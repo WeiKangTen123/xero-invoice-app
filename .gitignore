@@ -1,0 +1,20 @@
+node_modules/
+.env
+*.log
+logs/*.log
+coverage/
+dist/
+.DS_Store
+Thumbs.db
+.vscode/
+*.local
+
+# Runtime data — contains live secrets (Xero/IMAP/API keys), user accounts, and real invoice PDFs
+main/data/
+PDF/
+ui/node_modules/
+ui/dist/
+
+# Personal credential scratch notes — contain live API keys/secrets in plaintext
+unused/notes/*.txt
+unused/notes/*.bak

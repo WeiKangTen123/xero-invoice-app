@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Xero Invoice Automation — System Docs</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --accent:   #6366f1;
+    --accent2:  #8b5cf6;
+    --blue:     #3b82f6;
+    --success:  #10b981;
+    --warning:  #f59e0b;
+    --danger:   #ef4444;
+    --bg:       #08090f;
+    --bg2:      #0f1018;
+    --bg3:      #161720;
+    --border:   rgba(255,255,255,0.07);
+    --text:     #f0f0f5;
+    --muted:    rgba(255,255,255,0.38);
+    --subtle:   rgba(255,255,255,0.05);
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+
+  /* ── NAV ─────────────────────────────────── */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 32px; height: 56px;
+    background: rgba(8,9,15,0.9);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+    gap: 20px;
+  }
+  .nav-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 14px; white-space: nowrap; }
+  .nav-logo {
+    width: 28px; height: 28px; border-radius: 7px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
+  }
+  .nav-links { display: flex; gap: 20px; flex-wrap: wrap; }
+  .nav-links a {
+    color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 500;
+    transition: color 0.2s; white-space: nowrap;
+  }
+  .nav-links a:hover, .nav-links a.active { color: var(--text); }
+
+  /* ── HERO ────────────────────────────────── */
+  .hero {
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 100px 24px 60px;
+    position: relative; overflow: hidden;
+  }
+  .hero-glow {
+    position: absolute; top: -120px; left: 50%; transform: translateX(-50%);
+    width: 800px; height: 600px; border-radius: 50%;
+    background: radial-gradient(ellipse, rgba(99,102,241,0.18) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 14px; border-radius: 100px; font-size: 12px; font-weight: 600;
+    background: rgba(99,102,241,0.12); border: 1px solid rgba(99,102,241,0.25);
+    color: #a5b4fc; margin-bottom: 28px; letter-spacing: 0.04em;
+  }
+  .hero h1 {
+    font-size: clamp(34px, 6vw, 68px); font-weight: 800; line-height: 1.08;
+    letter-spacing: -1.5px; margin-bottom: 22px;
+    background: linear-gradient(135deg, #ffffff 0%, #a5b4fc 60%, #8b5cf6 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  }
+  .hero p {
+    font-size: clamp(15px, 2vw, 18px); color: var(--muted); max-width: 560px;
+    margin: 0 auto 44px; line-height: 1.65;
+  }
+  .hero-stats { display: flex; gap: 40px; justify-content: center; flex-wrap: wrap; margin-bottom: 60px; }
+  .hero-stat { text-align: center; }
+  .hero-stat-val { font-size: 28px; font-weight: 800; color: var(--accent); line-height: 1; }
+  .hero-stat-lbl { font-size: 12px; color: var(--muted); margin-top: 4px; letter-spacing: 0.03em; }
+
+  .scroll-hint {
+    position: absolute; bottom: 36px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    color: var(--muted); font-size: 11px;
+    animation: bob 2s ease-in-out infinite;
+  }
+  @keyframes bob { 0%,100%{transform:translateX(-50%) translateY(0);}50%{transform:translateX(-50%) translateY(6px);} }
+
+  /* ── SECTIONS ────────────────────────────── */
+  section { padding: 90px 24px; max-width: 1140px; margin: 0 auto; }
+  .section-label {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 12px;
+  }
+  .section-title { font-size: clamp(22px, 4vw, 38px); font-weight: 800; letter-spacing: -0.5px; margin-bottom: 14px; }
+  .section-sub { font-size: 15px; color: var(--muted); max-width: 580px; line-height: 1.65; margin-bottom: 48px; }
+
+  .divider { width: 100%; height: 1px; background: var(--border); max-width: 1140px; margin: 0 auto; }
+
+  /* ── PIPELINE ────────────────────────────── */
+  .pipeline-wrap {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 20px;
+    padding: 40px 32px; overflow-x: auto;
+  }
+  .pipeline-row { display: flex; align-items: center; gap: 0; min-width: 680px; }
+  .p-node { flex: 1; display: flex; flex-direction: column; align-items: center; text-align: center; }
+  .p-icon {
+    width: 52px; height: 52px; border-radius: 14px; font-size: 20px;
+    display: flex; align-items: center; justify-content: center; margin-bottom: 10px;
+  }
+  .p-icon.email { background: rgba(99,102,241,0.15); border: 1px solid rgba(99,102,241,0.3); }
+  .p-icon.queue { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.25); }
+  .p-icon.llm   { background: rgba(139,92,246,0.15); border: 1px solid rgba(139,92,246,0.3); }
+  .p-icon.store { background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.25); }
+  .p-icon.xero  { background: rgba(20,184,166,0.12); border: 1px solid rgba(20,184,166,0.25); }
+  .p-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .p-sub   { font-size: 11px; color: var(--muted); line-height: 1.4; max-width: 100px; }
+  .p-arrow { width: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  .p-arrow svg { width: 38px; }
+  .arrow-line { stroke: rgba(99,102,241,0.3); stroke-width: 1.5; fill: none; stroke-dasharray: 5 3; animation: dash 1.8s linear infinite; }
+  @keyframes dash { to { stroke-dashoffset: -16; } }
+  .arrow-head { fill: rgba(99,102,241,0.5); }
+
+  .pipeline-branch {
+    display: flex; align-items: center; gap: 14px; margin-top: 24px;
+    padding: 16px 20px; border-radius: 12px;
+    background: rgba(139,92,246,0.06); border: 1px solid rgba(139,92,246,0.15);
+    flex-wrap: wrap;
+  }
+  .branch-label { font-size: 11px; color: var(--accent2); font-weight: 700; letter-spacing: 0.05em; min-width: 60px; }
+  .branch-step { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+  .branch-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent2); flex-shrink: 0; }
+  .branch-arrow { color: var(--accent2); font-size: 12px; opacity: 0.5; }
+
+  /* ── STATUS ──────────────────────────────── */
+  .status-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px;
+    margin-bottom: 36px;
+  }
+  .status-card {
+    border-radius: 14px; padding: 20px; border: 1px solid var(--border);
+    background: var(--bg2); transition: transform 0.2s, border-color 0.2s;
+  }
+  .status-card:hover { transform: translateY(-2px); }
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 11px; border-radius: 100px; font-size: 11px; font-weight: 700;
+    margin-bottom: 10px; letter-spacing: 0.03em;
+  }
+  .status-badge .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .badge-pending  { background: rgba(245,158,11,0.1);  color: var(--warning); border: 1px solid rgba(245,158,11,0.2); }
+  .badge-reviewed { background: rgba(59,130,246,0.1);  color: #93c5fd;        border: 1px solid rgba(59,130,246,0.2); }
+  .badge-submit   { background: rgba(99,102,241,0.1);  color: #a5b4fc;        border: 1px solid rgba(99,102,241,0.2); }
+  .badge-posted   { background: rgba(16,185,129,0.1);  color: var(--success); border: 1px solid rgba(16,185,129,0.2); }
+  .badge-error    { background: rgba(239,68,68,0.08);  color: var(--danger);  border: 1px solid rgba(239,68,68,0.15); }
+  .badge-review   { background: rgba(245,158,11,0.08); color: var(--warning); border: 1px solid rgba(245,158,11,0.15); }
+  .badge-reported { background: rgba(239,68,68,0.08);  color: #fca5a5;        border: 1px solid rgba(239,68,68,0.15); }
+  .dot-warn { background: var(--warning); }
+  .dot-blue { background: var(--blue); }
+  .dot-acc  { background: var(--accent); animation: pulse-dot 1.4s ease-in-out infinite; }
+  .dot-ok   { background: var(--success); }
+  .dot-err  { background: var(--danger); }
+  .dot-rep  { background: #f87171; }
+  @keyframes pulse-dot { 0%,100%{opacity:1;}50%{opacity:0.35;} }
+  .status-card h4 { font-size: 14px; font-weight: 700; margin-bottom: 5px; }
+  .status-card p  { font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  .state-flow {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    flex-wrap: wrap; padding: 24px; border-radius: 14px;
+    background: var(--subtle); border: 1px solid var(--border); margin-bottom: 24px;
+  }
+  .state-box { padding: 7px 16px; border-radius: 8px; font-size: 12px; font-weight: 700; border: 1px solid; }
+  .state-box.s-pending  { background: rgba(245,158,11,0.1);  color: var(--warning); border-color: rgba(245,158,11,0.3); }
+  .state-box.s-reviewed { background: rgba(59,130,246,0.1);  color: #93c5fd;        border-color: rgba(59,130,246,0.3); }
+  .state-box.s-submit   { background: rgba(99,102,241,0.12); color: #a5b4fc;        border-color: rgba(99,102,241,0.35); }
+  .state-box.s-posted   { background: rgba(16,185,129,0.1);  color: var(--success); border-color: rgba(16,185,129,0.3); }
+  .state-box.s-error    { background: rgba(239,68,68,0.08);  color: var(--danger);  border-color: rgba(239,68,68,0.25); }
+  .state-box.s-rvneed   { background: rgba(245,158,11,0.08); color: var(--warning); border-color: rgba(245,158,11,0.2); }
+  .state-box.s-dup      { background: rgba(255,255,255,0.04); color: var(--muted);  border-color: var(--border); }
+  .state-arrow { color: var(--muted); font-size: 16px; }
+  .state-branch { display: flex; flex-direction: column; gap: 8px; }
+
+  /* ── CURRENCY FLOW ──────────────────────── */
+  .currency-flow {
+    display: flex; flex-direction: column;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 18px;
+    overflow: hidden;
+  }
+  .cf-step {
+    display: flex; align-items: flex-start; gap: 18px;
+    padding: 22px 28px; border-bottom: 1px solid var(--border); position: relative;
+  }
+  .cf-step:last-child { border-bottom: none; }
+  .cf-num {
+    width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 800;
+  }
+  .cf-num.try  { background: rgba(99,102,241,0.15); color: var(--accent); border: 1px solid rgba(99,102,241,0.3); }
+  .cf-num.fb   { background: rgba(245,158,11,0.12); color: var(--warning); border: 1px solid rgba(245,158,11,0.25); }
+  .cf-num.done { background: rgba(16,185,129,0.15); color: var(--success); border: 1px solid rgba(16,185,129,0.3); }
+  .cf-body h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .cf-body p  { font-size: 12px; color: var(--muted); line-height: 1.55; }
+  .cf-tag {
+    display: inline-block; margin-top: 7px; padding: 2px 9px; border-radius: 5px;
+    font-size: 11px; font-weight: 600; font-family: monospace;
+    background: rgba(139,92,246,0.12); color: #c4b5fd; border: 1px solid rgba(139,92,246,0.2);
+  }
+
+  /* ── DEDUP ───────────────────────────────── */
+  .dedup-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 700px) { .dedup-wrap { grid-template-columns: 1fr; } }
+  .dedup-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+  .dedup-card h3 { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+  .dedup-card p  { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 14px; }
+
+  .code-block {
+    background: rgba(0,0,0,0.45); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px;
+    line-height: 1.7; color: #c9d1d9; overflow-x: auto;
+  }
+  .code-block .kw  { color: #ff7b72; }
+  .code-block .fn  { color: #d2a8ff; }
+  .code-block .str { color: #a5d6ff; }
+  .code-block .cmt { color: #8b949e; }
+  .code-block .ok  { color: var(--success); }
+
+  /* ── ISO GRID ────────────────────────────── */
+  .iso-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+  .iso-card {
+    border-radius: 14px; padding: 20px; border: 1px solid var(--border);
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .iso-card:hover { border-color: rgba(99,102,241,0.35); transform: translateY(-2px); }
+  .iso-card.per-user { background: rgba(99,102,241,0.05); }
+  .iso-card.shared   { background: rgba(245,158,11,0.04); }
+  .iso-scope {
+    display: inline-block; padding: 2px 8px; border-radius: 100px; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 9px;
+  }
+  .scope-user   { background: rgba(99,102,241,0.15); color: #a5b4fc; border: 1px solid rgba(99,102,241,0.2); }
+  .scope-shared { background: rgba(245,158,11,0.12); color: var(--warning); border: 1px solid rgba(245,158,11,0.2); }
+  .iso-card h4 { font-size: 13px; font-weight: 700; margin-bottom: 5px; }
+  .iso-card p  { font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  /* ── FEATURE CARDS ───────────────────────── */
+  .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 18px; }
+  .feature-card {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 16px;
+    padding: 24px; transition: border-color 0.2s, transform 0.2s;
+  }
+  .feature-card:hover { border-color: rgba(99,102,241,0.35); transform: translateY(-3px); }
+  .feature-icon {
+    width: 42px; height: 42px; border-radius: 11px; font-size: 18px;
+    display: flex; align-items: center; justify-content: center; margin-bottom: 14px;
+    background: rgba(99,102,241,0.12); border: 1px solid rgba(99,102,241,0.2);
+  }
+  .feature-card h3 { font-size: 14px; font-weight: 700; margin-bottom: 7px; }
+  .feature-card p  { font-size: 13px; color: var(--muted); line-height: 1.6; }
+
+  /* ── TABLES ──────────────────────────────── */
+  .doc-table-wrap { overflow-x: auto; border-radius: 14px; border: 1px solid var(--border); margin-bottom: 28px; }
+  .doc-table { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--bg2); }
+  .doc-table th {
+    text-align: left; padding: 12px 16px; font-size: 11px; font-weight: 700;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02);
+  }
+  .doc-table td { padding: 11px 16px; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: top; line-height: 1.5; }
+  .doc-table tr:last-child td { border-bottom: none; }
+  .doc-table tr:hover td { background: rgba(255,255,255,0.02); }
+  .method-get    { color: var(--success); font-weight: 700; font-family: monospace; }
+  .method-post   { color: var(--accent);  font-weight: 700; font-family: monospace; }
+  .method-patch  { color: var(--warning); font-weight: 700; font-family: monospace; }
+  .method-delete { color: var(--danger);  font-weight: 700; font-family: monospace; }
+  .auth-jwt   { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; background: rgba(99,102,241,0.15); color: #a5b4fc; }
+  .auth-admin { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; background: rgba(239,68,68,0.12); color: #fca5a5; }
+  .auth-open  { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; background: rgba(255,255,255,0.06); color: var(--muted); }
+  .path-cell  { font-family: monospace; font-size: 12px; color: #e2e8f0; white-space: nowrap; }
+
+  /* ── STEPS ───────────────────────────────── */
+  .steps { display: flex; flex-direction: column; gap: 0; }
+  .step {
+    display: flex; gap: 20px; padding: 20px 0;
+    border-bottom: 1px solid var(--border); position: relative;
+  }
+  .step:last-child { border-bottom: none; }
+  .step-num {
+    width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+    background: rgba(99,102,241,0.15); border: 1px solid rgba(99,102,241,0.3);
+    color: var(--accent); font-size: 13px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step-body h4 { font-size: 14px; font-weight: 700; margin-bottom: 5px; }
+  .step-body p  { font-size: 13px; color: var(--muted); line-height: 1.55; }
+
+  /* ── ENV VARS ────────────────────────────── */
+  .env-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 700px) { .env-grid { grid-template-columns: 1fr; } }
+  .env-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 24px; }
+  .env-card h3 { font-size: 14px; font-weight: 700; margin-bottom: 16px; }
+  .env-row { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
+  .env-row:last-child { margin-bottom: 0; }
+  .env-key { font-family: monospace; font-size: 12px; color: #a5d6ff; font-weight: 600; }
+  .env-desc { font-size: 12px; color: var(--muted); }
+  .env-required { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; background: rgba(239,68,68,0.1); color: #fca5a5; margin-left: 6px; }
+  .env-optional { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; background: rgba(255,255,255,0.06); color: var(--muted); margin-left: 6px; }
+
+  /* ── WORKFLOW STEPS ──────────────────────── */
+  .workflow {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; overflow: hidden;
+  }
+  .wf-step {
+    display: flex; align-items: flex-start; gap: 18px; padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .wf-step:last-child { border-bottom: none; }
+  .wf-num {
+    width: 28px; height: 28px; border-radius: 8px; flex-shrink: 0;
+    background: rgba(99,102,241,0.15); border: 1px solid rgba(99,102,241,0.25);
+    color: var(--accent); font-size: 12px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .wf-body h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .wf-body p  { font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  /* ── MISC ────────────────────────────────── */
+  .tag {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 9px; border-radius: 5px; font-size: 11px; font-weight: 600;
+    font-family: monospace; border: 1px solid var(--border); color: var(--muted);
+    background: var(--subtle); margin: 2px;
+  }
+  .progress-demo {
+    height: 8px; border-radius: 4px; background: rgba(255,255,255,0.06); overflow: hidden;
+    margin: 16px 0; position: relative;
+  }
+  .progress-bar-green { position:absolute; left:0; top:0; height:100%; border-radius:4px; background: var(--success); }
+  .progress-bar-acc   { position:absolute; top:0; height:100%; background: var(--accent); overflow: hidden; }
+  .progress-bar-red   { position:absolute; right:0; top:0; height:100%; border-radius:0 4px 4px 0; background: var(--danger); }
+  .scanline {
+    height:100%;width:60%;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,0.3),transparent);
+    animation:scanline 1.4s ease-in-out infinite;
+  }
+  @keyframes scanline{0%{transform:translateX(-100%);}100%{transform:translateX(250%);}}
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+  .info-box {
+    background: rgba(99,102,241,0.07); border: 1px solid rgba(99,102,241,0.2);
+    border-radius: 12px; padding: 16px 20px; font-size: 13px; color: var(--muted);
+    line-height: 1.6; margin-bottom: 20px;
+  }
+  .info-box strong { color: var(--text); }
+
+  footer {
+    border-top: 1px solid var(--border); padding: 40px 24px;
+    text-align: center; color: var(--muted); font-size: 13px;
+  }
+
+  @media (max-width: 640px) {
+    nav { padding: 0 16px; }
+    .nav-links { gap: 12px; }
+    section { padding: 60px 16px; }
+    .pipeline-wrap { padding: 24px 14px; }
+    .two-col { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-brand">
+    <div class="nav-logo">⚡</div>
+    Xero Invoice Automation
+  </div>
+  <div class="nav-links">
+    <a href="#architecture">Architecture</a>
+    <a href="#flow">Pipeline</a>
+    <a href="#status">Status</a>
+    <a href="#currency">Currency</a>
+    <a href="#dedup">Dedup</a>
+    <a href="#isolation">Isolation</a>
+    <a href="#llm">LLM</a>
+    <a href="#api">API</a>
+    <a href="#env">Env Vars</a>
+    <a href="#setup">Setup</a>
+    <a href="#deploy">Deploy</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-glow"></div>
+  <div class="hero-badge">⚡ Fully automated · Per-user isolated · Zero duplicates</div>
+  <h1>Email → PDF → Xero<br>on autopilot</h1>
+  <p>Watches your Gmail inbox, extracts invoice data with an LLM, and posts draft bills to Xero — automatically, in the background, with no manual steps.</p>
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="hero-stat-val">1.5s</div><div class="hero-stat-lbl">Gap between Xero calls</div></div>
+    <div class="hero-stat"><div class="hero-stat-val">5×</div><div class="hero-stat-lbl">Concurrent PDF parsing</div></div>
+    <div class="hero-stat"><div class="hero-stat-val">0</div><div class="hero-stat-lbl">Duplicate submissions</div></div>
+    <div class="hero-stat"><div class="hero-stat-val">∞</div><div class="hero-stat-lbl">Users, fully isolated</div></div>
+  </div>
+  <div class="scroll-hint">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+    Scroll to explore
+  </div>
+</div>
+
+<!-- ── ARCHITECTURE ──────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="architecture">
+  <div class="section-label">Architecture</div>
+  <div class="section-title">How the pipeline fits together</div>
+  <div class="section-sub">Each component runs independently per user. A server restart loses nothing — the queue state on disk recovers all in-flight jobs automatically.</div>
+
+  <div class="pipeline-wrap">
+    <div class="pipeline-row">
+      <div class="p-node">
+        <div class="p-icon email">📧</div>
+        <div class="p-title">Gmail IMAP</div>
+        <div class="p-sub">IDLE + 60 s poll · last 40 days</div>
+      </div>
+      <div class="p-arrow"><svg viewBox="0 0 40 20"><line class="arrow-line" x1="2" y1="10" x2="34" y2="10"/><polygon class="arrow-head" points="34,5 40,10 34,15"/></svg></div>
+      <div class="p-node">
+        <div class="p-icon queue">⚙️</div>
+        <div class="p-title">Parser</div>
+        <div class="p-sub">PDF batch · template email detection</div>
+      </div>
+      <div class="p-arrow"><svg viewBox="0 0 40 20"><line class="arrow-line" x1="2" y1="10" x2="34" y2="10"/><polygon class="arrow-head" points="34,5 40,10 34,15"/></svg></div>
+      <div class="p-node">
+        <div class="p-icon llm">🤖</div>
+        <div class="p-title">LLM Parser</div>
+        <div class="p-sub">Gemini → Nvidia → OpenRouter</div>
+      </div>
+      <div class="p-arrow"><svg viewBox="0 0 40 20"><line class="arrow-line" x1="2" y1="10" x2="34" y2="10"/><polygon class="arrow-head" points="34,5 40,10 34,15"/></svg></div>
+      <div class="p-node">
+        <div class="p-icon store">📋</div>
+        <div class="p-title">Invoice Store</div>
+        <div class="p-sub">JSON file, write-mutex locked</div>
+      </div>
+      <div class="p-arrow"><svg viewBox="0 0 40 20"><line class="arrow-line" x1="2" y1="10" x2="34" y2="10"/><polygon class="arrow-head" points="34,5 40,10 34,15"/></svg></div>
+      <div class="p-node">
+        <div class="p-icon xero">☁️</div>
+        <div class="p-title">Xero API</div>
+        <div class="p-sub">Draft invoice + PDF + email body</div>
+      </div>
+    </div>
+
+    <div class="pipeline-branch" style="margin-top: 24px;">
+      <div class="branch-label">PDF path (ACCPAY)</div>
+      <div class="branch-step"><div class="branch-dot"></div>Email with PDF attachment</div>
+      <div class="branch-arrow">→</div>
+      <div class="branch-step"><div class="branch-dot"></div>Up to 5 PDFs concurrently (Promise.allSettled)</div>
+      <div class="branch-arrow">→</div>
+      <div class="branch-step"><div class="branch-dot"></div>LLM extracts fields</div>
+      <div class="branch-arrow">→</div>
+      <div class="branch-step"><div class="branch-dot"></div>Draft Bill in Xero Purchases → Drafts</div>
+    </div>
+    <div class="pipeline-branch" style="margin-top: 12px; border-color: rgba(16,185,129,0.2); background: rgba(16,185,129,0.04);">
+      <div class="branch-label" style="color: var(--success);">Template path (ACCREC)</div>
+      <div class="branch-step"><div class="branch-dot" style="background:var(--success);"></div>Email body contains "Client / Customer:"</div>
+      <div class="branch-arrow" style="color:var(--success);">→</div>
+      <div class="branch-step"><div class="branch-dot" style="background:var(--success);"></div>Regex parse body — no LLM needed</div>
+      <div class="branch-arrow" style="color:var(--success);">→</div>
+      <div class="branch-step"><div class="branch-dot" style="background:var(--success);"></div>Sales Invoice in Xero Accounts Receivable → Drafts</div>
+    </div>
+  </div>
+
+  <!-- Xero location table -->
+  <div class="doc-table-wrap" style="margin-top: 28px;">
+    <table class="doc-table">
+      <thead><tr><th>Invoice Type</th><th>Code</th><th>Where to find it in Xero</th></tr></thead>
+      <tbody>
+        <tr><td>Supplier Bill (from PDF)</td><td><span class="tag">ACCPAY</span></td><td>Purchases → <strong>Bills to Pay → Drafts</strong></td></tr>
+        <tr><td>Sales Invoice (from template email)</td><td><span class="tag">ACCREC</span></td><td>Accounts Receivable → <strong>Invoices → Drafts</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── PIPELINE FLOW ─────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="flow">
+  <div class="section-label">Background processing</div>
+  <div class="section-title">Email processing flow</div>
+  <div class="section-sub">The IMAP watcher detects new emails instantly via IDLE keepalive with a 60 s poll as fallback. Emails from the last 40 days are scanned on first start.</div>
+
+  <div class="feature-grid">
+    <div class="feature-card">
+      <div class="feature-icon">📬</div>
+      <h3>Email detected</h3>
+      <p>IMAP IDLE fires within seconds of a new email arriving. A 3 s debounce prevents double-scans when a user marks an email as unread. Fallback: active polling every 60 s.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">⚙️</div>
+      <h3>Parser branches</h3>
+      <p>PDF attachments → LLM parsing (up to 5 concurrently, rate-limited). Emails with "Client / Customer:" in the body → regex template parsing, no LLM call needed.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🤖</div>
+      <h3>LLM extraction</h3>
+      <p>Gemini is tried first. On failure, Nvidia then OpenRouter. On 429 rate-limit: waits <code>attempt × 15 s</code> (up to 4 retries). If all LLM calls fail, falls back to a regex parser.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🖼️</div>
+      <h3>Scanned PDFs</h3>
+      <p>Image-only / scanned PDFs with no extractable text cannot be parsed by the LLM. They are saved and marked <code>review-needed</code> so the user can enter data manually.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🔄</div>
+      <h3>Boot recovery</h3>
+      <p>On server start, all <code>pending</code> and <code>submitting</code> invoices are retried sequentially (1.5 s gap) 3 s after startup. No invoices left stranded after a crash or redeploy.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🗑️</div>
+      <h3>Clear all</h3>
+      <p>Stops the watcher, clears the email queue, deletes all PDF files, and resets the invoice store — a clean slate for the user without affecting other users.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── STATUS MACHINE ────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="status">
+  <div class="section-label">Status lifecycle</div>
+  <div class="section-title">Invoice status transitions</div>
+  <div class="section-sub">Each invoice moves through a well-defined set of states. <code>posted</code> and <code>duplicate</code> are locked — no endpoint can downgrade them.</div>
+
+  <!-- State flow diagram -->
+  <div class="state-flow" style="margin-bottom: 32px;">
+    <div class="state-branch">
+      <div class="state-box s-pending">pending</div>
+      <div style="font-size:11px;color:var(--muted);padding-left:4px;">↓ LLM fails</div>
+      <div class="state-box s-rvneed">review-needed</div>
+    </div>
+    <div class="state-arrow">→</div>
+    <div class="state-branch">
+      <div style="font-size:11px;color:var(--muted);">user verifies</div>
+      <div class="state-box s-reviewed">reviewed</div>
+    </div>
+    <div class="state-arrow">→</div>
+    <div class="state-box s-submit">submitting</div>
+    <div class="state-arrow">→</div>
+    <div class="state-branch">
+      <div class="state-box s-posted">posted ✓</div>
+      <div style="height:8px;"></div>
+      <div class="state-box s-error">error ✗</div>
+      <div style="height:8px;"></div>
+      <div class="state-box s-dup">duplicate</div>
+    </div>
+  </div>
+
+  <!-- Progress bar demo -->
+  <div style="background: var(--bg2); border: 1px solid var(--border); border-radius: 16px; padding: 24px; margin-bottom: 32px;">
+    <div style="font-size: 13px; font-weight: 600; margin-bottom: 10px; color: var(--muted);">Sidebar Pipeline Status — Xero submission progress bar</div>
+    <div class="progress-demo">
+      <div class="progress-bar-green" style="width: 60%;"></div>
+      <div class="progress-bar-acc" style="left: 60%; width: 20%;"><div class="scanline"></div></div>
+      <div class="progress-bar-red" style="width: 10%;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:6px;">
+      <span>6 of 10 posted</span>
+      <span style="color:var(--danger);">1 failed — open invoice to fix</span>
+    </div>
+    <div style="display:flex;gap:16px;margin-top:14px;flex-wrap:wrap;">
+      <span style="font-size:12px;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--success);margin-right:5px;"></span>Posted</span>
+      <span style="font-size:12px;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--accent);margin-right:5px;"></span>Submitting (animated)</span>
+      <span style="font-size:12px;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:rgba(255,255,255,0.1);margin-right:5px;"></span>Pending</span>
+      <span style="font-size:12px;"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--danger);margin-right:5px;"></span>Failed</span>
+    </div>
+    <div style="margin-top:12px;font-size:12px;color:var(--muted);">Widget lives in the sidebar — visible on every page, polls every 3 s when active and 15 s when idle.</div>
+  </div>
+
+  <div class="status-grid">
+    <div class="status-card">
+      <div class="status-badge badge-pending"><div class="dot dot-warn"></div>pending</div>
+      <h4>Awaiting submission</h4>
+      <p>Parsed and stored locally. Queued for Xero or waiting for Auto-submit to be enabled. Boot retry picks these up after restart.</p>
+    </div>
+    <div class="status-card">
+      <div class="status-badge badge-reviewed"><div class="dot dot-blue"></div>reviewed</div>
+      <h4>Verified, not yet posted</h4>
+      <p>User manually verified the extracted data. Shown in blue — visually distinct from posted (green). A banner in the invoice list prompts the user to click "Post to Xero".</p>
+    </div>
+    <div class="status-card">
+      <div class="status-badge badge-submit"><div class="dot dot-acc"></div>submitting</div>
+      <h4>Claimed &amp; in-flight</h4>
+      <p><code>claimForSubmit()</code> atomically sets this inside a write lock. No concurrent caller can claim the same invoice — duplicate submissions are impossible.</p>
+    </div>
+    <div class="status-card">
+      <div class="status-badge badge-posted"><div class="dot dot-ok"></div>posted</div>
+      <h4>Live in Xero</h4>
+      <p>Draft invoice created. <code>xeroInvoiceId</code> stored. PDF and email body attached to the Xero record. <strong>Locked</strong> — cannot be changed.</p>
+    </div>
+    <div class="status-card">
+      <div class="status-badge badge-error"><div class="dot dot-err"></div>error</div>
+      <h4>Xero rejected</h4>
+      <p>Real Xero validation message stored in <code>errorMsg</code>. Fix the field in InvoiceReview and click Post again — submission is idempotent.</p>
+    </div>
+    <div class="status-card">
+      <div class="status-badge badge-review"><div class="dot dot-warn"></div>review-needed</div>
+      <h4>LLM parse failed</h4>
+      <p>Amount or invoice number could not be extracted (e.g. scanned/image PDF). Record stored for manual data entry. Never submitted to Xero automatically.</p>
+    </div>
+    <div class="status-card">
+      <div class="status-badge badge-reported"><div class="dot dot-rep"></div>reported</div>
+      <h4>Flagged by user</h4>
+      <p>User added a note describing a problem. Visible to admins in the Admin panel under "Flagged invoices". Can be resolved by an admin.</p>
+    </div>
+    <div class="status-card" style="border-style:dashed;">
+      <div class="status-badge" style="background:rgba(255,255,255,0.04);color:var(--muted);border-color:var(--border);"><div class="dot" style="background:var(--muted);"></div>duplicate</div>
+      <h4>Blocked as duplicate</h4>
+      <p>Matched an existing record by vendor + invoice# + amount (±1%). Stored for visibility but never sent to Xero. <strong>Locked</strong> — cannot be changed.</p>
+    </div>
+  </div>
+
+  <!-- Manual submission workflow -->
+  <div style="margin-top: 40px;">
+    <div style="font-size:14px;font-weight:700;margin-bottom:16px;">Manual submission workflow</div>
+    <div class="workflow">
+      <div class="wf-step">
+        <div class="wf-num">1</div>
+        <div class="wf-body"><h4>Invoice list action buttons</h4><p>"Fix &amp; Post →" for <code>review-needed</code> / <code>error</code> rows. "Post to Xero →" (blue) for <code>reviewed</code> rows. "View →" (read-only) for <code>posted</code> / <code>duplicate</code>.</p></div>
+      </div>
+      <div class="wf-step">
+        <div class="wf-num">2</div>
+        <div class="wf-body"><h4>InvoiceReview page</h4><p>PDF on the left, extracted fields on the right. Editable before posting.</p></div>
+      </div>
+      <div class="wf-step">
+        <div class="wf-num">3</div>
+        <div class="wf-body"><h4>Correct fields (optional)</h4><p>PATCH <code>/api/invoices/:id</code> — no re-parsing needed. Only editable while status is <code>pending</code>, <code>review-needed</code>, <code>error</code>, or <code>reviewed</code>.</p></div>
+      </div>
+      <div class="wf-step">
+        <div class="wf-num">4</div>
+        <div class="wf-body"><h4>Post to Xero</h4><p>Calls POST <code>/api/invoices/:id/submit</code>. Returns 202 immediately — submission is async.</p></div>
+      </div>
+      <div class="wf-step">
+        <div class="wf-num">5</div>
+        <div class="wf-body"><h4>Success</h4><p>Status → <code>posted</code>. Xero Invoice ID shown in the UI.</p></div>
+      </div>
+      <div class="wf-step">
+        <div class="wf-num">6</div>
+        <div class="wf-body"><h4>On failure</h4><p>Real Xero error message shown (e.g. "Invoice # must be unique"). Retry available — endpoint is idempotent, won't create a duplicate.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── CURRENCY ──────────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="currency">
+  <div class="section-label">Currency handling</div>
+  <div class="section-title">PDF currency first, org base currency as fallback</div>
+  <div class="section-sub">The system never hardcodes a fallback currency. It detects the Xero org's actual base currency on the first mismatch and caches it — works for any Xero org worldwide.</div>
+
+  <div class="two-col">
+    <div class="currency-flow">
+      <div class="cf-step">
+        <div class="cf-num try">1</div>
+        <div class="cf-body">
+          <h4>Extract currency from PDF</h4>
+          <p>LLM reads the PDF and extracts the currency code (SGD, JPY, EUR…). Used directly on first submission.</p>
+          <div class="cf-tag">invoiceData.currency → "SGD"</div>
+        </div>
+      </div>
+      <div class="cf-step">
+        <div class="cf-num try">2</div>
+        <div class="cf-body">
+          <h4>Submit to Xero in PDF currency</h4>
+          <p>Calls <code>createInvoices()</code> with the extracted currency. If the org supports it, done.</p>
+          <div class="cf-tag">currencyCode: "SGD" → POST /Invoices</div>
+        </div>
+      </div>
+      <div class="cf-step">
+        <div class="cf-num fb">3</div>
+        <div class="cf-body">
+          <h4>Rejected: currency not subscribed</h4>
+          <p>Calls <code>GET /Organisations</code> to read the org's actual base currency (e.g. NZD for Xero Demo).</p>
+          <div class="cf-tag">GET /Organisations → baseCurrency: "NZD"</div>
+        </div>
+      </div>
+      <div class="cf-step">
+        <div class="cf-num done">4</div>
+        <div class="cf-body">
+          <h4>Retry with org base currency</h4>
+          <p>Invoice resubmitted in base currency. Stored <code>currency</code> field updated. Base currency cached per tenant for server lifetime.</p>
+          <div class="cf-tag">currencyCode: "NZD" → invoice created ✓</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:16px;">
+      <div class="feature-card" style="flex:1;">
+        <div class="feature-icon">🌍</div>
+        <h3>Works for any Xero org</h3>
+        <p>NZD (Demo), AUD, GBP, SGD — whatever the org's base currency is, the system detects it automatically. No hardcoded fallback.</p>
+      </div>
+      <div class="feature-card" style="flex:1;">
+        <div class="feature-icon">⚡</div>
+        <h3>Cached per tenant</h3>
+        <p>Base currency fetched once on first mismatch, stored in memory for the server lifetime. No extra API call for subsequent invoices.</p>
+      </div>
+      <div class="feature-card" style="flex:1;">
+        <div class="feature-icon">🔧</div>
+        <h3>Enable currencies in Xero</h3>
+        <p>Xero → Settings → Currencies → Add currency (e.g. SGD). Once added, future invoices post in the extracted PDF currency — no fallback needed.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── DEDUP ─────────────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="dedup">
+  <div class="section-label">Deduplication</div>
+  <div class="section-title">Two layers of duplicate protection</div>
+  <div class="section-sub">Duplicates are blocked at two distinct points using different matching strategies. Vendor names are normalised so legal suffix variations never slip through.</div>
+
+  <div class="dedup-wrap">
+    <div class="dedup-card">
+      <h3>Layer 1 — Storage dedup</h3>
+      <p>Before storing, <code>findStored()</code> checks for a matching record. Matches vendor (normalised) + invoice# + amount within 1%.</p>
+      <div class="code-block">
+<span class="cmt">// in onInvoiceEmail — before any storage</span>
+<span class="kw">const</span> existing = invStore.<span class="fn">findStored</span>(
+  invoiceData.vendorName,
+  invoiceData.invoiceNumber,
+  invoiceData.invoiceDate,
+  invoiceData.totalAmount
+);
+<span class="kw">if</span> (existing) {
+  <span class="kw">return</span>; <span class="cmt">// never stored, never sent to Xero</span>
+}
+      </div>
+      <p style="margin-top:12px;font-size:12px;color:var(--muted);">"BLCKLB PTE. LTD." and "blcklb" → same vendor. "Miss Thitipat Srikhongnattakul" and "Thitipat Srikhongnattakul" → same vendor.</p>
+    </div>
+
+    <div class="dedup-card">
+      <h3>Layer 2 — Atomic Xero claim</h3>
+      <p><code>claimForSubmit()</code> checks status and writes inside a single file-mutex lock. Two concurrent callers can never both claim the same invoice.</p>
+      <div class="code-block">
+<span class="cmt">// atomic check + flip inside write lock</span>
+<span class="kw">function</span> <span class="fn">claimForSubmit</span>(id) {
+  <span class="kw">return</span> _withLock(() => {
+    <span class="kw">if</span> (inv.status === <span class="str">'posted'</span>)
+      <span class="kw">return</span> { claimed: <span class="ok">false</span>, reason: <span class="str">'already posted'</span> };
+    <span class="kw">if</span> (inv.status === <span class="str">'submitting'</span>)
+      <span class="kw">return</span> { claimed: <span class="ok">false</span>, reason: <span class="str">'already submitting'</span> };
+    inv.status = <span class="str">'submitting'</span>; <span class="cmt">// ← atomic flip</span>
+    _write(list);
+    <span class="kw">return</span> { claimed: <span class="ok">true</span> };
+  });
+}
+      </div>
+    </div>
+  </div>
+
+  <!-- Dedup matching rules table -->
+  <div class="doc-table-wrap" style="margin-top: 24px;">
+    <table class="doc-table">
+      <thead><tr><th>Incoming invoice number</th><th>Match condition</th></tr></thead>
+      <tbody>
+        <tr><td>Real number (e.g. <code>040526-3</code>)</td><td>Same normalised vendor + same invoice# (case-insensitive) + amount within 1%</td></tr>
+        <tr><td>Auto-generated (<code>INV-&lt;timestamp&gt;</code>) or missing</td><td>Same normalised vendor + same date + amount within $0.01</td></tr>
+        <tr><td>Same vendor + invoice# but meaningfully different amounts</td><td>Treated as distinct invoices (allows legitimate corrections)</td></tr>
+        <tr><td>Zero amount + no real invoice# (LLM failed)</td><td>Stored as <code>review-needed</code>, never submitted to Xero</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── ISOLATION ─────────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="isolation">
+  <div class="section-label">Data isolation</div>
+  <div class="section-title">Fully per-user data separation</div>
+  <div class="section-sub">Every resource that touches invoice data is scoped to a single user. Multiple users share the same server with zero data leakage between them.</div>
+
+  <div class="info-box">
+    <strong>Per-user data path:</strong> <code>main/data/users/{userId}/</code> — <code>config.json</code> (IMAP + Xero + LLM creds) · <code>settings.json</code> (autoProcess toggle) · <code>invoices.json</code> (max 500) · <code>pdfs/</code> (PDF files)<br>
+    Directory is created immediately on account registration. On every boot, <code>ensureUserDirectories()</code> re-creates any missing directories (safe no-op if already present).
+  </div>
+
+  <div class="iso-grid">
+    <div class="iso-card per-user"><div class="iso-scope scope-user">Per-user</div><h4>Invoice history</h4><p><span class="tag">invoices.json</span> — max 500 entries, write-mutex protected.</p></div>
+    <div class="iso-card per-user"><div class="iso-scope scope-user">Per-user</div><h4>PDF files</h4><p><span class="tag">pdfs/</span> — one file per invoice, served via 5-minute signed URL.</p></div>
+    <div class="iso-card per-user"><div class="iso-scope scope-user">Per-user</div><h4>IMAP account</h4><p>Each user connects their own Gmail with their own App Password.</p></div>
+    <div class="iso-card per-user"><div class="iso-scope scope-user">Per-user</div><h4>Xero organisation</h4><p>Own Custom Connection, own client ID/secret, own Xero org.</p></div>
+    <div class="iso-card per-user"><div class="iso-scope scope-user">Per-user</div><h4>LLM API key</h4><p>Gemini / Nvidia / OpenRouter keys stored per-user. Rate limits apply independently.</p></div>
+    <div class="iso-card per-user"><div class="iso-scope scope-user">Per-user</div><h4>Xero token cache</h4><p>In-memory per user — fresh <code>AccountingApi()</code> per Xero call. No token contamination between users.</p></div>
+    <div class="iso-card per-user"><div class="iso-scope scope-user">Per-user</div><h4>Settings</h4><p><span class="tag">settings.json</span> — autoProcess toggle, default account code, default currency.</p></div>
+    <div class="iso-card per-user"><div class="iso-scope scope-user">Per-user</div><h4>IMAP watcher</h4><p>Independent connection per user with reconnect logic (10 s → 5 min cap, max 20 retries).</p></div>
+    <div class="iso-card shared"><div class="iso-scope scope-shared">Server-wide</div><h4>JWT secret</h4><p>One secret signs tokens for all users. Set via <span class="tag">JWT_SECRET</span> env var.</p></div>
+    <div class="iso-card shared"><div class="iso-scope scope-shared">Server-wide</div><h4>Slack webhook</h4><p>Optional error notifications. One webhook for the whole server.</p></div>
+  </div>
+
+  <!-- PDF Auth flow -->
+  <div style="margin-top: 32px;">
+    <div style="font-size: 14px; font-weight: 700; margin-bottom: 16px;">PDF Viewer — Signed URL authentication</div>
+    <div class="info-box">Browsers cannot send custom <code>Authorization</code> headers on direct navigation (new tab, <code>&lt;iframe src&gt;</code>, <code>&lt;embed&gt;</code>). A two-step signed URL flow solves this.</div>
+    <div class="workflow">
+      <div class="wf-step">
+        <div class="wf-num">1</div>
+        <div class="wf-body"><h4>Request signed URL</h4><p>Frontend calls <code>GET /api/invoices/:id/pdf-url</code> with Bearer JWT. Server verifies JWT, checks the PDF file exists on disk, issues a short-lived token scoped to that <code>userId + invoiceId</code>, valid for 5 minutes.</p></div>
+      </div>
+      <div class="wf-step">
+        <div class="wf-num">2</div>
+        <div class="wf-body"><h4>Open PDF directly</h4><p><code>&lt;iframe src="/api/invoices/:id/pdf?token=xxx"&gt;</code> — no Authorization header needed. Server verifies the token scope, streams the PDF. Frontend refreshes the token every 4 minutes while the review page is open.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── LLM ───────────────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="llm">
+  <div class="section-label">LLM Invoice Parsing</div>
+  <div class="section-title">Extracted fields &amp; rate limiting</div>
+  <div class="section-sub">The LLM reads the raw PDF text and returns structured JSON. If Gemini is rate-limited or fails, the system cascades to Nvidia then OpenRouter automatically.</div>
+
+  <div class="two-col" style="margin-bottom: 28px;">
+    <div>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead><tr><th>Field</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>vendorName</code></td><td>Seller / service provider (never the buyer)</td></tr>
+            <tr><td><code>invoiceNumber</code></td><td>Invoice reference number</td></tr>
+            <tr><td><code>invoiceDate</code></td><td>Date in <code>YYYY-MM-DD</code></td></tr>
+            <tr><td><code>dueDate</code></td><td>Payment due date in <code>YYYY-MM-DD</code></td></tr>
+            <tr><td><code>currency</code></td><td>e.g. <code>SGD</code>, <code>USD</code> — preserved as-is</td></tr>
+            <tr><td><code>lineItems</code></td><td>Array of <code>{description, unitAmount, taxType, discountRate}</code></td></tr>
+            <tr><td><code>totalAmount</code></td><td>Total due as a number</td></tr>
+            <tr><td><code>paymentReference</code></td><td>Bank / PayNow details</td></tr>
+            <tr><td><code>projectName</code></td><td>Artist / project name → Xero Reference field</td></tr>
+            <tr><td><code>invoiceType</code></td><td><code>ACCPAY</code> (bill) or <code>ACCREC</code> (sales invoice)</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:16px;">
+      <div class="feature-card">
+        <div class="feature-icon">⏱️</div>
+        <h3>Rate limiter (per user)</h3>
+        <p>Sliding 60 s window — max <strong>15 requests</strong> per minute, max <strong>5 concurrent</strong>. Provider: Gemini (15 RPM free tier) → Nvidia → OpenRouter.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔄</div>
+        <h3>429 back-off</h3>
+        <p>On rate-limit: waits <code>attempt × 15 s</code> before retry. Up to 4 attempts before falling back to the regex parser. No invoices are dropped.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📜</div>
+        <h3>Regex fallback</h3>
+        <p>If all LLM attempts fail, a pattern-based regex parser attempts to extract key fields. Invoice saved as <code>review-needed</code> if extraction is still insufficient.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── API REFERENCE ─────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="api">
+  <div class="section-label">API Reference</div>
+  <div class="section-title">All endpoints</div>
+  <div class="section-sub">All endpoints are prefixed with <code>/api</code>. JWT auth uses Bearer token in the Authorization header. Admin endpoints require role = admin.</div>
+
+  <div style="font-size: 13px; font-weight: 700; color: var(--muted); margin-bottom: 10px;">Auth &amp; Users</div>
+  <div class="doc-table-wrap">
+    <table class="doc-table">
+      <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/auth/login</td><td><span class="auth-open">—</span></td><td>Login, returns JWT</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/auth/register</td><td><span class="auth-open">—</span></td><td>Self-register. First user = admin. Returns JWT immediately.</td></tr>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/auth/status</td><td><span class="auth-open">—</span></td><td>Returns <code>{ hasUsers }</code> — UI shows register vs login on first boot</td></tr>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/auth/me</td><td><span class="auth-jwt">JWT</span></td><td>Current user info <code>{ id, email, role }</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="font-size: 13px; font-weight: 700; color: var(--muted); margin: 20px 0 10px;">Setup</div>
+  <div class="doc-table-wrap">
+    <table class="doc-table">
+      <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/setup/status</td><td><span class="auth-jwt">JWT</span></td><td>Which sections are configured, <code>ready</code> flag</td></tr>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/setup</td><td><span class="auth-jwt">JWT</span></td><td>Full config for this user (secrets visible with eye toggle in UI)</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/setup</td><td><span class="auth-jwt">JWT</span></td><td>Save this user's config (IMAP, Xero, LLM keys)</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/setup/test/xero</td><td><span class="auth-jwt">JWT</span></td><td>Test Xero connection</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/setup/test/imap</td><td><span class="auth-jwt">JWT</span></td><td>Test IMAP connection</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/setup/test/llm</td><td><span class="auth-jwt">JWT</span></td><td>Test LLM API key</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="font-size: 13px; font-weight: 700; color: var(--muted); margin: 20px 0 10px;">Process control</div>
+  <div class="doc-table-wrap">
+    <table class="doc-table">
+      <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/process/status</td><td><span class="auth-jwt">JWT</span></td><td>Watcher running + invoice count + <code>setupRequired</code> + <code>missingConfig</code></td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/process/start</td><td><span class="auth-jwt">JWT</span></td><td>Start this user's IMAP watcher</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/process/stop</td><td><span class="auth-jwt">JWT</span></td><td>Stop this user's IMAP watcher</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/process/rescan</td><td><span class="auth-jwt">JWT</span></td><td>Immediate inbox scan (rate-limited: 1 per 30 s)</td></tr>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/process/settings</td><td><span class="auth-jwt">JWT</span></td><td>autoProcess toggle value</td></tr>
+        <tr><td><span class="method-patch">PATCH</span></td><td class="path-cell">/api/process/settings</td><td><span class="auth-jwt">JWT</span></td><td>Update autoProcess toggle</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="font-size: 13px; font-weight: 700; color: var(--muted); margin: 20px 0 10px;">Invoices</div>
+  <div class="doc-table-wrap">
+    <table class="doc-table">
+      <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/invoices</td><td><span class="auth-jwt">JWT</span></td><td>List this user's invoices (includes <code>submittedAt</code>, <code>xeroInvoiceId</code>, <code>errorMsg</code>)</td></tr>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/invoices/:id</td><td><span class="auth-jwt">JWT</span></td><td>Full invoice detail</td></tr>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/invoices/:id/pdf-url</td><td><span class="auth-jwt">JWT</span></td><td>Returns a 5-minute signed URL for direct PDF browser access</td></tr>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/invoices/:id/pdf</td><td><span class="auth-jwt">JWT</span> or <code>?token=</code></td><td>Serve PDF binary. Accepts Bearer header or signed <code>?token=</code> query param.</td></tr>
+        <tr><td><span class="method-patch">PATCH</span></td><td class="path-cell">/api/invoices/:id</td><td><span class="auth-jwt">JWT</span></td><td>Correct LLM-extracted fields. Blocked on <code>posted</code> / <code>duplicate</code>.</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/invoices/:id/submit</td><td><span class="auth-jwt">JWT</span></td><td>Manually submit to Xero. Idempotent — won't duplicate if already posted.</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/invoices/submit-all</td><td><span class="auth-jwt">JWT</span></td><td>Bulk-submit all pending invoices sequentially (1.5 s gap)</td></tr>
+        <tr><td><span class="method-patch">PATCH</span></td><td class="path-cell">/api/invoices/:id/status</td><td><span class="auth-jwt">JWT</span></td><td>Manual status transition. <code>posted</code> and <code>duplicate</code> are locked.</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/invoices/:id/report</td><td><span class="auth-jwt">JWT</span></td><td>Flag an issue for admin review</td></tr>
+        <tr><td><span class="method-delete">DELETE</span></td><td class="path-cell">/api/invoices/:id</td><td><span class="auth-jwt">JWT</span></td><td>Delete invoice + PDF</td></tr>
+        <tr><td><span class="method-delete">DELETE</span></td><td class="path-cell">/api/invoices</td><td><span class="auth-jwt">JWT</span></td><td>Clear all invoices + PDFs + email queue for this user</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="font-size: 13px; font-weight: 700; color: var(--muted); margin: 20px 0 10px;">Admin</div>
+  <div class="doc-table-wrap">
+    <table class="doc-table">
+      <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/admin/users</td><td><span class="auth-admin">Admin</span></td><td>List all users</td></tr>
+        <tr><td><span class="method-post">POST</span></td><td class="path-cell">/api/admin/users</td><td><span class="auth-admin">Admin</span></td><td>Create a user</td></tr>
+        <tr><td><span class="method-patch">PATCH</span></td><td class="path-cell">/api/admin/users/:id</td><td><span class="auth-admin">Admin</span></td><td>Promote / demote role. Cannot demote last admin or self.</td></tr>
+        <tr><td><span class="method-delete">DELETE</span></td><td class="path-cell">/api/admin/users/:id</td><td><span class="auth-admin">Admin</span></td><td>Delete user + their entire <code>data/users/{id}/</code> directory</td></tr>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/api/admin/reports</td><td><span class="auth-admin">Admin</span></td><td>All flagged invoices across all users (<code>reported</code> + <code>review-needed</code>)</td></tr>
+        <tr><td><span class="method-patch">PATCH</span></td><td class="path-cell">/api/admin/reports/:userId/:id/resolve</td><td><span class="auth-admin">Admin</span></td><td>Resolve a flagged invoice</td></tr>
+        <tr><td><span class="method-get">GET</span></td><td class="path-cell">/dashboard/health</td><td><span class="auth-open">—</span></td><td>Health check</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── ENV VARS ──────────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="env">
+  <div class="section-label">Configuration</div>
+  <div class="section-title">Environment variables</div>
+  <div class="section-sub">Server-wide variables are set in Railway or a <code>.env</code> file. Per-user credentials are set via the Setup page and stored in <code>data/users/{id}/config.json</code>.</div>
+
+  <div class="env-grid">
+    <div class="env-card">
+      <h3>Server-wide (Railway / .env)</h3>
+      <div class="env-row">
+        <div class="env-key">JWT_SECRET <span class="env-required">Required</span></div>
+        <div class="env-desc">Any long random string (min 32 chars). Signs all user JWTs.</div>
+      </div>
+      <div class="env-row">
+        <div class="env-key">NODE_ENV <span class="env-optional">Optional</span></div>
+        <div class="env-desc">Set to <code>production</code> on Railway.</div>
+      </div>
+      <div class="env-row">
+        <div class="env-key">PORT <span class="env-optional">Optional</span></div>
+        <div class="env-desc">Defaults to <code>3000</code>.</div>
+      </div>
+      <div class="env-row">
+        <div class="env-key">SLACK_WEBHOOK_URL <span class="env-optional">Optional</span></div>
+        <div class="env-desc">Error + invoice notifications to Slack.</div>
+      </div>
+      <div class="env-row">
+        <div class="env-key">REDIS_URL <span class="env-optional">Optional</span></div>
+        <div class="env-desc">Enables Bull queue for async processing. Without this, inline processing is used.</div>
+      </div>
+    </div>
+
+    <div class="env-card">
+      <h3>Per-user (Setup page → config.json)</h3>
+      <div class="env-row">
+        <div class="env-key">XERO_CLIENT_ID / XERO_CLIENT_SECRET</div>
+        <div class="env-desc">From your Xero Custom Connection app.</div>
+      </div>
+      <div class="env-row">
+        <div class="env-key">IMAP_HOST / IMAP_PORT / IMAP_USER / IMAP_PASS</div>
+        <div class="env-desc">Gmail: host <code>imap.gmail.com</code>, port <code>993</code>, use App Password as <code>IMAP_PASS</code>.</div>
+      </div>
+      <div class="env-row">
+        <div class="env-key">IMAP_FILTER_FROM <span class="env-optional">Optional</span></div>
+        <div class="env-desc">Only process emails from this sender address.</div>
+      </div>
+      <div class="env-row">
+        <div class="env-key">Gemini_API_KEY / Nvidia_API_KEY / OPENROUTER_API_KEY</div>
+        <div class="env-desc">LLM provider keys. Priority: Gemini → Nvidia → OpenRouter.</div>
+      </div>
+      <div class="env-row">
+        <div class="env-key">DEFAULT_ACCOUNT_CODE / DEFAULT_CURRENCY / ZERO_TAX_RATE</div>
+        <div class="env-desc">Xero defaults. e.g. account code <code>200</code>, currency <code>SGD</code>, tax <code>NONE</code>.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-box" style="margin-top: 8px;">
+    <strong>Secret visibility:</strong> The Setup page renders all fields including API keys and passwords. Secret fields are hidden by default (<code>type="password"</code>) with an eye icon to reveal per-field. Old global <code>.env</code> credentials are <strong>not</strong> auto-migrated — each user must enter credentials via the Setup page.
+  </div>
+</section>
+
+<!-- ── SETUP ─────────────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="setup">
+  <div class="section-label">Setup Guide</div>
+  <div class="section-title">Connecting Xero &amp; Gmail</div>
+  <div class="section-sub">Each user sets up their own credentials independently. The system uses Xero Custom Connection (no OAuth browser flow — client credentials grant only).</div>
+
+  <div class="two-col">
+    <div>
+      <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">Xero App Setup (Custom Connection)</div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-body"><h4>Create the app</h4><p>Go to <strong>developer.xero.com → My Apps → New App</strong>. Select type: <strong>Custom Connection</strong>.</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-body"><h4>Set scopes</h4><p>Enable: <code>accounting.invoices</code>, <code>accounting.contacts</code>, <code>accounting.settings.read</code></p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-body"><h4>Copy credentials</h4><p>Configuration tab → copy <strong>Client ID</strong> and <strong>Client Secret</strong>.</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-body"><h4>Link your org</h4><p>Connection Management → add your Xero organisation.</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">5</div>
+          <div class="step-body"><h4>Paste into Setup page</h4><p>Go to Setup → Xero section → paste Client ID + Secret → click <strong>Test Xero</strong>.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">Gmail App Password</div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-body"><h4>Enable 2-Step Verification</h4><p>myaccount.google.com → Security → 2-Step Verification (must be on).</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-body"><h4>Generate App Password</h4><p>Security → App passwords → App: Mail, Device: Other → name it "Xero Invoice App".</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-body"><h4>Copy the 16-character password</h4><p>Paste it as <code>IMAP_PASS</code> in the Setup page. Use your Gmail address as <code>IMAP_USER</code>.</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-body"><h4>Test IMAP</h4><p>Setup page → IMAP section → click <strong>Test IMAP</strong>. A successful test confirms the connection works.</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── ROLES & ADMIN ─────────────────────────────────────────── -->
+<div class="divider"></div>
+<section>
+  <div class="section-label">Roles &amp; Admin</div>
+  <div class="section-title">User roles and admin capabilities</div>
+  <div class="section-sub">The first user to register becomes admin. All subsequent registrations default to the user role. Roles can be changed in the Admin panel.</div>
+
+  <div class="two-col" style="margin-bottom: 28px;">
+    <div class="doc-table-wrap">
+      <table class="doc-table">
+        <thead><tr><th>Role</th><th>Access</th></tr></thead>
+        <tbody>
+          <tr><td><strong style="color:#fca5a5;">admin</strong></td><td>All pages including /admin — manage users, view cross-user flagged reports, resolve issues</td></tr>
+          <tr><td><strong style="color:#a5b4fc;">user</strong></td><td>Dashboard, Setup, Invoices — fully isolated from other users</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="doc-table-wrap">
+      <table class="doc-table">
+        <thead><tr><th>Admin action</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>List / create users</td><td></td></tr>
+          <tr><td>Promote / demote role</td><td>Cannot demote last admin or self</td></tr>
+          <tr><td>Delete user</td><td>Removes user + entire <code>data/users/{id}/</code> directory</td></tr>
+          <tr><td>View flagged invoices</td><td>Cross-user: <code>reported</code> + <code>review-needed</code></td></tr>
+          <tr><td>Resolve flagged invoice</td><td></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ── DEPLOY ────────────────────────────────────────────────── -->
+<div class="divider"></div>
+<section id="deploy">
+  <div class="section-label">Deployment</div>
+  <div class="section-title">Railway &amp; local development</div>
+  <div class="section-sub">The app runs as a single Node.js process. No database required — all data is stored as JSON files on disk. Railway provides free persistent storage.</div>
+
+  <div class="two-col">
+    <div>
+      <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">Deploy to Railway</div>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div class="step-body"><h4>Push to private GitHub repo</h4><p>Never commit <code>.env</code>. The <code>.gitignore</code> excludes it by default.</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div class="step-body"><h4>New Railway project</h4><p>Railway → New Project → Deploy from GitHub repo. Select your repo.</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div class="step-body"><h4>Set environment variables</h4><p>Add <code>JWT_SECRET</code> (required) and optionally <code>SLACK_WEBHOOK_URL</code>, <code>REDIS_URL</code>.</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div class="step-body"><h4>Generate domain</h4><p>Settings → Domains → Generate Domain. Railway runs the app with <code>node main/index.js</code> (from Procfile).</p></div>
+        </div>
+        <div class="step">
+          <div class="step-num">5</div>
+          <div class="step-body"><h4>First-time setup</h4><p>Visit the URL → Register (first user = admin) → Setup page → fill in IMAP, Xero, LLM → Dashboard → Start.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div style="font-size: 14px; font-weight: 700; margin-bottom: 14px;">Run locally</div>
+      <div class="code-block" style="margin-bottom: 16px;">
+<span class="cmt"># Install backend deps</span>
+npm install
+
+<span class="cmt"># Start both backend + frontend (concurrently)</span>
+npm run dev
+
+<span class="cmt"># Frontend only (proxies API to :3000)</span>
+cd ui &amp;&amp; npm install &amp;&amp; npm run dev
+
+<span class="cmt"># Production UI build (served by Express)</span>
+cd ui &amp;&amp; npm run build
+
+<span class="cmt"># Backend only (nodemon auto-restart)</span>
+npm run dev:server
+      </div>
+      <div class="info-box">
+        <strong>npm run dev</strong> runs three scripts in order:<br>
+        1. <strong>predev</strong> — kills anything on port 3000 before starting<br>
+        2. <strong>dev:server</strong> — nodemon with 500 ms delay (grace period for port release)<br>
+        3. <strong>dev:ui</strong> — Vite dev server for React frontend<br><br>
+        On <code>SIGTERM</code> / <code>SIGINT</code>, the server calls <code>server.close()</code> before <code>process.exit()</code> — releases the port immediately so nodemon can restart without <code>EADDRINUSE</code>.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── KEY CAPABILITIES ──────────────────────────────────────── -->
+<div class="divider"></div>
+<section>
+  <div class="section-label">Key capabilities</div>
+  <div class="section-title">What the system handles for you</div>
+  <div class="section-sub">Production-grade reliability — no in-memory state that a restart can lose, no hardcoded limits that break at scale.</div>
+
+  <div class="feature-grid">
+    <div class="feature-card">
+      <div class="feature-icon">🔁</div>
+      <h3>Boot-time retry</h3>
+      <p>3 s after startup, all <code>pending</code> / <code>submitting</code> invoices across all users are retried sequentially. No invoices left stranded after a crash.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📊</div>
+      <h3>Persistent pipeline panel</h3>
+      <p>Pipeline Status widget in the sidebar via shared React context — always visible regardless of which page you navigate to. Polls 3 s (active) / 15 s (idle).</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">💱</div>
+      <h3>Dynamic currency fallback</h3>
+      <p>PDF currency tried first. On rejection, org base currency fetched from <code>GET /Organisations</code> and cached. Works for any Xero org worldwide.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🔒</div>
+      <h3>Atomic dedup lock</h3>
+      <p><code>claimForSubmit</code> flips status to <code>submitting</code> inside a single write-locked operation. Concurrent callers are guaranteed to never double-post.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🏎️</div>
+      <h3>Rate-limit aware</h3>
+      <p>Xero calls spaced 1.5 s apart. <code>withRetry</code> reads the <code>Retry-After</code> header on 429s and waits the exact amount before retrying — up to 5 attempts.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🔍</div>
+      <h3>Real Xero error messages</h3>
+      <p><code>_parseXeroErr</code> decodes xero-node's nested JSON-string errors so you see the actual Xero message ("Invoice # must be unique"), not "Unknown Xero error".</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🧹</div>
+      <h3>Smart dedup matching</h3>
+      <p>Vendor names normalised (strips Pte. Ltd., K.K., LLC, Inc…). Same invoice# with different amounts treated as distinct — allows legitimate corrections.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">📎</div>
+      <h3>PDF + email attachment</h3>
+      <p>Original PDF and email body text attached directly to the Xero draft invoice — full context for your accountant without leaving Xero.</p>
+    </div>
+    <div class="feature-card">
+      <div class="feature-icon">🔐</div>
+      <h3>Write safety</h3>
+      <p>Each user's invoice store has its own <code>_writeLock</code> promise chain. Concurrent email processing for the same user never corrupts <code>invoices.json</code>. Different users never block each other.</p>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<div class="divider"></div>
+<footer>
+  <div style="margin-bottom: 8px; font-weight: 600; color: var(--text);">Xero Invoice Automation</div>
+  <div>Built for multi-user, production-grade invoice processing. Per-user isolation · Zero duplicates · Disk-backed resilience.</div>
+</footer>
+
+<script>
+  // Animate progress bar on scroll into view
+  const bar = document.querySelector('.progress-bar-green');
+  let animated = false;
+  if (bar) {
+    const obs = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting && !animated) {
+        animated = true;
+        bar.style.transition = 'width 1.2s cubic-bezier(0.4,0,0.2,1)';
+        bar.style.width = '60%';
+      }
+    }, { threshold: 0.3 });
+    obs.observe(bar);
+  }
+
+  // Highlight active nav link on scroll
+  const sections = document.querySelectorAll('section[id]');
+  const navLinks = document.querySelectorAll('.nav-links a');
+  window.addEventListener('scroll', () => {
+    let current = '';
+    sections.forEach(s => { if (window.scrollY >= s.offsetTop - 80) current = s.id; });
+    navLinks.forEach(a => {
+      a.classList.toggle('active', a.getAttribute('href') === '#' + current);
+    });
+  }, { passive: true });
+</script>
+</body>
+</html>

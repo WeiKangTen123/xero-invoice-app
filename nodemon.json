@@ -1,0 +1,10 @@
+{
+  "watch": ["main"],
+  "ext": "js",
+  "ignore": [
+    "main/data/**",
+    "main/logs/**",
+    "ui/**"
+  ],
+  "delay": "500"
+}
