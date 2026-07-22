@@ -32,6 +32,7 @@ const morgan      = require('morgan');
 const logger      = require('./utils/logger');
 
 const { jwtSecret }             = require('./middleware/auth-middleware');
+require('./db/migrate').run();
 const { ensureUserDirectories, getAllUsers } = require('./utils/users');
 const emailWorker               = require('./queue/email-worker');
 const { createHandler, submitInvoiceToXero } = require('./utils/invoice-handler');

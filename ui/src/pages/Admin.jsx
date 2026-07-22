@@ -76,7 +76,7 @@ export default function Admin() {
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, marginBottom: 20, width: 'fit-content' }}>
-        {[{ key: 'users', label: '👥 Users' }, { key: 'reports', label: '⚠ Reports' }].map(t => (
+        {[{ key: 'users', label: '👥 Users' }, { key: 'reports', label: '⚠ Reports' }, { key: 'monitoring', label: '📊 Monitoring' }].map(t => (
           <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{
             padding: '7px 18px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
             background: tab === t.key ? 'var(--accent-gradient)' : 'transparent',
@@ -90,7 +90,8 @@ export default function Admin() {
       {error   && <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>}
       {success && <div className="alert alert-success"><span className="alert-icon">✓</span>{success}</div>}
 
-      {tab === 'reports' && <ReportsPanel navigate={navigate} />}
+      {tab === 'reports'    && <ReportsPanel navigate={navigate} />}
+      {tab === 'monitoring' && <MonitoringPanel />}
 
       {tab === 'users' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20, alignItems: 'start' }}>
 
@@ -383,6 +384,121 @@ function ReportsPanel({ navigate }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Monitoring panel ───────────────────────────────────────────────────────────
+function StatCard({ label, value }) {
+  return (
+    <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: '12px 16px', minWidth: 120 }}>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 700 }}>{value}</div>
+    </div>
+  );
+}
+
+function formatUptime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+function MonitoringPanel() {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  async function fetchMonitoring() {
+    setLoading(true);
+    try { setData(await api.get('/admin/monitoring')); }
+    catch (_) {}
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { fetchMonitoring(); }, []);
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)', padding: 16 }}>
+        <span style={{ width: 14, height: 14, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.65s linear infinite', display: 'inline-block' }} />
+        Loading monitoring data...
+      </div>
+    );
+  }
+
+  if (!data) return null;
+  const { system, users } = data;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* System health */}
+      <div className="card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+          <div className="card-title">System Health</div>
+          <button className="btn btn-outline btn-sm" onClick={fetchMonitoring}>↻</button>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+          <StatCard label="Uptime"        value={formatUptime(system.uptimeSeconds)} />
+          <StatCard label="Node"          value={system.nodeVersion} />
+          <StatCard label="Memory (RSS)"  value={`${system.memory.rssMb} MB`} />
+          <StatCard label="Heap Used"     value={`${system.memory.heapUsedMb} MB`} />
+          <StatCard label="DB Size"       value={system.dbSizeKb != null ? `${system.dbSizeKb} KB` : '—'} />
+          <StatCard label="Redis"         value={system.redisConfigured ? 'Configured' : 'Not set'} />
+          <StatCard label="Total Users"   value={system.totalUsers} />
+          <StatCard label="Total Invoices" value={system.totalInvoices} />
+        </div>
+      </div>
+
+      {/* Per-user activity */}
+      <div className="card">
+        <div className="card-title" style={{ marginBottom: 14 }}>Per-User Activity</div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
+                <th style={{ padding: '6px 10px' }}>User</th>
+                <th style={{ padding: '6px 10px' }}>Watcher</th>
+                <th style={{ padding: '6px 10px' }}>Xero</th>
+                <th style={{ padding: '6px 10px' }}>IMAP</th>
+                <th style={{ padding: '6px 10px' }}>Queue (pend/proc/dead)</th>
+                <th style={{ padding: '6px 10px' }}>Invoices (pend/posted/err)</th>
+                <th style={{ padding: '6px 10px' }}>Last Activity</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map(u => (
+                <tr key={u.id} style={{ borderTop: '1px solid var(--border)' }}>
+                  <td style={{ padding: '8px 10px' }}>{u.email}</td>
+                  <td style={{ padding: '8px 10px' }}>
+                    <span className={`badge ${u.watcherRunning ? 'badge-green' : 'badge-gray'}`}>
+                      {u.watcherRunning ? 'Running' : 'Stopped'}
+                    </span>
+                  </td>
+                  <td style={{ padding: '8px 10px' }}>
+                    <span className={`badge ${u.xeroConnected ? 'badge-green' : 'badge-gray'}`}>
+                      {u.xeroConnected ? 'Connected' : 'Not connected'}
+                    </span>
+                  </td>
+                  <td style={{ padding: '8px 10px' }}>
+                    <span className={`badge ${u.imapConfigured ? 'badge-green' : 'badge-gray'}`}>
+                      {u.imapConfigured ? 'Configured' : 'Not set'}
+                    </span>
+                  </td>
+                  <td style={{ padding: '8px 10px' }}>
+                    {u.queue.pending} / {u.queue.processing} / {u.queue.dead}
+                  </td>
+                  <td style={{ padding: '8px 10px' }}>
+                    {u.invoices.pending} / {u.invoices.posted} / {u.invoices.error}
+                  </td>
+                  <td style={{ padding: '8px 10px', color: 'var(--text-muted)' }}>
+                    {u.lastActivity ? new Date(u.lastActivity).toLocaleString() : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }

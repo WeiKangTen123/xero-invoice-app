@@ -1,86 +1,84 @@
-const fs      = require('fs');
-const path    = require('path');
-const bcrypt  = require('bcryptjs');
+const bcrypt = require('bcryptjs');
+const db     = require('../db');
 
-const DATA_DIR   = path.join(__dirname, '../data');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-
-// Serialise all writes to users.json through a promise chain so concurrent
-// admin operations (e.g. two admins creating users at once) never corrupt the file.
-let _usersWriteLock = Promise.resolve();
-
-function _withUsersLock(fn) {
-  const result = _usersWriteLock.then(fn);
-  _usersWriteLock = result.catch(() => {});
-  return result;
-}
-
-function readUsers() {
-  try {
-    if (!fs.existsSync(USERS_FILE)) return [];
-    return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-  } catch {
-    return [];
-  }
-}
-
-function writeUsers(users) {
-  fs.mkdirSync(path.dirname(USERS_FILE), { recursive: true });
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
-}
+// Maps config.json-style keys (as used throughout routes/setup.js and xero/connect.js)
+// to their user_credentials column names.
+const CONFIG_KEY_TO_COLUMN = {
+  XERO_CLIENT_ID:        'xero_client_id',
+  XERO_CLIENT_SECRET:    'xero_client_secret',
+  IMAP_HOST:             'imap_host',
+  IMAP_PORT:             'imap_port',
+  IMAP_USER:             'imap_user',
+  IMAP_PASS:             'imap_pass',
+  IMAP_FILTER_FROM:      'imap_filter_from',
+  IMAP_POLL_INTERVAL_MS: 'imap_poll_interval_ms',
+  Gemini_API_KEY:        'gemini_api_key',
+  Nvidia_API_KEY:        'nvidia_api_key',
+  OPENROUTER_API_KEY:    'openrouter_api_key',
+  OPENROUTER_MODEL:      'openrouter_model',
+  DEFAULT_ACCOUNT_CODE:  'default_account_code',
+  DEFAULT_CURRENCY:      'default_currency',
+  ZERO_TAX_RATE:         'zero_tax_rate',
+};
+const COLUMN_TO_CONFIG_KEY = Object.fromEntries(
+  Object.entries(CONFIG_KEY_TO_COLUMN).map(([k, v]) => [v, k])
+);
 
 // ── Per-user config (IMAP, Xero credentials, per-user defaults) ──────────────
 
 function getUserConfig(userId) {
-  const file = path.join(DATA_DIR, 'users', userId, 'config.json');
-  try {
-    if (!fs.existsSync(file)) return {};
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch { return {}; }
+  const row = db.prepare('SELECT * FROM user_credentials WHERE user_id = ?').get(userId);
+  if (!row) return {};
+  const config = {};
+  for (const [column, value] of Object.entries(row)) {
+    if (column === 'user_id' || value === null) continue;
+    config[COLUMN_TO_CONFIG_KEY[column]] = value;
+  }
+  return config;
 }
 
 function saveUserConfig(userId, patch) {
-  const dir = path.join(DATA_DIR, 'users', userId);
-  fs.mkdirSync(dir, { recursive: true });
-  const current = getUserConfig(userId);
-  const updated = { ...current };
-  for (const [k, v] of Object.entries(patch)) {
-    if (v === null || v === undefined) continue; // undefined/null = not provided
-    if (v === '') {
-      delete updated[k]; // explicit empty string = user wants to clear this field
-    } else {
-      updated[k] = v;
-    }
+  db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(userId);
+
+  const sets = [];
+  const args = [];
+  for (const [key, value] of Object.entries(patch)) {
+    const column = CONFIG_KEY_TO_COLUMN[key];
+    if (!column) continue;
+    if (value === null || value === undefined) continue; // not provided
+    sets.push(`${column} = ?`);
+    args.push(value === '' ? null : value); // explicit empty string = clear this field
   }
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(updated, null, 2));
-  return updated;
+  if (sets.length) {
+    db.prepare(`UPDATE user_credentials SET ${sets.join(', ')} WHERE user_id = ?`).run(...args, userId);
+  }
+  return getUserConfig(userId);
 }
 
 // ── User CRUD ─────────────────────────────────────────────────────────────────
 
 function hasUsers() {
-  return readUsers().length > 0;
+  return db.prepare('SELECT 1 FROM users LIMIT 1').get() !== undefined;
 }
 
 function findById(id) {
-  return readUsers().find(u => u.id === id) || null;
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(id) || null;
 }
 
 function findByEmail(email) {
-  return readUsers().find(u => u.email.toLowerCase() === email.toLowerCase()) || null;
+  return db.prepare('SELECT * FROM users WHERE lower(email) = lower(?)').get(email) || null;
 }
 
 async function createUser(email, password, role = 'user') {
   const hash = await bcrypt.hash(password, 10);
-  return _withUsersLock(() => {
-    const users = readUsers();
-    if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
-      throw new Error('Email already exists');
-    }
+
+  const create = db.transaction(() => {
+    if (findByEmail(email)) throw new Error('Email already exists');
+
     // 'auto' = first user becomes admin, all subsequent users become 'user'.
-    // Resolved inside the lock so two simultaneous first registrations cannot
-    // both claim admin — only one can be first in the serialised queue.
-    const actualRole = role === 'auto' ? (users.length === 0 ? 'admin' : 'user') : role;
+    // Resolved inside the transaction so two simultaneous first registrations
+    // cannot both claim admin — SQLite serialises writes, only one can go first.
+    const actualRole = role === 'auto' ? (hasUsers() ? 'user' : 'admin') : role;
     const user = {
       id:        `${Date.now()}`,
       email:     email.toLowerCase().trim(),
@@ -88,20 +86,21 @@ async function createUser(email, password, role = 'user') {
       role:      actualRole,
       createdAt: new Date().toISOString(),
     };
-    users.push(user);
-    writeUsers(users);
 
-    // Pre-create the user's data directory so every account in users.json
-    // has a corresponding folder from day one (not lazily on first config save).
-    const userDir    = path.join(DATA_DIR, 'users', user.id);
-    const configFile = path.join(userDir, 'config.json');
-    fs.mkdirSync(userDir, { recursive: true });
-    if (!fs.existsSync(configFile)) {
-      fs.writeFileSync(configFile, JSON.stringify({}, null, 2));
-    }
+    db.prepare(`
+      INSERT INTO users (id, email, password, role, created_at)
+      VALUES (@id, @email, @password, @role, @createdAt)
+    `).run(user);
+
+    // Pre-create the user's credentials row so every account has one from day one
+    // (mirrors the old behaviour of always creating config.json on user creation).
+    db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(user.id);
+    db.prepare('INSERT OR IGNORE INTO user_settings (user_id, auto_process) VALUES (?, 1)').run(user.id);
 
     return sanitize(user);
   });
+
+  return create();
 }
 
 async function validatePassword(email, password) {
@@ -112,33 +111,29 @@ async function validatePassword(email, password) {
 }
 
 function getAllUsers() {
-  return readUsers().map(sanitize);
+  return db.prepare('SELECT * FROM users ORDER BY created_at').all().map(sanitize);
 }
 
 function updateUserRole(id, role) {
-  return _withUsersLock(() => {
-    const users = readUsers();
-    const idx   = users.findIndex(u => u.id === id);
-    if (idx === -1) throw new Error('User not found');
-    users[idx] = { ...users[idx], role };
-    writeUsers(users);
-    return sanitize(users[idx]);
-  });
+  const user = findById(id);
+  if (!user) throw new Error('User not found');
+  db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+  return sanitize({ ...user, role });
 }
 
 function deleteUser(id) {
-  return _withUsersLock(() => {
-    const users = readUsers().filter(u => u.id !== id);
-    writeUsers(users);
-    // Remove the user's data directory atomically with the auth record so
-    // a future registration cannot collide with an orphaned dataset.
-    const userDir = path.join(DATA_DIR, 'users', id);
-    fs.rmSync(userDir, { recursive: true, force: true });
-  });
+  // ON DELETE CASCADE removes user_credentials/user_settings/invoices/invoice_reports/
+  // xero_tenants rows automatically. PDFs on disk are not touched here — callers that
+  // need the data directory removed (routes/admin.js) do that separately via fs.
+  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+}
+
+function readUsers() {
+  return db.prepare('SELECT * FROM users ORDER BY created_at').all();
 }
 
 function sanitize(u) {
-  return { id: u.id, email: u.email, role: u.role, createdAt: u.createdAt };
+  return { id: u.id, email: u.email, role: u.role, createdAt: u.created_at || u.createdAt };
 }
 
 // Returns which setup sections are configured for a user, and whether the
@@ -163,18 +158,13 @@ function getSetupStatus(userId) {
   };
 }
 
-// Ensures every account in users.json has a corresponding data directory and
-// config.json. Safe to call on every startup — creates only what is missing,
-// never overwrites existing files. Guards against users that were created
-// before the directory-provisioning logic existed in createUser.
+// Ensures every account has a user_credentials/user_settings row. Safe to call on
+// every startup — INSERT OR IGNORE never overwrites existing rows. Guards against
+// users created before this provisioning logic existed.
 function ensureUserDirectories() {
   for (const u of readUsers()) {
-    const userDir    = path.join(DATA_DIR, 'users', u.id);
-    const configFile = path.join(userDir, 'config.json');
-    fs.mkdirSync(userDir, { recursive: true });
-    if (!fs.existsSync(configFile)) {
-      fs.writeFileSync(configFile, JSON.stringify({}, null, 2));
-    }
+    db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(u.id);
+    db.prepare('INSERT OR IGNORE INTO user_settings (user_id, auto_process) VALUES (?, 1)').run(u.id);
   }
 }
 
@@ -182,4 +172,5 @@ module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
   getAllUsers, updateUserRole, deleteUser, readUsers,
   getUserConfig, saveUserConfig, getSetupStatus, ensureUserDirectories,
+  CONFIG_KEY_TO_COLUMN, // exposed for the one-time JSON->SQLite importer
 };

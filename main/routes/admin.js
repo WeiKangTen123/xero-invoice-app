@@ -1,8 +1,14 @@
 const express      = require('express');
 const router       = express.Router();
 const { requireAdmin } = require('../middleware/auth-middleware');
-const { getAllUsers, createUser, updateUserRole, deleteUser, readUsers } = require('../utils/users');
-const invoiceStore = require('../utils/invoice-store');
+const { getAllUsers, createUser, updateUserRole, deleteUser, readUsers, getSetupStatus } = require('../utils/users');
+const invoiceStore     = require('../utils/invoice-store');
+const settingsStore    = require('../utils/settings-store');
+const processState     = require('../utils/process-state');
+const emailQueue       = require('../queue/email-queue');
+const watcherRegistry  = require('../email/watcher-registry');
+const tokenCache       = require('../utils/token-cache');
+const db               = require('../db');
 const logger       = require('../utils/logger');
 
 // GET /api/admin/users
@@ -110,6 +116,63 @@ router.patch('/reports/:userId/:invoiceId/resolve', requireAdmin, async (req, re
     logger.info('Report resolved', { invoiceId, userId, by: req.user.email });
     res.json({ success: true });
   } catch (err) { next(err); }
+});
+
+// GET /api/admin/monitoring — per-user activity + backend health, for the Admin Monitoring tab.
+router.get('/monitoring', requireAdmin, (_req, res) => {
+  const fs    = require('fs');
+  const users = readUsers();
+
+  let dbSizeKb = null;
+  try {
+    if (db.path !== ':memory:') dbSizeKb = Math.round(fs.statSync(db.path).size / 1024);
+  } catch (_) {}
+
+  const mem = process.memoryUsage();
+  let totalInvoices = 0;
+
+  const userStats = users.map(u => {
+    const invoices = invoiceStore.forUser(u.id).getAll();
+    totalInvoices += invoices.length;
+    const byStatus = status => invoices.filter(i => i.status === status).length;
+    const setup     = getSetupStatus(u.id);
+    const tenants   = tokenCache.getPersistedTenants(u.id);
+
+    return {
+      id:             u.id,
+      email:          u.email,
+      role:           u.role,
+      watcherRunning: watcherRegistry.isRunning(u.id),
+      autoProcess:    settingsStore.forUser(u.id).get('autoProcess'),
+      queue:          emailQueue.getStats(u.id),
+      invoices: {
+        pending:      byStatus('pending'),
+        submitting:   byStatus('submitting'),
+        posted:       byStatus('posted'),
+        error:        byStatus('error'),
+        reviewNeeded: byStatus('review-needed'),
+      },
+      lastActivity:   processState.forUser(u.id).getStatus(watcherRegistry.isRunning(u.id)).lastActivity,
+      xeroConnected:  tenants.length > 0,
+      imapConfigured: setup.imap.configured,
+    };
+  });
+
+  res.json({
+    system: {
+      uptimeSeconds:   Math.round(process.uptime()),
+      nodeVersion:     process.version,
+      memory: {
+        rssMb:      Math.round(mem.rss / 1024 / 1024),
+        heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
+      },
+      dbSizeKb,
+      redisConfigured: !!process.env.REDIS_URL,
+      totalUsers:      users.length,
+      totalInvoices,
+    },
+    users: userStats,
+  });
 });
 
 module.exports = router;

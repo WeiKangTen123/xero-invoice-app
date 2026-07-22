@@ -1,8 +1,5 @@
-const fs   = require('fs');
-const path = require('path');
-
-const BASE_DIR = path.join(__dirname, '../data/users');
-const MAX      = 500;
+const db  = require('../db');
+const MAX = 500;
 
 // Normalise a vendor name for dedup comparison.
 // Strips honorifics, common legal suffixes, punctuation, and lowercases so that
@@ -17,93 +14,168 @@ function _normalizeVendor(name) {
     .trim();
 }
 
-// Cache store instances — one per userId, each with its own write mutex
-const _stores = new Map();
+// ── Row <-> JS record mapping ─────────────────────────────────────────────────
+// DB columns are snake_case; every field the rest of the app reads/writes on an
+// invoice record is camelCase (unchanged from the old invoices.json shape).
+
+const COLUMNS = [
+  'id', 'user_id', 'status', 'has_pdf', 'pdf_filename', 'vendor_name', 'contact_name',
+  'contact_email', 'contact_address', 'invoice_number', 'invoice_date', 'due_date',
+  'total_amount', 'currency', 'invoice_type', 'source', 'source_email', 'line_items',
+  'description', 'account_code', 'tax_amount', 'sub_total', 'payment_reference',
+  'xero_invoice_id', 'error_msg', 'duplicate_of', 'resolved_by', 'resolved_at',
+  'submitted_at', 'processed_at', 'updated_at',
+];
+
+const FIELD_TO_COLUMN = {
+  id: 'id', userId: 'user_id', status: 'status', hasPdf: 'has_pdf',
+  pdfFilename: 'pdf_filename', vendorName: 'vendor_name', contactName: 'contact_name',
+  contactEmail: 'contact_email', contactAddress: 'contact_address',
+  invoiceNumber: 'invoice_number', invoiceDate: 'invoice_date', dueDate: 'due_date',
+  totalAmount: 'total_amount', currency: 'currency', invoiceType: 'invoice_type',
+  source: 'source', sourceEmail: 'source_email', lineItems: 'line_items',
+  description: 'description', accountCode: 'account_code', taxAmount: 'tax_amount',
+  subTotal: 'sub_total', paymentReference: 'payment_reference',
+  xeroInvoiceId: 'xero_invoice_id', errorMsg: 'error_msg', duplicateOf: 'duplicate_of',
+  resolvedBy: 'resolved_by', resolvedAt: 'resolved_at', submittedAt: 'submitted_at',
+  processedAt: 'processed_at', updatedAt: 'updated_at',
+};
+
+// better-sqlite3 can only bind numbers/strings/bigints/buffers/null — booleans and
+// undefined (both of which show up on invoice records, e.g. hasPdf) need coercing.
+function _toBindable(field, value) {
+  if (field === 'lineItems') return JSON.stringify(value || []);
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (value === undefined) return null;
+  return value;
+}
+
+function _rowToRecord(row, reports) {
+  if (!row) return null;
+  return {
+    id:                row.id,
+    status:            row.status,
+    hasPdf:            !!row.has_pdf,
+    pdfFilename:       row.pdf_filename,
+    vendorName:        row.vendor_name,
+    contactName:       row.contact_name,
+    contactEmail:      row.contact_email,
+    contactAddress:    row.contact_address,
+    invoiceNumber:     row.invoice_number,
+    invoiceDate:       row.invoice_date,
+    dueDate:           row.due_date,
+    totalAmount:       row.total_amount,
+    currency:          row.currency,
+    invoiceType:       row.invoice_type,
+    source:            row.source,
+    sourceEmail:       row.source_email,
+    lineItems:         row.line_items ? JSON.parse(row.line_items) : [],
+    description:       row.description,
+    accountCode:       row.account_code,
+    taxAmount:         row.tax_amount,
+    subTotal:          row.sub_total,
+    paymentReference:  row.payment_reference,
+    xeroInvoiceId:     row.xero_invoice_id,
+    errorMsg:          row.error_msg,
+    duplicateOf:       row.duplicate_of,
+    resolvedBy:        row.resolved_by,
+    resolvedAt:        row.resolved_at,
+    submittedAt:       row.submitted_at,
+    processedAt:       row.processed_at,
+    reports:           reports || [],
+  };
+}
 
 function forUser(userId) {
-  if (_stores.has(userId)) return _stores.get(userId);
-
-  const FILE = path.join(BASE_DIR, userId, 'invoices.json');
-
-  // Serialise all writes through a promise chain so concurrent callers never
-  // clobber each other's updates on the JSON file.
-  let _writeLock = Promise.resolve();
-
-  function _withLock(fn) {
-    const result = _writeLock.then(fn);
-    _writeLock = result.catch(() => {});
-    return result;
+  function _reportsFor(invoiceId) {
+    return db.prepare(`
+      SELECT user_email AS userEmail, note, reported_at AS reportedAt
+      FROM invoice_reports WHERE invoice_id = ? ORDER BY id
+    `).all(invoiceId);
   }
 
-  function read() {
-    try {
-      if (!fs.existsSync(FILE)) return [];
-      return JSON.parse(fs.readFileSync(FILE, 'utf8'));
-    } catch { return []; }
+  function _hydrate(row) { return row ? _rowToRecord(row, _reportsFor(row.id)) : null; }
+
+  function getAll() {
+    const rows = db.prepare('SELECT * FROM invoices WHERE user_id = ? ORDER BY rowid DESC').all(userId);
+    return rows.map(_hydrate);
   }
 
-  function _write(list) {
-    fs.mkdirSync(path.dirname(FILE), { recursive: true });
-    fs.writeFileSync(FILE, JSON.stringify(list, null, 2));
+  function getById(id) {
+    const row = db.prepare('SELECT * FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
+    return _hydrate(row);
   }
-
-  function getAll()     { return read(); }
-  function getById(id)  { return read().find(inv => inv.id === id) || null; }
 
   function add(invoice) {
-    return _withLock(() => {
-      const list = read();
-      if (list.find(i => i.id === invoice.id)) return null;
-      list.unshift(invoice);
-      if (list.length > MAX) list.splice(MAX);
-      _write(list);
-      return invoice;
-    });
+    const existing = db.prepare('SELECT 1 FROM invoices WHERE id = ? AND user_id = ?').get(invoice.id, userId);
+    if (existing) return null;
+
+    const cols = ['id', 'user_id'];
+    const vals = [invoice.id, userId];
+    for (const [field, column] of Object.entries(FIELD_TO_COLUMN)) {
+      if (field === 'id' || field === 'userId' || !(field in invoice)) continue;
+      cols.push(column);
+      vals.push(_toBindable(field, invoice[field]));
+    }
+    if (!cols.includes('processed_at')) { cols.push('processed_at'); vals.push(new Date().toISOString()); }
+
+    const placeholders = cols.map(() => '?').join(', ');
+    db.prepare(`INSERT INTO invoices (${cols.join(', ')}) VALUES (${placeholders})`).run(...vals);
+
+    // Enforce the same MAX-500-per-user cap the old JSON store had.
+    db.prepare(`
+      DELETE FROM invoices WHERE user_id = ? AND id NOT IN (
+        SELECT id FROM invoices WHERE user_id = ? ORDER BY rowid DESC LIMIT ?
+      )
+    `).run(userId, userId, MAX);
+
+    return getById(invoice.id);
   }
 
   function update(id, patch) {
-    return _withLock(() => {
-      const list = read();
-      const idx  = list.findIndex(i => i.id === id);
-      if (idx === -1) return null;
-      list[idx] = { ...list[idx], ...patch };
-      _write(list);
-      return list[idx];
-    });
+    const existing = db.prepare('SELECT 1 FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
+    if (!existing) return null;
+
+    const sets = ['updated_at = ?'];
+    const args = [new Date().toISOString()];
+    for (const [field, value] of Object.entries(patch)) {
+      const column = FIELD_TO_COLUMN[field];
+      if (!column || column === 'id' || column === 'user_id') continue;
+      sets.push(`${column} = ?`);
+      args.push(_toBindable(field, value));
+    }
+    db.prepare(`UPDATE invoices SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`).run(...args, id, userId);
+    return getById(id);
   }
 
   function addReport(id, report) {
-    return _withLock(() => {
-      const list    = read();
-      const idx     = list.findIndex(i => i.id === id);
-      if (idx === -1) return null;
-      const reports = list[idx].reports || [];
-      reports.push({ ...report, reportedAt: new Date().toISOString() });
-      list[idx] = { ...list[idx], status: 'reported', reports };
-      _write(list);
-      return list[idx];
-    });
+    const existing = getById(id);
+    if (!existing) return null;
+    db.prepare(`
+      INSERT INTO invoice_reports (invoice_id, user_email, note, reported_at)
+      VALUES (?, ?, ?, ?)
+    `).run(id, report.userEmail, report.note, new Date().toISOString());
+    return update(id, { status: 'reported' });
   }
 
-  function getReported() { return read().filter(i => i.status === 'reported'); }
+  function getReported() {
+    return db.prepare('SELECT * FROM invoices WHERE user_id = ? AND status = ?')
+      .all(userId, 'reported').map(_hydrate);
+  }
 
   // Returns all invoices that need human attention: user-flagged reports and
   // system-flagged parsing failures that could not be submitted to Xero.
-  function getFlagged()  { return read().filter(i => i.status === 'reported' || i.status === 'review-needed'); }
+  function getFlagged() {
+    return db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status IN ('reported', 'review-needed')")
+      .all(userId).map(_hydrate);
+  }
 
   function remove(id) {
-    return _withLock(() => {
-      const list = read();
-      const idx  = list.findIndex(i => i.id === id);
-      if (idx === -1) return false;
-      list.splice(idx, 1);
-      _write(list);
-      return true;
-    });
+    const info = db.prepare('DELETE FROM invoices WHERE id = ? AND user_id = ?').run(id, userId);
+    return info.changes > 0;
   }
 
   // Core invoice-matching logic used by both findPosted and findStored.
-  // Returns true when `inv` is a semantic match for the given invoice fields.
   function _matchesInvoice(inv, normV, invoiceNumber, invoiceDate, totalAmount) {
     const isAutoNum = !invoiceNumber ||
       invoiceNumber === '—' ||
@@ -120,9 +192,6 @@ function forUser(userId) {
     const invNumMatch = normInvV === normV &&
       (inv.invoiceNumber || '').toLowerCase() === (invoiceNumber || '').toLowerCase();
     if (invNumMatch) {
-      // Same vendor + invoice# but meaningfully different amounts → treat as distinct invoices.
-      // Allows same invoice rescanned (LLM rounding < 1%) while letting through corrections
-      // or separate invoices that happen to share an invoice number across different currencies.
       const a = totalAmount || 0;
       const b = inv.totalAmount || 0;
       if (a > 0 && b > 0 && Math.abs(a - b) / Math.max(a, b) > 0.01) return false;
@@ -141,48 +210,41 @@ function forUser(userId) {
   }
 
   // Returns a posted record matching this invoice, or null.
-  // Used as a guard inside the Xero submission queue to prevent re-posting.
   function findPosted(vendorName, invoiceNumber, invoiceDate, totalAmount) {
     const normV = _normalizeVendor(vendorName);
-    return read().find(inv =>
-      inv.status === 'posted' &&
-      _matchesInvoice(inv, normV, invoiceNumber, invoiceDate, totalAmount)
-    ) || null;
+    const candidates = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status = 'posted'")
+      .all(userId).map(_hydrate);
+    return candidates.find(inv => _matchesInvoice(inv, normV, invoiceNumber, invoiceDate, totalAmount)) || null;
   }
 
   // Returns any already-stored record matching this invoice (posted, pending, or review-needed).
-  // Used as an upfront guard in onInvoiceEmail to prevent storing duplicates on re-scans.
   function findStored(vendorName, invoiceNumber, invoiceDate, totalAmount) {
-    const normV   = _normalizeVendor(vendorName);
-    const exclude = new Set(['duplicate', 'error']);
-    return read().find(inv =>
-      !exclude.has(inv.status) &&
-      _matchesInvoice(inv, normV, invoiceNumber, invoiceDate, totalAmount)
-    ) || null;
+    const normV = _normalizeVendor(vendorName);
+    const candidates = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status NOT IN ('duplicate', 'error')")
+      .all(userId).map(_hydrate);
+    return candidates.find(inv => _matchesInvoice(inv, normV, invoiceNumber, invoiceDate, totalAmount)) || null;
   }
 
-  // Atomically marks an invoice as 'submitting' if it isn't already posted or
-  // in-flight. Returns { claimed: true } or { claimed: false, reason }.
-  // All state checks + the write happen inside a single lock so two concurrent
-  // callers can never both claim the same invoice.
+  // Atomically marks an invoice as 'submitting' if it isn't already posted or in-flight.
+  // better-sqlite3 is synchronous, so the whole select-then-write happens on one tick
+  // of the single-threaded event loop — no other call can interleave.
   function claimForSubmit(id) {
-    return _withLock(() => {
-      const list = read();
-      const idx  = list.findIndex(i => i.id === id);
-      if (idx === -1)                         return { claimed: false, reason: 'not found' };
-      if (list[idx].status === 'posted')      return { claimed: false, reason: 'already posted', xeroInvoiceId: list[idx].xeroInvoiceId };
-      if (list[idx].status === 'submitting')  return { claimed: false, reason: 'already submitting' };
-      list[idx] = { ...list[idx], status: 'submitting', errorMsg: null };
-      _write(list);
+    const claim = db.transaction(() => {
+      const row = db.prepare('SELECT status, xero_invoice_id FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
+      if (!row) return { claimed: false, reason: 'not found' };
+      if (row.status === 'posted')     return { claimed: false, reason: 'already posted', xeroInvoiceId: row.xero_invoice_id };
+      if (row.status === 'submitting') return { claimed: false, reason: 'already submitting' };
+      db.prepare("UPDATE invoices SET status = 'submitting', error_msg = NULL WHERE id = ? AND user_id = ?").run(id, userId);
       return { claimed: true };
     });
+    return claim();
   }
 
-  function clear() { return _withLock(() => _write([])); }
+  function clear() {
+    db.prepare('DELETE FROM invoices WHERE user_id = ?').run(userId);
+  }
 
-  const store = { getAll, getById, add, update, addReport, getReported, getFlagged, remove, clear, findPosted, findStored, claimForSubmit };
-  _stores.set(userId, store);
-  return store;
+  return { getAll, getById, add, update, addReport, getReported, getFlagged, remove, clear, findPosted, findStored, claimForSubmit };
 }
 
-module.exports = { forUser };
+module.exports = { forUser, FIELD_TO_COLUMN, _toBindable }; // exposed for the one-time JSON->SQLite importer
