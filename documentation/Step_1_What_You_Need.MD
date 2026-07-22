@@ -32,13 +32,13 @@ Go through this before touching any config:
 [ ] I have PostgreSQL available (local install or Railway)
 [ ] I have Redis available (local install or Railway) — optional
 [ ] I have a Slack workspace — optional
-[ ] I have Node.js 20+ installed
+[ ] I have Node.js 22+ installed
 [ ] I have npm 9+ installed
 ```
 
 Check Node and npm versions:
 ```bash
-node --version    # must be v20.x or higher
+node --version    # must be v22.x or higher (better-sqlite3 requires Node >=22)
 npm --version     # must be 9.x or higher
 ```
 
