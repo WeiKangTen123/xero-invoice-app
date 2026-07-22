@@ -9,8 +9,8 @@ Thumbs.db
 .vscode/
 *.local
 
-# Personal deployment scratch notes — not for the public repo
-DEPLOY_NOTES.md
+# Personal deployment scratch notes — not for the public repo (real server/GitHub access info)
+documentation/important/
 
 # Runtime data — contains live secrets (Xero/IMAP/API keys), user accounts, and real invoice PDFs
 main/data/
