@@ -31,7 +31,7 @@ router.post('/register', async (req, res) => {
       jwtSecret(),
       { expiresIn: '7d' }
     );
-    logger.info('User registered', { email, role: assignedRole });
+    logger.info('User registered', { email, role: user.role });
     res.status(201).json({ success: true, user, token });
   } catch (err) {
     res.status(400).json({ error: err.message });
