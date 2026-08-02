@@ -2,8 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 
-// Statuses that allow the user to trigger a Xero submission
-const SUBMITTABLE = new Set(['pending', 'review-needed', 'error', 'reviewed']);
+// Statuses that allow the user to trigger a Xero submission.
+// 'posted' is included so a correction can be re-posted — this updates the existing
+// Xero bill in place rather than creating a duplicate (see backend submitDraftInvoice).
+const SUBMITTABLE = new Set(['pending', 'review-needed', 'error', 'reviewed', 'posted']);
 // Statuses that allow the user to mark as reviewed (i.e. not yet finalised)
 const MARKABLE    = new Set(['pending', 'review-needed', 'error', 'reported']);
 
@@ -80,6 +82,21 @@ function InfoRow({ label, value, mono }) {
   );
 }
 
+// ── Mini field (compact 2-per-row variant of InfoRow, for the summary grid) ─────
+function MiniField({ label, value, mono }) {
+  if (!value && value !== 0) return null;
+  return (
+    <div>
+      <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: 3 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: mono ? 'monospace' : 'inherit', wordBreak: 'break-word' }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
 // ── Status pill ───────────────────────────────────────────────────────────────
 function StatusPill({ status }) {
   const map = {
@@ -117,6 +134,12 @@ export default function InvoiceReview() {
   const [submitting, setSubmitting] = useState(false);
   const [submitErr,  setSubmitErr]  = useState('');
   const [submitOk,   setSubmitOk]   = useState(false);
+  const [wasRepost,  setWasRepost]  = useState(false);
+  const [editing,    setEditing]    = useState(false);
+  const [form,       setForm]       = useState(null);
+  const [saving,     setSaving]     = useState(false);
+  const [saveErr,    setSaveErr]    = useState('');
+  const [showMeta,   setShowMeta]   = useState(false);
 
   // ── Fetch invoice ─────────────────────────────────────────────────────────
   async function fetchInvoice() {
@@ -131,6 +154,16 @@ export default function InvoiceReview() {
   }
 
   useEffect(() => { fetchInvoice(); }, [id]);
+
+  // Re-fetch if the chat assistant confirms a change to this invoice while it's
+  // the one open on screen — keeps the visible fields in sync without polling.
+  useEffect(() => {
+    function onExternalUpdate(e) {
+      if (e.detail?.invoiceId === id) fetchInvoice();
+    }
+    window.addEventListener('invoice-updated', onExternalUpdate);
+    return () => window.removeEventListener('invoice-updated', onExternalUpdate);
+  }, [id]);
 
   // ── Signed PDF URL — fetched with Bearer JWT, refreshed before it expires ─
   // The iframe/anchor cannot send Authorization headers on direct navigation,
@@ -174,6 +207,7 @@ export default function InvoiceReview() {
   async function submitToXero() {
     setSubmitting(true);
     setSubmitErr('');
+    setWasRepost(inv.status === 'posted');
     try {
       // Server fires submission in background and returns 202 immediately.
       await api.post(`/invoices/${id}/submit`, {});
@@ -201,6 +235,60 @@ export default function InvoiceReview() {
 
   useEffect(() => () => clearInterval(_pollRef.current), []);
 
+  // ── Edit mode ─────────────────────────────────────────────────────────────
+  function startEdit() {
+    setForm({
+      vendorName:       inv.vendorName       || '',
+      contactEmail:     inv.contactEmail     || '',
+      contactAddress:   inv.contactAddress   || '',
+      invoiceNumber:    inv.invoiceNumber    || '',
+      invoiceDate:      inv.invoiceDate      || '',
+      dueDate:          inv.dueDate          || '',
+      totalAmount:      inv.totalAmount      ?? 0,
+      subTotal:         inv.subTotal         ?? 0,
+      taxAmount:        inv.taxAmount        ?? 0,
+      currency:         inv.currency         || '',
+      invoiceType:      inv.invoiceType      || 'ACCPAY',
+      accountCode:      inv.accountCode      || '',
+      paymentReference: inv.paymentReference || '',
+      lineItems:        (inv.lineItems || []).map(li => ({ ...li })),
+    });
+    setSaveErr('');
+    setEditing(true);
+  }
+
+  function cancelEdit() {
+    setEditing(false);
+    setForm(null);
+    setSaveErr('');
+  }
+
+  function updateField(key, value) {
+    setForm(f => ({ ...f, [key]: value }));
+  }
+
+  function updateLineItem(idx, key, value) {
+    setForm(f => ({
+      ...f,
+      lineItems: f.lineItems.map((li, i) => i === idx ? { ...li, [key]: value } : li),
+    }));
+  }
+
+  async function saveEdit() {
+    setSaving(true);
+    setSaveErr('');
+    try {
+      const d = await api.patch(`/invoices/${id}`, form);
+      setInv(d.invoice);
+      setEditing(false);
+      setForm(null);
+    } catch (err) {
+      setSaveErr(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   // ── Loading / error states ────────────────────────────────────────────────
   if (loading) {
     return (
@@ -221,8 +309,9 @@ export default function InvoiceReview() {
   }
 
   const typeLabel  = inv.invoiceType === 'ACCPAY' ? 'Bill (ACCPAY)' : 'Invoice (ACCREC)';
-  const canSubmit  = SUBMITTABLE.has(inv.status) && !submitOk;
-  const canReview  = MARKABLE.has(inv.status);
+  const canSubmit  = SUBMITTABLE.has(inv.status) && !submitOk && !editing;
+  const canReview  = MARKABLE.has(inv.status) && !editing;
+  const canEdit    = SUBMITTABLE.has(inv.status); // same set the backend allows PATCH /:id for
   const isError    = inv.status === 'error' || inv.status === 'review-needed';
 
   return (
@@ -257,19 +346,23 @@ export default function InvoiceReview() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <StatusPill status={inv.status} />
 
-            {/* Post to Xero — primary action for invoices that haven't been posted yet */}
+            {/* Post to Xero — creates a new draft, or (for an already-posted invoice)
+                updates the existing Xero bill in place rather than duplicating it */}
             {canSubmit && (
               <button
                 className="btn btn-primary btn-sm"
                 onClick={submitToXero}
                 disabled={submitting}
                 style={{ gap: 6 }}
+                title={inv.status === 'posted' ? 'Updates the existing Xero bill — does not create a duplicate' : undefined}
               >
                 {submitting
-                  ? <><Spinner /> Posting...</>
-                  : inv.status === 'error'
-                    ? '↺ Retry Xero'
-                    : '→ Post to Xero'}
+                  ? <><Spinner /> {inv.status === 'posted' ? 'Updating...' : 'Posting...'}</>
+                  : inv.status === 'posted'
+                    ? '↻ Re-post to Xero'
+                    : inv.status === 'error'
+                      ? '↺ Retry Xero'
+                      : '→ Post to Xero'}
               </button>
             )}
 
@@ -284,21 +377,46 @@ export default function InvoiceReview() {
               </button>
             )}
 
-            <button
-              className="btn btn-sm"
-              style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
-              onClick={() => setReporting(true)}
-            >
-              ⚠ Report Issue
-            </button>
+            {!editing && (
+              <button
+                className="btn btn-sm"
+                style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
+                onClick={() => setReporting(true)}
+              >
+                ⚠ Report Issue
+              </button>
+            )}
+
+            {/* Edit — correct LLM-extracted fields before/instead of posting to Xero */}
+            {canEdit && !editing && (
+              <button className="btn btn-outline btn-sm" onClick={startEdit}>
+                ✎ Edit
+              </button>
+            )}
+            {editing && (
+              <>
+                <button className="btn btn-outline btn-sm" onClick={cancelEdit} disabled={saving}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary btn-sm" onClick={saveEdit} disabled={saving} style={{ gap: 6 }}>
+                  {saving ? <><Spinner /> Saving...</> : '✓ Save Changes'}
+                </button>
+              </>
+            )}
           </div>
         </div>
+
+        {saveErr && (
+          <div className="alert alert-error" style={{ marginBottom: 12 }}>
+            <span className="alert-icon">✕</span>{saveErr}
+          </div>
+        )}
 
         {/* Xero submission result banners */}
         {submitOk && (
           <div className="alert alert-success" style={{ marginBottom: 12 }}>
             <span className="alert-icon">✓</span>
-            Invoice posted to Xero successfully.
+            {wasRepost ? 'Existing Xero bill updated successfully.' : 'Invoice posted to Xero successfully.'}
             {inv.xeroInvoiceId && (
               <span style={{ marginLeft: 8, opacity: 0.7, fontSize: 12 }}>ID: {inv.xeroInvoiceId}</span>
             )}
@@ -351,10 +469,12 @@ export default function InvoiceReview() {
           </div>
         )}
 
-        {/* Main layout: PDF left, info panel right */}
-        <div style={{ display: 'grid', gridTemplateColumns: inv.hasPdf ? '1fr 380px' : '1fr', gap: 20, alignItems: 'start' }}>
+        {/* Main layout: PDF left, info panel right (sticky — stays in view while the PDF scrolls) */}
+        <div style={{ display: 'grid', gridTemplateColumns: inv.hasPdf ? '1fr 500px' : '1fr', gap: 20, alignItems: 'start' }}>
 
-          {/* PDF Viewer */}
+          {/* PDF Viewer — fills its full grid column; the #zoom=page-width fragment on
+              the iframe src (below) tells the native PDF viewer to fit-scale itself,
+              so it never letterboxes no matter how wide the column is */}
           {inv.hasPdf ? (
             <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
@@ -370,7 +490,7 @@ export default function InvoiceReview() {
               </div>
               {pdfUrl ? (
                 <iframe
-                  src={pdfUrl}
+                  src={`${pdfUrl}#zoom=page-width`}
                   title="Invoice PDF"
                   style={{ width: '100%', height: 'calc(100vh - 240px)', minHeight: 500, border: 'none', display: 'block', background: '#525659' }}
                 />
@@ -408,69 +528,194 @@ export default function InvoiceReview() {
             </div>
           )}
 
-          {/* Info panel */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Info panel — sticky + independently scrollable so it stays visible while
+              you scroll a multi-page PDF, instead of scrolling away with the page */}
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: 16,
+            position: inv.hasPdf ? 'sticky' : 'static', top: 0,
+            maxHeight: inv.hasPdf ? 'calc(100vh - 88px)' : 'none',
+            overflowY: inv.hasPdf ? 'auto' : 'visible',
+            paddingRight: inv.hasPdf ? 4 : 0,
+          }}>
 
             {/* Summary card */}
             <div className="card">
-              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
-                {inv.currency} {Number(inv.totalAmount || 0).toLocaleString('en', { minimumFractionDigits: 2 })}
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>Total amount</div>
-              <InfoRow label="Type"         value={typeLabel} />
-              <InfoRow label="Invoice #"    value={inv.invoiceNumber} mono />
-              <InfoRow label="Invoice Date" value={inv.invoiceDate} />
-              <InfoRow label="Due Date"     value={inv.dueDate} />
-              <InfoRow label="Source"       value={inv.source === 'pdf' ? 'PDF Attachment' : 'Email Body'} />
+              {editing ? (
+                <>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <div className="form-group" style={{ width: 90 }}>
+                      <label className="form-label">Currency</label>
+                      <input className="form-input" value={form.currency} maxLength={3}
+                        onChange={e => updateField('currency', e.target.value.toUpperCase())} />
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="form-label">Total Amount</label>
+                      <input className="form-input" type="number" step="0.01" value={form.totalAmount}
+                        onChange={e => updateField('totalAmount', e.target.value)} />
+                    </div>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Type</label>
+                    <select className="form-input" value={form.invoiceType}
+                      onChange={e => updateField('invoiceType', e.target.value)}>
+                      <option value="ACCPAY">Bill (ACCPAY)</option>
+                      <option value="ACCREC">Invoice (ACCREC)</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Invoice #</label>
+                    <input className="form-input" value={form.invoiceNumber}
+                      onChange={e => updateField('invoiceNumber', e.target.value)} />
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="form-label">Invoice Date</label>
+                      <input className="form-input" type="date" value={form.invoiceDate || ''}
+                        onChange={e => updateField('invoiceDate', e.target.value)} />
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="form-label">Due Date</label>
+                      <input className="form-input" type="date" value={form.dueDate || ''}
+                        onChange={e => updateField('dueDate', e.target.value)} />
+                    </div>
+                  </div>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="form-label">Account Code</label>
+                    <input className="form-input" value={form.accountCode}
+                      onChange={e => updateField('accountCode', e.target.value)} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 16 }}>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>
+                        {inv.currency} {Number(inv.totalAmount || 0).toLocaleString('en', { minimumFractionDigits: 2 })}
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Total amount</div>
+                    </div>
+                    <span className="badge badge-gray" style={{ fontSize: 11 }}>{typeLabel}</span>
+                  </div>
+                  {/* Compact 2-col grid instead of one full-width row per field */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px' }}>
+                    <MiniField label="Invoice #"    value={inv.invoiceNumber} mono />
+                    <MiniField label="Account"      value={inv.accountCode} mono />
+                    <MiniField label="Invoice Date" value={inv.invoiceDate} />
+                    <MiniField label="Due Date"     value={inv.dueDate} />
+                  </div>
+                  <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
+                    Source: {inv.source === 'pdf' ? 'PDF Attachment' : 'Email Body'}
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Vendor card */}
             <div className="card">
               <div className="card-title" style={{ marginBottom: 12 }}>Vendor / Contact</div>
-              <InfoRow label="Name"       value={inv.vendorName} />
-              <InfoRow label="Email"      value={inv.contactEmail} />
-              <InfoRow label="Address"    value={inv.contactAddress} />
-              <InfoRow label="Phone"      value={inv.vendorPhone} />
-              <InfoRow label="From email" value={inv.sourceEmail} />
+              {editing ? (
+                <>
+                  <div className="form-group">
+                    <label className="form-label">Name</label>
+                    <input className="form-input" value={form.vendorName}
+                      onChange={e => updateField('vendorName', e.target.value)} />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Email</label>
+                    <input className="form-input" value={form.contactEmail}
+                      onChange={e => updateField('contactEmail', e.target.value)} />
+                  </div>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="form-label">Address</label>
+                    <textarea className="form-input" rows={2} value={form.contactAddress}
+                      onChange={e => updateField('contactAddress', e.target.value)}
+                      style={{ resize: 'vertical', fontFamily: 'inherit' }} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <InfoRow label="Name"       value={inv.vendorName} />
+                  <InfoRow label="Email"      value={inv.contactEmail} />
+                  <InfoRow label="Address"    value={inv.contactAddress} />
+                  <InfoRow label="Phone"      value={inv.vendorPhone} />
+                  <InfoRow label="From email" value={inv.sourceEmail} />
+                </>
+              )}
             </div>
 
-            {/* Line items */}
-            {inv.lineItems?.length > 0 && (
+            {/* Line items + payment reference — merged into one card since both relate
+                to "what am I actually paying for" and payment ref is short */}
+            {((editing ? form.lineItems : inv.lineItems)?.length > 0 || inv.paymentReference || editing) && (
               <div className="card">
-                <div className="card-title" style={{ marginBottom: 12 }}>Line Items ({inv.lineItems.length})</div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {inv.lineItems.map((li, i) => (
-                    <div key={i} style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
-                      <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 4, lineHeight: 1.4 }}>{li.description}</div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--text-muted)' }}>
-                        <span>{inv.currency} {Number(li.unitAmount || 0).toLocaleString('en', { minimumFractionDigits: 2 })}</span>
-                        {li.discountRate > 0 && <span>· {li.discountRate}% disc.</span>}
-                        {li.taxType && li.taxType !== 'NONE' && <span className="badge badge-yellow">{li.taxType}</span>}
+                {(editing ? form.lineItems : inv.lineItems)?.length > 0 && (
+                  <>
+                    <div className="card-title" style={{ marginBottom: 12 }}>
+                      Line Items ({(editing ? form.lineItems : inv.lineItems).length})
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {(editing ? form.lineItems : inv.lineItems).map((li, i) => (
+                        editing ? (
+                          <div key={i} style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            <input className="form-input" value={li.description || ''} placeholder="Description"
+                              onChange={e => updateLineItem(i, 'description', e.target.value)} />
+                            <input className="form-input" type="number" step="0.01" value={li.unitAmount ?? ''} placeholder="Amount"
+                              onChange={e => updateLineItem(i, 'unitAmount', e.target.value)} />
+                          </div>
+                        ) : (
+                          <div key={i} style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
+                            <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 4, lineHeight: 1.4 }}>{li.description}</div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--text-muted)' }}>
+                              <span>{inv.currency} {Number(li.unitAmount || 0).toLocaleString('en', { minimumFractionDigits: 2 })}</span>
+                              {li.discountRate > 0 && <span>· {li.discountRate}% disc.</span>}
+                              {li.taxType && li.taxType !== 'NONE' && <span className="badge badge-yellow">{li.taxType}</span>}
+                            </div>
+                          </div>
+                        )
+                      ))}
+                    </div>
+
+                    {editing ? (
+                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                        <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                          <label className="form-label">Subtotal</label>
+                          <input className="form-input" type="number" step="0.01" value={form.subTotal}
+                            onChange={e => updateField('subTotal', e.target.value)} />
+                        </div>
+                        <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                          <label className="form-label">Tax</label>
+                          <input className="form-input" type="number" step="0.01" value={form.taxAmount}
+                            onChange={e => updateField('taxAmount', e.target.value)} />
+                        </div>
                       </div>
+                    ) : inv.subTotal > 0 && inv.taxAmount > 0 && (
+                      <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-muted)' }}>
+                          <span>Subtotal</span><span>{inv.currency} {Number(inv.subTotal).toFixed(2)}</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-muted)' }}>
+                          <span>Tax</span><span>{inv.currency} {Number(inv.taxAmount).toFixed(2)}</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', borderTop: '1px solid var(--border)', paddingTop: 6, marginTop: 2 }}>
+                          <span>Total</span><span>{inv.currency} {Number(inv.totalAmount).toFixed(2)}</span>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {(inv.paymentReference || editing) && (
+                  <div style={{ marginTop: (editing ? form.lineItems : inv.lineItems)?.length > 0 ? 14 : 0, paddingTop: (editing ? form.lineItems : inv.lineItems)?.length > 0 ? 14 : 0, borderTop: (editing ? form.lineItems : inv.lineItems)?.length > 0 ? '1px solid var(--border)' : 'none' }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: 6 }}>
+                      Payment Reference
                     </div>
-                  ))}
-                </div>
-                {inv.subTotal > 0 && inv.taxAmount > 0 && (
-                  <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-muted)' }}>
-                      <span>Subtotal</span><span>{inv.currency} {Number(inv.subTotal).toFixed(2)}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-muted)' }}>
-                      <span>Tax</span><span>{inv.currency} {Number(inv.taxAmount).toFixed(2)}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', borderTop: '1px solid var(--border)', paddingTop: 6, marginTop: 2 }}>
-                      <span>Total</span><span>{inv.currency} {Number(inv.totalAmount).toFixed(2)}</span>
-                    </div>
+                    {editing ? (
+                      <input className="form-input" value={form.paymentReference}
+                        onChange={e => updateField('paymentReference', e.target.value)} />
+                    ) : (
+                      <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>{inv.paymentReference}</div>
+                    )}
                   </div>
                 )}
-              </div>
-            )}
-
-            {/* Payment reference */}
-            {inv.paymentReference && (
-              <div className="card">
-                <div className="card-title" style={{ marginBottom: 8 }}>Payment Reference</div>
-                <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>{inv.paymentReference}</div>
               </div>
             )}
 
@@ -489,18 +734,28 @@ export default function InvoiceReview() {
               </div>
             )}
 
-            {/* Meta */}
+            {/* Meta — collapsed by default; rarely needed, not something you cross-check
+                against the PDF, so it shouldn't take up permanent scroll space */}
             <div className="card">
-              <div className="card-title" style={{ marginBottom: 10 }}>Processing Info</div>
-              <InfoRow label="Processed"  value={inv.processedAt  ? new Date(inv.processedAt).toLocaleString()  : '—'} />
-              {inv.submittedAt && (
-                <InfoRow label="Submitted" value={new Date(inv.submittedAt).toLocaleString()} />
+              <button
+                onClick={() => setShowMeta(v => !v)}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}
+              >
+                <span style={{ display: 'inline-block', transition: 'transform 0.15s ease', transform: showMeta ? 'rotate(90deg)' : 'none' }}>▸</span>
+                Processing Info
+              </button>
+              {showMeta && (
+                <div style={{ marginTop: 10 }}>
+                  <InfoRow label="Processed"  value={inv.processedAt  ? new Date(inv.processedAt).toLocaleString()  : '—'} />
+                  {inv.submittedAt && (
+                    <InfoRow label="Submitted" value={new Date(inv.submittedAt).toLocaleString()} />
+                  )}
+                  {inv.xeroInvoiceId && (
+                    <InfoRow label="Xero ID"   value={inv.xeroInvoiceId} mono />
+                  )}
+                  <InfoRow label="Project"   value={inv.projectName} />
+                </div>
               )}
-              {inv.xeroInvoiceId && (
-                <InfoRow label="Xero ID"   value={inv.xeroInvoiceId} mono />
-              )}
-              <InfoRow label="Account"   value={inv.accountCode} mono />
-              <InfoRow label="Project"   value={inv.projectName} />
             </div>
           </div>
         </div>

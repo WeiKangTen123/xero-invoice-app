@@ -172,7 +172,6 @@ async function submitInvoiceToXero(userId, invoiceId) {
   // (boot-time retry, manual submit, submit-all) from posting the same invoice twice.
   const claim = await invStore.claimForSubmit(invoiceId);
   if (!claim.claimed) {
-    if (claim.reason === 'already posted') return claim.xeroInvoiceId || null;
     if (claim.reason === 'already submitting') return null;
     throw new Error('Invoice not found');
   }

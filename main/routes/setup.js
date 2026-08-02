@@ -13,7 +13,7 @@ const logger  = require('../utils/logger');
 const USER_SECTIONS = {
   xero:     ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET'],
   imap:     ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_FILTER_FROM', 'IMAP_POLL_INTERVAL_MS'],
-  llm:      ['Gemini_API_KEY', 'Nvidia_API_KEY', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL'],
+  llm:      ['Gemini_API_KEY'],
   defaults: ['DEFAULT_ACCOUNT_CODE', 'DEFAULT_CURRENCY', 'ZERO_TAX_RATE'],
 };
 
@@ -24,8 +24,7 @@ const GLOBAL_SECTIONS = {
 };
 
 const SECRET_KEYS = new Set([
-  'XERO_CLIENT_SECRET', 'IMAP_PASS',
-  'Gemini_API_KEY', 'Nvidia_API_KEY', 'OPENROUTER_API_KEY', 'SLACK_WEBHOOK_URL',
+  'XERO_CLIENT_SECRET', 'IMAP_PASS', 'Gemini_API_KEY', 'SLACK_WEBHOOK_URL',
 ]);
 
 const ENV_FILE = path.join(__dirname, '../.env');

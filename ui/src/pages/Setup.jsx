@@ -11,10 +11,7 @@ const HELP = {
   IMAP_PASS:             'App password for the mailbox. For Gmail, generate one under Google Account → Security → App passwords.',
   IMAP_FILTER_FROM:      'Optional — only process emails from this sender address. Leave blank to process all.',
   IMAP_POLL_INTERVAL_MS: 'How often to check for new emails in milliseconds. Default: 60000 (60 seconds).',
-  Gemini_API_KEY:        'Google Gemini API key for LLM parsing. Get it at aistudio.google.com',
-  Nvidia_API_KEY:        'Nvidia NIM API key — used as fallback if Gemini fails.',
-  OPENROUTER_API_KEY:    'OpenRouter API key — final LLM fallback. Get it at openrouter.ai',
-  OPENROUTER_MODEL:      'OpenRouter model ID to use, e.g. openai/gpt-4o-mini',
+  Gemini_API_KEY:        'Google Gemini API key for LLM parsing and the chat assistant. Get it at aistudio.google.com',
   DEFAULT_ACCOUNT_CODE:  'Xero account code for line items when no code is detected (e.g. 200).',
   DEFAULT_CURRENCY:      'Default invoice currency code (e.g. SGD, USD, AUD).',
   ZERO_TAX_RATE:         'Tax rate name in Xero for zero-rated items (e.g. NONE, TAX001).',
@@ -25,7 +22,7 @@ const HELP = {
 const SECTION_META = {
   xero:     { label: 'Xero Connection',  desc: 'Custom Connection credentials from developer.xero.com', icon: '🔗', testKey: 'xero', testLabel: 'Test Xero' },
   imap:     { label: 'Email / IMAP',     desc: 'Mailbox credentials for watching invoice emails',       icon: '✉',  testKey: 'imap', testLabel: 'Test IMAP' },
-  llm:      { label: 'LLM / AI Parsing', desc: 'API keys for extracting invoice data from PDFs (Gemini → Nvidia → OpenRouter fallback)', icon: '🤖', testKey: 'llm', testLabel: 'Test LLM' },
+  llm:      { label: 'LLM / AI Parsing', desc: 'Gemini API key for extracting invoice data from PDFs and powering the chat assistant', icon: '🤖', testKey: 'llm', testLabel: 'Test LLM' },
   defaults: { label: 'Invoice Defaults', desc: 'Fallback values when fields cannot be detected automatically', icon: '⚙', testKey: null },
   optional: { label: 'Optional',         desc: 'Slack error notifications, Redis queue', icon: '◎', testKey: null },
 };

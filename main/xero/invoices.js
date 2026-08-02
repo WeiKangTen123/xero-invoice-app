@@ -83,17 +83,11 @@ function _referenceField(invoiceData) {
   return s.includes('|') ? s.split('|').pop().trim() : s;
 }
 
-// Create a fresh AccountingApi instance per call so concurrent users cannot
-// contaminate each other's token state on a shared singleton.
-async function createDraftInvoice(userId, tenantId, invoiceData) {
+// Builds the Xero invoice body + resolves the contact — shared by create and update,
+// since both send the same shape to their respective Xero endpoints.
+async function _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi) {
   const { getUserConfig } = require('../utils/users');
-  const pdfStore          = require('../utils/pdf-store').forUser(userId);
-  const cache             = require('../utils/token-cache').forUser(userId);
   const userConfig        = getUserConfig(userId);
-
-  const token                   = await cache.getValidToken(tenantId);
-  const accountingApi           = new AccountingApi();
-  accountingApi.accessToken     = token;
 
   const contactID = await getOrCreateContact(userId, tenantId, {
     vendorName:  invoiceData.contactName  || invoiceData.vendorName,
@@ -107,54 +101,69 @@ async function createDraftInvoice(userId, tenantId, invoiceData) {
   const brandingThemeID = await getBrandingThemeID(accountingApi, tenantId, invoiceData.brandingThemeName);
   const lineItems       = buildLineItems(invoiceData, userConfig);
   const lineAmountTypes = invoiceData.lineAmountTypes === 'Inclusive' ? 'Inclusive' : 'Exclusive';
-  let currencyCode = invoiceData.currency || userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'USD';
+  const currencyCode    = invoiceData.currency || userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'USD';
 
-  const invoiceBody = {
-    invoices: [{
-      type:          invoiceData.invoiceType || 'ACCPAY',
-      status:        'DRAFT',
-      contact:       { contactID },
-      date:          invoiceData.invoiceDate,
-      dueDate:       invoiceData.dueDate,
-      invoiceNumber: invoiceData.invoiceNumber,
-      reference:     _referenceField(invoiceData),
-      currencyCode,
-      lineAmountTypes,
-      ...(brandingThemeID && { brandingThemeID }),
-      lineItems,
-    }]
+  return {
+    currencyCode,
+    invoiceBody: {
+      invoices: [{
+        type:          invoiceData.invoiceType || 'ACCPAY',
+        status:        'DRAFT',
+        contact:       { contactID },
+        date:          invoiceData.invoiceDate,
+        dueDate:       invoiceData.dueDate,
+        invoiceNumber: invoiceData.invoiceNumber,
+        reference:     _referenceField(invoiceData),
+        currencyCode,
+        lineAmountTypes,
+        ...(brandingThemeID && { brandingThemeID }),
+        lineItems,
+      }]
+    },
   };
+}
 
-  let result;
+// Submits with the currency-mismatch retry: if the Xero org isn't subscribed to the
+// attempted currency, detect the org's base currency and retry once with that.
+async function _submitWithCurrencyRetry(submitFn, accountingApi, tenantId, invoiceBody, currencyCode, userId, invoiceData) {
   try {
-    result = await withRetry(() => accountingApi.createInvoices(tenantId, invoiceBody));
+    return await withRetry(() => submitFn(invoiceBody));
   } catch (err) {
-    // If Xero org isn't subscribed to this currency, detect the org's base currency
-    // and retry once with that — avoids hardcoding USD and works for any Xero org.
     const msg = xeroErrMsg(err);
-    if (msg.includes('not subscribed to currency')) {
-      const baseCurrency = await getOrgBaseCurrency(accountingApi, tenantId);
-      if (baseCurrency !== currencyCode) {
-        logger.warn('Currency not subscribed — retrying with org base currency', {
-          attempted: currencyCode, fallback: baseCurrency, userId,
-        });
-        currencyCode = baseCurrency;
-        invoiceBody.invoices[0].currencyCode = baseCurrency;
-        // Update the stored record so future retries also use the correct currency
-        if (invoiceData._invoiceStoreId) {
-          try {
-            const invStore = require('../utils/invoice-store').forUser(userId);
-            await invStore.update(invoiceData._invoiceStoreId, { currency: baseCurrency });
-          } catch (_) {}
-        }
-        result = await withRetry(() => accountingApi.createInvoices(tenantId, invoiceBody));
-      } else {
-        throw err;
-      }
-    } else {
-      throw err;
+    if (!msg.includes('not subscribed to currency')) throw err;
+
+    const baseCurrency = await getOrgBaseCurrency(accountingApi, tenantId);
+    if (baseCurrency === currencyCode) throw err;
+
+    logger.warn('Currency not subscribed — retrying with org base currency', {
+      attempted: currencyCode, fallback: baseCurrency, userId,
+    });
+    invoiceBody.invoices[0].currencyCode = baseCurrency;
+    if (invoiceData._invoiceStoreId) {
+      try {
+        const invStore = require('../utils/invoice-store').forUser(userId);
+        await invStore.update(invoiceData._invoiceStoreId, { currency: baseCurrency });
+      } catch (_) {}
     }
+    return await withRetry(() => submitFn(invoiceBody));
   }
+}
+
+// Create a fresh AccountingApi instance per call so concurrent users cannot
+// contaminate each other's token state on a shared singleton.
+async function createDraftInvoice(userId, tenantId, invoiceData) {
+  const pdfStore             = require('../utils/pdf-store').forUser(userId);
+  const cache                = require('../utils/token-cache').forUser(userId);
+  const token                = await cache.getValidToken(tenantId);
+  const accountingApi        = new AccountingApi();
+  accountingApi.accessToken  = token;
+
+  const { invoiceBody, currencyCode } = await _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi);
+
+  const result = await _submitWithCurrencyRetry(
+    body => accountingApi.createInvoices(tenantId, body),
+    accountingApi, tenantId, invoiceBody, currencyCode, userId, invoiceData
+  );
   const created = result.body.invoices[0];
 
   // Set delivery address — best-effort, non-fatal if Xero rejects it
@@ -214,7 +223,7 @@ async function createDraftInvoice(userId, tenantId, invoiceData) {
     vendor:      invoiceData.contactName || invoiceData.vendorName,
     amount:      invoiceData.totalAmount,
     invoiceType: invoiceData.invoiceType,
-    lineItems:   lineItems.length,
+    lineItems:   invoiceBody.invoices[0].lineItems.length,
     currency:    currencyCode,
     userId,
   });
@@ -222,4 +231,61 @@ async function createDraftInvoice(userId, tenantId, invoiceData) {
   return created;
 }
 
-module.exports = { createDraftInvoice };
+// Updates an existing Xero invoice in place (PUT /Invoices/{InvoiceID}) instead of
+// creating a new one — used when re-posting a correction to an invoice that was
+// already sent to Xero, so it doesn't create a duplicate bill.
+// Only works while the invoice is still editable on the Xero side (DRAFT/SUBMITTED
+// status there) — if it's since been approved/paid in Xero itself, this will throw
+// and the caller surfaces the Xero error as-is.
+async function updateDraftInvoice(userId, tenantId, xeroInvoiceId, invoiceData) {
+  const cache                = require('../utils/token-cache').forUser(userId);
+  const token                = await cache.getValidToken(tenantId);
+  const accountingApi        = new AccountingApi();
+  accountingApi.accessToken  = token;
+
+  const { invoiceBody, currencyCode } = await _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi);
+
+  const result = await _submitWithCurrencyRetry(
+    body => accountingApi.updateInvoice(tenantId, xeroInvoiceId, body),
+    accountingApi, tenantId, invoiceBody, currencyCode, userId, invoiceData
+  );
+  const updated = result.body.invoices[0];
+
+  // Re-apply delivery address — best-effort, non-fatal. Not re-attaching the email
+  // body/PDF here since those were already attached on the original create and
+  // re-attaching on every correction would just pile up duplicate attachments.
+  if (invoiceData.contactAddress) {
+    try {
+      const freshToken = await cache.getValidToken(tenantId);
+      await axios.post(
+        `https://api.xero.com/api.xro/2.0/Invoices/${xeroInvoiceId}`,
+        {
+          InvoiceID:        xeroInvoiceId,
+          InvoiceAddresses: [{ InvoiceAddressType: 'TO', AddressLine1: invoiceData.contactAddress }],
+        },
+        {
+          headers: {
+            Authorization:    `Bearer ${freshToken}`,
+            'xero-tenant-id': tenantId,
+            'Content-Type':   'application/json',
+          },
+        }
+      );
+    } catch (err) {
+      logger.warn('Delivery address not updated', { error: err?.response?.data?.Message || err.message });
+    }
+  }
+
+  logger.info('Draft invoice updated', {
+    tenantId,
+    invoiceID:   updated.invoiceID,
+    vendor:      invoiceData.contactName || invoiceData.vendorName,
+    amount:      invoiceData.totalAmount,
+    currency:    currencyCode,
+    userId,
+  });
+
+  return updated;
+}
+
+module.exports = { createDraftInvoice, updateDraftInvoice };
