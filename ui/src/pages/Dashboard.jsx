@@ -275,15 +275,37 @@ export default function Dashboard() {
   async function handleRescan() {
     setRescanning(true);
     setRescanMsg('');
+    const prevCheckedAt = status?.lastScan?.checkedAt || null;
     try {
       await api.post('/process/rescan', {});
-      setRescanMsg('Scan started — check back in a moment.');
-      setTimeout(() => { setRescanMsg(''); fetchInvoices(); }, 4000);
+
+      // The IMAP search itself is async on the backend — poll status until it
+      // reports a fresh lastScan (bounded so a slow/stuck mailbox can't hang the UI).
+      let result = null;
+      for (let i = 0; i < 8; i++) {
+        await new Promise(r => setTimeout(r, 1200));
+        const s = await refreshStatus();
+        if (s?.lastScan?.checkedAt && s.lastScan.checkedAt !== prevCheckedAt) {
+          result = s.lastScan;
+          break;
+        }
+      }
+
+      if (result) {
+        setRescanMsg(
+          result.emailsFound > 0
+            ? `Found ${result.emailsFound} new email${result.emailsFound === 1 ? '' : 's'} — processing...`
+            : 'No new emails found.'
+        );
+      } else {
+        setRescanMsg('Still checking — this is taking longer than usual.');
+      }
+      fetchInvoices();
     } catch (err) {
       setRescanMsg(err.message);
-      setTimeout(() => setRescanMsg(''), 4000);
     } finally {
       setRescanning(false);
+      setTimeout(() => setRescanMsg(''), 6000);
     }
   }
 
@@ -419,6 +441,14 @@ export default function Dashboard() {
             {rescanMsg && (
               <div style={{ fontSize: 12, color: 'var(--accent)', marginTop: 6, fontWeight: 500 }}>
                 {rescanMsg}
+              </div>
+            )}
+            {!rescanMsg && status?.lastScan && (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                Last checked {new Date(status.lastScan.checkedAt).toLocaleTimeString()} —{' '}
+                {status.lastScan.emailsFound > 0
+                  ? `found ${status.lastScan.emailsFound} email${status.lastScan.emailsFound === 1 ? '' : 's'}`
+                  : 'no new emails'}
               </div>
             )}
             {!running && (
