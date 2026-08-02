@@ -13,9 +13,11 @@ Extract these fields:
 - invoiceNumber: invoice reference number (null if not found)
 - invoiceDate: YYYY-MM-DD (null if not found)
 - dueDate: YYYY-MM-DD (null if not stated)
-- currency: SGD if PayNow or SGD keyword present, otherwise USD
+- currency: the invoice's actual currency as a 3-letter ISO code (USD, SGD, AUD, GBP, EUR, MYR, etc.) — read explicit codes or symbols on the invoice ("S$" or "PayNow" implies SGD; "£" implies GBP; "€" implies EUR; "A$" implies AUD). If only a bare "$" appears with no other currency signal anywhere on the invoice, return null rather than guessing.
 - lineItems: array of { description, amount } — include full multi-line descriptions
 - totalAmount: total due as a plain number (no commas, no symbols)
+- subTotal: pre-tax subtotal as a plain number, only if explicitly shown on the invoice (null if not shown)
+- taxAmount: total tax/GST/VAT amount as a plain number, only if explicitly shown (null if not shown; 0 if the invoice explicitly states no tax applies)
 - paymentReference: combine all payment details — PayNow ID, bank name, account number, SWIFT, beneficiary — format: "Bank: OCBC | Acct: 601-493935-001 | Swift: OCBCSGSG | Beneficiary: Denise Teo" — null if none
 - projectName: artist or project name this invoice relates to (null if not applicable)`;
 

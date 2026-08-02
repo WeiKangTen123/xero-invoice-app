@@ -77,20 +77,53 @@ function getMatch(text, pattern) {
   return m ? m[1].trim() : null;
 }
 
-function mapTaxType(raw) {
-  const t = (raw || '').toLowerCase().trim();
-  if (!t || t === 'none' || t === 'n/a' || t === '-' || t === 'no tax') return 'NONE';
-  if (t.includes('gst') || t.includes('vat')) return 'TAX001';
-  return 'NONE';
+// Currencies this app has actually seen in practice. Not exhaustive — extend as
+// needed, since an unlisted code just falls through to the "not detected" path
+// below rather than being handled incorrectly.
+const CURRENCY_CODES = ['USD', 'SGD', 'AUD', 'GBP', 'EUR', 'MYR', 'NZD', 'CAD', 'JPY', 'CNY', 'HKD', 'INR'];
+
+// Reads the invoice's actual currency from its text instead of assuming the
+// account's configured default applies to every invoice — an invoice's currency
+// is a property of the invoice, not of the account processing it. Returns null
+// (not a guess) when nothing in the text actually says which currency this is;
+// callers fall back to the user's configured default in that case.
+function _detectCurrency(text) {
+  const labeled = getMatch(text, /Currency\s*:\s*([A-Z]{3})\b/i);
+  if (labeled && CURRENCY_CODES.includes(labeled.toUpperCase())) return labeled.toUpperCase();
+
+  // A 3-letter code directly adjacent to a monetary amount, e.g. "SGD 1,090.00"
+  const nearAmount = text.match(new RegExp(`\\b(${CURRENCY_CODES.join('|')})\\b\\s*\\$?\\s*[\\d,]+\\.?\\d*`));
+  if (nearAmount) return nearAmount[1].toUpperCase();
+
+  // Currency-specific symbols, checked before a bare "$" (which is ambiguous —
+  // used by USD, SGD, AUD, CAD, HKD, NZD... — so it deliberately isn't handled here)
+  if (/S\$/.test(text))  return 'SGD';
+  if (/A\$/.test(text))  return 'AUD';
+  if (/£/.test(text))    return 'GBP';
+  if (/€/.test(text))    return 'EUR';
+  if (/¥/.test(text))    return 'JPY';
+  if (/RM\s?\d/.test(text)) return 'MYR';
+
+  return null;
+}
+
+// Extracts a percentage like "9%", "GST 9%", "VAT (20%)" from free text near a line
+// item. Returns null for non-percentage text ("GST", "-", "NONE", blank) — those
+// don't carry a computable dollar amount, so the line contributes no tax rather than
+// guessing one.
+function _parseTaxPercent(raw) {
+  if (!raw) return null;
+  const m = String(raw).match(/(\d+(?:\.\d+)?)\s*%/);
+  return m ? parseFloat(m[1]) : null;
 }
 
 // Guarantees subTotal/taxAmount are always present and consistent, regardless of
-// which of the three parser paths produced `parsed` — only parseGenericFormat used
-// to set these explicitly, so template- and LLM-parsed invoices (the common case
-// for PDF attachments) silently got subTotal=0/taxAmount=0, which hid the
-// Subtotal/Tax/Total breakdown in the review UI even though the total was correct.
-// Mirrors the fallback already documented (but not implemented) elsewhere in the
-// codebase: missing subtotal = total - tax; missing both = subtotal equals total.
+// which of the three parser paths produced `parsed`. Real per-invoice dollar figures
+// (when the source stated them) are always preferred; missing values are derived
+// from whichever of totalAmount/subTotal/taxAmount ARE known, since these three
+// must always satisfy subTotal + taxAmount = totalAmount before the amount reaches
+// Xero — see xero/invoices.js resolveTaxType, which uses subTotal/taxAmount to look
+// up the org's real tax rate.
 function _ensureSubtotalTax(parsed) {
   const total = Number(parsed.totalAmount) || 0;
   let sub = parsed.subTotal != null ? Number(parsed.subTotal) : null;
@@ -98,8 +131,9 @@ function _ensureSubtotalTax(parsed) {
 
   if (sub == null && tax == null) { sub = total; tax = 0; }
   else if (sub == null)          { sub = total - tax; }
-  else if (tax == null)          { tax = 0; }
+  else if (tax == null)          { tax = total - sub; }
   if (!(sub > 0)) sub = total; // avoid negative/zero subtotal line items
+  if (!(tax >= 0)) tax = 0;    // avoid a negative tax line item from bad extraction
 
   parsed.subTotal  = parseFloat(sub.toFixed(2));
   parsed.taxAmount = parseFloat((tax || 0).toFixed(2));
@@ -200,25 +234,38 @@ function parseTemplateFormat(text, email, defaults) {
     dueDate = addDays(invoiceDate, 30);
   }
 
-  const currencyLine    = getMatch(text, /^Currency\s*:\s*([^\n]+)/im) || '';
-  const currencyParts   = currencyLine.split(',').map(s => s.trim());
-  const brandingThemeName = currencyParts.length > 1 ? currencyParts[0] : 'Standard';
+  // This template's "Currency:" line has actually been used to carry a currency
+  // code AND a branding theme name together (comma-separated, either order seen
+  // in practice — "SGD, Standard" or "Standard, SGD") — previously only the
+  // non-currency part was ever kept, and only when there happened to be a comma,
+  // so the actual currency code in this field was silently discarded even when
+  // explicitly stated. Order-agnostic here: whichever part is a real ISO code is
+  // the currency, whichever isn't is the theme name.
+  const currencyLine      = getMatch(text, /^Currency\s*:\s*([^\n]+)/im) || '';
+  const currencyParts     = currencyLine.split(',').map(s => s.trim()).filter(Boolean);
+  const templateCurrency  = currencyParts.find(p => CURRENCY_CODES.includes(p.toUpperCase())) || null;
+  const brandingThemeName = currencyParts.find(p => !CURRENCY_CODES.includes(p.toUpperCase())) || 'Standard';
 
   const taxSetting      = getMatch(text, /Tax\s+inclusive\s*\/\s*exclusive\s*:\s*([^\n]+)/i) || '';
   const lineAmountTypes = /inclusive/i.test(taxSetting) ? 'Inclusive' : 'Exclusive';
 
   const lineItems = [];
+  let taxAmount = 0;
   const lineItemRegex = /[ \t]*(?:\d+\.\s*)?Description\s*\/\s*Details\s*:([\s\S]+?)[ \t]*\nAmount\s*:\s*([\d,]*\.?\d*)[ \t]*\nDiscount\s*:\s*([\d.]*)[ \t]*%?[ \t]*\nTax\s*\(If\s*applicable\)\s*:\s*([^\n]*)/gi;
   let match;
   while ((match = lineItemRegex.exec(text)) !== null) {
     const desc = match[1].trim().replace(/[•·]/g, '*');
     if (!desc) continue;
-    lineItems.push({
-      description:  desc,
-      unitAmount:   parseFloat((match[2] || '0').replace(/,/g, '')) || 0,
-      discountRate: parseFloat(match[3]) || 0,
-      taxType:      mapTaxType(match[4])
-    });
+    const unitAmount   = parseFloat((match[2] || '0').replace(/,/g, '')) || 0;
+    const discountRate = parseFloat(match[3]) || 0;
+    // A real percentage (e.g. "GST 9%") contributes a computable dollar amount to
+    // the invoice-level taxAmount; free text with no number ("GST", "-") doesn't —
+    // resolveTaxType in xero/invoices.js needs a dollar figure, not a label.
+    const taxPercent = _parseTaxPercent(match[4]);
+    if (taxPercent != null) {
+      taxAmount += unitAmount * (1 - discountRate / 100) * (taxPercent / 100);
+    }
+    lineItems.push({ description: desc, unitAmount, discountRate });
   }
 
   if (!lineItems.length) {
@@ -227,11 +274,12 @@ function parseTemplateFormat(text, email, defaults) {
     const amt  = parseFloat(
       (getMatch(text, /Amount\s*:\s*([\d,]+\.?\d*)/i) || '0').replace(/,/g, '')
     );
-    lineItems.push({ description: desc, unitAmount: amt, discountRate: 0, taxType: 'NONE' });
+    lineItems.push({ description: desc, unitAmount: amt, discountRate: 0 });
   }
 
-  const totalAmount = lineItems.reduce((sum, item) =>
+  const subTotal    = lineItems.reduce((sum, item) =>
     sum + item.unitAmount * (1 - (item.discountRate || 0) / 100), 0);
+  const totalAmount = subTotal + taxAmount;
 
   const invoiceNumber =
     getMatch(text, /invoice\s*(?:no|number|#|num)[.:\s]*([A-Z0-9][A-Z0-9\-\/]{1,30})/i) ||
@@ -245,11 +293,13 @@ function parseTemplateFormat(text, email, defaults) {
     invoiceNumber:    invoiceNumber.slice(0, 100),
     invoiceDate,
     dueDate,
-    currency:         defaults.currency,
+    currency:         templateCurrency || _detectCurrency(text) || defaults.currency,
     brandingThemeName,
     lineAmountTypes,
     lineItems,
     totalAmount:      parseFloat(totalAmount.toFixed(2)),
+    subTotal:         parseFloat(subTotal.toFixed(2)),
+    taxAmount:        parseFloat(taxAmount.toFixed(2)),
     description:      (email.subject || `Invoice from ${contactName}`).slice(0, 500),
     sourceEmail:      email.from?.text || '',
     accountCode:      defaults.accountCode,
@@ -304,14 +354,13 @@ function parseGenericFormat(text, email, defaults) {
     invoiceNumber:    invoiceNumber.slice(0, 100),
     invoiceDate,
     dueDate,
-    currency:         defaults.currency,
+    currency:         _detectCurrency(text) || defaults.currency,
     brandingThemeName:'Standard',
     lineAmountTypes:  'Exclusive',
     lineItems: [{
       description:  (email.subject || `Invoice from ${cleanVendor}`).slice(0, 500),
       unitAmount:   parseFloat(subTotal.toFixed(2)),
       discountRate: 0,
-      taxType:      taxAmount > 0 ? 'TAX001' : 'NONE'
     }],
     totalAmount:   parseFloat(totalAmount.toFixed(2)),
     description:   (email.subject || `Invoice from ${cleanVendor}`).slice(0, 500),
@@ -340,7 +389,6 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     description:  li.description,
     unitAmount:   parseFloat(li.amount ?? li.unitAmount) || 0,
     discountRate: 0,
-    taxType:      'NONE',
   }));
 
   if (!lineItems.length) {
@@ -348,7 +396,6 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
       description:  email.subject || `Invoice from ${llm.vendorName}`,
       unitAmount:   parseFloat(llm.totalAmount) || 0,
       discountRate: 0,
-      taxType:      'NONE',
     });
   }
 
@@ -363,11 +410,18 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     invoiceNumber:    (llm.invoiceNumber || fallbackInvoiceNumber).slice(0, 100),
     invoiceDate,
     dueDate,
-    currency:         llm.currency || defaults.currency,
+    // Regex fallback covers the rare case the LLM leaves currency null on text that
+    // actually does state it — belt-and-braces, not the primary detection path.
+    currency:         llm.currency || _detectCurrency(text) || defaults.currency,
     brandingThemeName:'Standard',
     lineAmountTypes:  'Exclusive',
     lineItems,
     totalAmount:      parseFloat(llm.totalAmount) || 0,
+    // Both nullable — _ensureSubtotalTax (called by the shared caller) fills in
+    // whichever the LLM didn't find from whichever it did, so xero/invoices.js
+    // always has a real dollar figure to look up the org's actual tax rate with.
+    subTotal:         llm.subTotal  != null ? parseFloat(llm.subTotal)  : null,
+    taxAmount:        llm.taxAmount != null ? parseFloat(llm.taxAmount) : null,
     description:      (email.subject || `Invoice from ${llm.vendorName}`).slice(0, 500),
     sourceEmail:      email.from?.text || '',
     accountCode:      defaults.accountCode,
@@ -461,4 +515,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, _ensureSubtotalTax }; // helper exposed for tests
+module.exports = { parseInvoice, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency }; // helpers exposed for tests

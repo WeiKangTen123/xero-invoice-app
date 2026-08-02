@@ -23,6 +23,69 @@ async function getOrgBaseCurrency(accountingApi, tenantId) {
   }
 }
 
+// Per-tenant cache of the org's own configured tax rates — avoids an extra Xero
+// API call on every invoice. Populated lazily, persists for the server lifetime.
+const _orgTaxRatesCache = new Map();
+
+async function getOrgTaxRates(accountingApi, tenantId) {
+  if (_orgTaxRatesCache.has(tenantId)) return _orgTaxRatesCache.get(tenantId);
+  try {
+    const res   = await accountingApi.getTaxRates(tenantId);
+    const rates = (res.body.taxRates || []).filter(r => r.status === 'ACTIVE');
+    _orgTaxRatesCache.set(tenantId, rates);
+    logger.info('Xero org tax rates loaded', { tenantId, count: rates.length });
+    return rates;
+  } catch (err) {
+    logger.warn('Could not fetch org tax rates — tax will be posted as a flat line item', { error: xeroErrMsg(err) });
+    return [];
+  }
+}
+
+// Matches the invoice's actual detected tax (subTotal/taxAmount — real dollar
+// figures from parser.js, dynamic per invoice) against the connected Xero org's
+// own configured tax rates, instead of guessing a hardcoded TaxType code (which
+// varies per org/country and hard-fails the whole invoice if it doesn't exist on
+// that org). If no confident match is found, the caller falls back to posting the
+// tax as its own flat line item so the total still reconciles — just without
+// proper per-line GST categorisation in Xero's own reports.
+const TAX_RATE_TOLERANCE_PCT = 0.75;
+
+async function resolveTaxType(accountingApi, tenantId, invoiceData, zeroRate) {
+  const subTotal  = Number(invoiceData.subTotal)  || 0;
+  const taxAmount = Number(invoiceData.taxAmount) || 0;
+
+  if (subTotal <= 0 || taxAmount <= 0) return { taxType: zeroRate, applied: true, unmatchedTaxAmount: 0 };
+
+  const effectiveRate = (taxAmount / subTotal) * 100;
+  // Below this, treat as effectively tax-free rather than risk matching an
+  // unrelated 0%-ish rate whose semantics (zero-rated vs exempt vs GST-free)
+  // can't be told apart from dollar figures alone.
+  if (effectiveRate < 0.1) return { taxType: zeroRate, applied: true, unmatchedTaxAmount: 0 };
+
+  const rates     = await getOrgTaxRates(accountingApi, tenantId);
+  const isExpense = invoiceData.invoiceType !== 'ACCREC'; // ACCPAY (bill) is this app's primary case
+  const candidates = rates.filter(r => isExpense ? r.canApplyToExpenses : r.canApplyToRevenue);
+
+  let best = null;
+  let bestDiff = Infinity;
+  for (const r of candidates) {
+    const diff = Math.abs((r.displayTaxRate || 0) - effectiveRate);
+    if (diff < bestDiff) { bestDiff = diff; best = r; }
+  }
+
+  if (best && bestDiff <= TAX_RATE_TOLERANCE_PCT) {
+    logger.info('Matched invoice tax to org tax rate', {
+      tenantId, effectiveRate: effectiveRate.toFixed(2), matched: best.name, taxType: best.taxType,
+    });
+    return { taxType: best.taxType, applied: true, unmatchedTaxAmount: 0 };
+  }
+
+  logger.warn('No matching org tax rate for detected tax — posting as a flat line item', {
+    tenantId, effectiveRate: effectiveRate.toFixed(2), taxAmount,
+  });
+  return { taxType: zeroRate, applied: false, unmatchedTaxAmount: taxAmount };
+}
+
 async function getBrandingThemeID(accountingApi, tenantId, themeName) {
   if (!themeName) return undefined;
   try {
@@ -40,7 +103,11 @@ async function getBrandingThemeID(accountingApi, tenantId, themeName) {
   return undefined;
 }
 
-function buildLineItems(invoiceData, userConfig) {
+// Every non-zero line item is tagged with ONE resolved tax type for the whole
+// invoice (see resolveTaxType) — invoices from this app carry a single overall
+// tax rate, not a per-line mix, so there's no meaningful per-item signal to
+// resolve independently.
+async function buildLineItems(invoiceData, userConfig, accountingApi, tenantId) {
   const rawLineItems = invoiceData.lineItems ? [...invoiceData.lineItems] : null;
 
   if (invoiceData.paymentReference && rawLineItems) {
@@ -51,11 +118,14 @@ function buildLineItems(invoiceData, userConfig) {
   const zeroRate    = userConfig.ZERO_TAX_RATE         || process.env.ZERO_TAX_RATE         || 'NONE';
   const accountCode = invoiceData.accountCode           || userConfig.DEFAULT_ACCOUNT_CODE   || process.env.DEFAULT_ACCOUNT_CODE || '200';
 
+  const { taxType, applied, unmatchedTaxAmount } =
+    await resolveTaxType(accountingApi, tenantId, invoiceData, zeroRate);
+
+  let items;
   if (rawLineItems) {
-    return rawLineItems.map(item => {
+    items = rawLineItems.map(item => {
       const amount = parseFloat(item.unitAmount) || 0;
       if (amount === 0) return { description: item.description };
-      const taxType = (item.taxType === 'NONE' || !item.taxType) ? zeroRate : item.taxType;
       return {
         description: item.description,
         accountCode,
@@ -65,16 +135,32 @@ function buildLineItems(invoiceData, userConfig) {
         ...(parseFloat(item.discountRate) > 0 && { discountRate: parseFloat(item.discountRate) }),
       };
     });
+  } else {
+    // Fallback single-line item when no line items were extracted
+    items = [{
+      description: invoiceData.description,
+      quantity:    1.0,
+      unitAmount:  parseFloat(invoiceData.subTotal) || 0,
+      accountCode: invoiceData.accountCode || userConfig.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '310',
+      taxType,
+    }];
   }
 
-  // Fallback single-line item when no line items were extracted
-  return [{
-    description: invoiceData.description,
-    quantity:    1.0,
-    unitAmount:  parseFloat(invoiceData.subTotal) || 0,
-    accountCode: invoiceData.accountCode || userConfig.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '310',
-    taxType:     zeroRate,
-  }];
+  // No org tax rate confidently matched the invoice's detected tax — rather than
+  // silently dropping it (the previous behaviour), post it as its own flat-dollar
+  // line so the Xero total still reconciles to the real invoice total. Not
+  // categorised as GST in Xero's own reports, but never silently wrong either.
+  if (!applied && unmatchedTaxAmount > 0) {
+    items.push({
+      description: 'Tax / GST',
+      accountCode,
+      taxType:    zeroRate,
+      quantity:   1.0,
+      unitAmount: unmatchedTaxAmount,
+    });
+  }
+
+  return items;
 }
 
 function _referenceField(invoiceData) {
@@ -99,7 +185,7 @@ async function _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi) {
   });
 
   const brandingThemeID = await getBrandingThemeID(accountingApi, tenantId, invoiceData.brandingThemeName);
-  const lineItems       = buildLineItems(invoiceData, userConfig);
+  const lineItems       = await buildLineItems(invoiceData, userConfig, accountingApi, tenantId);
   const lineAmountTypes = invoiceData.lineAmountTypes === 'Inclusive' ? 'Inclusive' : 'Exclusive';
   const currencyCode    = invoiceData.currency || userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'USD';
 
@@ -288,4 +374,8 @@ async function updateDraftInvoice(userId, tenantId, xeroInvoiceId, invoiceData) 
   return updated;
 }
 
-module.exports = { createDraftInvoice, updateDraftInvoice };
+module.exports = {
+  createDraftInvoice, updateDraftInvoice,
+  // Exposed for tests only — internal to the create/update flow above.
+  buildLineItems, resolveTaxType, getOrgTaxRates,
+};
