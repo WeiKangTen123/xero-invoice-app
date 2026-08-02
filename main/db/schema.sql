@@ -95,3 +95,16 @@ CREATE TABLE IF NOT EXISTS xero_tenants (
   connected_at TEXT NOT NULL,
   PRIMARY KEY (user_id, tenant_id)
 );
+
+-- 1:many — a user can add multiple Gemini API keys. gemini-client.js rotates
+-- through every model on the first key before moving to the next key, so adding
+-- a key is a real way to add quota headroom, not just a backup. api_key is
+-- encrypted at rest the same way as other secrets (see utils/crypto.js).
+CREATE TABLE IF NOT EXISTS user_gemini_keys (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  api_key    TEXT NOT NULL,
+  label      TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gemini_keys_user_id ON user_gemini_keys(user_id);

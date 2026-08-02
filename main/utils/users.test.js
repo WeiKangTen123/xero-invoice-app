@@ -112,4 +112,53 @@ describe('users store (SQLite)', () => {
     expect(users.getUserConfig(u.id)).toEqual({});
     expect(invoiceStore.forUser(u.id).getAll()).toEqual([]);
   });
+
+  describe('Gemini API keys (multi-key)', () => {
+    test('addGeminiKey / getGeminiKeys round-trip, oldest first, encrypted at rest', async () => {
+      const u = await users.createUser('gem1@test.com', 'password123', 'user');
+      users.addGeminiKey(u.id, 'AIzaFirstKey', 'Personal');
+      users.addGeminiKey(u.id, 'AIzaSecondKey');
+
+      const keys = users.getGeminiKeys(u.id);
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toMatchObject({ apiKey: 'AIzaFirstKey', label: 'Personal' });
+      expect(keys[1]).toMatchObject({ apiKey: 'AIzaSecondKey', label: null });
+
+      const db  = require('../db');
+      const row = db.prepare('SELECT api_key FROM user_gemini_keys WHERE user_id = ? ORDER BY id').all(u.id)[0];
+      expect(row.api_key.startsWith('enc:v1:')).toBe(true);
+    });
+
+    test('addGeminiKey rejects empty key', async () => {
+      const u = await users.createUser('gem2@test.com', 'password123', 'user');
+      expect(() => users.addGeminiKey(u.id, '')).toThrow('API key is required');
+      expect(() => users.addGeminiKey(u.id, '   ')).toThrow('API key is required');
+    });
+
+    test('removeGeminiKey deletes only the owning user\'s key', async () => {
+      const u1 = await users.createUser('gem3@test.com', 'password123', 'user');
+      const u2 = await users.createUser('gem4@test.com', 'password123', 'user');
+      const { id } = users.addGeminiKey(u1.id, 'AIzaOwnedByU1');
+
+      expect(users.removeGeminiKey(u2.id, id)).toBe(false); // wrong owner
+      expect(users.getGeminiKeys(u1.id)).toHaveLength(1);
+
+      expect(users.removeGeminiKey(u1.id, id)).toBe(true);
+      expect(users.getGeminiKeys(u1.id)).toHaveLength(0);
+    });
+
+    test('getSetupStatus.llm is true once a multi-key is added, with no legacy field set', async () => {
+      const u = await users.createUser('gem5@test.com', 'password123', 'user');
+      expect(users.getSetupStatus(u.id).llm.configured).toBe(false);
+      users.addGeminiKey(u.id, 'AIzaOnlyKey');
+      expect(users.getSetupStatus(u.id).llm.configured).toBe(true);
+    });
+
+    test('deleteUser cascades to user_gemini_keys', async () => {
+      const u = await users.createUser('gem6@test.com', 'password123', 'user');
+      users.addGeminiKey(u.id, 'AIzaCascadeKey');
+      users.deleteUser(u.id);
+      expect(users.getGeminiKeys(u.id)).toEqual([]);
+    });
+  });
 });

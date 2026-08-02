@@ -7,15 +7,23 @@ const logger = require('./logger');
 const GEMINI_URL    = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
 const GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
 
-function _resolveKey(userId) {
-  let key;
+// Returns every key available to try, in rotation order: the user's added keys
+// (oldest first, via the multi-key Setup UI) first, then the legacy single-field
+// value if that's all an account has, then the .env fallback shared across users
+// with nothing configured of their own.
+function _resolveKeys(userId) {
+  const keys = [];
   if (userId) {
-    const { getUserConfig } = require('./users');
-    key = getUserConfig(userId).Gemini_API_KEY;
+    const { getGeminiKeys, getUserConfig } = require('./users');
+    for (const row of getGeminiKeys(userId)) keys.push(row.apiKey);
+    if (!keys.length) {
+      const legacy = getUserConfig(userId).Gemini_API_KEY;
+      if (legacy) keys.push(legacy);
+    }
   }
-  if (!key) key = process.env.Gemini_API_KEY;
-  if (!key) throw new Error('No Gemini API key configured — add Gemini_API_KEY in Setup');
-  return key;
+  if (!keys.length && process.env.Gemini_API_KEY) keys.push(process.env.Gemini_API_KEY);
+  if (!keys.length) throw new Error('No Gemini API key configured — add one in Setup');
+  return keys;
 }
 
 function _isQuotaError(err) {
@@ -100,27 +108,34 @@ async function _callOnce(model, key, messages, opts) {
   return choice.message.content;
 }
 
-// Tries each model in GEMINI_MODELS order. On a quota/rate-limit error, rotates to
-// the next model immediately (no backoff wait — a different model has its own
-// separate quota, so waiting on the first one is pointless). Any other error
-// (bad request, auth failure) fails fast instead of burning the next model's quota
-// on a request that will fail the same way.
+// Two-level rotation: for the current key, try every model in GEMINI_MODELS order;
+// only once ALL models are exhausted (quota/rate-limited) on that key does it move
+// to the next key. No backoff wait between attempts — a different model or key has
+// its own separate quota, so waiting on the exhausted one first is pointless. Any
+// non-quota error (bad request, auth failure) fails fast instead of burning through
+// every remaining model/key on a request that will fail the exact same way there too.
 async function callGemini(userId, messages, opts = {}) {
-  const key = _resolveKey(userId);
+  const keys = _resolveKeys(userId);
   const limiter = _getLimiter(userId);
 
   return limiter.enqueue(async () => {
     let lastErr;
-    for (const model of GEMINI_MODELS) {
-      try {
-        return await _callOnce(model, key, messages, opts);
-      } catch (err) {
-        lastErr = err;
-        if (_isQuotaError(err)) {
-          logger.warn(`Gemini quota/rate limit on ${model} — rotating to next model`, { userId });
-          continue;
+    for (let k = 0; k < keys.length; k++) {
+      const key = keys[k];
+      for (const model of GEMINI_MODELS) {
+        try {
+          return await _callOnce(model, key, messages, opts);
+        } catch (err) {
+          lastErr = err;
+          if (_isQuotaError(err)) {
+            logger.warn(`Gemini quota/rate limit on ${model} (key ${k + 1}/${keys.length}) — rotating`, { userId });
+            continue;
+          }
+          throw err;
         }
-        throw err;
+      }
+      if (k < keys.length - 1) {
+        logger.warn(`All models exhausted on key ${k + 1}/${keys.length} — moving to next key`, { userId });
       }
     }
     throw lastErr;

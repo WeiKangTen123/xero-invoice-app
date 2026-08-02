@@ -11,7 +11,6 @@ const HELP = {
   IMAP_PASS:             'App password for the mailbox. For Gmail, generate one under Google Account → Security → App passwords.',
   IMAP_FILTER_FROM:      'Optional — only process emails from this sender address. Leave blank to process all.',
   IMAP_POLL_INTERVAL_MS: 'How often to check for new emails in milliseconds. Default: 60000 (60 seconds).',
-  Gemini_API_KEY:        'Google Gemini API key for LLM parsing and the chat assistant. Get it at aistudio.google.com',
   DEFAULT_ACCOUNT_CODE:  'Xero account code for line items when no code is detected (e.g. 200).',
   DEFAULT_CURRENCY:      'Default invoice currency code (e.g. SGD, USD, AUD).',
   ZERO_TAX_RATE:         'Tax rate name in Xero for zero-rated items (e.g. NONE, TAX001).',
@@ -19,16 +18,41 @@ const HELP = {
   REDIS_URL:             'Optional Redis URL for the job queue. Leave blank to use in-memory queue.',
 };
 
+// helpUrl/helpLabel — where to actually go get the credentials this section asks
+// for. Shown as a link in the section header, not just described in prose.
 const SECTION_META = {
-  xero:     { label: 'Xero Connection',  desc: 'Custom Connection credentials from developer.xero.com', icon: '🔗', testKey: 'xero', testLabel: 'Test Xero' },
-  imap:     { label: 'Email / IMAP',     desc: 'Mailbox credentials for watching invoice emails',       icon: '✉',  testKey: 'imap', testLabel: 'Test IMAP' },
-  llm:      { label: 'LLM / AI Parsing', desc: 'Gemini API key for extracting invoice data from PDFs and powering the chat assistant', icon: '🤖', testKey: 'llm', testLabel: 'Test LLM' },
+  xero: {
+    label: 'Xero Connection', icon: '🔗',
+    desc: 'Custom Connection credentials from developer.xero.com',
+    testKey: 'xero', testLabel: 'Test Xero',
+    helpUrl: 'https://developer.xero.com/app/manage', helpLabel: 'Get Client ID & Secret ↗',
+  },
+  imap: {
+    label: 'Email / IMAP', icon: '✉',
+    desc: 'Mailbox credentials for watching invoice emails',
+    testKey: 'imap', testLabel: 'Test IMAP',
+    helpUrl: 'https://myaccount.google.com/apppasswords', helpLabel: 'Generate a Gmail App Password ↗',
+  },
   defaults: { label: 'Invoice Defaults', desc: 'Fallback values when fields cannot be detected automatically', icon: '⚙', testKey: null },
   optional: { label: 'Optional',         desc: 'Slack error notifications, Redis queue', icon: '◎', testKey: null },
 };
 
 function isSecretKey(key) {
   return /pass|secret|key|url/i.test(key);
+}
+
+function HelpLink({ url, label }) {
+  if (!url) return null;
+  return (
+    <a
+      href={url} target="_blank" rel="noopener noreferrer"
+      style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none', fontWeight: 600, whiteSpace: 'nowrap' }}
+      onMouseEnter={e => { e.currentTarget.style.textDecoration = 'underline'; }}
+      onMouseLeave={e => { e.currentTarget.style.textDecoration = 'none'; }}
+    >
+      {label}
+    </a>
+  );
 }
 
 function Field({ name, meta, value, onChange }) {
@@ -92,6 +116,193 @@ function TestResult({ msg }) {
     }}>
       {msg.ok ? '✓' : '✕'} {msg.text}
     </span>
+  );
+}
+
+// ── One generic Xero/IMAP/defaults/optional card ────────────────────────────────
+function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, testing, msgs, onTest }) {
+  return (
+    <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{
+            width: 38, height: 38, borderRadius: 10, flexShrink: 0,
+            background: 'var(--accent-subtle)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
+          }}>
+            {meta.icon}
+          </div>
+          <div>
+            <div className="card-title">{meta.label}</div>
+            <div className="card-subtitle" style={{ marginBottom: 0 }}>{meta.desc}</div>
+          </div>
+        </div>
+
+        {meta.testKey && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+            <TestResult msg={msgs[meta.testKey]} />
+            <button
+              type="button" className="btn btn-outline btn-sm"
+              disabled={testing[meta.testKey]}
+              onClick={() => onTest(meta.testKey)}
+              style={{ whiteSpace: 'nowrap' }}
+            >
+              {testing[meta.testKey]
+                ? <><span className="btn-spinner" style={{ borderColor: 'rgba(0,0,0,0.15)', borderTopColor: 'var(--accent)' }} /> Testing...</>
+                : `⚡ ${meta.testLabel}`}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {meta.helpUrl && (
+        <div style={{ marginBottom: 14 }}><HelpLink url={meta.helpUrl} label={meta.helpLabel} /></div>
+      )}
+
+      <div style={{ height: 1, background: 'var(--border)', marginBottom: 20 }} />
+
+      <div className="grid-2">
+        {Object.entries(sectionData).map(([name, fieldMeta]) => (
+          <Field key={name} name={name} meta={fieldMeta} value={values[name] || ''} onChange={onChange} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── LLM / AI Studio — multiple API keys, not a single flat field ────────────────
+// A separate resource (its own add/remove endpoints) rather than part of the
+// generic Setup form, since "a list the user can add to" doesn't fit the
+// one-value-per-field pattern the rest of this page uses.
+function LlmKeysCard({ idx, testing, msgs, onTest }) {
+  const [keys,    setKeys]    = useState(null);
+  const [newKey,  setNewKey]  = useState('');
+  const [newLabel, setNewLabel] = useState('');
+  const [showNew, setShowNew] = useState(false);
+  const [adding,  setAdding]  = useState(false);
+  const [removing, setRemoving] = useState(null);
+  const [error,   setError]   = useState('');
+
+  async function fetchKeys() {
+    try { const d = await api.get('/setup/llm-keys'); setKeys(d.keys); }
+    catch (_) { setKeys([]); }
+  }
+
+  useEffect(() => { fetchKeys(); }, []);
+
+  async function handleAdd(e) {
+    e.preventDefault();
+    if (!newKey.trim()) return;
+    setAdding(true); setError('');
+    try {
+      await api.post('/setup/llm-keys', { apiKey: newKey.trim(), label: newLabel.trim() || undefined });
+      setNewKey(''); setNewLabel(''); setShowNew(false);
+      await fetchKeys();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function handleRemove(id) {
+    setRemoving(id);
+    try { await api.delete(`/setup/llm-keys/${id}`); await fetchKeys(); }
+    catch (err) { setError(err.message); }
+    finally { setRemoving(null); }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>
+            🤖
+          </div>
+          <div>
+            <div className="card-title">LLM / AI Parsing</div>
+            <div className="card-subtitle" style={{ marginBottom: 0 }}>
+              Gemini API keys for extracting invoice data from PDFs and powering the chat assistant
+            </div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <TestResult msg={msgs.llm} />
+          <button type="button" className="btn btn-outline btn-sm" disabled={testing.llm} onClick={() => onTest('llm')} style={{ whiteSpace: 'nowrap' }}>
+            {testing.llm ? <><span className="btn-spinner" style={{ borderColor: 'rgba(0,0,0,0.15)', borderTopColor: 'var(--accent)' }} /> Testing...</> : '⚡ Test LLM'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <HelpLink url="https://aistudio.google.com/apikey" label="Get a Gemini API key at Google AI Studio ↗" />
+      </div>
+
+      <div style={{ height: 1, background: 'var(--border)', marginBottom: 16 }} />
+
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
+        Add more than one key for extra headroom — when a key's quota runs out across
+        every model, the next key is used automatically. Nothing extra to configure.
+      </div>
+
+      {error && <div className="alert alert-error" style={{ marginBottom: 12 }}><span className="alert-icon">✕</span>{error}</div>}
+
+      {keys === null ? (
+        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Loading keys…</div>
+      ) : keys.length === 0 && !showNew ? (
+        <div className="empty-state" style={{ padding: '20px 0' }}>
+          <div className="empty-state-icon">🔑</div>
+          <div>No API keys added yet</div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+          {keys.map((k, i) => (
+            <div key={k.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', width: 18 }}>{i + 1}</span>
+              <span style={{ fontFamily: 'monospace', fontSize: 13, flex: 1 }}>{k.keyMasked}</span>
+              {k.label && <span className="badge badge-gray">{k.label}</span>}
+              <button
+                type="button" className="btn btn-sm"
+                disabled={removing === k.id}
+                onClick={() => handleRemove(k.id)}
+                style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
+                title="Remove key"
+              >
+                {removing === k.id ? '...' : '✕'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showNew ? (
+        <form onSubmit={handleAdd} style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 12, borderRadius: 8, border: '1px dashed var(--border)' }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ position: 'relative', flex: 2 }}>
+              <input
+                type="password" className="form-input" placeholder="AIza…"
+                value={newKey} onChange={e => setNewKey(e.target.value)} autoFocus
+                style={{ fontFamily: 'monospace' }}
+              />
+            </div>
+            <input
+              type="text" className="form-input" placeholder="Label (optional)"
+              value={newLabel} onChange={e => setNewLabel(e.target.value)} style={{ flex: 1 }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button type="button" className="btn btn-outline btn-sm" onClick={() => { setShowNew(false); setNewKey(''); setNewLabel(''); }}>Cancel</button>
+            <button type="submit" className="btn btn-primary btn-sm" disabled={adding || !newKey.trim()}>
+              {adding ? '...' : '✓ Add key'}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <button type="button" className="btn btn-outline btn-sm" onClick={() => setShowNew(true)}>
+          + Add another API key
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -181,65 +392,27 @@ export default function Setup() {
       )}
 
       <form onSubmit={handleSave}>
-        {Object.entries(SECTION_META).map(([key, meta], idx) => {
+        {['xero', 'imap'].map((key, idx) => {
           const sectionData = config[key];
           if (!sectionData) return null;
           return (
-            <div
-              key={key}
-              className="card"
-              style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}
-            >
-              {/* Section header */}
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20, gap: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-                  <div style={{
-                    width: 38, height: 38, borderRadius: 10, flexShrink: 0,
-                    background: 'var(--accent-subtle)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 18,
-                  }}>
-                    {meta.icon}
-                  </div>
-                  <div>
-                    <div className="card-title">{meta.label}</div>
-                    <div className="card-subtitle" style={{ marginBottom: 0 }}>{meta.desc}</div>
-                  </div>
-                </div>
+            <SectionCard
+              key={key} sectionKey={key} meta={SECTION_META[key]} sectionData={sectionData}
+              values={values} onChange={handleChange} idx={idx} testing={testing} msgs={msgs} onTest={runTest}
+            />
+          );
+        })}
 
-                {/* Test button */}
-                {meta.testKey && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-                    <TestResult msg={msgs[meta.testKey]} />
-                    <button
-                      type="button"
-                      className="btn btn-outline btn-sm"
-                      disabled={testing[meta.testKey]}
-                      onClick={() => runTest(meta.testKey)}
-                      style={{ whiteSpace: 'nowrap' }}
-                    >
-                      {testing[meta.testKey]
-                        ? <><span className="btn-spinner" style={{ borderColor: 'rgba(0,0,0,0.15)', borderTopColor: 'var(--accent)' }} /> Testing...</>
-                        : `⚡ ${meta.testLabel}`}
-                    </button>
-                  </div>
-                )}
-              </div>
+        <LlmKeysCard idx={2} testing={testing} msgs={msgs} onTest={runTest} />
 
-              <div style={{ height: 1, background: 'var(--border)', marginBottom: 20 }} />
-
-              <div className="grid-2">
-                {Object.entries(sectionData).map(([name, fieldMeta]) => (
-                  <Field
-                    key={name}
-                    name={name}
-                    meta={fieldMeta}
-                    value={values[name] || ''}
-                    onChange={handleChange}
-                  />
-                ))}
-              </div>
-            </div>
+        {['defaults', 'optional'].map((key, i) => {
+          const sectionData = config[key];
+          if (!sectionData) return null;
+          return (
+            <SectionCard
+              key={key} sectionKey={key} meta={SECTION_META[key]} sectionData={sectionData}
+              values={values} onChange={handleChange} idx={i + 3} testing={testing} msgs={msgs} onTest={runTest}
+            />
           );
         })}
 
