@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const db     = require('../db');
+const { encrypt, decrypt } = require('./crypto');
 
 // Maps config.json-style keys (as used throughout routes/setup.js and xero/connect.js)
 // to their user_credentials column names.
@@ -24,6 +25,11 @@ const COLUMN_TO_CONFIG_KEY = Object.fromEntries(
   Object.entries(CONFIG_KEY_TO_COLUMN).map(([k, v]) => [v, k])
 );
 
+// These columns hold real credentials and are encrypted at rest (AES-256-GCM, see
+// ./crypto.js) — everything else in user_credentials (client ID, IMAP host/user/
+// port, defaults) isn't secret and stays plain for easy querying/debugging.
+const ENCRYPTED_COLUMNS = new Set(['xero_client_secret', 'imap_pass', 'gemini_api_key']);
+
 // ── Per-user config (IMAP, Xero credentials, per-user defaults) ──────────────
 
 function getUserConfig(userId) {
@@ -32,7 +38,7 @@ function getUserConfig(userId) {
   const config = {};
   for (const [column, value] of Object.entries(row)) {
     if (column === 'user_id' || value === null) continue;
-    config[COLUMN_TO_CONFIG_KEY[column]] = value;
+    config[COLUMN_TO_CONFIG_KEY[column]] = ENCRYPTED_COLUMNS.has(column) ? decrypt(value) : value;
   }
   return config;
 }
@@ -47,7 +53,11 @@ function saveUserConfig(userId, patch) {
     if (!column) continue;
     if (value === null || value === undefined) continue; // not provided
     sets.push(`${column} = ?`);
-    args.push(value === '' ? null : value); // explicit empty string = clear this field
+    if (value === '') {
+      args.push(null); // explicit empty string = clear this field
+    } else {
+      args.push(ENCRYPTED_COLUMNS.has(column) ? encrypt(value) : value);
+    }
   }
   if (sets.length) {
     db.prepare(`UPDATE user_credentials SET ${sets.join(', ')} WHERE user_id = ?`).run(...args, userId);
@@ -172,5 +182,5 @@ module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
   getAllUsers, updateUserRole, deleteUser, readUsers,
   getUserConfig, saveUserConfig, getSetupStatus, ensureUserDirectories,
-  CONFIG_KEY_TO_COLUMN, // exposed for the one-time JSON->SQLite importer
+  CONFIG_KEY_TO_COLUMN, ENCRYPTED_COLUMNS, // exposed for the one-time JSON->SQLite importer
 };

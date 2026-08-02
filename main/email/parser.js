@@ -84,6 +84,28 @@ function mapTaxType(raw) {
   return 'NONE';
 }
 
+// Guarantees subTotal/taxAmount are always present and consistent, regardless of
+// which of the three parser paths produced `parsed` — only parseGenericFormat used
+// to set these explicitly, so template- and LLM-parsed invoices (the common case
+// for PDF attachments) silently got subTotal=0/taxAmount=0, which hid the
+// Subtotal/Tax/Total breakdown in the review UI even though the total was correct.
+// Mirrors the fallback already documented (but not implemented) elsewhere in the
+// codebase: missing subtotal = total - tax; missing both = subtotal equals total.
+function _ensureSubtotalTax(parsed) {
+  const total = Number(parsed.totalAmount) || 0;
+  let sub = parsed.subTotal != null ? Number(parsed.subTotal) : null;
+  let tax = parsed.taxAmount != null ? Number(parsed.taxAmount) : null;
+
+  if (sub == null && tax == null) { sub = total; tax = 0; }
+  else if (sub == null)          { sub = total - tax; }
+  else if (tax == null)          { tax = 0; }
+  if (!(sub > 0)) sub = total; // avoid negative/zero subtotal line items
+
+  parsed.subTotal  = parseFloat(sub.toFixed(2));
+  parsed.taxAmount = parseFloat((tax || 0).toFixed(2));
+  return parsed;
+}
+
 // Resolve per-user defaults, falling back to .env globals
 function _userDefaults(userId) {
   if (!userId) {
@@ -383,6 +405,7 @@ async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email
     logger.info('PDF invoice detected — using LLM parser', { file: pdfFilename, userId });
     parsed = await parsePDFWithLLM(text, email, pdfFilename, userId, defaults);
   }
+  _ensureSubtotalTax(parsed);
 
   const invoiceType = source === 'pdf' ? 'ACCPAY' : 'ACCREC';
   const result = {
@@ -438,4 +461,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice };
+module.exports = { parseInvoice, _ensureSubtotalTax }; // helper exposed for tests
