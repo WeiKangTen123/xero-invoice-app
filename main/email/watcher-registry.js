@@ -2,6 +2,7 @@ const Imap              = require('imap');
 const { simpleParser } = require('mailparser');
 const emailQueue        = require('../queue/email-queue');
 const emailWorker       = require('../queue/email-worker');
+const processState      = require('../utils/process-state');
 const logger            = require('../utils/logger');
 
 const MIN_POLL_MS         = 30000;
@@ -54,6 +55,11 @@ function _fetchUnseen(s) {
       if (s.fetchPending) { s.fetchPending = false; _fetchUnseen(s); }
       return;
     }
+
+    // Recorded for both an empty and a non-empty result — the UI needs to be able
+    // to say "checked, found nothing" just as much as "found N emails".
+    processState.forUser(s.userId).notifyScan(uids?.length || 0);
+
     if (!uids?.length) {
       s.fetchInProgress = false;
       if (s.fetchPending) { s.fetchPending = false; _fetchUnseen(s); }

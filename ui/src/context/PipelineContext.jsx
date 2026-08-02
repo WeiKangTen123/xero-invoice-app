@@ -12,7 +12,8 @@ export function PipelineProvider({ children }) {
       const s = await api.get('/process/status');
       setStatus(s);
       statusRef.current = s;
-    } catch (_) {}
+      return s;
+    } catch (_) { return null; }
   }, []);
 
   useEffect(() => {

@@ -1,5 +1,7 @@
 const express      = require('express');
 const router       = express.Router();
+const fs           = require('fs');
+const path         = require('path');
 const { requireAdmin } = require('../middleware/auth-middleware');
 const { getAllUsers, createUser, updateUserRole, deleteUser, readUsers, getSetupStatus } = require('../utils/users');
 const invoiceStore     = require('../utils/invoice-store');
@@ -10,6 +12,15 @@ const watcherRegistry  = require('../email/watcher-registry');
 const tokenCache       = require('../utils/token-cache');
 const db               = require('../db');
 const logger       = require('../utils/logger');
+
+// LOGS_DIR override lets tests point at a throwaway directory instead of the
+// real logs/ folder a dev server may be actively writing to (see db/index.js
+// for the same DB_PATH pattern).
+const LOGS_DIR = process.env.LOGS_DIR || path.join(__dirname, '../../logs');
+// Only the currently-active file per stream — never the rotated logs/*N.log
+// backups, which can grow large over a server's lifetime and aren't meant
+// to be read live.
+const LOG_FILES = { combined: 'combined.log', error: 'error.log' };
 
 // GET /api/admin/users
 router.get('/users', requireAdmin, (_req, res) => {
@@ -120,12 +131,22 @@ router.patch('/reports/:userId/:invoiceId/resolve', requireAdmin, async (req, re
 
 // GET /api/admin/monitoring — per-user activity + backend health, for the Admin Monitoring tab.
 router.get('/monitoring', requireAdmin, (_req, res) => {
-  const fs    = require('fs');
   const users = readUsers();
 
   let dbSizeKb = null;
   try {
     if (db.path !== ':memory:') dbSizeKb = Math.round(fs.statSync(db.path).size / 1024);
+  } catch (_) {}
+
+  // Total bytes under logs/ — includes rotated backups, so a runaway pre-rotation
+  // log (this app once had 500MB+ files before maxsize/maxFiles was added) is
+  // visible here even though /logs itself only ever reads the active file.
+  let logsSizeMb = null;
+  try {
+    const total = fs.readdirSync(LOGS_DIR).reduce((sum, f) => {
+      try { return sum + fs.statSync(path.join(LOGS_DIR, f)).size; } catch { return sum; }
+    }, 0);
+    logsSizeMb = Math.round(total / 1024 / 1024);
   } catch (_) {}
 
   const mem = process.memoryUsage();
@@ -167,12 +188,40 @@ router.get('/monitoring', requireAdmin, (_req, res) => {
         heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
       },
       dbSizeKb,
+      logsSizeMb,
       redisConfigured: !!process.env.REDIS_URL,
       totalUsers:      users.length,
       totalInvoices,
     },
     users: userStats,
   });
+});
+
+// GET /api/admin/logs — tail the active combined/error log for on-call debugging
+// without needing SSH access to the server. Only reads the currently-active file
+// (see LOG_FILES above); filters are applied before the tail so "last 200" means
+// the last 200 matching entries, not 200 raw lines that then get filtered down.
+router.get('/logs', requireAdmin, (req, res) => {
+  const fileKey  = LOG_FILES[req.query.file] ? req.query.file : 'combined';
+  const filePath = path.join(LOGS_DIR, LOG_FILES[fileKey]);
+  const lines    = Math.min(Math.max(parseInt(req.query.lines, 10) || 200, 1), 1000);
+  const userId   = (req.query.userId || '').trim();
+  const q        = (req.query.q || '').trim().toLowerCase();
+
+  let raw = '';
+  try { raw = fs.readFileSync(filePath, 'utf8'); } catch (_) { /* not created yet */ }
+
+  const entries = raw.split('\n').filter(Boolean).map(line => {
+    try { return JSON.parse(line); } catch { return { level: 'info', message: line, timestamp: null }; }
+  });
+
+  const filtered = entries.filter(e => {
+    if (userId && !JSON.stringify(e).includes(userId)) return false;
+    if (q && !JSON.stringify(e).toLowerCase().includes(q)) return false;
+    return true;
+  });
+
+  res.json({ file: fileKey, entries: filtered.slice(-lines) });
 });
 
 module.exports = router;

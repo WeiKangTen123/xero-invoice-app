@@ -76,7 +76,7 @@ export default function Admin() {
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, marginBottom: 20, width: 'fit-content' }}>
-        {[{ key: 'users', label: '👥 Users' }, { key: 'reports', label: '⚠ Reports' }, { key: 'monitoring', label: '📊 Monitoring' }].map(t => (
+        {[{ key: 'users', label: '👥 Users' }, { key: 'reports', label: '⚠ Reports' }, { key: 'monitoring', label: '📊 Monitoring' }, { key: 'logs', label: '📄 Logs' }].map(t => (
           <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{
             padding: '7px 18px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
             background: tab === t.key ? 'var(--accent-gradient)' : 'transparent',
@@ -92,6 +92,7 @@ export default function Admin() {
 
       {tab === 'reports'    && <ReportsPanel navigate={navigate} />}
       {tab === 'monitoring' && <MonitoringPanel />}
+      {tab === 'logs'       && <LogsPanel />}
 
       {tab === 'users' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20, alignItems: 'start' }}>
 
@@ -443,6 +444,7 @@ function MonitoringPanel() {
           <StatCard label="Memory (RSS)"  value={`${system.memory.rssMb} MB`} />
           <StatCard label="Heap Used"     value={`${system.memory.heapUsedMb} MB`} />
           <StatCard label="DB Size"       value={system.dbSizeKb != null ? `${system.dbSizeKb} KB` : '—'} />
+          <StatCard label="Logs Size"     value={system.logsSizeMb != null ? `${system.logsSizeMb} MB` : '—'} />
           <StatCard label="Redis"         value={system.redisConfigured ? 'Configured' : 'Not set'} />
           <StatCard label="Total Users"   value={system.totalUsers} />
           <StatCard label="Total Invoices" value={system.totalInvoices} />
@@ -499,6 +501,148 @@ function MonitoringPanel() {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Logs panel ──────────────────────────────────────────────────────────────
+// Tails the live combined/error log so day-to-day debugging doesn't require
+// SSH-ing into the server just to grep a file.
+function levelStyle(level) {
+  switch (level) {
+    case 'error': return { background: 'var(--danger-subtle)', color: 'var(--danger)' };
+    case 'warn':  return { background: 'rgba(245,158,11,0.12)', color: 'var(--warning)' };
+    default:      return { background: 'var(--bg-hover)', color: 'var(--text-muted)' };
+  }
+}
+
+function LogsPanel() {
+  const [file,    setFile]    = useState('combined');
+  const [userId,  setUserId]  = useState('');
+  const [q,       setQ]       = useState('');
+  const [lines,   setLines]   = useState(200);
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  async function fetchLogs(overrideFile) {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ file: overrideFile || file, lines: String(lines) });
+      if (userId.trim()) params.set('userId', userId.trim());
+      if (q.trim())      params.set('q', q.trim());
+      const d = await api.get(`/admin/logs?${params.toString()}`);
+      setEntries(d.entries || []);
+    } catch (_) {
+      setEntries([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { fetchLogs(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function selectFile(f) {
+    setFile(f);
+    fetchLogs(f);
+  }
+
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+        <div>
+          <div className="card-title">Server Logs</div>
+          <div className="card-subtitle" style={{ marginBottom: 0 }}>
+            Live tail of the active log file — no SSH needed for day-to-day debugging.
+          </div>
+        </div>
+        <button className="btn btn-outline btn-sm" onClick={() => fetchLogs()}>↻</button>
+      </div>
+
+      <form
+        onSubmit={e => { e.preventDefault(); fetchLogs(); }}
+        style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 14 }}
+      >
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[{ key: 'combined', label: 'All' }, { key: 'error', label: 'Errors only' }].map(f => (
+            <button
+              key={f.key} type="button" onClick={() => selectFile(f.key)}
+              className="btn btn-sm"
+              style={{
+                background: file === f.key ? 'var(--accent-gradient)' : 'var(--bg-secondary)',
+                color:      file === f.key ? '#fff' : 'var(--text-muted)',
+                border:     file === f.key ? 'none' : '1px solid var(--border)',
+              }}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <input
+          type="text" className="form-input" placeholder="Filter by user ID…"
+          value={userId} onChange={e => setUserId(e.target.value)}
+          style={{ maxWidth: 190 }}
+        />
+        <input
+          type="text" className="form-input" placeholder="Search message…"
+          value={q} onChange={e => setQ(e.target.value)}
+          style={{ maxWidth: 220 }}
+        />
+        <select
+          className="form-input" value={lines}
+          onChange={e => { const n = Number(e.target.value); setLines(n); fetchLogs(); }}
+          style={{ maxWidth: 110 }}
+        >
+          {[100, 200, 500, 1000].map(n => <option key={n} value={n}>{n} lines</option>)}
+        </select>
+        <button type="submit" className="btn btn-primary btn-sm">Search</button>
+      </form>
+
+      {loading ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)', padding: '16px 0' }}>
+          <span style={{ width: 14, height: 14, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.65s linear infinite', display: 'inline-block' }} />
+          Loading...
+        </div>
+      ) : entries.length === 0 ? (
+        <div className="empty-state" style={{ padding: '30px 0' }}>
+          <div className="empty-state-icon">📄</div>
+          <div>No matching log entries</div>
+        </div>
+      ) : (
+        <div style={{
+          fontFamily: 'monospace', fontSize: 12, lineHeight: 1.6,
+          background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 10,
+          padding: '4px 12px', maxHeight: 480, overflowY: 'auto',
+        }}>
+          {entries.map((e, i) => {
+            const c = levelStyle(e.level);
+            return (
+              <div
+                key={i} title={JSON.stringify(e, null, 2)}
+                style={{
+                  display: 'flex', gap: 8, padding: '5px 0', alignItems: 'flex-start',
+                  borderTop: i > 0 ? '1px solid var(--border)' : 'none',
+                }}
+              >
+                <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                  {e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '—'}
+                </span>
+                <span style={{
+                  background: c.background, color: c.color, borderRadius: 4, padding: '1px 6px',
+                  fontWeight: 700, fontSize: 10, textTransform: 'uppercase', whiteSpace: 'nowrap', flexShrink: 0,
+                }}>
+                  {e.level || 'info'}
+                </span>
+                <span style={{ color: 'var(--text-primary)', wordBreak: 'break-word' }}>
+                  {e.message}
+                  {(e.userId || e.by) && (
+                    <span style={{ color: 'var(--text-muted)' }}> — {e.userId ? `user:${e.userId}` : e.by}</span>
+                  )}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
