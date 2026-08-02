@@ -52,6 +52,44 @@ describe('users store (SQLite)', () => {
     expect(cfg.XERO_CLIENT_ID).toBeUndefined();
   });
 
+  test('secret fields are encrypted at rest, non-secret fields stay plain', async () => {
+    const u = await users.createUser('sec@test.com', 'password123', 'user');
+    users.saveUserConfig(u.id, {
+      XERO_CLIENT_ID:     'plain-client-id',
+      XERO_CLIENT_SECRET: 'super-secret-value',
+      IMAP_PASS:          'app-password-123',
+      Gemini_API_KEY:     'AIzaFakeKeyForTest',
+    });
+
+    const db  = require('../db');
+    const row = db.prepare('SELECT * FROM user_credentials WHERE user_id = ?').get(u.id);
+
+    // Raw DB values for secret columns must NOT equal the plaintext...
+    expect(row.xero_client_secret).not.toBe('super-secret-value');
+    expect(row.imap_pass).not.toBe('app-password-123');
+    expect(row.gemini_api_key).not.toBe('AIzaFakeKeyForTest');
+    // ...and must be recognisably encrypted.
+    expect(row.xero_client_secret.startsWith('enc:v1:')).toBe(true);
+    // Non-secret columns stay plain, unchanged, queryable.
+    expect(row.xero_client_id).toBe('plain-client-id');
+
+    // getUserConfig still returns the real values, transparently decrypted.
+    const cfg = users.getUserConfig(u.id);
+    expect(cfg.XERO_CLIENT_SECRET).toBe('super-secret-value');
+    expect(cfg.IMAP_PASS).toBe('app-password-123');
+    expect(cfg.Gemini_API_KEY).toBe('AIzaFakeKeyForTest');
+  });
+
+  test('a legacy plaintext secret value (pre-encryption) is still readable', async () => {
+    const u = await users.createUser('legacy@test.com', 'password123', 'user');
+    const db = require('../db');
+    // Simulate a row written before encryption existed — direct SQL, bypassing saveUserConfig.
+    db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(u.id);
+    db.prepare('UPDATE user_credentials SET gemini_api_key = ? WHERE user_id = ?').run('legacy-plain-key', u.id);
+
+    expect(users.getUserConfig(u.id).Gemini_API_KEY).toBe('legacy-plain-key');
+  });
+
   test('getSetupStatus reflects configured sections', async () => {
     const u = await users.createUser('setup@test.com', 'password123', 'user');
     expect(users.getSetupStatus(u.id).ready).toBe(false);

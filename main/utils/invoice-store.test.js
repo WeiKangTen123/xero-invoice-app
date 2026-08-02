@@ -79,11 +79,14 @@ describe('invoice-store (SQLite)', () => {
     expect(store.claimForSubmit(inv.id)).toEqual({ claimed: false, reason: 'already submitting' });
   });
 
-  test('claimForSubmit rejects an already-posted invoice', () => {
+  test('claimForSubmit allows re-claiming an already-posted invoice (re-post flow)', () => {
     const store = invoiceStore.forUser(userId);
     const inv   = baseInvoice({ status: 'posted', xeroInvoiceId: 'xero-9' });
     store.add(inv);
-    expect(store.claimForSubmit(inv.id)).toEqual({ claimed: false, reason: 'already posted', xeroInvoiceId: 'xero-9' });
+    expect(store.claimForSubmit(inv.id)).toEqual({ claimed: true });
+    expect(store.getById(inv.id).status).toBe('submitting');
+    // xeroInvoiceId is preserved through the claim so the caller can route to an update
+    expect(store.getById(inv.id).xeroInvoiceId).toBe('xero-9');
   });
 
   test('addReport sets status to reported and stores the report', () => {
@@ -107,5 +110,30 @@ describe('invoice-store (SQLite)', () => {
     expect(store.getAll()).toHaveLength(500);
     expect(store.getById('bulk-0')).toBeNull();
     expect(store.getById('bulk-504')).not.toBeNull();
+  });
+
+  // Regression test for the batched-report-fetch fix (was one query per invoice,
+  // now one query for the whole set) — verifies each invoice still gets exactly
+  // its own reports, not another invoice's, and unreported invoices get [].
+  test('getAll/getFlagged attach reports to the correct invoice after batch fetch', () => {
+    const store = invoiceStore.forUser(userId);
+    const a = baseInvoice({ id: 'multi-a', vendorName: 'Vendor A' });
+    const b = baseInvoice({ id: 'multi-b', vendorName: 'Vendor B' });
+    const c = baseInvoice({ id: 'multi-c', vendorName: 'Vendor C' }); // never reported
+    store.add(a); store.add(b); store.add(c);
+
+    store.addReport('multi-a', { userEmail: 'u1@test.com', note: 'issue on A' });
+    store.addReport('multi-b', { userEmail: 'u2@test.com', note: 'issue on B (1)' });
+    store.addReport('multi-b', { userEmail: 'u3@test.com', note: 'issue on B (2)' });
+
+    const all = store.getAll();
+    const byId = Object.fromEntries(all.map(i => [i.id, i]));
+
+    expect(byId['multi-a'].reports.map(r => r.note)).toEqual(['issue on A']);
+    expect(byId['multi-b'].reports.map(r => r.note)).toEqual(['issue on B (1)', 'issue on B (2)']);
+    expect(byId['multi-c'].reports).toEqual([]);
+
+    const flagged = store.getFlagged();
+    expect(flagged.map(i => i.id).sort()).toEqual(['multi-a', 'multi-b']);
   });
 });

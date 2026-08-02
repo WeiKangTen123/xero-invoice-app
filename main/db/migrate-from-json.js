@@ -9,7 +9,8 @@ const path = require('path');
 
 require('./migrate').run(); // ensure schema exists first
 const db = require('./index');
-const { CONFIG_KEY_TO_COLUMN } = require('../utils/users');
+const { CONFIG_KEY_TO_COLUMN, ENCRYPTED_COLUMNS } = require('../utils/users');
+const { encrypt } = require('../utils/crypto');
 const { FIELD_TO_COLUMN, _toBindable } = require('../utils/invoice-store');
 
 const DATA_DIR  = path.join(__dirname, '../data');
@@ -46,7 +47,10 @@ function importCredentials(userId) {
 
   db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(userId);
   const sets = keys.map(k => `${CONFIG_KEY_TO_COLUMN[k]} = ?`).join(', ');
-  const args = keys.map(k => config[k]);
+  const args = keys.map(k => {
+    const column = CONFIG_KEY_TO_COLUMN[k];
+    return ENCRYPTED_COLUMNS.has(column) ? encrypt(config[k]) : config[k];
+  });
   db.prepare(`UPDATE user_credentials SET ${sets} WHERE user_id = ?`).run(...args, userId);
 }
 

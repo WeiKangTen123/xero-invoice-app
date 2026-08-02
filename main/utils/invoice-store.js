@@ -96,9 +96,29 @@ function forUser(userId) {
 
   function _hydrate(row) { return row ? _rowToRecord(row, _reportsFor(row.id)) : null; }
 
+  // Batched version of _hydrate for a whole row set — one query for all reports
+  // instead of one query per invoice. getAll/getReported/getFlagged/findPosted/
+  // findStored all fan out over every matching invoice, so without this each of
+  // those calls issued 1 + N queries (N = invoice count, up to 500/user).
+  function _hydrateMany(rows) {
+    if (!rows.length) return [];
+    const placeholders = rows.map(() => '?').join(',');
+    const reportRows = db.prepare(`
+      SELECT invoice_id AS invoiceId, user_email AS userEmail, note, reported_at AS reportedAt
+      FROM invoice_reports WHERE invoice_id IN (${placeholders}) ORDER BY id
+    `).all(...rows.map(r => r.id));
+
+    const byInvoice = new Map();
+    for (const r of reportRows) {
+      if (!byInvoice.has(r.invoiceId)) byInvoice.set(r.invoiceId, []);
+      byInvoice.get(r.invoiceId).push({ userEmail: r.userEmail, note: r.note, reportedAt: r.reportedAt });
+    }
+    return rows.map(row => _rowToRecord(row, byInvoice.get(row.id) || []));
+  }
+
   function getAll() {
     const rows = db.prepare('SELECT * FROM invoices WHERE user_id = ? ORDER BY rowid DESC').all(userId);
-    return rows.map(_hydrate);
+    return _hydrateMany(rows);
   }
 
   function getById(id) {
@@ -159,15 +179,15 @@ function forUser(userId) {
   }
 
   function getReported() {
-    return db.prepare('SELECT * FROM invoices WHERE user_id = ? AND status = ?')
-      .all(userId, 'reported').map(_hydrate);
+    const rows = db.prepare('SELECT * FROM invoices WHERE user_id = ? AND status = ?').all(userId, 'reported');
+    return _hydrateMany(rows);
   }
 
   // Returns all invoices that need human attention: user-flagged reports and
   // system-flagged parsing failures that could not be submitted to Xero.
   function getFlagged() {
-    return db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status IN ('reported', 'review-needed')")
-      .all(userId).map(_hydrate);
+    const rows = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status IN ('reported', 'review-needed')").all(userId);
+    return _hydrateMany(rows);
   }
 
   function remove(id) {
@@ -212,27 +232,29 @@ function forUser(userId) {
   // Returns a posted record matching this invoice, or null.
   function findPosted(vendorName, invoiceNumber, invoiceDate, totalAmount) {
     const normV = _normalizeVendor(vendorName);
-    const candidates = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status = 'posted'")
-      .all(userId).map(_hydrate);
+    const rows = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status = 'posted'").all(userId);
+    const candidates = _hydrateMany(rows);
     return candidates.find(inv => _matchesInvoice(inv, normV, invoiceNumber, invoiceDate, totalAmount)) || null;
   }
 
   // Returns any already-stored record matching this invoice (posted, pending, or review-needed).
   function findStored(vendorName, invoiceNumber, invoiceDate, totalAmount) {
     const normV = _normalizeVendor(vendorName);
-    const candidates = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status NOT IN ('duplicate', 'error')")
-      .all(userId).map(_hydrate);
+    const rows = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status NOT IN ('duplicate', 'error')").all(userId);
+    const candidates = _hydrateMany(rows);
     return candidates.find(inv => _matchesInvoice(inv, normV, invoiceNumber, invoiceDate, totalAmount)) || null;
   }
 
-  // Atomically marks an invoice as 'submitting' if it isn't already posted or in-flight.
+  // Atomically marks an invoice as 'submitting' if it isn't already in-flight.
+  // A 'posted' invoice CAN be re-claimed — that's a deliberate re-post of a correction,
+  // which the Xero layer routes to an update-in-place using the stored xeroInvoiceId
+  // rather than creating a duplicate bill (see queue/processor.js submitDraftInvoice).
   // better-sqlite3 is synchronous, so the whole select-then-write happens on one tick
   // of the single-threaded event loop — no other call can interleave.
   function claimForSubmit(id) {
     const claim = db.transaction(() => {
-      const row = db.prepare('SELECT status, xero_invoice_id FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
+      const row = db.prepare('SELECT status FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
       if (!row) return { claimed: false, reason: 'not found' };
-      if (row.status === 'posted')     return { claimed: false, reason: 'already posted', xeroInvoiceId: row.xero_invoice_id };
       if (row.status === 'submitting') return { claimed: false, reason: 'already submitting' };
       db.prepare("UPDATE invoices SET status = 'submitting', error_msg = NULL WHERE id = ? AND user_id = ?").run(id, userId);
       return { claimed: true };
