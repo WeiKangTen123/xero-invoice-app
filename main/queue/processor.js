@@ -1,8 +1,17 @@
-const { createDraftInvoice }                 = require('../xero/invoices');
+const { createDraftInvoice, updateDraftInvoice } = require('../xero/invoices');
 const { notifyInvoiceCreated, notifyError }  = require('../utils/notify');
 const logger = require('../utils/logger');
 
 let invoiceQueue = null;
+
+// Routes to an update when the invoice already has a Xero ID (re-posting a
+// correction), otherwise creates a new draft — keeps re-posts from ever creating
+// a duplicate bill in the connected Xero org.
+function submitDraftInvoice(userId, tenantId, invoiceData) {
+  return invoiceData.xeroInvoiceId
+    ? updateDraftInvoice(userId, tenantId, invoiceData.xeroInvoiceId, invoiceData)
+    : createDraftInvoice(userId, tenantId, invoiceData);
+}
 
 function getQueue() {
   if (invoiceQueue) return invoiceQueue;
@@ -24,9 +33,9 @@ function getQueue() {
 
     invoiceQueue.process(3, async (job) => {
       const { userId, invoiceData, tenantId, tenantName } = job.data;
-      logger.info('Processing invoice job', { jobId: job.id, tenant: tenantName, userId });
+      logger.info('Processing invoice job', { jobId: job.id, tenant: tenantName, userId, mode: invoiceData.xeroInvoiceId ? 'update' : 'create' });
 
-      const xeroInvoice = await createDraftInvoice(userId, tenantId, invoiceData);
+      const xeroInvoice = await submitDraftInvoice(userId, tenantId, invoiceData);
 
       // Update the invoice store record now that Xero has accepted it.
       // This covers the async queue path — the inline path is already handled
@@ -107,8 +116,9 @@ async function enqueueInvoice(userId, invoiceData) {
       logger.info('Invoice queued', { tenant: tenantName, vendor: invoiceData.vendorName, userId });
     } else {
       try {
-        logger.info('Processing invoice inline', { tenant: tenantName, userId });
-        const xeroInvoice = await createDraftInvoice(userId, tenantId, invoiceData);
+        const mode = invoiceData.xeroInvoiceId ? 'update' : 'create';
+        logger.info('Processing invoice inline', { tenant: tenantName, userId, mode });
+        const xeroInvoice = await submitDraftInvoice(userId, tenantId, invoiceData);
         await notifyInvoiceCreated({
           tenantName,
           vendorName:    invoiceData.vendorName,
@@ -117,11 +127,11 @@ async function enqueueInvoice(userId, invoiceData) {
           currency:      invoiceData.currency || 'SGD',
           invoiceID:     xeroInvoice.invoiceID,
         });
-        logger.info('Invoice created inline', { invoiceID: xeroInvoice.invoiceID, userId });
+        logger.info(`Invoice ${mode === 'update' ? 'updated' : 'created'} inline`, { invoiceID: xeroInvoice.invoiceID, userId });
         firstInvoiceId = firstInvoiceId || xeroInvoice.invoiceID;
       } catch (err) {
         const detail = err?.response?.body || err?.response?.data || err?.body || err?.message || String(err);
-        logger.error('Inline invoice creation failed', {
+        logger.error('Inline invoice submission failed', {
           tenant: tenantName, error: err.message, detail: JSON.stringify(detail), userId,
         });
         lastErr = err;

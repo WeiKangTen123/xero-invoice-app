@@ -46,10 +46,11 @@ const processRoutes = require('./routes/process');
 const invoiceRoutes = require('./routes/invoices');
 const adminRoutes   = require('./routes/admin');
 const dashRoutes    = require('./routes/dashboard');
+const chatRoutes    = require('./routes/chat');
 
 
 const app  = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
 const PROD = process.env.NODE_ENV === 'production';
 
 // ── Security & middleware ────────────────────────────────────────────────────
@@ -88,6 +89,7 @@ app.use('/api/setup',    setupRoutes);
 app.use('/api/process',  processRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/admin',    adminRoutes);
+app.use('/api/chat',     chatRoutes);
 app.use('/dashboard',    dashRoutes);   // legacy health check
 
 // ── Serve React UI ───────────────────────────────────────────────────────────

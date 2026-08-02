@@ -37,8 +37,11 @@ const EDITABLE_FIELDS = new Set([
   'paymentReference',
 ]);
 
-const EDITABLE_STATUSES    = new Set(['pending', 'review-needed', 'error', 'reviewed']);
-const SUBMITTABLE_STATUSES = new Set(['pending', 'review-needed', 'error', 'reviewed']);
+// 'posted' is included so a correction can be edited and re-posted — re-posting an
+// already-posted invoice updates the existing Xero bill in place (see
+// queue/processor.js submitDraftInvoice) rather than creating a duplicate.
+const EDITABLE_STATUSES    = new Set(['pending', 'review-needed', 'error', 'reviewed', 'posted']);
+const SUBMITTABLE_STATUSES = new Set(['pending', 'review-needed', 'error', 'reviewed', 'posted']);
 
 // ── GET /api/invoices ─────────────────────────────────────────────────────────
 router.get('/', requireAuth, (req, res) => {
@@ -324,5 +327,9 @@ router.delete('/', requireAuth, async (req, res, next) => {
     res.json({ success: true });
   } catch (err) { next(err); }
 });
+
+// Exposed so the chat assistant validates proposed edits against the exact same
+// whitelist this route enforces — one source of truth, no risk of drift.
+router.EDITABLE_FIELDS = EDITABLE_FIELDS;
 
 module.exports = router;
