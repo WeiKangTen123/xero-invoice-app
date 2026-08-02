@@ -3,17 +3,21 @@ const router  = express.Router();
 const fs      = require('fs');
 const path    = require('path');
 const { requireAuth, requireAdmin } = require('../middleware/auth-middleware');
-const { getUserConfig, saveUserConfig, getSetupStatus } = require('../utils/users');
+const {
+  getUserConfig, saveUserConfig, getSetupStatus,
+  getGeminiKeys, addGeminiKey, removeGeminiKey,
+} = require('../utils/users');
 const logger  = require('../utils/logger');
 
 // ── Field definitions ─────────────────────────────────────────────────────────
 
 // Per-user fields — stored in data/users/{id}/config.json
-// Each user brings their own IMAP account, Xero connection, and LLM API key.
+// Each user brings their own IMAP account and Xero connection. Gemini API keys are
+// a separate 1:many resource managed via the /llm-keys routes below, not a flat
+// field here — a user can have any number of them.
 const USER_SECTIONS = {
   xero:     ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET'],
   imap:     ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_FILTER_FROM', 'IMAP_POLL_INTERVAL_MS'],
-  llm:      ['Gemini_API_KEY'],
   defaults: ['DEFAULT_ACCOUNT_CODE', 'DEFAULT_CURRENCY', 'ZERO_TAX_RATE'],
 };
 
@@ -22,10 +26,6 @@ const USER_SECTIONS = {
 const GLOBAL_SECTIONS = {
   optional: ['SLACK_WEBHOOK_URL', 'REDIS_URL'],
 };
-
-const SECRET_KEYS = new Set([
-  'XERO_CLIENT_SECRET', 'IMAP_PASS', 'Gemini_API_KEY', 'SLACK_WEBHOOK_URL',
-]);
 
 const ENV_FILE = path.join(__dirname, '../.env');
 
@@ -138,6 +138,41 @@ router.post('/', requireAuth, (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Gemini API keys — a separate 1:many resource, not a flat Setup field ──────
+// gemini-client.js rotates through every model on one key before moving to the
+// next, so adding a key here is real extra quota headroom, not just a spare.
+
+// GET /api/setup/llm-keys — list this user's keys (masked, never the raw value)
+router.get('/llm-keys', requireAuth, (req, res) => {
+  const keys = getGeminiKeys(req.user.id).map(k => ({
+    id:        k.id,
+    label:     k.label,
+    createdAt: k.createdAt,
+    keyMasked: k.apiKey.length > 8 ? `${k.apiKey.slice(0, 4)}••••${k.apiKey.slice(-4)}` : '••••',
+  }));
+  res.json({ keys });
+});
+
+// POST /api/setup/llm-keys — add a new key
+router.post('/llm-keys', requireAuth, (req, res) => {
+  try {
+    const { apiKey, label } = req.body;
+    const result = addGeminiKey(req.user.id, apiKey, label);
+    logger.info('Gemini API key added', { by: req.user.email });
+    res.status(201).json({ success: true, id: result.id });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// DELETE /api/setup/llm-keys/:id
+router.delete('/llm-keys/:id', requireAuth, (req, res) => {
+  const removed = removeGeminiKey(req.user.id, Number(req.params.id));
+  if (!removed) return res.status(404).json({ error: 'Key not found' });
+  logger.info('Gemini API key removed', { by: req.user.email });
+  res.json({ success: true });
 });
 
 // ── POST /api/setup/test/xero — test this user's Xero connection ──────────────

@@ -152,7 +152,9 @@ function getSetupStatus(userId) {
   const config = getUserConfig(userId);
   const imap   = !!(config.IMAP_HOST && config.IMAP_USER && config.IMAP_PASS);
   const xero   = !!(config.XERO_CLIENT_ID && config.XERO_CLIENT_SECRET);
-  const llm    = !!(config.Gemini_API_KEY || config.Nvidia_API_KEY || config.OPENROUTER_API_KEY);
+  // Legacy single-field fallback covers an account that hasn't added a key through
+  // the multi-key UI yet but still has the old single Gemini_API_KEY column set.
+  const llm    = getGeminiKeys(userId).length > 0 || !!config.Gemini_API_KEY;
 
   const missingConfig = [];
   if (!imap) missingConfig.push('imap');
@@ -166,6 +168,29 @@ function getSetupStatus(userId) {
     ready:         imap && xero,
     missingConfig,
   };
+}
+
+// ── Gemini API keys (1:many — see user_gemini_keys in schema.sql) ────────────
+// A user can add more than one key; gemini-client.js rotates through every model
+// on a key before moving to the next one, so adding a key is real extra quota
+// headroom, not just a spare. Ordered oldest-first so rotation is deterministic.
+
+function getGeminiKeys(userId) {
+  const rows = db.prepare('SELECT id, api_key, label, created_at FROM user_gemini_keys WHERE user_id = ? ORDER BY id').all(userId);
+  return rows.map(r => ({ id: r.id, apiKey: decrypt(r.api_key), label: r.label, createdAt: r.created_at }));
+}
+
+function addGeminiKey(userId, apiKey, label) {
+  if (!apiKey || !apiKey.trim()) throw new Error('API key is required');
+  const info = db.prepare(`
+    INSERT INTO user_gemini_keys (user_id, api_key, label, created_at) VALUES (?, ?, ?, ?)
+  `).run(userId, encrypt(apiKey.trim()), label ? label.trim().slice(0, 60) : null, new Date().toISOString());
+  return { id: info.lastInsertRowid };
+}
+
+function removeGeminiKey(userId, keyId) {
+  const info = db.prepare('DELETE FROM user_gemini_keys WHERE id = ? AND user_id = ?').run(keyId, userId);
+  return info.changes > 0;
 }
 
 // Ensures every account has a user_credentials/user_settings row. Safe to call on
@@ -182,5 +207,6 @@ module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
   getAllUsers, updateUserRole, deleteUser, readUsers,
   getUserConfig, saveUserConfig, getSetupStatus, ensureUserDirectories,
+  getGeminiKeys, addGeminiKey, removeGeminiKey,
   CONFIG_KEY_TO_COLUMN, ENCRYPTED_COLUMNS, // exposed for the one-time JSON->SQLite importer
 };
