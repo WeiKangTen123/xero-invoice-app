@@ -21,7 +21,7 @@ function _normalizeVendor(name) {
 const COLUMNS = [
   'id', 'user_id', 'status', 'has_pdf', 'pdf_filename', 'vendor_name', 'contact_name',
   'contact_email', 'contact_address', 'invoice_number', 'invoice_date', 'due_date',
-  'total_amount', 'currency', 'invoice_type', 'source', 'source_email', 'line_items',
+  'total_amount', 'currency', 'invoice_type', 'source', 'source_email',
   'description', 'account_code', 'tax_amount', 'sub_total', 'payment_reference',
   'xero_invoice_id', 'error_msg', 'duplicate_of', 'resolved_by', 'resolved_at',
   'submitted_at', 'processed_at', 'updated_at',
@@ -33,7 +33,7 @@ const FIELD_TO_COLUMN = {
   contactEmail: 'contact_email', contactAddress: 'contact_address',
   invoiceNumber: 'invoice_number', invoiceDate: 'invoice_date', dueDate: 'due_date',
   totalAmount: 'total_amount', currency: 'currency', invoiceType: 'invoice_type',
-  source: 'source', sourceEmail: 'source_email', lineItems: 'line_items',
+  source: 'source', sourceEmail: 'source_email',
   description: 'description', accountCode: 'account_code', taxAmount: 'tax_amount',
   subTotal: 'sub_total', paymentReference: 'payment_reference',
   xeroInvoiceId: 'xero_invoice_id', errorMsg: 'error_msg', duplicateOf: 'duplicate_of',
@@ -41,16 +41,23 @@ const FIELD_TO_COLUMN = {
   processedAt: 'processed_at', updatedAt: 'updated_at',
 };
 
+// total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
+// but every caller outside this file works in decimal dollars — these two helpers
+// are the only place that boundary is crossed.
+const MONEY_FIELDS = new Set(['totalAmount', 'taxAmount', 'subTotal']);
+function _dollarsToCents(value) { return Math.round((Number(value) || 0) * 100); }
+function _centsToDollars(value) { return Math.round(value || 0) / 100; }
+
 // better-sqlite3 can only bind numbers/strings/bigints/buffers/null — booleans and
 // undefined (both of which show up on invoice records, e.g. hasPdf) need coercing.
 function _toBindable(field, value) {
-  if (field === 'lineItems') return JSON.stringify(value || []);
+  if (MONEY_FIELDS.has(field)) return _dollarsToCents(value);
   if (typeof value === 'boolean') return value ? 1 : 0;
   if (value === undefined) return null;
   return value;
 }
 
-function _rowToRecord(row, reports) {
+function _rowToRecord(row, reports, lineItems) {
   if (!row) return null;
   return {
     id:                row.id,
@@ -64,16 +71,16 @@ function _rowToRecord(row, reports) {
     invoiceNumber:     row.invoice_number,
     invoiceDate:       row.invoice_date,
     dueDate:           row.due_date,
-    totalAmount:       row.total_amount,
+    totalAmount:       _centsToDollars(row.total_amount),
     currency:          row.currency,
     invoiceType:       row.invoice_type,
     source:            row.source,
     sourceEmail:       row.source_email,
-    lineItems:         row.line_items ? JSON.parse(row.line_items) : [],
+    lineItems:         lineItems || [],
     description:       row.description,
     accountCode:       row.account_code,
-    taxAmount:         row.tax_amount,
-    subTotal:          row.sub_total,
+    taxAmount:         _centsToDollars(row.tax_amount),
+    subTotal:          _centsToDollars(row.sub_total),
     paymentReference:  row.payment_reference,
     xeroInvoiceId:     row.xero_invoice_id,
     errorMsg:          row.error_msg,
@@ -94,26 +101,58 @@ function forUser(userId) {
     `).all(invoiceId);
   }
 
-  function _hydrate(row) { return row ? _rowToRecord(row, _reportsFor(row.id)) : null; }
+  function _lineItemsFor(invoiceId) {
+    return db.prepare(`
+      SELECT description, unit_amount AS unitAmount, discount_rate AS discountRate
+      FROM invoice_line_items WHERE invoice_id = ? ORDER BY sort_order
+    `).all(invoiceId).map(li => ({ ...li, unitAmount: _centsToDollars(li.unitAmount) }));
+  }
+
+  function _replaceLineItems(invoiceId, lineItems) {
+    db.prepare('DELETE FROM invoice_line_items WHERE invoice_id = ?').run(invoiceId);
+    const insert = db.prepare(`
+      INSERT INTO invoice_line_items (invoice_id, sort_order, description, unit_amount, discount_rate)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    (lineItems || []).forEach((item, i) => {
+      insert.run(invoiceId, i, item.description ?? null, _dollarsToCents(item.unitAmount), item.discountRate ?? null);
+    });
+  }
+
+  function _hydrate(row) { return row ? _rowToRecord(row, _reportsFor(row.id), _lineItemsFor(row.id)) : null; }
 
   // Batched version of _hydrate for a whole row set — one query for all reports
-  // instead of one query per invoice. getAll/getReported/getFlagged/findPosted/
-  // findStored all fan out over every matching invoice, so without this each of
-  // those calls issued 1 + N queries (N = invoice count, up to 500/user).
+  // (and line items) instead of one query per invoice. getAll/getReported/getFlagged/
+  // findPosted/findStored all fan out over every matching invoice, so without this
+  // each of those calls issued 1 + N queries (N = invoice count, up to 500/user).
   function _hydrateMany(rows) {
     if (!rows.length) return [];
     const placeholders = rows.map(() => '?').join(',');
+    const ids = rows.map(r => r.id);
+
     const reportRows = db.prepare(`
       SELECT invoice_id AS invoiceId, user_email AS userEmail, note, reported_at AS reportedAt
       FROM invoice_reports WHERE invoice_id IN (${placeholders}) ORDER BY id
-    `).all(...rows.map(r => r.id));
-
-    const byInvoice = new Map();
+    `).all(...ids);
+    const reportsByInvoice = new Map();
     for (const r of reportRows) {
-      if (!byInvoice.has(r.invoiceId)) byInvoice.set(r.invoiceId, []);
-      byInvoice.get(r.invoiceId).push({ userEmail: r.userEmail, note: r.note, reportedAt: r.reportedAt });
+      if (!reportsByInvoice.has(r.invoiceId)) reportsByInvoice.set(r.invoiceId, []);
+      reportsByInvoice.get(r.invoiceId).push({ userEmail: r.userEmail, note: r.note, reportedAt: r.reportedAt });
     }
-    return rows.map(row => _rowToRecord(row, byInvoice.get(row.id) || []));
+
+    const lineItemRows = db.prepare(`
+      SELECT invoice_id AS invoiceId, description, unit_amount AS unitAmount, discount_rate AS discountRate
+      FROM invoice_line_items WHERE invoice_id IN (${placeholders}) ORDER BY invoice_id, sort_order
+    `).all(...ids);
+    const lineItemsByInvoice = new Map();
+    for (const li of lineItemRows) {
+      if (!lineItemsByInvoice.has(li.invoiceId)) lineItemsByInvoice.set(li.invoiceId, []);
+      lineItemsByInvoice.get(li.invoiceId).push({
+        description: li.description, unitAmount: _centsToDollars(li.unitAmount), discountRate: li.discountRate,
+      });
+    }
+
+    return rows.map(row => _rowToRecord(row, reportsByInvoice.get(row.id) || [], lineItemsByInvoice.get(row.id) || []));
   }
 
   function getAll() {
@@ -141,6 +180,7 @@ function forUser(userId) {
 
     const placeholders = cols.map(() => '?').join(', ');
     db.prepare(`INSERT INTO invoices (${cols.join(', ')}) VALUES (${placeholders})`).run(...vals);
+    if ('lineItems' in invoice) _replaceLineItems(invoice.id, invoice.lineItems);
 
     // Enforce the same MAX-500-per-user cap the old JSON store had.
     db.prepare(`
@@ -159,12 +199,14 @@ function forUser(userId) {
     const sets = ['updated_at = ?'];
     const args = [new Date().toISOString()];
     for (const [field, value] of Object.entries(patch)) {
+      if (field === 'lineItems') continue; // handled separately below (child table, not a column)
       const column = FIELD_TO_COLUMN[field];
       if (!column || column === 'id' || column === 'user_id') continue;
       sets.push(`${column} = ?`);
       args.push(_toBindable(field, value));
     }
     db.prepare(`UPDATE invoices SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`).run(...args, id, userId);
+    if ('lineItems' in patch) _replaceLineItems(id, patch.lineItems);
     return getById(id);
   }
 

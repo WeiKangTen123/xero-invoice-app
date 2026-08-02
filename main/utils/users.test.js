@@ -52,6 +52,12 @@ describe('users store (SQLite)', () => {
     expect(cfg.XERO_CLIENT_ID).toBeUndefined();
   });
 
+  test('IMAP_LOOKBACK_DAYS round-trips through saveUserConfig / getUserConfig', async () => {
+    const u = await users.createUser('lookback@test.com', 'password123', 'user');
+    users.saveUserConfig(u.id, { IMAP_LOOKBACK_DAYS: '30' });
+    expect(users.getUserConfig(u.id).IMAP_LOOKBACK_DAYS).toBe('30');
+  });
+
   test('secret fields are encrypted at rest, non-secret fields stay plain', async () => {
     const u = await users.createUser('sec@test.com', 'password123', 'user');
     users.saveUserConfig(u.id, {

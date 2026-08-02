@@ -13,6 +13,7 @@ const CONFIG_KEY_TO_COLUMN = {
   IMAP_PASS:             'imap_pass',
   IMAP_FILTER_FROM:      'imap_filter_from',
   IMAP_POLL_INTERVAL_MS: 'imap_poll_interval_ms',
+  IMAP_LOOKBACK_DAYS:    'imap_lookback_days',
   Gemini_API_KEY:        'gemini_api_key',
   Nvidia_API_KEY:        'nvidia_api_key',
   OPENROUTER_API_KEY:    'openrouter_api_key',

@@ -17,7 +17,7 @@ const logger  = require('../utils/logger');
 // field here — a user can have any number of them.
 const USER_SECTIONS = {
   xero:     ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET'],
-  imap:     ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_FILTER_FROM', 'IMAP_POLL_INTERVAL_MS'],
+  imap:     ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_FILTER_FROM', 'IMAP_POLL_INTERVAL_MS', 'IMAP_LOOKBACK_DAYS'],
   defaults: ['DEFAULT_ACCOUNT_CODE', 'DEFAULT_CURRENCY', 'ZERO_TAX_RATE'],
 };
 

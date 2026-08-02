@@ -89,6 +89,15 @@ function importInvoices(userId) {
         VALUES (?, ?, ?, ?)
       `).run(inv.id, r.userEmail, r.note, r.reportedAt || new Date().toISOString());
     }
+
+    // lineItems isn't in FIELD_TO_COLUMN (it's a child table, not a column — see
+    // invoice-store.js), so it needs its own insert here, same as invoice_reports above.
+    (inv.lineItems || []).forEach((item, i) => {
+      db.prepare(`
+        INSERT INTO invoice_line_items (invoice_id, sort_order, description, unit_amount, discount_rate)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(inv.id, i, item.description ?? null, Math.round((Number(item.unitAmount) || 0) * 100), item.discountRate ?? null);
+    });
   }
   console.log(`  invoices for user ${userId}: ${imported} imported, ${invoices.length - imported} already present`);
 }

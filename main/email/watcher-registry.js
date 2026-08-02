@@ -10,6 +10,8 @@ const RECONNECT_BASE_MS   = 10000;
 const RECONNECT_MAX_MS    = 300000; // 5 min cap
 const RECONNECT_MAX_TRIES = 20;
 const UPDATE_DEBOUNCE_MS  = 3000;
+const DEFAULT_LOOKBACK_DAYS = 100;
+const MAX_LOOKBACK_DAYS     = 365; // guards against an accidentally huge/slow IMAP SINCE search
 
 // registry: userId → WatcherState object
 const _registry = new Map();
@@ -36,12 +38,20 @@ function _getState(userId) {
 
 // ── Fetch ─────────────────────────────────────────────────────────────────────
 
+// Clamped so a blank/invalid/zero/negative value falls back to the default rather
+// than searching since the epoch, and an absurdly large one (e.g. a typo'd extra
+// zero) can't turn every poll into a multi-year IMAP SINCE search.
+function _resolveLookbackDays(raw) {
+  return Math.min(Math.max(parseInt(raw, 10) || DEFAULT_LOOKBACK_DAYS, 1), MAX_LOOKBACK_DAYS);
+}
+
 function _fetchUnseen(s) {
   if (s.fetchInProgress) { s.fetchPending = true; return; }
   s.fetchInProgress = true;
 
+  const lookbackDays = _resolveLookbackDays(s.credentials?.IMAP_LOOKBACK_DAYS);
   const since = new Date();
-  since.setDate(since.getDate() - 100);
+  since.setDate(since.getDate() - lookbackDays);
   const sinceStr = since.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' });
   const criteria = ['UNSEEN', ['SINCE', sinceStr]];
   if (s.credentials?.IMAP_FILTER_FROM) {
@@ -259,4 +269,4 @@ function isRunning(userId) {
   return !!_registry.get(userId)?.imap;
 }
 
-module.exports = { start, stop, rescan, isRunning };
+module.exports = { start, stop, rescan, isRunning, _resolveLookbackDays }; // last one exposed for tests
