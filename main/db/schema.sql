@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS user_credentials (
   imap_pass             TEXT,
   imap_filter_from      TEXT,
   imap_poll_interval_ms TEXT,
+  imap_lookback_days    TEXT,
   gemini_api_key        TEXT,
   nvidia_api_key        TEXT,
   openrouter_api_key    TEXT,
@@ -38,10 +39,17 @@ CREATE TABLE IF NOT EXISTS user_settings (
 );
 
 -- 1:many — invoice records (was data/users/<id>/invoices.json array)
+-- total_amount/tax_amount/sub_total are stored as INTEGER cents (not REAL dollars)
+-- to avoid float rounding drift on repeated read-modify-write cycles; invoice-store.js
+-- converts to/from decimal dollars at the JS boundary, so every other layer of the
+-- app (parsing, Xero posting, the UI) keeps working with plain dollar amounts.
 CREATE TABLE IF NOT EXISTS invoices (
   id                TEXT PRIMARY KEY,
   user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  status            TEXT NOT NULL,
+  status            TEXT NOT NULL CHECK (status IN (
+                       'pending', 'submitting', 'posted', 'error',
+                       'duplicate', 'reported', 'review-needed', 'reviewed'
+                     )),
   has_pdf           INTEGER NOT NULL DEFAULT 0,
   pdf_filename      TEXT,
   vendor_name       TEXT,
@@ -51,20 +59,19 @@ CREATE TABLE IF NOT EXISTS invoices (
   invoice_number    TEXT,
   invoice_date      TEXT,
   due_date          TEXT,
-  total_amount      REAL DEFAULT 0,
+  total_amount      INTEGER DEFAULT 0, -- cents
   currency          TEXT,
   invoice_type      TEXT,
   source            TEXT,
   source_email      TEXT,
-  line_items        TEXT,
   description       TEXT,
   account_code      TEXT,
-  tax_amount        REAL DEFAULT 0,
-  sub_total         REAL DEFAULT 0,
+  tax_amount        INTEGER DEFAULT 0, -- cents
+  sub_total         INTEGER DEFAULT 0, -- cents
   payment_reference TEXT,
   xero_invoice_id   TEXT,
   error_msg         TEXT,
-  duplicate_of      TEXT,
+  duplicate_of      TEXT REFERENCES invoices(id) ON DELETE SET NULL,
   resolved_by       TEXT,
   resolved_at       TEXT,
   submitted_at      TEXT,
@@ -73,6 +80,12 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(user_id, status);
+
+-- One posted Xero invoice can't back two local records for the same user. NULLs
+-- (every non-posted invoice) are exempt — SQLite treats each NULL as distinct, and
+-- the partial WHERE clause makes that explicit rather than incidental.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_user_xero_invoice
+  ON invoices(user_id, xero_invoice_id) WHERE xero_invoice_id IS NOT NULL;
 
 -- 1:many — invoice reports (was invoices[i].reports[])
 CREATE TABLE IF NOT EXISTS invoice_reports (
@@ -83,6 +96,21 @@ CREATE TABLE IF NOT EXISTS invoice_reports (
   reported_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reports_invoice_id ON invoice_reports(invoice_id);
+
+-- 1:many — invoice line items (was invoices.line_items, a JSON-encoded TEXT blob).
+-- Normalised into its own table for the same reason as invoice_reports: the app
+-- never queries into individual line items, but keeping them in a real table with
+-- a real cents column avoids float drift the same way total_amount/tax_amount do,
+-- and sort_order preserves the original array order on read.
+CREATE TABLE IF NOT EXISTS invoice_line_items (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  invoice_id     TEXT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  sort_order     INTEGER NOT NULL,
+  description    TEXT,
+  unit_amount    INTEGER NOT NULL DEFAULT 0, -- cents
+  discount_rate  REAL -- percent (0-100), not a currency value
+);
+CREATE INDEX IF NOT EXISTS idx_line_items_invoice_id ON invoice_line_items(invoice_id);
 
 -- 1:many — persisted connected-org list. Tokens themselves are NOT stored here;
 -- they stay in-memory in token-cache.js and auto-refresh via client credentials.

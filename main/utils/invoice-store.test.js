@@ -136,4 +136,134 @@ describe('invoice-store (SQLite)', () => {
     const flagged = store.getFlagged();
     expect(flagged.map(i => i.id).sort()).toEqual(['multi-a', 'multi-b']);
   });
+
+  // Regression coverage for the REAL-dollars -> INTEGER-cents migration: money is
+  // stored as cents (see schema.sql), so a value like 19.99 must survive a
+  // write/read cycle exactly, not drift the way repeated float math would.
+  describe('money stored as integer cents', () => {
+    test('a decimal dollar amount round-trips exactly, with no float drift', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv = baseInvoice({ totalAmount: 19.99, taxAmount: 1.62, subTotal: 18.37 });
+      store.add(inv);
+      const fetched = store.getById(inv.id);
+      expect(fetched.totalAmount).toBe(19.99);
+      expect(fetched.taxAmount).toBe(1.62);
+      expect(fetched.subTotal).toBe(18.37);
+    });
+
+    test('the underlying column actually holds cents, not dollars', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv = baseInvoice({ totalAmount: 19.99 });
+      store.add(inv);
+      const db = require('../db');
+      const raw = db.prepare('SELECT total_amount FROM invoices WHERE id = ?').get(inv.id);
+      expect(raw.total_amount).toBe(1999);
+    });
+
+    test('update() also converts a patched money field through the cents boundary', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv = baseInvoice({ totalAmount: 100 });
+      store.add(inv);
+      const updated = store.update(inv.id, { totalAmount: 250.5 });
+      expect(updated.totalAmount).toBe(250.5);
+    });
+
+    test('surviving 100 repeated read-modify-write cycles does not accumulate drift', () => {
+      // This is exactly the failure mode REAL dollars was vulnerable to and cents isn't.
+      const store = invoiceStore.forUser(userId);
+      const inv = baseInvoice({ totalAmount: 10.1 });
+      store.add(inv);
+      for (let i = 0; i < 100; i++) {
+        const current = store.getById(inv.id).totalAmount;
+        store.update(inv.id, { totalAmount: current });
+      }
+      expect(store.getById(inv.id).totalAmount).toBe(10.1);
+    });
+  });
+
+  describe('line items (invoice_line_items child table)', () => {
+    test('add() persists line items and getById() returns them in the original order', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv = baseInvoice({
+        lineItems: [
+          { description: 'First item',  unitAmount: 12.34, discountRate: 0 },
+          { description: 'Second item', unitAmount: 56.78, discountRate: 10 },
+        ],
+      });
+      store.add(inv);
+      const fetched = store.getById(inv.id);
+      expect(fetched.lineItems).toEqual([
+        { description: 'First item',  unitAmount: 12.34, discountRate: 0 },
+        { description: 'Second item', unitAmount: 56.78, discountRate: 10 },
+      ]);
+    });
+
+    test('an invoice with no line items returns an empty array, not null/undefined', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv = baseInvoice();
+      store.add(inv);
+      expect(store.getById(inv.id).lineItems).toEqual([]);
+    });
+
+    test('update() with a lineItems patch fully replaces the previous set', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv = baseInvoice({ lineItems: [{ description: 'Old item', unitAmount: 5 }] });
+      store.add(inv);
+      store.update(inv.id, { lineItems: [{ description: 'New item', unitAmount: 9.5 }] });
+      const fetched = store.getById(inv.id);
+      expect(fetched.lineItems).toHaveLength(1);
+      expect(fetched.lineItems[0]).toMatchObject({ description: 'New item', unitAmount: 9.5 });
+    });
+
+    test('getAll() (batched hydration) attaches line items to the correct invoice', () => {
+      const store = invoiceStore.forUser(userId);
+      store.add(baseInvoice({ id: 'li-a', lineItems: [{ description: 'A1', unitAmount: 1 }] }));
+      store.add(baseInvoice({ id: 'li-b', lineItems: [{ description: 'B1', unitAmount: 2 }, { description: 'B2', unitAmount: 3 }] }));
+      const byId = Object.fromEntries(store.getAll().map(i => [i.id, i]));
+      expect(byId['li-a'].lineItems.map(l => l.description)).toEqual(['A1']);
+      expect(byId['li-b'].lineItems.map(l => l.description)).toEqual(['B1', 'B2']);
+    });
+
+    test('deleting the parent invoice cascades to its line items', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv = baseInvoice({ lineItems: [{ description: 'Item', unitAmount: 1 }] });
+      store.add(inv);
+      store.remove(inv.id);
+      const db = require('../db');
+      const remaining = db.prepare('SELECT COUNT(*) AS n FROM invoice_line_items WHERE invoice_id = ?').get(inv.id);
+      expect(remaining.n).toBe(0);
+    });
+  });
+
+  describe('schema constraints', () => {
+    test('rejects an invoice with a status outside the allowed CHECK list', () => {
+      const store = invoiceStore.forUser(userId);
+      expect(() => store.add(baseInvoice({ status: 'not-a-real-status' }))).toThrow();
+    });
+
+    test('rejects a second invoice with the same (user_id, xero_invoice_id)', () => {
+      const store = invoiceStore.forUser(userId);
+      store.add(baseInvoice({ id: 'dup-1', status: 'posted', xeroInvoiceId: 'xero-shared' }));
+      expect(() => store.add(baseInvoice({ id: 'dup-2', status: 'posted', xeroInvoiceId: 'xero-shared' })))
+        .toThrow();
+    });
+
+    test('allows multiple invoices with no xeroInvoiceId (NULLs are not "duplicates" of each other)', () => {
+      const store = invoiceStore.forUser(userId);
+      store.add(baseInvoice({ id: 'null-1' }));
+      expect(() => store.add(baseInvoice({ id: 'null-2' }))).not.toThrow();
+    });
+
+    test('rejects duplicateOf pointing at a non-existent invoice id', () => {
+      const store = invoiceStore.forUser(userId);
+      expect(() => store.add(baseInvoice({ duplicateOf: 'does-not-exist' }))).toThrow();
+    });
+
+    test('accepts duplicateOf pointing at a real invoice id', () => {
+      const store = invoiceStore.forUser(userId);
+      const original = baseInvoice({ id: 'orig-1', status: 'posted' });
+      store.add(original);
+      expect(() => store.add(baseInvoice({ id: 'dup-of-orig', duplicateOf: 'orig-1' }))).not.toThrow();
+    });
+  });
 });

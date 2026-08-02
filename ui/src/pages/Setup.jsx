@@ -11,6 +11,7 @@ const HELP = {
   IMAP_PASS:             'App password for the mailbox. For Gmail, generate one under Google Account → Security → App passwords.',
   IMAP_FILTER_FROM:      'Optional — only process emails from this sender address. Leave blank to process all.',
   IMAP_POLL_INTERVAL_MS: 'How often to check for new emails in milliseconds. Default: 60000 (60 seconds).',
+  IMAP_LOOKBACK_DAYS:    'How many days back to search for unread invoice emails. Default: 100. Max: 365.',
   DEFAULT_ACCOUNT_CODE:  'Xero account code for line items when no code is detected (e.g. 200).',
   DEFAULT_CURRENCY:      'Default invoice currency code (e.g. SGD, USD, AUD).',
   ZERO_TAX_RATE:         'Tax rate name in Xero for zero-rated items (e.g. NONE, TAX001).',
