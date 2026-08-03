@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DigitalOcean vs Aliyun — 50GB Database Sizing</title>
+    <style>
+        :root {
+            --bg-base: #08090f;
+            --bg-card: #0f1018;
+            --bg-card-hover: #161720;
+            --bg-inset: #0a0b12;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --text-faint: #5b6577;
+            --do-color: #0080ff;
+            --do-soft: rgba(0, 128, 255, 0.1);
+            --ali-color: #ff6a00;
+            --ali-soft: rgba(255, 106, 0, 0.1);
+            --accent-start: #6366f1;
+            --accent-end: #8b5cf6;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --border-glass: rgba(255, 255, 255, 0.07);
+            --font-stack: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            --mono-stack: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+            --card-radius: 16px;
+            --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: var(--font-stack);
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            line-height: 1.6;
+        }
+
+        .container { max-width: 1160px; margin: 0 auto; padding: 0 1.5rem; }
+        .section { padding: 4rem 0; border-bottom: 1px solid var(--border-glass); }
+        .section:last-of-type { border-bottom: none; }
+
+        h1, h2, h3, h4 { font-weight: 700; line-height: 1.2; }
+        h2 { font-size: 2rem; margin-bottom: 0.75rem; }
+        h2 .eyebrow-num { color: var(--text-faint); font-family: var(--mono-stack); font-size: 1.1rem; margin-right: 0.5rem; }
+        p { color: var(--text-muted); }
+        .section-lede { font-size: 1.05rem; max-width: 60ch; margin-bottom: 2.5rem; }
+        .mono { font-family: var(--mono-stack); }
+
+        code {
+            font-family: var(--mono-stack);
+            background: rgba(255,255,255,0.06);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: #d4d9e8;
+        }
+
+        a { color: inherit; }
+
+        /* ── Top bar (link back to the main doc) ───────────────────────── */
+        .topbar {
+            border-bottom: 1px solid var(--border-glass);
+            padding: 1.1rem 0;
+        }
+        .topbar .container { display: flex; align-items: center; justify-content: space-between; }
+        .back-link {
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            color: var(--text-muted); text-decoration: none; font-size: 0.9rem; font-weight: 500;
+            transition: var(--transition);
+        }
+        .back-link:hover { color: #fff; }
+        .topbar .tag { font-family: var(--mono-stack); font-size: 0.78rem; color: var(--text-faint); }
+
+        /* ── Hero ───────────────────────────────────────────────────────── */
+        .hero { padding: 5rem 0 3rem; text-align: center; position: relative; overflow: hidden; }
+        .hero::before {
+            content: ''; position: absolute; top: -10%; left: 50%; transform: translateX(-50%);
+            width: 900px; height: 500px;
+            background: radial-gradient(ellipse, rgba(0,128,255,0.12) 0%, rgba(255,106,0,0.08) 45%, transparent 75%);
+            z-index: -1; pointer-events: none;
+        }
+        .hero .kicker {
+            font-family: var(--mono-stack); font-size: 0.8rem; letter-spacing: 0.1em; text-transform: uppercase;
+            color: var(--text-faint); margin-bottom: 1.25rem;
+        }
+        .hero h1 {
+            font-size: clamp(2.2rem, 5vw, 3.4rem); letter-spacing: -0.03em; margin-bottom: 1.25rem;
+            text-wrap: balance;
+        }
+        .hero h1 .vs {
+            display: inline-block; font-size: 0.5em; color: var(--text-faint); vertical-align: middle;
+            margin: 0 0.3em; font-weight: 400;
+        }
+        .hero .provider-do { color: var(--do-color); }
+        .hero .provider-ali { color: var(--ali-color); }
+        .hero p.sub { font-size: 1.1rem; max-width: 620px; margin: 0 auto; }
+        .hero .sub strong { color: var(--text-main); }
+
+        /* ── Provider head-to-head cards ───────────────────────────────── */
+        .vs-grid {
+            display: grid; grid-template-columns: 1fr auto 1fr; gap: 1.5rem; align-items: stretch;
+        }
+        @media (max-width: 820px) { .vs-grid { grid-template-columns: 1fr; } .vs-divider { display: none; } }
+
+        .provider-card {
+            background: var(--bg-card); border: 1px solid var(--border-glass); border-radius: var(--card-radius);
+            padding: 2rem; display: flex; flex-direction: column;
+        }
+        .provider-card.do { border-top: 3px solid var(--do-color); }
+        .provider-card.ali { border-top: 3px solid var(--ali-color); }
+
+        .provider-head { display: flex; align-items: center; gap: 0.85rem; margin-bottom: 0.35rem; }
+        .provider-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+        .provider-dot.do { background: var(--do-color); }
+        .provider-dot.ali { background: var(--ali-color); }
+        .provider-name { font-size: 1.3rem; font-weight: 700; }
+        .provider-region { font-size: 0.85rem; color: var(--text-faint); margin-bottom: 1.5rem; }
+
+        .spec-row {
+            display: flex; justify-content: space-between; align-items: baseline;
+            padding: 0.7rem 0; border-bottom: 1px dashed var(--border-glass); font-size: 0.92rem;
+        }
+        .spec-row:last-of-type { border-bottom: none; }
+        .spec-row .label { color: var(--text-muted); }
+        .spec-row .value { color: var(--text-main); font-weight: 600; text-align: right; font-family: var(--mono-stack); font-size: 0.88rem; }
+
+        .subtotal-line {
+            display: flex; justify-content: space-between; padding: 0.85rem 0 0; margin-top: 0.5rem;
+            font-size: 0.88rem; color: var(--text-faint);
+        }
+
+        .provider-total {
+            margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border-glass);
+            display: flex; justify-content: space-between; align-items: baseline;
+        }
+        .provider-total .label { font-size: 0.95rem; color: var(--text-muted); }
+        .provider-total .amount { font-size: 2rem; font-weight: 800; font-family: var(--mono-stack); }
+        .do .provider-total .amount { color: var(--do-color); }
+        .ali .provider-total .amount { color: var(--ali-color); }
+        .provider-total .per { font-size: 0.85rem; color: var(--text-faint); font-weight: 400; }
+
+        .vs-divider {
+            display: flex; align-items: center; justify-content: center;
+            font-family: var(--mono-stack); font-weight: 800; font-size: 0.9rem; color: var(--text-faint);
+            width: 42px;
+        }
+        .vs-divider span {
+            width: 42px; height: 42px; border-radius: 50%; background: var(--bg-card);
+            border: 1px solid var(--border-glass); display: flex; align-items: center; justify-content: center;
+        }
+
+        .diff-banner {
+            margin-top: 1.5rem; padding: 1.1rem 1.5rem; border-radius: 12px;
+            background: linear-gradient(90deg, var(--ali-soft), transparent);
+            border: 1px solid rgba(255,106,0,0.25);
+            font-size: 0.95rem; display: flex; align-items: center; gap: 0.75rem;
+        }
+        .diff-banner strong { color: var(--ali-color); }
+
+        /* ── Storage model callout ─────────────────────────────────────── */
+        .model-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 2rem; }
+        @media (max-width: 700px) { .model-grid { grid-template-columns: 1fr; } }
+        .model-card {
+            background: var(--bg-inset); border: 1px solid var(--border-glass); border-radius: 12px; padding: 1.5rem;
+        }
+        .model-card h4 { font-size: 1rem; margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; }
+        .model-card.do-model h4::before { content: '●'; color: var(--do-color); }
+        .model-card.ali-model h4::before { content: '●'; color: var(--ali-color); }
+        .model-card p { font-size: 0.9rem; margin-bottom: 0; }
+        .tier-ladder { list-style: none; margin-top: 1rem; font-family: var(--mono-stack); font-size: 0.82rem; }
+        .tier-ladder li { padding: 0.3rem 0; color: var(--text-faint); display: flex; justify-content: space-between; }
+        .tier-ladder li.picked { color: var(--text-main); font-weight: 600; }
+        .tier-ladder li.picked::before { content: '→ '; }
+
+        /* ── Scaling table ──────────────────────────────────────────────── */
+        .scale-table-wrap { overflow-x: auto; border-radius: var(--card-radius); border: 1px solid var(--border-glass); }
+        table.scale-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        table.scale-table th, table.scale-table td { padding: 0.9rem 1.1rem; text-align: right; border-bottom: 1px solid var(--border-glass); }
+        table.scale-table th:first-child, table.scale-table td:first-child { text-align: left; }
+        table.scale-table thead th { background: rgba(255,255,255,0.02); color: var(--text-muted); font-weight: 600; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
+        table.scale-table tbody tr:last-child td { border-bottom: none; }
+        table.scale-table td.mono-cell { font-family: var(--mono-stack); }
+        table.scale-table .col-do { color: var(--do-color); font-weight: 700; }
+        table.scale-table .col-ali { color: var(--ali-color); font-weight: 700; }
+        table.scale-table tr.current-row { background: rgba(255,255,255,0.025); }
+        table.scale-table tr.current-row td:first-child { position: relative; }
+        .row-flag {
+            display: inline-block; font-size: 0.68rem; font-family: var(--mono-stack); letter-spacing: 0.03em;
+            padding: 0.15rem 0.5rem; border-radius: 100px; background: var(--accent-start); color: #fff; margin-left: 0.6rem;
+            vertical-align: middle;
+        }
+
+        /* ── Feature matrix ─────────────────────────────────────────────── */
+        .feature-table-wrap { overflow-x: auto; border-radius: var(--card-radius); border: 1px solid var(--border-glass); }
+        table.feature-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        table.feature-table th, table.feature-table td { padding: 0.85rem 1.1rem; border-bottom: 1px solid var(--border-glass); text-align: center; }
+        table.feature-table th:first-child, table.feature-table td:first-child { text-align: left; color: var(--text-muted); }
+        table.feature-table thead th { background: rgba(255,255,255,0.02); font-weight: 700; }
+        table.feature-table thead th.do-head { color: var(--do-color); }
+        table.feature-table thead th.ali-head { color: var(--ali-color); }
+        table.feature-table tbody tr:last-child td { border-bottom: none; }
+        .yes { color: var(--success); }
+        .no { color: var(--text-faint); }
+        .partial { color: var(--warning); }
+
+        /* ── Verdict ────────────────────────────────────────────────────── */
+        .verdict-card {
+            background: var(--bg-card); border: 1px solid var(--border-glass); border-radius: var(--card-radius);
+            padding: 2.25rem; position: relative; overflow: hidden;
+        }
+        .verdict-card::before {
+            content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%;
+            background: linear-gradient(180deg, var(--ali-color), var(--do-color));
+        }
+        .verdict-card h3 { font-size: 1.3rem; margin-bottom: 1rem; }
+        .verdict-list { list-style: none; display: flex; flex-direction: column; gap: 0.9rem; margin-top: 1.25rem; }
+        .verdict-list li { display: flex; gap: 0.85rem; align-items: flex-start; font-size: 0.95rem; color: var(--text-muted); }
+        .verdict-list li .num {
+            flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; background: rgba(255,255,255,0.08);
+            display: flex; align-items: center; justify-content: center; font-family: var(--mono-stack); font-size: 0.72rem;
+            color: var(--text-main); margin-top: 0.1rem;
+        }
+        .verdict-list li strong { color: var(--text-main); }
+
+        .caveat {
+            margin-top: 2rem; padding: 1rem 1.25rem; border-radius: 10px;
+            background: rgba(245, 158, 11, 0.06); border: 1px solid rgba(245, 158, 11, 0.2);
+            font-size: 0.85rem; color: var(--text-muted); display: flex; gap: 0.7rem;
+        }
+        .caveat .icon { flex-shrink: 0; }
+
+        footer { padding: 2.5rem 0; text-align: center; font-size: 0.85rem; color: var(--text-faint); }
+    </style>
+</head>
+<body>
+
+    <div class="topbar">
+        <div class="container">
+            <a href="index.html" class="back-link">← Back to full Server Configuration doc</a>
+            <span class="tag">documentation/server_config/index_1.html</span>
+        </div>
+    </div>
+
+    <main>
+        <section class="hero">
+            <div class="container">
+                <div class="kicker">Provider Deep-Dive · Database sized for 50 GB</div>
+                <h1><span class="provider-do">DigitalOcean</span><span class="vs">vs</span><span class="provider-ali">Alibaba Cloud</span></h1>
+                <p class="sub">The <a href="02_Provider_Comparison.md"><code>02_Provider_Comparison.md</code></a> matrix compares every provider at the <strong>10 GB launch tier</strong>. This page answers a narrower question: once the invoice/company data actually needs <strong>~50 GB</strong>, which of the two realistic front-runners holds up better — and why.</p>
+            </div>
+        </section>
+
+        <section class="section">
+            <div class="container">
+                <h2><span class="eyebrow-num">01</span>Side-by-side at 50 GB</h2>
+                <p class="section-lede">Same app server both sides (2 vCPU / 4 GB RAM — this app's Node process + IMAP listener need dedicated resources, not shared). The database is sized to clear a 50 GB working set on each provider's own tier structure.</p>
+
+                <div class="vs-grid">
+                    <div class="provider-card do">
+                        <div class="provider-head">
+                            <span class="provider-dot do"></span>
+                            <span class="provider-name">DigitalOcean</span>
+                        </div>
+                        <div class="provider-region">Singapore (SGP1)</div>
+
+                        <div class="spec-row"><span class="label">App Droplet — 2 vCPU / 4 GB / 80 GB SSD</span><span class="value">$24/mo</span></div>
+                        <div class="spec-row"><span class="label">Managed PostgreSQL — 2 vCPU / 4 GB / 60 GB SSD</span><span class="value">$60/mo</span></div>
+                        <div class="spec-row"><span class="label">Cloudflare (DDoS + SSL + CDN)</span><span class="value">$0/mo</span></div>
+
+                        <div class="provider-total">
+                            <span class="label">Total</span>
+                            <span class="amount">$84<span class="per">/mo</span></span>
+                        </div>
+                    </div>
+
+                    <div class="vs-divider"><span>vs</span></div>
+
+                    <div class="provider-card ali">
+                        <div class="provider-head">
+                            <span class="provider-dot ali"></span>
+                            <span class="provider-name">Alibaba Cloud</span>
+                        </div>
+                        <div class="provider-region">Kuala Lumpur (or Singapore)</div>
+
+                        <div class="spec-row"><span class="label">ECS — 2 vCPU / 4 GB / 40 GB SSD</span><span class="value">~$20/mo</span></div>
+                        <div class="spec-row"><span class="label">ApsaraDB RDS compute — 2 vCPU / 4 GB</span><span class="value">~$42/mo</span></div>
+                        <div class="spec-row"><span class="label">+ 50 GB cloud SSD storage (billed separately)</span><span class="value">~$6/mo</span></div>
+                        <div class="spec-row"><span class="label">Security Groups + DDoS basic</span><span class="value">$0/mo</span></div>
+
+                        <div class="provider-total">
+                            <span class="label">Total</span>
+                            <span class="amount">~$68<span class="per">/mo</span></span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="diff-banner">
+                    ⚡ At the 50 GB tier, Aliyun runs roughly <strong>$16/mo (~19%) cheaper</strong> — and it's not a pricing coincidence. It comes from how each provider structures database storage. See below.
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <div class="container">
+                <h2><span class="eyebrow-num">02</span>Why the gap opens up at 50 GB</h2>
+                <p class="section-lede">At the 10 GB launch tier (see the main comparison doc) DigitalOcean is actually the <em>cheaper</em> of the two — $39/mo all-in vs Aliyun's ~$45/mo. The ranking flips once storage needs grow, because of a structural difference in how each provider sells database storage.</p>
+
+                <div class="model-grid">
+                    <div class="model-card do-model">
+                        <h4>DigitalOcean — storage bundled with compute</h4>
+                        <p>You can't buy "50 GB" on its own. Storage is fixed per compute tier, and tiers roughly double at each step — so clearing 50 GB forces a jump to the tier with 60 GB, which also doubles the vCPU/RAM whether that compute is needed or not.</p>
+                        <ul class="tier-ladder">
+                            <li>1 vCPU · 1 GB RAM · <b>10 GB</b> — $15/mo</li>
+                            <li>1 vCPU · 2 GB RAM · <b>30 GB</b> — $30/mo</li>
+                            <li class="picked">2 vCPU · 4 GB RAM · <b>60 GB</b> — $60/mo</li>
+                            <li>4 vCPU · 8 GB RAM · <b>115 GB</b> — $120/mo</li>
+                        </ul>
+                    </div>
+                    <div class="model-card ali-model">
+                        <h4>Aliyun — storage decoupled from compute</h4>
+                        <p>ApsaraDB RDS sells compute (vCPU/RAM) and cloud SSD storage as two separate line items. Need more disk but not more CPU? Add storage in ~20 GB increments at roughly <code>$0.10–0.12/GB/mo</code> without ever paying for compute you don't need.</p>
+                        <ul class="tier-ladder">
+                            <li>1 vCPU · 2 GB RAM (compute) — ~$25/mo</li>
+                            <li class="picked">2 vCPU · 4 GB RAM (compute) — ~$42/mo</li>
+                            <li>+ storage, any size — ~$0.10–0.12/GB/mo</li>
+                            <li>+ 50 GB example — ~$6/mo on top</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <div class="container">
+                <h2><span class="eyebrow-num">03</span>Total cost as the database grows</h2>
+                <p class="section-lede">Same two providers, same app server, database size increasing left to right. This is the trend that matters for a B2B SaaS onboarding more companies over time.</p>
+
+                <div class="scale-table-wrap">
+                    <table class="scale-table">
+                        <thead>
+                            <tr>
+                                <th>DB size</th>
+                                <th class="col-do">DigitalOcean</th>
+                                <th class="col-ali">Aliyun</th>
+                                <th>Cheaper by</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>10 GB <span style="color:var(--text-faint); font-weight:400;">— launch, 1–10 companies</span></td>
+                                <td class="mono-cell">$39/mo</td>
+                                <td class="mono-cell">~$45/mo</td>
+                                <td class="mono-cell col-do">DO by $6</td>
+                            </tr>
+                            <tr class="current-row">
+                                <td>50 GB <span class="row-flag">THIS PAGE</span></td>
+                                <td class="mono-cell">$84/mo</td>
+                                <td class="mono-cell">~$68/mo</td>
+                                <td class="mono-cell col-ali">Aliyun by $16</td>
+                            </tr>
+                            <tr>
+                                <td>100 GB <span style="color:var(--text-faint); font-weight:400;">— 30–50 companies</span></td>
+                                <td class="mono-cell">$144/mo <span style="color:var(--text-faint); font-weight:400;">(next tier: 4 vCPU/8 GB/115 GB)</span></td>
+                                <td class="mono-cell">~$78/mo <span style="color:var(--text-faint); font-weight:400;">(same compute + more storage)</span></td>
+                                <td class="mono-cell col-ali">Aliyun by $66</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p style="margin-top: 1rem; font-size: 0.85rem;">At 100 GB, DigitalOcean is forced into its 4 vCPU/8 GB tier purely to get the disk space — compute it doesn't need. Aliyun just adds storage to the same 2 vCPU/4 GB instance. The gap compounds with every storage-driven tier jump on DO's side.</p>
+            </div>
+        </section>
+
+        <section class="section">
+            <div class="container">
+                <h2><span class="eyebrow-num">04</span>Everything else, side by side</h2>
+
+                <div class="feature-table-wrap">
+                    <table class="feature-table">
+                        <thead>
+                            <tr>
+                                <th>Factor</th>
+                                <th class="do-head">DigitalOcean</th>
+                                <th class="ali-head">Aliyun</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Storage pricing model</td><td class="partial">Bundled w/ compute</td><td class="yes">Decoupled — pay per GB</td></tr>
+                            <tr><td>Kuala Lumpur data centre</td><td class="no">✕</td><td class="yes">✓</td></tr>
+                            <tr><td>Singapore data centre</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+                            <tr><td>Private VPC</td><td class="yes">✓</td><td class="yes">✓</td></tr>
+                            <tr><td>Automated daily DB backups</td><td class="yes">✓ free</td><td class="yes">✓ included</td></tr>
+                            <tr><td>English documentation</td><td class="yes">Best in class</td><td class="partial">Workable, thinner</td></tr>
+                            <tr><td>Console UI clarity</td><td class="yes">Clean</td><td class="partial">Denser, more menus</td></tr>
+                            <tr><td>Setup difficulty</td><td class="partial">Medium</td><td class="no">Harder</td></tr>
+                            <tr><td>Malaysian data residency</td><td class="no">✕</td><td class="yes">✓ (if KL region)</td></tr>
+                            <tr><td>Storage flexibility as DB scales</td><td class="no">Forced compute jumps</td><td class="yes">Add disk independently</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <div class="container">
+                <h2><span class="eyebrow-num">05</span>Verdict</h2>
+                <div class="verdict-card">
+                    <h3>If a 50 GB+ database is the real target, size for Aliyun — but weigh the trade-off honestly.</h3>
+                    <ul class="verdict-list">
+                        <li><span class="num">1</span><span><strong>Launching now, unsure of growth:</strong> stay on DigitalOcean's 10 GB tier ($39/mo). It's cheaper at small scale and the documentation/setup ease is worth more than the storage-pricing difference until data actually grows.</span></li>
+                        <li><span class="num">2</span><span><strong>Already expecting 50 GB+ within the first year:</strong> Aliyun's decoupled storage saves real money and compounds further at 100 GB+ — worth the steeper setup curve, especially if any companies are Malaysia-based (KL data centre + residency).</span></li>
+                        <li><span class="num">3</span><span><strong>Migration path:</strong> nothing locks you in — start on DigitalOcean, and if storage growth outpaces the 60 GB tier, this is the point to re-evaluate against Aliyun's per-GB model rather than paying for DO's next full compute jump.</span></li>
+                    </ul>
+                </div>
+
+                <div class="caveat">
+                    <span class="icon">⚠️</span>
+                    <span>Prices above are estimates built from each provider's published tier structure, not live quotes — cloud pricing changes and varies by region/promo. Confirm current numbers on <span class="mono">digitalocean.com/pricing</span> and the Alibaba Cloud pricing calculator before committing budget.</span>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container">
+            Xero Invoice App — Server Configuration · Companion to <a href="index.html" style="color: var(--text-muted); text-decoration: underline;">index.html</a>
+        </div>
+    </footer>
+
+</body>
+</html>

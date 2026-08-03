@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Configuration & Deployment - Xero Invoice App</title>
+    <style>
+        :root {
+            --bg-base: #08090f;
+            --bg-card: #0f1018;
+            --bg-card-hover: #161720;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent-start: #6366f1;
+            --accent-end: #8b5cf6;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --info: #3b82f6;
+            --border-glass: rgba(255, 255, 255, 0.07);
+            --font-stack: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            --card-radius: 16px;
+            --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-stack);
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        /* Typography */
+        h1, h2, h3, h4 {
+            font-weight: 700;
+            line-height: 1.2;
+            margin-bottom: 1rem;
+        }
+
+        h2 {
+            font-size: 2.25rem;
+            text-align: center;
+            margin-bottom: 2.5rem;
+            background: linear-gradient(to right, #fff, #cbd5e1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        p {
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+        }
+
+        /* Utility */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 1.5rem;
+        }
+
+        .section {
+            padding: 5rem 0;
+            border-bottom: 1px solid var(--border-glass);
+        }
+
+        .section:last-of-type {
+            border-bottom: none;
+        }
+
+        .glass-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-glass);
+            border-radius: var(--card-radius);
+            padding: 2rem;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            transition: var(--transition);
+        }
+
+        .glass-card:hover {
+            background: var(--bg-card-hover);
+            transform: translateY(-5px);
+            border-color: rgba(255, 255, 255, 0.15);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            background: rgba(99, 102, 241, 0.1);
+            color: #a5b4fc;
+            border: 1px solid rgba(99, 102, 241, 0.2);
+        }
+
+        /* Navbar */
+        .navbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 70px;
+            background: rgba(8, 9, 15, 0.8);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border-glass);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+        }
+
+        .navbar .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+        }
+
+        .logo {
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: #fff;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .logo span {
+            background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 1.5rem;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: var(--transition);
+        }
+
+        .nav-links a:hover, .nav-links a.active {
+            color: #fff;
+        }
+
+        /* Hero */
+        .hero {
+            padding: 10rem 0 6rem;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 800px;
+            height: 800px;
+            background: radial-gradient(circle, rgba(99,102,241,0.15) 0%, rgba(8,9,15,0) 70%);
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        .hero h1 {
+            font-size: 3.5rem;
+            letter-spacing: -0.05em;
+            margin-bottom: 1.5rem;
+            background: linear-gradient(135deg, #fff 0%, #a5b4fc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 1.25rem;
+            max-width: 600px;
+            margin: 0 auto 2rem;
+        }
+
+        /* Overview Cards */
+        .overview-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .overview-card .icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            display: inline-block;
+        }
+
+        .overview-card h3 {
+            font-size: 1.25rem;
+            color: #fff;
+        }
+        
+        .overview-card ul {
+            list-style: none;
+            margin-bottom: 1.5rem;
+            color: var(--text-muted);
+        }
+        
+        .overview-card ul li {
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .overview-card ul li::before {
+            content: '•';
+            color: var(--accent-start);
+        }
+        
+        .price {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 1rem;
+        }
+
+        /* Architecture */
+        .arch-diagram {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
+            padding: 3rem 0;
+            position: relative;
+        }
+        
+        .arch-node {
+            background: var(--bg-card);
+            border: 1px solid var(--border-glass);
+            padding: 1.5rem;
+            border-radius: var(--card-radius);
+            text-align: center;
+            z-index: 2;
+            flex: 1;
+            min-width: 150px;
+            position: relative;
+        }
+        
+        .arch-node h4 {
+            margin-bottom: 0.5rem;
+            font-size: 1.1rem;
+        }
+        
+        .arch-node p {
+            font-size: 0.85rem;
+            margin: 0;
+        }
+
+        .arch-arrow {
+            color: var(--accent-start);
+            font-size: 1.5rem;
+            z-index: 1;
+        }
+
+        .arch-group {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            flex: 1;
+        }
+
+        /* Security Matrix */
+        .security-table-wrapper {
+            overflow-x: auto;
+        }
+
+        .security-table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+
+        .security-table th, .security-table td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-glass);
+        }
+
+        .security-table th {
+            font-weight: 600;
+            color: #fff;
+            background: rgba(255,255,255,0.02);
+        }
+
+        .status-ok { color: var(--success); display: flex; align-items: center; gap: 0.5rem; }
+        .status-warn { color: var(--warning); display: flex; align-items: center; gap: 0.5rem; }
+
+        /* Roadmap */
+        .roadmap {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            position: relative;
+        }
+
+        .phase-card {
+            position: relative;
+        }
+
+        .phase-current {
+            border-color: var(--accent-start);
+            box-shadow: 0 0 20px rgba(99, 102, 241, 0.2);
+        }
+        
+        .phase-current::before {
+            content: 'Current Phase';
+            position: absolute;
+            top: -12px;
+            left: 20px;
+            background: linear-gradient(90deg, var(--accent-start), var(--accent-end));
+            color: white;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: bold;
+        }
+
+        /* Comparison Table */
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: center;
+        }
+
+        .comparison-table th, .comparison-table td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-glass);
+        }
+
+        .comparison-table th {
+            color: #fff;
+        }
+        
+        .comparison-table td:first-child, .comparison-table th:first-child {
+            text-align: left;
+        }
+
+        .highlight-col {
+            background: rgba(99, 102, 241, 0.05);
+            border-left: 1px solid rgba(99, 102, 241, 0.2);
+            border-right: 1px solid rgba(99, 102, 241, 0.2);
+        }
+        
+        .highlight-col-header {
+            background: rgba(99, 102, 241, 0.1);
+            border-top: 2px solid var(--accent-start) !important;
+            border-left: 1px solid rgba(99, 102, 241, 0.2);
+            border-right: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: 8px 8px 0 0;
+        }
+
+        /* Port Map */
+        .port-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .port-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 1.5rem;
+            background: rgba(255,255,255,0.02);
+            border-radius: 8px;
+            border-left: 4px solid transparent;
+        }
+        
+        .port-item.public { border-left-color: var(--success); }
+        .port-item.redirect { border-left-color: var(--info); }
+        .port-item.internal { border-left-color: var(--warning); }
+        .port-item.private { border-left-color: var(--danger); }
+        
+        .port-name {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-weight: 600;
+            color: #fff;
+        }
+        
+        .port-num {
+            background: rgba(255,255,255,0.1);
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+
+        /* Checklist */
+        .progress-container {
+            margin-bottom: 2rem;
+        }
+        
+        .progress-bar-bg {
+            height: 8px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+        
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-start), var(--accent-end));
+            width: 0%;
+            transition: width 0.5s ease;
+        }
+        
+        .checklist-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+        
+        .checklist-group h4 {
+            color: #fff;
+            border-bottom: 1px solid var(--border-glass);
+            padding-bottom: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .check-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+            cursor: pointer;
+            user-select: none;
+            transition: var(--transition);
+        }
+        
+        .check-item:hover {
+            color: #fff;
+        }
+        
+        .check-item input[type="checkbox"] {
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--text-muted);
+            border-radius: 4px;
+            background: transparent;
+            cursor: pointer;
+            position: relative;
+            transition: var(--transition);
+        }
+        
+        .check-item input[type="checkbox"]:checked {
+            background: var(--accent-start);
+            border-color: var(--accent-start);
+        }
+        
+        .check-item input[type="checkbox"]:checked::after {
+            content: '✓';
+            position: absolute;
+            color: white;
+            font-size: 14px;
+            top: -1px;
+            left: 3px;
+        }
+        
+        .check-item.completed span {
+            text-decoration: line-through;
+            color: var(--text-muted);
+            opacity: 0.5;
+        }
+
+        /* Cost Chart */
+        .cost-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4rem;
+            flex-wrap: wrap;
+        }
+        
+        .donut-chart {
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            background: conic-gradient(
+                var(--accent-start) 0% 61.5%,
+                var(--info) 61.5% 100%
+            );
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 30px rgba(0,0,0,0.5);
+        }
+        
+        .donut-chart::before {
+            content: '';
+            width: 140px;
+            height: 140px;
+            background: var(--bg-card);
+            border-radius: 50%;
+            position: absolute;
+        }
+        
+        .donut-inner {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+        }
+        
+        .donut-inner h3 {
+            margin: 0;
+            font-size: 1.5rem;
+            color: #fff;
+        }
+        
+        .cost-legend {
+            list-style: none;
+        }
+        
+        .cost-legend li {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            font-size: 1.1rem;
+        }
+        
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+        }
+        
+        .c-app { background: var(--accent-start); }
+        .c-db { background: var(--info); }
+        .c-cf { background: var(--text-muted); }
+
+        /* Footer */
+        footer {
+            background: rgba(8, 9, 15, 0.8);
+            border-top: 1px solid var(--border-glass);
+            padding: 3rem 0;
+            margin-top: 4rem;
+        }
+        
+        .footer-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 2rem;
+        }
+        
+        .footer-links {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        
+        .footer-links a {
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        
+        .footer-links a:hover {
+            color: #fff;
+        }
+
+        /* Animations */
+        .fade-in {
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+        }
+        
+        .fade-in.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        @media (max-width: 768px) {
+            .nav-links { display: none; }
+            .arch-diagram { flex-direction: column; }
+            .arch-arrow { transform: rotate(90deg); margin: 0.5rem 0; }
+        }
+    </style>
+</head>
+<body>
+
+    <nav class="navbar">
+        <div class="container">
+            <a href="#" class="logo">
+                <span>Xero</span> Invoice App
+            </a>
+            <ul class="nav-links">
+                <li><a href="#overview">Overview</a></li>
+                <li><a href="#architecture">Architecture</a></li>
+                <li><a href="#security">Security</a></li>
+                <li><a href="#scaling">Scaling</a></li>
+                <li><a href="#provider">Provider</a></li>
+                <li><a href="#network">Network</a></li>
+                <li><a href="#checklist">Checklist</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <main>
+        <!-- Hero Section -->
+        <section class="hero">
+            <div class="container fade-in">
+                <span class="badge" style="margin-bottom: 1rem;">DigitalOcean · Singapore · $39/month</span>
+                <h1>Server Configuration & Deployment</h1>
+                <p>Production infrastructure for the Xero Invoice App — B2B SaaS</p>
+            </div>
+        </section>
+
+        <!-- Quick Overview -->
+        <section id="overview" class="section">
+            <div class="container">
+                <h2 class="fade-in">Infrastructure Overview</h2>
+                <div class="overview-grid fade-in">
+                    
+                    <div class="glass-card overview-card">
+                        <div class="icon">🖥️</div>
+                        <h3>App Server (Droplet)</h3>
+                        <div class="price">$24/month</div>
+                        <ul>
+                            <li>2 vCPU</li>
+                            <li>4 GB RAM</li>
+                            <li>80 GB SSD</li>
+                        </ul>
+                        <span class="badge">Ubuntu 24.04 LTS</span>
+                    </div>
+
+                    <div class="glass-card overview-card">
+                        <div class="icon">🗄️</div>
+                        <h3>Managed PostgreSQL</h3>
+                        <div class="price">$15/month</div>
+                        <ul>
+                            <li>1 vCPU</li>
+                            <li>1 GB RAM</li>
+                            <li>10 GB SSD</li>
+                        </ul>
+                        <span class="badge">Daily Backups · Encrypted</span>
+                    </div>
+
+                    <div class="glass-card overview-card">
+                        <div class="icon">🛡️</div>
+                        <h3>Cloudflare (Free)</h3>
+                        <div class="price">$0/month</div>
+                        <ul>
+                            <li>HTTPS/TLS</li>
+                            <li>DDoS Protection</li>
+                            <li>CDN & WAF</li>
+                        </ul>
+                        <span class="badge">Server IP Hidden</span>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+
+        <!-- Architecture Diagram -->
+        <section id="architecture" class="section">
+            <div class="container">
+                <h2 class="fade-in">Infrastructure Architecture</h2>
+                <div class="arch-diagram fade-in">
+                    
+                    <div class="arch-node">
+                        <h4>Users</h4>
+                        <p>Web Browser</p>
+                    </div>
+                    
+                    <div class="arch-arrow">→</div>
+                    
+                    <div class="arch-node" style="border-color: var(--warning)">
+                        <h4>Cloudflare</h4>
+                        <p>SSL + DDoS + CDN</p>
+                    </div>
+                    
+                    <div class="arch-arrow">→</div>
+                    
+                    <div class="arch-group">
+                        <div class="arch-node" style="border-color: var(--accent-start)">
+                            <h4>Nginx</h4>
+                            <p>Reverse Proxy (443)</p>
+                        </div>
+                        <div class="arch-node" style="border-color: var(--success)">
+                            <h4>Node.js App</h4>
+                            <p>Port 4000 (PM2)</p>
+                        </div>
+                    </div>
+                    
+                    <div class="arch-arrow">→</div>
+                    
+                    <div class="arch-group">
+                        <div class="arch-node" style="border-color: var(--info)">
+                            <h4>PostgreSQL</h4>
+                            <p>Private VPC</p>
+                        </div>
+                        <div class="arch-node" style="border-color: var(--text-muted)">
+                            <h4>External APIs</h4>
+                            <p>Xero, Gmail, LLM</p>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+
+        <!-- Security Matrix -->
+        <section id="security" class="section">
+            <div class="container">
+                <h2 class="fade-in">Security Layers</h2>
+                <div class="glass-card fade-in security-table-wrapper">
+                    <table class="security-table">
+                        <thead>
+                            <tr>
+                                <th>Layer</th>
+                                <th>Protection</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Network</td>
+                                <td>Cloudflare DDoS protection</td>
+                                <td><span class="status-ok">✅ Protected</span></td>
+                            </tr>
+                            <tr>
+                                <td>Transport</td>
+                                <td>HTTPS/TLS encryption</td>
+                                <td><span class="status-ok">✅ Encrypted</span></td>
+                            </tr>
+                            <tr>
+                                <td>Server IP</td>
+                                <td>Hidden behind Cloudflare</td>
+                                <td><span class="status-ok">✅ Hidden</span></td>
+                            </tr>
+                            <tr>
+                                <td>Firewall</td>
+                                <td>Only ports 443 + 22 open</td>
+                                <td><span class="status-ok">✅ Configured</span></td>
+                            </tr>
+                            <tr>
+                                <td>SSH</td>
+                                <td>Key-based auth, root disabled</td>
+                                <td><span class="status-ok">✅ Hardened</span></td>
+                            </tr>
+                            <tr>
+                                <td>App Headers</td>
+                                <td>Helmet (XSS, clickjacking, MIME)</td>
+                                <td><span class="status-ok">✅ Active</span></td>
+                            </tr>
+                            <tr>
+                                <td>Rate Limiting</td>
+                                <td>500 req/15min per user</td>
+                                <td><span class="status-ok">✅ Active</span></td>
+                            </tr>
+                            <tr>
+                                <td>CORS</td>
+                                <td>Restricted to production domain</td>
+                                <td><span class="status-warn">⚠️ Add before launch</span></td>
+                            </tr>
+                            <tr>
+                                <td>JWT Auth</td>
+                                <td>Token-based, role access</td>
+                                <td><span class="status-warn">⚠️ Fix fallback secret</span></td>
+                            </tr>
+                            <tr>
+                                <td>Passwords</td>
+                                <td>bcrypt salted hash</td>
+                                <td><span class="status-ok">✅ Hashed</span></td>
+                            </tr>
+                            <tr>
+                                <td>Database</td>
+                                <td>Private VPC, SSL, encrypted at rest</td>
+                                <td><span class="status-ok">✅ Secured</span></td>
+                            </tr>
+                            <tr>
+                                <td>Credentials</td>
+                                <td>AES-256-GCM encryption at rest</td>
+                                <td><span class="status-ok">✅ Encrypted</span></td>
+                            </tr>
+                            <tr>
+                                <td>SQL Injection</td>
+                                <td>Parameterized queries</td>
+                                <td><span class="status-ok">✅ Prevented</span></td>
+                            </tr>
+                            <tr>
+                                <td>Input Validation</td>
+                                <td>express-validator</td>
+                                <td><span class="status-ok">✅ Active</span></td>
+                            </tr>
+                            <tr>
+                                <td>Backups</td>
+                                <td>Daily automated, 7-day retention</td>
+                                <td><span class="status-ok">✅ Enabled</span></td>
+                            </tr>
+                            <tr>
+                                <td>Error Handling</td>
+                                <td>Generic messages, no stack traces</td>
+                                <td><span class="status-ok">✅ Sanitised</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Scaling Roadmap -->
+        <section id="scaling" class="section">
+            <div class="container">
+                <h2 class="fade-in">Growth Scaling Plan</h2>
+                <div class="roadmap fade-in">
+                    
+                    <div class="glass-card phase-card phase-current">
+                        <h3>Phase 1 - Launch</h3>
+                        <p>1-10 Companies</p>
+                        <hr style="border-color: var(--border-glass); margin: 1rem 0;">
+                        <p><strong>App:</strong> 2 vCPU, 4 GB RAM, 80 GB SSD</p>
+                        <p><strong>DB:</strong> 1 vCPU, 1 GB RAM, 10 GB</p>
+                        <p><strong>Redis:</strong> Not needed</p>
+                        <h4 style="color: var(--accent-start); margin-top: 1rem;">$39/month</h4>
+                    </div>
+
+                    <div class="glass-card phase-card">
+                        <h3>Phase 2 - Growth</h3>
+                        <p>10-50 Companies</p>
+                        <hr style="border-color: var(--border-glass); margin: 1rem 0;">
+                        <p><strong>App:</strong> 4 vCPU, 8 GB RAM, 80 GB SSD</p>
+                        <p><strong>DB:</strong> 2 vCPU, 4 GB RAM, 50 GB + replica</p>
+                        <p><strong>Storage:</strong> 50 GB Object Storage</p>
+                        <h4 style="color: var(--info); margin-top: 1rem;">$143/month</h4>
+                    </div>
+
+                    <div class="glass-card phase-card">
+                        <h3>Phase 3 - Enterprise</h3>
+                        <p>50+ Companies</p>
+                        <hr style="border-color: var(--border-glass); margin: 1rem 0;">
+                        <p><strong>App:</strong> 2× servers + Load Balancer</p>
+                        <p><strong>DB:</strong> 4 vCPU, 8 GB RAM, 100 GB + replica</p>
+                        <p><strong>Redis:</strong> 4 GB HA cluster</p>
+                        <h4 style="color: var(--warning); margin-top: 1rem;">$370/month</h4>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+
+        <!-- Provider Comparison -->
+        <section id="provider" class="section">
+            <div class="container">
+                <h2 class="fade-in">Why DigitalOcean?</h2>
+                <p class="fade-in" style="text-align: center; margin-top: -1.5rem; margin-bottom: 2rem;">
+                    Need more than the 10&nbsp;GB launch tier? See the
+                    <a href="index_1.html" style="color: #a5b4fc; text-decoration: underline;">DigitalOcean vs Aliyun deep-dive at 50&nbsp;GB →</a>
+                </p>
+                <div class="glass-card fade-in security-table-wrapper" style="padding: 0;">
+                    <table class="comparison-table">
+                        <thead>
+                            <tr>
+                                <th>Factor</th>
+                                <th class="highlight-col-header">DigitalOcean</th>
+                                <th>Aliyun</th>
+                                <th>GCP</th>
+                                <th>Railway</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Monthly Cost</td>
+                                <td class="highlight-col"><strong>$39</strong></td>
+                                <td>$45</td>
+                                <td>$72</td>
+                                <td>$15</td>
+                            </tr>
+                            <tr>
+                                <td>Managed PostgreSQL</td>
+                                <td class="highlight-col">✅</td>
+                                <td>✅</td>
+                                <td>✅</td>
+                                <td>❌</td>
+                            </tr>
+                            <tr>
+                                <td>Private VPC</td>
+                                <td class="highlight-col">✅</td>
+                                <td>✅</td>
+                                <td>✅</td>
+                                <td>❌</td>
+                            </tr>
+                            <tr>
+                                <td>Singapore DC</td>
+                                <td class="highlight-col">✅</td>
+                                <td>✅</td>
+                                <td>✅</td>
+                                <td>✅</td>
+                            </tr>
+                            <tr>
+                                <td>KL Data Centre</td>
+                                <td class="highlight-col">❌</td>
+                                <td>✅</td>
+                                <td>❌</td>
+                                <td>❌</td>
+                            </tr>
+                            <tr>
+                                <td>Documentation</td>
+                                <td class="highlight-col">⭐⭐⭐ Best</td>
+                                <td>⭐ Weak (EN)</td>
+                                <td>⭐⭐ Good</td>
+                                <td>⭐⭐ Good</td>
+                            </tr>
+                            <tr>
+                                <td>B2B SaaS Ready</td>
+                                <td class="highlight-col">✅</td>
+                                <td>✅</td>
+                                <td>✅</td>
+                                <td>❌</td>
+                            </tr>
+                            <tr>
+                                <td>Setup Difficulty</td>
+                                <td class="highlight-col">Medium</td>
+                                <td>Hard</td>
+                                <td>Hard</td>
+                                <td>Easy</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Port Map & Firewall -->
+        <section id="network" class="section">
+            <div class="container">
+                <h2 class="fade-in">Network Configuration</h2>
+                <div class="glass-card fade-in">
+                    <div class="port-list">
+                        
+                        <div class="port-item public">
+                            <div class="port-name">
+                                <span class="port-num">443</span> HTTPS (Web Traffic)
+                            </div>
+                            <span class="badge" style="color: var(--success); border-color: var(--success)">Public (Cloudflare Only)</span>
+                        </div>
+                        
+                        <div class="port-item redirect">
+                            <div class="port-name">
+                                <span class="port-num">80</span> HTTP (Redirect)
+                            </div>
+                            <span class="badge" style="color: var(--info); border-color: var(--info)">Redirect to HTTPS</span>
+                        </div>
+                        
+                        <div class="port-item internal">
+                            <div class="port-name">
+                                <span class="port-num">4000</span> Node.js App
+                            </div>
+                            <span class="badge" style="color: var(--warning); border-color: var(--warning)">Internal (Localhost via Nginx)</span>
+                        </div>
+                        
+                        <div class="port-item private">
+                            <div class="port-name">
+                                <span class="port-num">25060</span> PostgreSQL Database
+                            </div>
+                            <span class="badge" style="color: var(--danger); border-color: var(--danger)">Private VPC Only</span>
+                        </div>
+                        
+                        <div class="port-item internal">
+                            <div class="port-name">
+                                <span class="port-num">22</span> SSH Access
+                            </div>
+                            <span class="badge" style="color: var(--warning); border-color: var(--warning)">Admin IPs Only</span>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Deployment Checklist -->
+        <section id="checklist" class="section">
+            <div class="container">
+                <h2 class="fade-in">Pre-Launch Checklist</h2>
+                <div class="glass-card fade-in">
+                    
+                    <div class="progress-container">
+                        <div style="display: flex; justify-content: space-between; color: var(--text-muted); font-size: 0.9rem;">
+                            <span>Launch Readiness</span>
+                            <span id="progress-text">0/26 Completed</span>
+                        </div>
+                        <div class="progress-bar-bg">
+                            <div class="progress-bar-fill" id="progress-bar"></div>
+                        </div>
+                    </div>
+
+                    <div class="checklist-grid" id="checklist-container">
+                        
+                        <div class="checklist-group">
+                            <h4>Week 1 - Security</h4>
+                            <label class="check-item"><input type="checkbox" value="sec-1"> <span>Fix JWT fallback secret</span></label>
+                            <label class="check-item"><input type="checkbox" value="sec-2"> <span>Add CORS middleware</span></label>
+                            <label class="check-item"><input type="checkbox" value="sec-3"> <span>Add HTTPS redirect</span></label>
+                            <label class="check-item"><input type="checkbox" value="sec-4"> <span>Regenerate ALL API keys</span></label>
+                            <label class="check-item"><input type="checkbox" value="sec-5"> <span>Generate production secrets</span></label>
+                            <label class="check-item"><input type="checkbox" value="sec-6"> <span>Add login rate limit</span></label>
+                        </div>
+
+                        <div class="checklist-group">
+                            <h4>Week 2 - Database</h4>
+                            <label class="check-item"><input type="checkbox" value="db-1"> <span>Migrate SQLite → PostgreSQL</span></label>
+                            <label class="check-item"><input type="checkbox" value="db-2"> <span>Update parameterized queries</span></label>
+                            <label class="check-item"><input type="checkbox" value="db-3"> <span>Test all API routes</span></label>
+                            <label class="check-item"><input type="checkbox" value="db-4"> <span>Run data migration</span></label>
+                        </div>
+
+                        <div class="checklist-group">
+                            <h4>Week 3 - Infrastructure</h4>
+                            <label class="check-item"><input type="checkbox" value="inf-1"> <span>Provision DigitalOcean Droplet</span></label>
+                            <label class="check-item"><input type="checkbox" value="inf-2"> <span>Provision Managed PostgreSQL</span></label>
+                            <label class="check-item"><input type="checkbox" value="inf-3"> <span>Configure VPC / firewall</span></label>
+                            <label class="check-item"><input type="checkbox" value="inf-4"> <span>Set up Cloudflare DNS + SSL</span></label>
+                        </div>
+
+                        <div class="checklist-group">
+                            <h4>Week 4 - Deploy</h4>
+                            <label class="check-item"><input type="checkbox" value="dep-1"> <span>Install Node.js, Nginx, PM2</span></label>
+                            <label class="check-item"><input type="checkbox" value="dep-2"> <span>Configure Nginx reverse proxy</span></label>
+                            <label class="check-item"><input type="checkbox" value="dep-3"> <span>Set environment variables</span></label>
+                            <label class="check-item"><input type="checkbox" value="dep-4"> <span>Deploy code + build UI</span></label>
+                            <label class="check-item"><input type="checkbox" value="dep-5"> <span>Verify HTTPS + all routes</span></label>
+                        </div>
+
+                        <div class="checklist-group">
+                            <h4>Week 5 - Monitor</h4>
+                            <label class="check-item"><input type="checkbox" value="mon-1"> <span>Set up error monitoring (Sentry)</span></label>
+                            <label class="check-item"><input type="checkbox" value="mon-2"> <span>Set up uptime monitoring</span></label>
+                            <label class="check-item"><input type="checkbox" value="mon-3"> <span>Enable automated backups</span></label>
+                            <label class="check-item"><input type="checkbox" value="mon-4"> <span>Test disaster recovery</span></label>
+                        </div>
+
+                        <div class="checklist-group">
+                            <h4>Week 6 - Launch</h4>
+                            <label class="check-item"><input type="checkbox" value="lnc-1"> <span>End-to-end test with real data</span></label>
+                            <label class="check-item"><input type="checkbox" value="lnc-2"> <span>Security scan</span></label>
+                            <label class="check-item"><input type="checkbox" value="lnc-3"> <span>Onboard first company</span></label>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Cost Calculator -->
+        <section class="section">
+            <div class="container">
+                <h2 class="fade-in">Monthly Cost Breakdown</h2>
+                <div class="glass-card fade-in">
+                    <div class="cost-container">
+                        
+                        <div class="donut-chart">
+                            <div class="donut-inner">
+                                <h3>$39</h3>
+                                <p style="margin:0; font-size: 0.9rem;">Total / month</p>
+                            </div>
+                        </div>
+
+                        <ul class="cost-legend">
+                            <li>
+                                <div class="legend-color c-app"></div>
+                                <strong>App Server (Droplet):</strong> $24 (62%)
+                            </li>
+                            <li>
+                                <div class="legend-color c-db"></div>
+                                <strong>Managed PostgreSQL:</strong> $15 (38%)
+                            </li>
+                            <li>
+                                <div class="legend-color c-cf"></div>
+                                <strong>Cloudflare:</strong> $0 (0%)
+                            </li>
+                        </ul>
+
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="container footer-content">
+            <div>
+                <strong style="color: #fff;">Xero Invoice App</strong>
+                <p style="margin-top: 0.5rem; font-size: 0.9rem;">Server Configuration Documentation</p>
+            </div>
+            <div class="footer-links">
+                <a href="../01_setup.md">01 Setup</a>
+                <a href="../02_architecture.md">02 Architecture</a>
+                <a href="../03_api.md">03 API</a>
+                <a href="../04_database.md">04 Database</a>
+                <a href="../05_deployment.md">05 Deployment</a>
+                <a href="../06_security.md">06 Security</a>
+            </div>
+            <div style="color: var(--text-muted); font-size: 0.9rem;">
+                Generated: <span id="gen-date"></span>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Set current date
+        document.getElementById('gen-date').textContent = new Date().toLocaleDateString('en-US', {
+            year: 'numeric', month: 'long', day: 'numeric'
+        });
+
+        // Intersection Observer for scroll animations
+        const observerOptions = {
+            root: null,
+            rootMargin: '0px',
+            threshold: 0.1
+        };
+
+        const observer = new IntersectionObserver((entries, observer) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('visible');
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, observerOptions);
+
+        document.querySelectorAll('.fade-in').forEach(element => {
+            observer.observe(element);
+        });
+
+        // Scroll Spy for Navbar
+        const sections = document.querySelectorAll('section[id]');
+        const navLinks = document.querySelectorAll('.nav-links a');
+
+        window.addEventListener('scroll', () => {
+            let current = '';
+            sections.forEach(section => {
+                const sectionTop = section.offsetTop;
+                const sectionHeight = section.clientHeight;
+                if (pageYOffset >= (sectionTop - 200)) {
+                    current = section.getAttribute('id');
+                }
+            });
+
+            navLinks.forEach(link => {
+                link.classList.remove('active');
+                if (link.getAttribute('href').includes(current) && current !== '') {
+                    link.classList.add('active');
+                }
+            });
+        });
+
+        // Smooth Scroll
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    window.scrollTo({
+                        top: target.offsetTop - 80,
+                        behavior: 'smooth'
+                    });
+                }
+            });
+        });
+
+        // Checklist functionality with localStorage
+        const checkboxes = document.querySelectorAll('.check-item input[type="checkbox"]');
+        const progressBar = document.getElementById('progress-bar');
+        const progressText = document.getElementById('progress-text');
+        
+        function updateProgress() {
+            const total = checkboxes.length;
+            const checked = document.querySelectorAll('.check-item input[type="checkbox"]:checked').length;
+            const percentage = (checked / total) * 100;
+            
+            progressBar.style.width = `${percentage}%`;
+            progressText.textContent = `${checked}/${total} Completed`;
+            
+            // Toggle completed class for styling
+            checkboxes.forEach(cb => {
+                if (cb.checked) {
+                    cb.parentElement.classList.add('completed');
+                } else {
+                    cb.parentElement.classList.remove('completed');
+                }
+            });
+        }
+
+        // Load saved state
+        const savedState = JSON.parse(localStorage.getItem('xero-deploy-checklist')) || {};
+        
+        checkboxes.forEach(cb => {
+            if (savedState[cb.value]) {
+                cb.checked = true;
+            }
+            
+            cb.addEventListener('change', () => {
+                const currentState = JSON.parse(localStorage.getItem('xero-deploy-checklist')) || {};
+                currentState[cb.value] = cb.checked;
+                localStorage.setItem('xero-deploy-checklist', JSON.stringify(currentState));
+                updateProgress();
+            });
+        });
+
+        // Initial progress update
+        updateProgress();
+    </script>
+</body>
+</html>
