@@ -24,7 +24,11 @@ const USER_SECTIONS = {
 // Shared/global fields — stored in .env; only admins can set these
 // (Slack webhook, Redis — infrastructure-level config not per-user)
 const GLOBAL_SECTIONS = {
-  optional: ['SLACK_WEBHOOK_URL', 'REDIS_URL'],
+  optional:  ['SLACK_WEBHOOK_URL', 'REDIS_URL'],
+  // One shared Xero "Web app" registration for the whole deployment — each user
+  // authorizes it against their own org via the consent screen (see routes/xero-oauth.js),
+  // unlike the per-user XERO_CLIENT_ID/SECRET Custom Connection fields above.
+  xeroOAuth: ['XERO_OAUTH_CLIENT_ID', 'XERO_OAUTH_CLIENT_SECRET', 'XERO_OAUTH_REDIRECT_URI'],
 };
 
 const ENV_FILE = path.join(__dirname, '../.env');

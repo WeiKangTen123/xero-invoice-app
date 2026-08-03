@@ -106,6 +106,24 @@ describe('users store (SQLite)', () => {
     expect(users.getSetupStatus(u.id).ready).toBe(true);
   });
 
+  test('getSetupStatus treats an OAuth connection as configured, with no Custom Connection fields at all', async () => {
+    const u = await users.createUser('oauth-setup@test.com', 'password123', 'user');
+    expect(users.getSetupStatus(u.id).xero.configured).toBe(false);
+    users.saveUserConfig(u.id, { XERO_CONNECTION_TYPE: 'oauth' });
+    expect(users.getSetupStatus(u.id).xero.configured).toBe(true);
+  });
+
+  test('xero_oauth_refresh_token round-trips through the same encryption as the other secrets', async () => {
+    const u = await users.createUser('oauth-token@test.com', 'password123', 'user');
+    users.saveUserConfig(u.id, { XERO_OAUTH_REFRESH_TOKEN: 'refresh-token-abc123' });
+
+    const db  = require('../db');
+    const row = db.prepare('SELECT xero_oauth_refresh_token FROM user_credentials WHERE user_id = ?').get(u.id);
+    expect(row.xero_oauth_refresh_token.startsWith('enc:v1:')).toBe(true);
+
+    expect(users.getUserConfig(u.id).XERO_OAUTH_REFRESH_TOKEN).toBe('refresh-token-abc123');
+  });
+
   test('deleteUser cascades to credentials/settings/invoices', async () => {
     const u = await users.createUser('cascade@test.com', 'password123', 'user');
     users.saveUserConfig(u.id, { XERO_CLIENT_ID: 'abc' });

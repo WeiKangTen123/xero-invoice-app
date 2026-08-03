@@ -21,6 +21,9 @@ const CONFIG_KEY_TO_COLUMN = {
   DEFAULT_ACCOUNT_CODE:  'default_account_code',
   DEFAULT_CURRENCY:      'default_currency',
   ZERO_TAX_RATE:         'zero_tax_rate',
+  XERO_CONNECTION_TYPE:     'xero_connection_type',
+  XERO_OAUTH_REFRESH_TOKEN: 'xero_oauth_refresh_token',
+  XERO_OAUTH_CONNECTED_AT:  'xero_oauth_connected_at',
 };
 const COLUMN_TO_CONFIG_KEY = Object.fromEntries(
   Object.entries(CONFIG_KEY_TO_COLUMN).map(([k, v]) => [v, k])
@@ -29,7 +32,7 @@ const COLUMN_TO_CONFIG_KEY = Object.fromEntries(
 // These columns hold real credentials and are encrypted at rest (AES-256-GCM, see
 // ./crypto.js) — everything else in user_credentials (client ID, IMAP host/user/
 // port, defaults) isn't secret and stays plain for easy querying/debugging.
-const ENCRYPTED_COLUMNS = new Set(['xero_client_secret', 'imap_pass', 'gemini_api_key']);
+const ENCRYPTED_COLUMNS = new Set(['xero_client_secret', 'imap_pass', 'gemini_api_key', 'xero_oauth_refresh_token']);
 
 // ── Per-user config (IMAP, Xero credentials, per-user defaults) ──────────────
 
@@ -152,7 +155,10 @@ function sanitize(u) {
 function getSetupStatus(userId) {
   const config = getUserConfig(userId);
   const imap   = !!(config.IMAP_HOST && config.IMAP_USER && config.IMAP_PASS);
-  const xero   = !!(config.XERO_CLIENT_ID && config.XERO_CLIENT_SECRET);
+  // Either connection method counts as "configured" — Custom Connection (client ID +
+  // secret) or OAuth (connection type flipped to 'oauth' once a user has completed
+  // the consent flow; see xero/oauth.js).
+  const xero   = !!(config.XERO_CLIENT_ID && config.XERO_CLIENT_SECRET) || config.XERO_CONNECTION_TYPE === 'oauth';
   // Legacy single-field fallback covers an account that hasn't added a key through
   // the multi-key UI yet but still has the old single Gemini_API_KEY column set.
   const llm    = getGeminiKeys(userId).length > 0 || !!config.Gemini_API_KEY;

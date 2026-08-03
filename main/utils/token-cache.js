@@ -15,8 +15,12 @@ function _getCache(userId) {
 function forUser(userId) {
   const cache = _getCache(userId);
 
-  function cacheToken(tenantId, tenantName, access_token, expires_at) {
-    cache.tokens[tenantId] = { access_token, expires_at: new Date(expires_at).getTime() };
+  function cacheToken(tenantId, tenantName, access_token, expires_at, connectionType = 'custom') {
+    cache.tokens[tenantId] = {
+      access_token,
+      expires_at:      new Date(expires_at).getTime(),
+      connection_type: connectionType, // 'custom' | 'oauth' — which refresh mechanism applies on expiry
+    };
     if (tenantName && !cache.tenants.find(t => t.tenant_id === tenantId)) {
       cache.tenants.push({ tenant_id: tenantId, tenant_name: tenantName });
     }
@@ -52,10 +56,12 @@ function forUser(userId) {
     if (!mem) throw new Error(`No Xero token for tenant ${tenantId} — reconnect Xero first`);
     if (Date.now() < mem.expires_at - 60_000) return mem.access_token;
 
-    logger.info('Token expired — refreshing', { tenantId, userId });
-    const { refreshClientCredentialsToken } = require('../xero/connect');
-    const { access_token, expires_at } = await refreshClientCredentialsToken(userId);
-    cacheToken(tenantId, null, access_token, expires_at);
+    logger.info('Token expired — refreshing', { tenantId, userId, connectionType: mem.connection_type });
+    const refresh = mem.connection_type === 'oauth'
+      ? require('../xero/oauth').refreshAuthCodeToken
+      : require('../xero/connect').refreshClientCredentialsToken;
+    const { access_token, expires_at } = await refresh(userId);
+    cacheToken(tenantId, null, access_token, expires_at, mem.connection_type);
     return access_token;
   }
 

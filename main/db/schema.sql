@@ -29,7 +29,15 @@ CREATE TABLE IF NOT EXISTS user_credentials (
   openrouter_model      TEXT,
   default_account_code  TEXT,
   default_currency      TEXT,
-  zero_tax_rate         TEXT
+  zero_tax_rate         TEXT,
+  -- OAuth2 "Web app" Xero connection — a second, parallel connection method to the
+  -- Custom Connection fields above (xero_client_id/secret). xero_connection_type
+  -- records which one is actually active ('custom' | 'oauth' | NULL); the OAuth
+  -- refresh token is encrypted the same way as the other secrets in this table
+  -- (see ENCRYPTED_COLUMNS in utils/users.js).
+  xero_connection_type     TEXT,
+  xero_oauth_refresh_token TEXT,
+  xero_oauth_connected_at  TEXT
 );
 
 -- 1:1 with users — app behaviour toggles (was data/users/<id>/settings.json)

@@ -16,6 +16,9 @@ function run() {
   db.exec(schema);
 
   _ensureColumn('user_credentials', 'imap_lookback_days', 'imap_lookback_days TEXT');
+  _ensureColumn('user_credentials', 'xero_connection_type',     'xero_connection_type TEXT');
+  _ensureColumn('user_credentials', 'xero_oauth_refresh_token', 'xero_oauth_refresh_token TEXT');
+  _ensureColumn('user_credentials', 'xero_oauth_connected_at',  'xero_oauth_connected_at TEXT');
 }
 
 module.exports = { run };
