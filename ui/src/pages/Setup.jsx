@@ -17,9 +17,9 @@ const HELP = {
   ZERO_TAX_RATE:         'Tax rate name in Xero for zero-rated items (e.g. NONE, TAX001).',
   SLACK_WEBHOOK_URL:     'Optional Slack incoming webhook URL for error notifications.',
   REDIS_URL:             'Optional Redis URL for the job queue. Leave blank to use in-memory queue.',
-  XERO_OAUTH_CLIENT_ID:     'Client ID from your Xero "Web app" (not Custom Connection). One shared app for everyone using this deployment.',
+  XERO_OAUTH_CLIENT_ID:     'Client ID from your own Xero "Web app" (not Custom Connection). Each user brings their own — not shared with other accounts.',
   XERO_OAUTH_CLIENT_SECRET: 'Client secret for the same Xero Web app.',
-  XERO_OAUTH_REDIRECT_URI:  'Must exactly match a redirect URI registered on the Xero Web app. Must be HTTPS in production (http://localhost is fine for local dev).',
+  XERO_OAUTH_REDIRECT_URI:  'Set once for this whole server — register this exact value as a redirect URI on every user\'s Xero Web app. Must be HTTPS in production (http://localhost is fine for local dev).',
 };
 
 // helpUrl/helpLabel — where to actually go get the credentials this section asks
@@ -40,10 +40,9 @@ const SECTION_META = {
   defaults: { label: 'Invoice Defaults', desc: 'Fallback values when fields cannot be detected automatically', icon: '⚙', testKey: null },
   optional: { label: 'Optional',         desc: 'Slack error notifications, Redis queue', icon: '◎', testKey: null },
   xeroOAuth: {
-    label: 'Xero OAuth App (admin)', icon: '🔐',
-    desc: 'One shared Xero "Web app" registration used by everyone\'s "Connect to Xero" button',
+    label: 'Xero OAuth Redirect URI (admin)', icon: '🔐',
+    desc: 'Set once for the whole server — every user registers this same value on their own Xero Web app',
     testKey: null,
-    helpUrl: 'https://developer.xero.com/app/manage', helpLabel: 'Manage your Xero apps ↗',
   },
 };
 
@@ -299,24 +298,40 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
         </div>
       ) : null}
 
-      <div className="grid-2" style={{ marginBottom: 16 }}>
-        {Object.entries(sectionData).map(([name, fieldMeta]) => (
-          <Field key={name} name={name} meta={fieldMeta} value={values[name] || ''} onChange={onChange} />
-        ))}
+      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 10 }}>
+        Option A — Custom Connection
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+      <div className="grid-2" style={{ marginBottom: 16 }}>
+        {Object.entries(sectionData)
+          .filter(([name]) => !name.startsWith('XERO_OAUTH_'))
+          .map(([name, fieldMeta]) => (
+            <Field key={name} name={name} meta={fieldMeta} value={values[name] || ''} onChange={onChange} />
+          ))}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
         <TestResult msg={msgs.xero} />
         <button type="button" className="btn btn-outline btn-sm" disabled={testing.xero} onClick={() => onTest('xero')}>
           {testing.xero ? <><span className="btn-spinner" style={{ borderColor: 'rgba(0,0,0,0.15)', borderTopColor: 'var(--accent)' }} /> Testing...</> : '⚡ Test Custom Connection'}
         </button>
       </div>
 
-      <div style={{ height: 1, background: 'var(--border)', margin: '4px 0 16px' }} />
+      <div style={{ height: 1, background: 'var(--border)', margin: '4px 0 20px' }} />
 
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-          Or connect by logging into Xero directly — no Client ID/Secret needed.
-        </div>
+      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 4 }}>
+        Option B — OAuth (your own Xero Web app)
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
+        Bring your own Xero Web app's Client ID/Secret — this keeps your Xero API rate limit separate from every other account on this deployment.
+      </div>
+      <div className="grid-2" style={{ marginBottom: 16 }}>
+        {Object.entries(sectionData)
+          .filter(([name]) => name.startsWith('XERO_OAUTH_'))
+          .map(([name, fieldMeta]) => (
+            <Field key={name} name={name} meta={fieldMeta} value={values[name] || ''} onChange={onChange} />
+          ))}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12 }}>
         <button type="button" className="btn btn-primary btn-sm" disabled={connecting} onClick={handleConnect}>
           {connecting ? '...' : '🔗 Connect to Xero'}
         </button>

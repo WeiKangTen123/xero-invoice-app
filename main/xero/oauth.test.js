@@ -16,18 +16,18 @@ const { getUserConfig, saveUserConfig } = require('../utils/users');
 const tokenCache = require('../utils/token-cache');
 const oauth = require('./oauth');
 
-const ENV = {
-  XERO_OAUTH_CLIENT_ID:     'client-abc',
-  XERO_OAUTH_CLIENT_SECRET: 'secret-xyz',
-  XERO_OAUTH_REDIRECT_URI:  'https://example.sslip.io/api/xero/oauth/callback',
-};
+// Client ID/Secret are per-user (each user brings their own Xero Web app); only the
+// redirect URI is global — a property of this server's deployment, not of any user.
+const REDIRECT_URI = 'https://example.sslip.io/api/xero/oauth/callback';
+const USER_CREDS = { XERO_OAUTH_CLIENT_ID: 'client-abc', XERO_OAUTH_CLIENT_SECRET: 'secret-xyz' };
 
 describe('xero/oauth', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
     jest.clearAllMocks();
-    Object.assign(process.env, ENV);
+    process.env.XERO_OAUTH_REDIRECT_URI = REDIRECT_URI;
+    getUserConfig.mockReturnValue({ ...USER_CREDS });
   });
 
   afterEach(() => {
@@ -35,48 +35,58 @@ describe('xero/oauth', () => {
   });
 
   describe('buildAuthorizeUrl', () => {
-    test('throws a clear error when the app-level OAuth config is missing', () => {
-      delete process.env.XERO_OAUTH_CLIENT_ID;
-      expect(() => oauth.buildAuthorizeUrl('user-1')).toThrow(/not configured/i);
+    test('throws a clear error when the deployment-wide redirect URI is missing', () => {
+      delete process.env.XERO_OAUTH_REDIRECT_URI;
+      expect(() => oauth.buildAuthorizeUrl('user-1')).toThrow(/redirect uri is not configured/i);
     });
 
-    test('builds a URL with the required OAuth2 params against Xero\'s real authorize endpoint', () => {
+    test('throws a clear error when this specific user has no Web app credentials on file', () => {
+      getUserConfig.mockReturnValue({}); // redirect URI is set (beforeEach), but this user's own client id/secret aren't
+      expect(() => oauth.buildAuthorizeUrl('user-1')).toThrow(/add your xero web app/i);
+    });
+
+    test('builds a URL using THIS user\'s own client_id, not some other user\'s', () => {
+      getUserConfig.mockReturnValue({ XERO_OAUTH_CLIENT_ID: 'this-users-client-id', XERO_OAUTH_CLIENT_SECRET: 'secret' });
       const url = new URL(oauth.buildAuthorizeUrl('user-1'));
       expect(url.origin + url.pathname).toBe('https://login.xero.com/identity/connect/authorize');
       expect(url.searchParams.get('response_type')).toBe('code');
-      expect(url.searchParams.get('client_id')).toBe('client-abc');
-      expect(url.searchParams.get('redirect_uri')).toBe(ENV.XERO_OAUTH_REDIRECT_URI);
+      expect(url.searchParams.get('client_id')).toBe('this-users-client-id');
+      expect(url.searchParams.get('redirect_uri')).toBe(REDIRECT_URI);
       expect(url.searchParams.get('scope')).toContain('offline_access');
       expect(url.searchParams.get('state')).toBe('fake-state-abc');
+      expect(getUserConfig).toHaveBeenCalledWith('user-1');
     });
   });
 
   describe('exchangeCodeForTokens', () => {
-    test('posts an authorization_code grant and returns the tokens', async () => {
+    test('posts an authorization_code grant using the given user\'s own credentials', async () => {
       axios.post.mockResolvedValue({ data: { access_token: 'at-1', refresh_token: 'rt-1', expires_in: 1800 } });
-      const result = await oauth.exchangeCodeForTokens('the-code');
+      const result = await oauth.exchangeCodeForTokens('user-1', 'the-code');
       expect(result.access_token).toBe('at-1');
       expect(result.refresh_token).toBe('rt-1');
       expect(result.expires_at).toBeInstanceOf(Date);
 
-      const [url, body] = axios.post.mock.calls[0];
+      const [url, body, opts] = axios.post.mock.calls[0];
       expect(url).toBe('https://identity.xero.com/connect/token');
       expect(body.get('grant_type')).toBe('authorization_code');
       expect(body.get('code')).toBe('the-code');
-      expect(body.get('redirect_uri')).toBe(ENV.XERO_OAUTH_REDIRECT_URI);
+      expect(body.get('redirect_uri')).toBe(REDIRECT_URI);
+      // Basic auth is built from THIS user's client_id:client_secret
+      const expectedAuth = 'Basic ' + Buffer.from(`${USER_CREDS.XERO_OAUTH_CLIENT_ID}:${USER_CREDS.XERO_OAUTH_CLIENT_SECRET}`).toString('base64');
+      expect(opts.headers.Authorization).toBe(expectedAuth);
     });
   });
 
   describe('refreshAuthCodeToken', () => {
     test('throws when there is no refresh token on file', async () => {
-      getUserConfig.mockReturnValue({});
+      getUserConfig.mockReturnValue({ ...USER_CREDS }); // has app creds, but never completed a connection
       await expect(oauth.refreshAuthCodeToken('user-1')).rejects.toThrow(/no xero oauth connection/i);
     });
 
     test('persists the ROTATED refresh token Xero returns, not the old one', async () => {
       // This is the critical correctness case: Xero issues a brand new refresh token
       // on every use and immediately invalidates the previous one.
-      getUserConfig.mockReturnValue({ XERO_OAUTH_REFRESH_TOKEN: 'old-refresh-token' });
+      getUserConfig.mockReturnValue({ ...USER_CREDS, XERO_OAUTH_REFRESH_TOKEN: 'old-refresh-token' });
       axios.post.mockResolvedValue({ data: { access_token: 'at-new', refresh_token: 'rt-BRAND-NEW', expires_in: 1800 } });
 
       await oauth.refreshAuthCodeToken('user-1');

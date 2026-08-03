@@ -31,11 +31,19 @@ CREATE TABLE IF NOT EXISTS user_credentials (
   default_currency      TEXT,
   zero_tax_rate         TEXT,
   -- OAuth2 "Web app" Xero connection — a second, parallel connection method to the
-  -- Custom Connection fields above (xero_client_id/secret). xero_connection_type
-  -- records which one is actually active ('custom' | 'oauth' | NULL); the OAuth
-  -- refresh token is encrypted the same way as the other secrets in this table
-  -- (see ENCRYPTED_COLUMNS in utils/users.js).
+  -- Custom Connection fields above. Each user brings their own Xero Web app (own
+  -- Client ID/Secret, same as Custom Connection's per-user model) rather than
+  -- sharing one deployment-wide app — Xero's 60-calls/minute rate limit is per-app,
+  -- so per-user apps give each user an independent budget instead of one shared
+  -- pool across every user. Only the redirect URI is shared (it's a property of
+  -- this server's deployment, not of any one user — see XERO_OAUTH_REDIRECT_URI
+  -- in routes/setup.js GLOBAL_SECTIONS). xero_connection_type records which method
+  -- is actually active ('custom' | 'oauth' | NULL). Both OAuth secrets are
+  -- encrypted the same way as the other secrets in this table (see
+  -- ENCRYPTED_COLUMNS in utils/users.js).
   xero_connection_type     TEXT,
+  xero_oauth_client_id     TEXT,
+  xero_oauth_client_secret TEXT,
   xero_oauth_refresh_token TEXT,
   xero_oauth_connected_at  TEXT
 );
