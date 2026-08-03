@@ -22,6 +22,8 @@ const CONFIG_KEY_TO_COLUMN = {
   DEFAULT_CURRENCY:      'default_currency',
   ZERO_TAX_RATE:         'zero_tax_rate',
   XERO_CONNECTION_TYPE:     'xero_connection_type',
+  XERO_OAUTH_CLIENT_ID:     'xero_oauth_client_id',
+  XERO_OAUTH_CLIENT_SECRET: 'xero_oauth_client_secret',
   XERO_OAUTH_REFRESH_TOKEN: 'xero_oauth_refresh_token',
   XERO_OAUTH_CONNECTED_AT:  'xero_oauth_connected_at',
 };
@@ -32,7 +34,7 @@ const COLUMN_TO_CONFIG_KEY = Object.fromEntries(
 // These columns hold real credentials and are encrypted at rest (AES-256-GCM, see
 // ./crypto.js) — everything else in user_credentials (client ID, IMAP host/user/
 // port, defaults) isn't secret and stays plain for easy querying/debugging.
-const ENCRYPTED_COLUMNS = new Set(['xero_client_secret', 'imap_pass', 'gemini_api_key', 'xero_oauth_refresh_token']);
+const ENCRYPTED_COLUMNS = new Set(['xero_client_secret', 'imap_pass', 'gemini_api_key', 'xero_oauth_client_secret', 'xero_oauth_refresh_token']);
 
 // ── Per-user config (IMAP, Xero credentials, per-user defaults) ──────────────
 

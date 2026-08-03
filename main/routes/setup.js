@@ -15,8 +15,11 @@ const logger  = require('../utils/logger');
 // Each user brings their own IMAP account and Xero connection. Gemini API keys are
 // a separate 1:many resource managed via the /llm-keys routes below, not a flat
 // field here — a user can have any number of them.
+// Each user brings their own Xero Web app for OAuth too (XERO_OAUTH_CLIENT_ID/SECRET),
+// same per-user model as the Custom Connection fields — see xero/oauth.js for why
+// (Xero's rate limit is per-app, so per-user apps give each user their own budget).
 const USER_SECTIONS = {
-  xero:     ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET'],
+  xero:     ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_ID', 'XERO_OAUTH_CLIENT_SECRET'],
   imap:     ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_FILTER_FROM', 'IMAP_POLL_INTERVAL_MS', 'IMAP_LOOKBACK_DAYS'],
   defaults: ['DEFAULT_ACCOUNT_CODE', 'DEFAULT_CURRENCY', 'ZERO_TAX_RATE'],
 };
@@ -25,10 +28,9 @@ const USER_SECTIONS = {
 // (Slack webhook, Redis — infrastructure-level config not per-user)
 const GLOBAL_SECTIONS = {
   optional:  ['SLACK_WEBHOOK_URL', 'REDIS_URL'],
-  // One shared Xero "Web app" registration for the whole deployment — each user
-  // authorizes it against their own org via the consent screen (see routes/xero-oauth.js),
-  // unlike the per-user XERO_CLIENT_ID/SECRET Custom Connection fields above.
-  xeroOAuth: ['XERO_OAUTH_CLIENT_ID', 'XERO_OAUTH_CLIENT_SECRET', 'XERO_OAUTH_REDIRECT_URI'],
+  // A property of this server's deployment, not of any one user — every user's own
+  // Xero Web app (see USER_SECTIONS.xero above) registers this same redirect URI.
+  xeroOAuth: ['XERO_OAUTH_REDIRECT_URI'],
 };
 
 const ENV_FILE = path.join(__dirname, '../.env');

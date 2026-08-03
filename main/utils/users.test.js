@@ -124,6 +124,20 @@ describe('users store (SQLite)', () => {
     expect(users.getUserConfig(u.id).XERO_OAUTH_REFRESH_TOKEN).toBe('refresh-token-abc123');
   });
 
+  test('each user can have their own xero_oauth_client_id/secret, secret encrypted, id plain', async () => {
+    const u = await users.createUser('own-webapp@test.com', 'password123', 'user');
+    users.saveUserConfig(u.id, { XERO_OAUTH_CLIENT_ID: 'this-users-client-id', XERO_OAUTH_CLIENT_SECRET: 'this-users-secret' });
+
+    const db  = require('../db');
+    const row = db.prepare('SELECT xero_oauth_client_id, xero_oauth_client_secret FROM user_credentials WHERE user_id = ?').get(u.id);
+    expect(row.xero_oauth_client_id).toBe('this-users-client-id'); // not secret, stays plain
+    expect(row.xero_oauth_client_secret.startsWith('enc:v1:')).toBe(true);
+
+    const cfg = users.getUserConfig(u.id);
+    expect(cfg.XERO_OAUTH_CLIENT_ID).toBe('this-users-client-id');
+    expect(cfg.XERO_OAUTH_CLIENT_SECRET).toBe('this-users-secret');
+  });
+
   test('deleteUser cascades to credentials/settings/invoices', async () => {
     const u = await users.createUser('cascade@test.com', 'password123', 'user');
     users.saveUserConfig(u.id, { XERO_CLIENT_ID: 'abc' });

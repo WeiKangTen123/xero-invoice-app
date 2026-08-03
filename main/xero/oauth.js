@@ -8,22 +8,29 @@ const SCOPES = 'offline_access accounting.invoices accounting.contacts accountin
 const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
 const TOKEN_URL      = 'https://identity.xero.com/connect/token';
 
-// One shared Xero "Web app" registration for the whole deployment — unlike Custom
-// Connection (client ID/secret per user), every user authorizes the SAME registered
-// app against their own organisation via Xero's consent screen. Global, .env-backed,
-// admin-only (see routes/setup.js GLOBAL_SECTIONS.xeroOAuth).
-function _appCreds() {
-  const clientId     = process.env.XERO_OAUTH_CLIENT_ID;
-  const clientSecret = process.env.XERO_OAUTH_CLIENT_SECRET;
+// Each user brings their own Xero "Web app" (own Client ID/Secret), same per-user
+// model as Custom Connection — Xero's 60-calls/minute rate limit is per-app, so
+// per-user apps give each user an independent budget instead of every user sharing
+// one deployment-wide pool. Only the redirect URI is shared — it's a property of
+// this server's deployment, not of any one user (see routes/setup.js
+// GLOBAL_SECTIONS.xeroOAuth), and every user's Web app registers the same one.
+function _appCreds(userId) {
+  const { getUserConfig } = require('../utils/users');
+  const config       = getUserConfig(userId);
+  const clientId     = config.XERO_OAUTH_CLIENT_ID;
+  const clientSecret = config.XERO_OAUTH_CLIENT_SECRET;
   const redirectUri  = process.env.XERO_OAUTH_REDIRECT_URI;
-  if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error('Xero OAuth is not configured — an admin needs to set XERO_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI in Setup.');
+  if (!redirectUri) {
+    throw new Error('Xero OAuth redirect URI is not configured — an admin needs to set XERO_OAUTH_REDIRECT_URI in Setup.');
+  }
+  if (!clientId || !clientSecret) {
+    throw new Error('Xero OAuth is not configured — add your Xero Web app\'s Client ID and Secret in Setup.');
   }
   return { clientId, clientSecret, redirectUri };
 }
 
 function buildAuthorizeUrl(userId) {
-  const { clientId, redirectUri } = _appCreds();
+  const { clientId, redirectUri } = _appCreds(userId);
   const state = oauthState.create(userId);
   const params = new URLSearchParams({
     response_type: 'code',
@@ -35,8 +42,8 @@ function buildAuthorizeUrl(userId) {
   return `${AUTHORIZE_URL}?${params.toString()}`;
 }
 
-async function exchangeCodeForTokens(code) {
-  const { clientId, clientSecret, redirectUri } = _appCreds();
+async function exchangeCodeForTokens(userId, code) {
+  const { clientId, clientSecret, redirectUri } = _appCreds(userId);
   const creds = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
 
   const res = await axios.post(
@@ -60,7 +67,7 @@ async function exchangeCodeForTokens(code) {
 // returns, or the connection silently breaks the next time a refresh is needed.
 async function refreshAuthCodeToken(userId) {
   const { getUserConfig, saveUserConfig } = require('../utils/users');
-  const { clientId, clientSecret } = _appCreds();
+  const { clientId, clientSecret } = _appCreds(userId);
   const refreshToken = getUserConfig(userId).XERO_OAUTH_REFRESH_TOKEN;
   if (!refreshToken) {
     throw new Error('No Xero OAuth connection on file — reconnect via Setup.');
@@ -110,7 +117,7 @@ async function completeConnection(userId, code) {
   const { saveUserConfig } = require('../utils/users');
   logger.info('Completing Xero OAuth connection...', { userId });
 
-  const { access_token, refresh_token, expires_at } = await exchangeCodeForTokens(code);
+  const { access_token, refresh_token, expires_at } = await exchangeCodeForTokens(userId, code);
 
   saveUserConfig(userId, {
     XERO_OAUTH_REFRESH_TOKEN: refresh_token,
