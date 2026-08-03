@@ -28,6 +28,13 @@ function _newState(userId) {
     fetchPending:     false,
     debounceTimer:    null,
     pollId:           null,
+    // s.imap is set as soon as `new Imap()` is constructed — well before the
+    // connection handshake finishes and the inbox is actually selected. A
+    // manual rescan that lands in that window calls .search() on a mailbox
+    // that isn't open yet, which the imap library throws synchronously for
+    // ("No mailbox is currently selected"). This flag is the real "safe to
+    // search" signal — only true once openBox has actually succeeded.
+    mailboxReady:     false,
   };
 }
 
@@ -46,6 +53,7 @@ function _resolveLookbackDays(raw) {
 }
 
 function _fetchUnseen(s) {
+  if (!s.mailboxReady) { logger.warn(`[user:${s.userId}] Fetch skipped — mailbox not open yet`); return; }
   if (s.fetchInProgress) { s.fetchPending = true; return; }
   s.fetchInProgress = true;
 
@@ -137,6 +145,7 @@ function _connect(s) {
   s.intentionalStop = false;
   s.fetchInProgress = false;
   s.fetchPending    = false;
+  s.mailboxReady    = false;
   s.onInvoice       = onInvoice;
 
   const pollMs = Math.max(parseInt(credentials.IMAP_POLL_INTERVAL_MS) || 60000, MIN_POLL_MS);
@@ -163,6 +172,7 @@ function _connect(s) {
         return;
       }
 
+      s.mailboxReady = true;
       _fetchUnseen(s);
 
       imap.on('mail', () => {
@@ -188,6 +198,7 @@ function _connect(s) {
   });
 
   imap.on('error', (err) => {
+    s.mailboxReady = false;
     if (s.intentionalStop) return;
     s.reconnectAttempt++;
     const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, s.reconnectAttempt - 1), RECONNECT_MAX_MS);
@@ -206,6 +217,7 @@ function _connect(s) {
   });
 
   imap.once('end', () => {
+    s.mailboxReady = false;
     if (s.pollId) { clearInterval(s.pollId); s.pollId = null; }
     if (s.intentionalStop) {
       logger.info(`[user:${userId}] IMAP connection closed (intentional stop)`);
@@ -252,14 +264,20 @@ function stop(userId) {
   if (s.pollId)        { clearInterval(s.pollId);       s.pollId        = null; }
   if (s.imap) {
     try { s.imap.end(); } catch (_) {}
-    s.imap      = null;
-    s.onInvoice = null;
+    s.imap         = null;
+    s.mailboxReady = false;
+    s.onInvoice    = null;
   }
 }
 
 function rescan(userId) {
   const s = _registry.get(userId);
-  if (!s?.imap) return false;
+  // s.imap is set the instant `new Imap()` is constructed — well before the
+  // handshake finishes and the inbox is actually selected. Gating on
+  // mailboxReady (not just s.imap) is what stops a rescan fired in that
+  // window from calling .search() on an unselected mailbox, which node-imap
+  // throws synchronously for.
+  if (!s?.imap || !s.mailboxReady) return false;
   logger.info(`[user:${userId}] Manual rescan triggered`);
   _fetchUnseen(s);
   return true;
