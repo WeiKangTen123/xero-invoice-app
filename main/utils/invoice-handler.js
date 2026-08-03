@@ -1,5 +1,5 @@
 const { enqueueInvoice }  = require('../queue/processor');
-const { autoConnect }     = require('../xero/connect');
+const { reconnectXero }   = require('../xero/reconnect');
 const { xeroErrMsg }      = require('../xero/xero-utils');
 const { notifyError }     = require('./notify');
 const logger              = require('./logger');
@@ -47,7 +47,7 @@ function createHandler(userId) {
         const tenants = await cache.getAllTenants();
         if (!tenants.length) {
           logger.info('No cached Xero tenants — reconnecting', { userId });
-          await autoConnect(userId);
+          await reconnectXero(userId);
         }
         const xeroInvoiceId = await enqueueInvoice(userId, { ...invoiceData, _invoiceStoreId: id });
         if (xeroInvoiceId) {
@@ -181,7 +181,7 @@ async function submitInvoiceToXero(userId, invoiceId) {
   const tenants = await cache.getAllTenants();
   if (!tenants.length) {
     logger.info('No cached Xero tenants — reconnecting before manual submit', { userId });
-    await autoConnect(userId);
+    await reconnectXero(userId);
   }
 
   const record = invStore.getById(invoiceId);

@@ -52,9 +52,14 @@ async function autoConnect(userId) {
   }
 
   for (const tenant of tenants) {
-    tokenCache.cacheToken(tenant.tenantId, tenant.tenantName, access_token, expires_at);
+    tokenCache.cacheToken(tenant.tenantId, tenant.tenantName, access_token, expires_at, 'custom');
     logger.info('Xero org connected', { tenantName: tenant.tenantName, userId });
   }
+
+  // A successful Custom Connection means this is now the active method — flips a
+  // user back from 'oauth' if they'd previously connected that way and are now
+  // re-testing/using Custom Connection instead.
+  require('../utils/users').saveUserConfig(userId, { XERO_CONNECTION_TYPE: 'custom' });
 
   return tenants;
 }

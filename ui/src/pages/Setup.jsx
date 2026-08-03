@@ -17,6 +17,9 @@ const HELP = {
   ZERO_TAX_RATE:         'Tax rate name in Xero for zero-rated items (e.g. NONE, TAX001).',
   SLACK_WEBHOOK_URL:     'Optional Slack incoming webhook URL for error notifications.',
   REDIS_URL:             'Optional Redis URL for the job queue. Leave blank to use in-memory queue.',
+  XERO_OAUTH_CLIENT_ID:     'Client ID from your Xero "Web app" (not Custom Connection). One shared app for everyone using this deployment.',
+  XERO_OAUTH_CLIENT_SECRET: 'Client secret for the same Xero Web app.',
+  XERO_OAUTH_REDIRECT_URI:  'Must exactly match a redirect URI registered on the Xero Web app. Must be HTTPS in production (http://localhost is fine for local dev).',
 };
 
 // helpUrl/helpLabel — where to actually go get the credentials this section asks
@@ -36,6 +39,12 @@ const SECTION_META = {
   },
   defaults: { label: 'Invoice Defaults', desc: 'Fallback values when fields cannot be detected automatically', icon: '⚙', testKey: null },
   optional: { label: 'Optional',         desc: 'Slack error notifications, Redis queue', icon: '◎', testKey: null },
+  xeroOAuth: {
+    label: 'Xero OAuth App (admin)', icon: '🔐',
+    desc: 'One shared Xero "Web app" registration used by everyone\'s "Connect to Xero" button',
+    testKey: null,
+    helpUrl: 'https://developer.xero.com/app/manage', helpLabel: 'Manage your Xero apps ↗',
+  },
 };
 
 function isSecretKey(key) {
@@ -166,6 +175,151 @@ function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, tes
         {Object.entries(sectionData).map(([name, fieldMeta]) => (
           <Field key={name} name={name} meta={fieldMeta} value={values[name] || ''} onChange={onChange} />
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Xero Connection — two coexisting connection methods, not a flat field list ──
+// Custom Connection (existing Client ID/Secret fields + Test button, unchanged)
+// and OAuth2 "Web app" (new — connect via Xero's consent screen) are both shown at
+// once; whichever the user successfully completes becomes the active method
+// (config.xero.connectionType, decided server-side by which one actually succeeds).
+function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs, onTest }) {
+  const [tenants, setTenants]       = useState(null); // null = loading
+  const [connectionType, setConnectionType] = useState('custom');
+  const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [banner, setBanner]         = useState(null);
+
+  async function fetchTenants() {
+    try {
+      const d = await api.get('/xero/tenants');
+      setConnectionType(d.connectionType || 'custom');
+      setTenants(d.tenants || []);
+    } catch (_) {
+      setTenants([]);
+    }
+  }
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const flag = params.get('xero_oauth');
+    if (flag) {
+      setBanner(flag === 'success'
+        ? { ok: true, text: 'Xero connected via OAuth.' }
+        : { ok: false, text: 'Xero OAuth connection failed — try again.' });
+      params.delete('xero_oauth');
+      const qs = params.toString();
+      window.history.replaceState({}, '', `${window.location.pathname}${qs ? '?' + qs : ''}`);
+    }
+    fetchTenants();
+  }, []);
+
+  // A successful Custom Connection test also connects tenants server-side —
+  // refresh this card's view of the connection once that happens.
+  useEffect(() => {
+    if (msgs.xero?.ok) fetchTenants();
+  }, [msgs.xero]);
+
+  async function handleConnect() {
+    setConnecting(true);
+    try {
+      const { url } = await api.get('/xero/oauth/connect');
+      window.location.href = url;
+    } catch (err) {
+      setBanner({ ok: false, text: err.message });
+      setConnecting(false);
+    }
+  }
+
+  async function handleDisconnect() {
+    setDisconnecting(true);
+    try {
+      await api.delete('/xero/oauth/disconnect');
+      await fetchTenants();
+    } catch (err) {
+      setBanner({ ok: false, text: err.message });
+    } finally {
+      setDisconnecting(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>
+            🔗
+          </div>
+          <div>
+            <div className="card-title">Xero Connection</div>
+            <div className="card-subtitle" style={{ marginBottom: 0 }}>
+              Connect via Custom Connection credentials, or via Xero login (OAuth) — either works
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <HelpLink url="https://developer.xero.com/app/manage" label="Manage your Xero apps ↗" />
+      </div>
+
+      {banner && (
+        <div className={`alert ${banner.ok ? 'alert-success' : 'alert-error'}`} style={{ marginBottom: 14 }}>
+          <span className="alert-icon">{banner.ok ? '✓' : '✕'}</span>{banner.text}
+        </div>
+      )}
+
+      <div style={{ height: 1, background: 'var(--border)', marginBottom: 20 }} />
+
+      {tenants === null ? (
+        <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>Checking connection…</div>
+      ) : tenants.length > 0 ? (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>
+              Connected {connectionType === 'oauth' ? 'via OAuth' : 'via Custom Connection'}
+            </span>
+            {connectionType === 'oauth' && (
+              <button type="button" className="btn btn-sm" disabled={disconnecting} onClick={handleDisconnect}
+                style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}>
+                {disconnecting ? '...' : 'Disconnect'}
+              </button>
+            )}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {tenants.map(t => (
+              <div key={t.tenantId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', fontSize: 13 }}>
+                <span className="badge badge-green">● Live</span>
+                {t.tenantName}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="grid-2" style={{ marginBottom: 16 }}>
+        {Object.entries(sectionData).map(([name, fieldMeta]) => (
+          <Field key={name} name={name} meta={fieldMeta} value={values[name] || ''} onChange={onChange} />
+        ))}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+        <TestResult msg={msgs.xero} />
+        <button type="button" className="btn btn-outline btn-sm" disabled={testing.xero} onClick={() => onTest('xero')}>
+          {testing.xero ? <><span className="btn-spinner" style={{ borderColor: 'rgba(0,0,0,0.15)', borderTopColor: 'var(--accent)' }} /> Testing...</> : '⚡ Test Custom Connection'}
+        </button>
+      </div>
+
+      <div style={{ height: 1, background: 'var(--border)', margin: '4px 0 16px' }} />
+
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          Or connect by logging into Xero directly — no Client ID/Secret needed.
+        </div>
+        <button type="button" className="btn btn-primary btn-sm" disabled={connecting} onClick={handleConnect}>
+          {connecting ? '...' : '🔗 Connect to Xero'}
+        </button>
       </div>
     </div>
   );
@@ -393,20 +547,27 @@ export default function Setup() {
       )}
 
       <form onSubmit={handleSave}>
-        {['xero', 'imap'].map((key, idx) => {
+        {config.xero && (
+          <XeroConnectionCard
+            idx={0} sectionData={config.xero}
+            values={values} onChange={handleChange} testing={testing} msgs={msgs} onTest={runTest}
+          />
+        )}
+
+        {['imap'].map((key, idx) => {
           const sectionData = config[key];
           if (!sectionData) return null;
           return (
             <SectionCard
               key={key} sectionKey={key} meta={SECTION_META[key]} sectionData={sectionData}
-              values={values} onChange={handleChange} idx={idx} testing={testing} msgs={msgs} onTest={runTest}
+              values={values} onChange={handleChange} idx={idx + 1} testing={testing} msgs={msgs} onTest={runTest}
             />
           );
         })}
 
         <LlmKeysCard idx={2} testing={testing} msgs={msgs} onTest={runTest} />
 
-        {['defaults', 'optional'].map((key, i) => {
+        {['defaults', 'optional', 'xeroOAuth'].map((key, i) => {
           const sectionData = config[key];
           if (!sectionData) return null;
           return (
