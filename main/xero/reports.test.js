@@ -289,20 +289,22 @@ describe('xero/reports — _buildProfitAndLoss (pure)', () => {
   });
 });
 
+// Xero's real Bank Summary report is COLUMNAR, not "one section per account
+// with labeled rows" — confirmed against a live response (see git history/PR
+// description): one Header row spells out what each cell position means, then
+// every bank account is a plain Row with values at those same positions,
+// followed by a SummaryRow "Total" line. These fixtures mirror that exactly.
+function bankSummaryHeader(...columns) { return { rowType: 'Header', cells: columns.map(cell) }; }
+function bankSummaryAccountRow(...values) { return { rowType: 'Row', cells: values.map(cell) }; }
+
 describe('xero/reports — _buildBankSummary (pure)', () => {
-  test('extracts cash received/spent/closing balance per account section, plus totals', () => {
+  test('reads column positions off the real Header row and extracts one row per account, plus totals', () => {
     const tree = [
-      section('Business Bank Account', [
-        row('Opening Balance', ['Opening Balance', '1,000.00']),
-        row('Cash Received', ['Cash Received', '5,000.00']),
-        row('Cash Spent', ['Cash Spent', '(2,000.00)']),
-        row('Closing Balance', ['Closing Balance', '4,000.00']),
-      ]),
-      section('Savings Account', [
-        row('Opening Balance', ['Opening Balance', '500.00']),
-        row('Cash Received', ['Cash Received', '100.00']),
-        row('Cash Spent', ['Cash Spent', '(50.00)']),
-        row('Closing Balance', ['Closing Balance', '550.00']),
+      bankSummaryHeader('Bank Accounts', 'Opening Balance', 'Cash Received', 'Cash Spent', 'Closing Balance'),
+      section('', [
+        bankSummaryAccountRow('Business Bank Account', '1,000.00', '5,000.00', '(2,000.00)', '4,000.00'),
+        bankSummaryAccountRow('Savings Account', '500.00', '100.00', '(50.00)', '550.00'),
+        row('Total', ['Total', '1,500.00', '5,100.00', '(2,050.00)', '4,550.00'], 'SummaryRow'),
       ]),
     ];
     const result = _buildBankSummary(tree);
@@ -313,17 +315,21 @@ describe('xero/reports — _buildBankSummary (pure)', () => {
     expect(result).toMatchObject({ cashIn: 5100, cashOut: 2050, net: 3050 });
   });
 
-  test('a non-account section (e.g. a report-wide totals row with no cash rows) is skipped', () => {
+  test('the report-wide "Total" SummaryRow is excluded from the account list (cashIn/cashOut are summed independently, not read off it)', () => {
     const tree = [
-      section('Business Bank Account', [
-        row('Cash Received', ['Cash Received', '100.00']),
-        row('Cash Spent', ['Cash Spent', '(50.00)']),
-        row('Closing Balance', ['Closing Balance', '50.00']),
+      bankSummaryHeader('Bank Accounts', 'Opening Balance', 'Cash Received', 'Cash Spent', 'Closing Balance'),
+      section('', [
+        bankSummaryAccountRow('Business Bank Account', '100.00', '100.00', '(50.00)', '50.00'),
+        row('Total', ['Total', '100.00', '100.00', '(50.00)', '50.00'], 'SummaryRow'),
       ]),
-      section('Notes', [row('Some disclaimer text', ['Some disclaimer text'])]),
     ];
     const result = _buildBankSummary(tree);
     expect(result.accounts).toHaveLength(1);
+  });
+
+  test('no Header row (unexpected report shape) — zeroed totals, not a crash', () => {
+    expect(_buildBankSummary([section('', [row('Something', ['Something', '1.00'])])]))
+      .toEqual({ accounts: [], cashIn: 0, cashOut: 0, net: 0 });
   });
 
   test('no sections — zeroed totals, empty account list', () => {

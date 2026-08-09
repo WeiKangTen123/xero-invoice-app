@@ -379,21 +379,39 @@ function _buildProfitAndLoss(reportRows) {
   return { income, expenses, netProfit };
 }
 
+// Bank Summary is COLUMNAR, not sectioned-with-labeled-rows like it visually
+// appears in Xero's UI: one Header row spells out what each cell position
+// means ("Bank Accounts" | "Opening Balance" | "Cash Received" | "Cash Spent"
+// | "Closing Balance"), then every bank account is one plain Row with values
+// at those same positions — confirmed against a real Xero response, not
+// guessed. Reading positions off the real Header row (rather than hardcoding
+// indexes 0-4) survives Xero reordering or relabeling the columns.
 function _buildBankSummary(reportRows) {
-  const flat = _flattenReportRows(reportRows);
-  // Each bank account gets its own section in this report; walking the raw tree
-  // (not the flattened list) keeps each account's rows grouped correctly rather
-  // than guessing which "Cash Received" belongs to which account.
+  const header  = (reportRows || []).find(r => r.rowType === 'Header');
+  const columns = (header?.cells || []).map(c => (c.value || '').toLowerCase());
+  const receivedIdx = columns.findIndex(c => c.includes('cash received'));
+  const spentIdx     = columns.findIndex(c => c.includes('cash spent'));
+  const closingIdx   = columns.findIndex(c => c.includes('closing balance'));
+  if (receivedIdx < 0 || spentIdx < 0) return { accounts: [], cashIn: 0, cashOut: 0, net: 0 };
+
   const accounts = [];
-  for (const section of reportRows || []) {
-    if (section.rowType !== 'Section' || !section.rows?.length) continue;
-    const flatSection = _flattenReportRows(section.rows);
-    const received = _findRow(flatSection, /cash received/i);
-    const spent    = _findRow(flatSection, /cash spent/i);
-    const closing  = _findRow(flatSection, /closing balance/i);
-    if (!received && !spent && !closing) continue; // not an account section (e.g. a totals row)
-    accounts.push({ name: section.title || 'Account', cashReceived: received, cashSpent: Math.abs(spent), closingBalance: closing });
-  }
+  (function walk(rows) {
+    for (const row of rows || []) {
+      // SummaryRow (the report's own "Total" line) is deliberately excluded —
+      // cashIn/cashOut are summed from the per-account rows below instead, so
+      // this never depends on that row's label matching anything.
+      if (row.rowType === 'Row' && row.cells?.length > spentIdx) {
+        accounts.push({
+          name:           row.cells[0]?.value || 'Account',
+          cashReceived:   _parseReportNumber(row.cells[receivedIdx]?.value),
+          cashSpent:      Math.abs(_parseReportNumber(row.cells[spentIdx]?.value)),
+          closingBalance: closingIdx >= 0 ? _parseReportNumber(row.cells[closingIdx]?.value) : 0,
+        });
+      }
+      if (row.rows?.length) walk(row.rows);
+    }
+  })(reportRows);
+
   const cashIn  = accounts.reduce((s, a) => s + a.cashReceived, 0);
   const cashOut = accounts.reduce((s, a) => s + a.cashSpent, 0);
   return { accounts, cashIn, cashOut, net: cashIn - cashOut };
