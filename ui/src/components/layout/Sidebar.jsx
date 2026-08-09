@@ -6,7 +6,7 @@ import { usePipeline } from '../../context/PipelineContext';
 const NAV = [
   { to: '/dashboard',     label: 'Dashboard',     icon: '▦',  desc: 'Overview' },
   { to: '/invoices',      label: 'Invoices',      icon: '◧',  desc: 'History' },
-  { to: '/xero-insights', label: 'Xero Insights', icon: '◆',  desc: 'Financial reports' },
+  { to: '/xero-insights', label: 'Insights',      icon: '◆',  desc: 'Financial reports' },
   { to: '/setup',         label: 'Setup',         icon: '◈',  desc: 'Config' },
 ];
 
