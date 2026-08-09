@@ -1,4 +1,4 @@
-const { _buildSummary } = require('./reports');
+const { _buildSummary, computeRange, _buildPeriod, _buildAccounts, _buildBankAccounts, _buildContacts } = require('./reports');
 
 describe('xero/reports — _buildSummary (pure)', () => {
   const ORG = { name: 'Blacklab Pte. Ltd.', countryCode: 'SG', baseCurrency: 'SGD', financialYearEndDay: 31, financialYearEndMonth: 12 };
@@ -74,6 +74,146 @@ describe('xero/reports — _buildSummary (pure)', () => {
   });
 });
 
+describe('xero/reports — computeRange (pure, date math only)', () => {
+  // Pin "now" so every preset resolves deterministically. Wednesday, so the
+  // week-start (Monday) case actually crosses a few days, not a no-op.
+  beforeEach(() => { jest.useFakeTimers().setSystemTime(new Date('2026-08-12T10:00:00Z')); }); // Wed
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('day — from and to are both today', () => {
+    const r = computeRange('day', 'UTC');
+    expect(r).toMatchObject({ preset: 'day', fromISO: '2026-08-12', toISO: '2026-08-12', days: 1 });
+    expect(r.where).toBe('Date >= DateTime(2026,8,12) && Date < DateTime(2026,8,13)');
+  });
+
+  test('week — from is Monday of this week, to is today', () => {
+    const r = computeRange('week', 'UTC');
+    expect(r.fromISO).toBe('2026-08-10'); // Monday
+    expect(r.toISO).toBe('2026-08-12');   // today (Wednesday)
+  });
+
+  test('month — from is the 1st of this month', () => {
+    const r = computeRange('month', 'UTC');
+    expect(r.fromISO).toBe('2026-08-01');
+    expect(r.toISO).toBe('2026-08-12');
+  });
+
+  test('year — from is Jan 1 of this year', () => {
+    const r = computeRange('year', 'UTC');
+    expect(r.fromISO).toBe('2026-01-01');
+    expect(r.toISO).toBe('2026-08-12');
+  });
+
+  test('custom — uses the given from/to verbatim', () => {
+    const r = computeRange('custom', 'UTC', '2026-01-15', '2026-03-01');
+    expect(r).toMatchObject({ preset: 'custom', fromISO: '2026-01-15', toISO: '2026-03-01' });
+    expect(r.where).toBe('Date >= DateTime(2026,1,15) && Date < DateTime(2026,3,2)');
+  });
+
+  test('custom — rejects "from" after "to"', () => {
+    expect(() => computeRange('custom', 'UTC', '2026-03-01', '2026-01-15')).toThrow(/must not be after/i);
+  });
+
+  test('custom — rejects missing/malformed dates', () => {
+    expect(() => computeRange('custom', 'UTC', 'not-a-date', '2026-01-15')).toThrow(/valid/i);
+    expect(() => computeRange('custom', 'UTC', undefined, undefined)).toThrow(/valid/i);
+  });
+
+  test('an unrecognised preset falls back to month, not a crash', () => {
+    const r = computeRange('bogus', 'UTC');
+    expect(r.preset).toBe('month');
+    expect(r.fromISO).toBe('2026-08-01');
+  });
+
+  test('"today" is resolved per the given timezone, not the server\'s', () => {
+    // 2026-08-12T23:30 UTC is already 2026-08-13 in Singapore (UTC+8).
+    jest.setSystemTime(new Date('2026-08-12T23:30:00Z'));
+    const utc = computeRange('day', 'UTC');
+    const sgt = computeRange('day', 'Asia/Singapore');
+    expect(utc.fromISO).toBe('2026-08-12');
+    expect(sgt.fromISO).toBe('2026-08-13');
+  });
+});
+
+describe('xero/reports — _buildPeriod (pure)', () => {
+  const shortRange = { preset: 'week', fromISO: '2026-08-10', toISO: '2026-08-12', days: 3 };
+  const longRange  = { preset: 'year', fromISO: '2026-01-01', toISO: '2026-08-12', days: 224 };
+
+  test('totals sales and bills separately, computes net', () => {
+    const invoices = [
+      { type: 'ACCREC', total: 300, date: '2026-08-10T00:00:00Z' },
+      { type: 'ACCREC', total: 150, date: '2026-08-11T00:00:00Z' },
+      { type: 'ACCPAY', total: 90,  date: '2026-08-11T00:00:00Z' },
+    ];
+    const { totals } = _buildPeriod(invoices, shortRange);
+    expect(totals).toEqual({ salesTotal: 450, billsTotal: 90, salesCount: 2, billsCount: 1, net: 360 });
+  });
+
+  test('short ranges (<=31 days) bucket by day', () => {
+    const invoices = [
+      { type: 'ACCREC', total: 100, date: '2026-08-10T00:00:00Z' },
+      { type: 'ACCREC', total: 50,  date: '2026-08-10T00:00:00Z' },
+      { type: 'ACCPAY', total: 20,  date: '2026-08-11T00:00:00Z' },
+    ];
+    const { granularity, trend } = _buildPeriod(invoices, shortRange);
+    expect(granularity).toBe('day');
+    expect(trend).toEqual([
+      { bucket: '2026-08-10', sales: 150, bills: 0 },
+      { bucket: '2026-08-11', sales: 0, bills: 20 },
+    ]);
+  });
+
+  test('long ranges (>31 days) bucket by month', () => {
+    const invoices = [
+      { type: 'ACCREC', total: 100, date: '2026-01-05T00:00:00Z' },
+      { type: 'ACCREC', total: 200, date: '2026-01-20T00:00:00Z' },
+      { type: 'ACCPAY', total: 30,  date: '2026-03-01T00:00:00Z' },
+    ];
+    const { granularity, trend } = _buildPeriod(invoices, longRange);
+    expect(granularity).toBe('month');
+    expect(trend).toEqual([
+      { bucket: '2026-01', sales: 300, bills: 0 },
+      { bucket: '2026-03', sales: 0, bills: 30 },
+    ]);
+  });
+
+  test('an invoice with no date is totalled but excluded from the trend', () => {
+    const { totals, trend } = _buildPeriod([{ type: 'ACCREC', total: 75, date: null }], shortRange);
+    expect(totals.salesTotal).toBe(75);
+    expect(trend).toEqual([]);
+  });
+
+  test('no invoices — zeroed totals, empty trend', () => {
+    const { totals, trend } = _buildPeriod([], shortRange);
+    expect(totals).toEqual({ salesTotal: 0, billsTotal: 0, salesCount: 0, billsCount: 0, net: 0 });
+    expect(trend).toEqual([]);
+  });
+});
+
+describe('xero/reports — directory builders (pure)', () => {
+  test('_buildAccounts maps the fields the Chart of Accounts table needs', () => {
+    const accounts = _buildAccounts([{ accountID: 'a1', code: '200', name: 'Sales', type: 'REVENUE', taxType: 'OUTPUT', status: 'ACTIVE' }]);
+    expect(accounts).toEqual([{ accountId: 'a1', code: '200', name: 'Sales', type: 'REVENUE', taxType: 'OUTPUT', status: 'ACTIVE' }]);
+  });
+
+  test('_buildBankAccounts keeps only Type==BANK accounts', () => {
+    const accounts = _buildBankAccounts([
+      { accountID: 'a1', type: 'BANK', code: '090', name: 'Main Account', bankAccountNumber: '123-456', currencyCode: 'SGD', status: 'ACTIVE' },
+      { accountID: 'a2', type: 'REVENUE', code: '200', name: 'Sales' },
+    ]);
+    expect(accounts).toEqual([{ accountId: 'a1', code: '090', name: 'Main Account', accountNumber: '123-456', currency: 'SGD', status: 'ACTIVE' }]);
+  });
+
+  test('_buildContacts maps customer/supplier flags and falls back name to "Unknown"', () => {
+    const contacts = _buildContacts([
+      { contactID: 'c1', name: 'Acme Corp', emailAddress: 'a@acme.com', isCustomer: true, isSupplier: false, contactStatus: 'ACTIVE' },
+      { contactID: 'c2', isCustomer: false, isSupplier: true },
+    ]);
+    expect(contacts[0]).toMatchObject({ name: 'Acme Corp', isCustomer: true, isSupplier: false });
+    expect(contacts[1]).toMatchObject({ name: 'Unknown', isSupplier: true });
+  });
+});
+
 describe('xero/reports — getSummary caching', () => {
   let reports, tokenCacheMock, getOrganisations, getInvoices;
 
@@ -128,5 +268,65 @@ describe('xero/reports — getSummary caching', () => {
     await reports.getSummary('user-1', 'tenant-1'); // refetches
     await reports.getSummary('user-2', 'tenant-1'); // still cached
     expect(getOrganisations).toHaveBeenCalledTimes(3); // 2 initial + 1 refetch, not 4
+  });
+});
+
+describe('xero/reports — getPeriod / getAccounts / getBankAccounts / getContacts caching', () => {
+  let reports, getInvoices, getAccounts, getContacts;
+
+  beforeEach(() => {
+    jest.resetModules();
+    getInvoices = jest.fn().mockResolvedValue({ body: { invoices: [] } });
+    getAccounts = jest.fn().mockResolvedValue({ body: { accounts: [] } });
+    getContacts = jest.fn().mockResolvedValue({ body: { contacts: [] } });
+
+    jest.doMock('xero-node', () => ({
+      AccountingApi: jest.fn().mockImplementation(() => ({ getInvoices, getAccounts, getContacts })),
+    }));
+    jest.doMock('../utils/token-cache', () => ({
+      forUser: jest.fn(() => ({ getValidToken: jest.fn().mockResolvedValue('fake-token') })),
+    }));
+
+    reports = require('./reports');
+  });
+
+  test('getPeriod passes the computed Xero `where` filter through to getInvoices', async () => {
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'custom', from: '2026-01-01', to: '2026-01-31', timezone: 'UTC' });
+    const whereArg = getInvoices.mock.calls[0][2];
+    expect(whereArg).toBe('Date >= DateTime(2026,1,1) && Date < DateTime(2026,2,1)');
+  });
+
+  test('getPeriod caches per distinct range — a different preset refetches, the same one does not', async () => {
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' });
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' }); // same range, cached
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'year', timezone: 'UTC' });   // different range, refetches
+    expect(getInvoices).toHaveBeenCalledTimes(2);
+  });
+
+  test('getAccounts and getBankAccounts cache independently of getSummary/getPeriod', async () => {
+    await reports.getAccounts('user-1', 'tenant-1');
+    await reports.getAccounts('user-1', 'tenant-1');
+    await reports.getBankAccounts('user-1', 'tenant-1');
+    expect(getAccounts).toHaveBeenCalledTimes(2); // one per distinct cache key (accounts vs bank)
+  });
+
+  test('getContacts fetches once, then serves from cache', async () => {
+    await reports.getContacts('user-1', 'tenant-1');
+    await reports.getContacts('user-1', 'tenant-1');
+    expect(getContacts).toHaveBeenCalledTimes(1);
+  });
+
+  test('clearCache also clears period/accounts/bank/contacts entries for that user', async () => {
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' });
+    await reports.getAccounts('user-1', 'tenant-1');
+    await reports.getContacts('user-1', 'tenant-1');
+    reports.clearCache('user-1');
+
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' });
+    await reports.getAccounts('user-1', 'tenant-1');
+    await reports.getContacts('user-1', 'tenant-1');
+    expect(getInvoices).toHaveBeenCalledTimes(2);
+    expect(getAccounts).toHaveBeenCalledTimes(2);
+    expect(getContacts).toHaveBeenCalledTimes(2);
   });
 });

@@ -109,4 +109,131 @@ describe('routes/xero-reports', () => {
       .expect(500);
     expect(res.body.error).toMatch(/rate limit/i);
   });
+
+  describe('GET /period', () => {
+    test('returns connected:false with no tenant, without calling reports.getPeriod', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([]);
+      const res = await request(app)
+        .get('/api/xero-reports/period')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+      expect(res.body).toEqual({ connected: false, tenants: [] });
+      expect(reports.getPeriod).not.toHaveBeenCalled();
+    });
+
+    test('threads preset/from/to/force through, and passes this user\'s timezone default', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getPeriod.mockResolvedValue({ range: {}, totals: {}, granularity: 'day', trend: [] });
+
+      await request(app)
+        .get('/api/xero-reports/period?preset=custom&from=2026-01-01&to=2026-01-31&force=true')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+
+      expect(reports.getPeriod).toHaveBeenCalledWith(testUser.id, 't1', {
+        preset: 'custom', from: '2026-01-01', to: '2026-01-31', timezone: 'Asia/Singapore', force: true,
+      });
+    });
+
+    test('uses this user\'s saved timezone preference when set', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getPeriod.mockResolvedValue({ range: {}, totals: {}, granularity: 'day', trend: [] });
+      users.saveUserConfig(testUser.id, { TIMEZONE: 'America/New_York' });
+
+      await request(app)
+        .get('/api/xero-reports/period')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+
+      expect(reports.getPeriod).toHaveBeenCalledWith(testUser.id, 't1', expect.objectContaining({ timezone: 'America/New_York' }));
+    });
+
+    test('a bad custom range surfaces as 400, not 500', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getPeriod.mockRejectedValue(new Error('Custom range requires valid "from" and "to" dates (YYYY-MM-DD)'));
+
+      const res = await request(app)
+        .get('/api/xero-reports/period?preset=custom')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(400);
+      expect(res.body.error).toMatch(/valid/i);
+    });
+
+    test('a real Xero failure still surfaces as 500', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getPeriod.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
+
+      await request(app)
+        .get('/api/xero-reports/period')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(500);
+    });
+  });
+
+  describe('GET /accounts, /bank-accounts, /contacts', () => {
+    test('all three require authentication', async () => {
+      await request(app).get('/api/xero-reports/accounts').expect(401);
+      await request(app).get('/api/xero-reports/bank-accounts').expect(401);
+      await request(app).get('/api/xero-reports/contacts').expect(401);
+    });
+
+    test('all three return connected:false with no tenant', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([]);
+      for (const path of ['accounts', 'bank-accounts', 'contacts']) {
+        const res = await request(app)
+          .get(`/api/xero-reports/${path}`)
+          .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+          .expect(200);
+        expect(res.body).toEqual({ connected: false, tenants: [] });
+      }
+    });
+
+    test('GET /accounts calls reports.getAccounts for the resolved tenant', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getAccounts.mockResolvedValue({ accounts: [{ code: '200', name: 'Sales' }] });
+
+      const res = await request(app)
+        .get('/api/xero-reports/accounts')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+
+      expect(reports.getAccounts).toHaveBeenCalledWith(testUser.id, 't1', { force: false });
+      expect(res.body.accounts).toHaveLength(1);
+    });
+
+    test('GET /bank-accounts calls reports.getBankAccounts for the resolved tenant', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getBankAccounts.mockResolvedValue({ bankAccounts: [] });
+
+      await request(app)
+        .get('/api/xero-reports/bank-accounts?force=true')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+
+      expect(reports.getBankAccounts).toHaveBeenCalledWith(testUser.id, 't1', { force: true });
+    });
+
+    test('GET /contacts calls reports.getContacts for the resolved tenant', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getContacts.mockResolvedValue({ contacts: [] });
+
+      await request(app)
+        .get('/api/xero-reports/contacts')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+
+      expect(reports.getContacts).toHaveBeenCalledWith(testUser.id, 't1', { force: false });
+    });
+
+    test('a failure on any of the three surfaces as 500, not a crash', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getContacts.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
+
+      const res = await request(app)
+        .get('/api/xero-reports/contacts')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(500);
+      expect(res.body.error).toMatch(/rate limit/i);
+    });
+  });
 });
