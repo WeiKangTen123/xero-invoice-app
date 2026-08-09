@@ -1,8 +1,9 @@
-jest.mock('../xero/connect', () => ({ refreshClientCredentialsToken: jest.fn() }));
-jest.mock('../xero/oauth',   () => ({ refreshAuthCodeToken: jest.fn() }));
+jest.mock('../xero/connect',    () => ({ refreshClientCredentialsToken: jest.fn() }));
+jest.mock('../xero/oauth',      () => ({ refreshAuthCodeToken: jest.fn() }));
+jest.mock('../xero/reconnect',  () => ({ reconnectXero: jest.fn() }));
 
 describe('token-cache', () => {
-  let tokenCache, refreshClientCredentialsToken, refreshAuthCodeToken;
+  let tokenCache, refreshClientCredentialsToken, refreshAuthCodeToken, reconnectXero;
 
   beforeEach(() => {
     jest.resetModules();
@@ -13,6 +14,8 @@ describe('token-cache', () => {
     tokenCache = require('./token-cache');
     ({ refreshClientCredentialsToken } = require('../xero/connect'));
     ({ refreshAuthCodeToken } = require('../xero/oauth'));
+    ({ reconnectXero } = require('../xero/reconnect'));
+    reconnectXero.mockResolvedValue(undefined); // default: "reconnected" but populated nothing — see cold-cache tests below for the populating case
   });
 
   test('getAllTenants/getValidToken work for a token cached with the default (custom) type', async () => {
@@ -60,9 +63,46 @@ describe('token-cache', () => {
     expect(refreshClientCredentialsToken).not.toHaveBeenCalled();
   });
 
-  test('getValidToken throws a clear error for a tenant with no cached token', async () => {
+  test('getValidToken throws a clear error for a tenant with no cached token, even after attempting reconnect', async () => {
     const cache = tokenCache.forUser('user-4');
     await expect(cache.getValidToken('unknown-tenant')).rejects.toThrow(/reconnect xero first/i);
+    expect(reconnectXero).toHaveBeenCalledWith('user-4');
+  });
+
+  test('getValidToken transparently reconnects from a cold cache (e.g. right after a restart) instead of forcing a manual reconnect', async () => {
+    // Access tokens are never persisted, so this is the normal state on every
+    // boot for an already-connected user — reconnectXero() is expected to
+    // populate the cache from the persisted refresh token, same as the real
+    // xero/oauth.js#reconnect / xero/connect.js#autoConnect do.
+    reconnectXero.mockImplementation(async userId => {
+      tokenCache.forUser(userId).cacheToken('t6', 'Org', 'recovered-tok', new Date(Date.now() + 10 * 60_000), 'oauth');
+    });
+    const cache = tokenCache.forUser('user-6');
+    expect(await cache.getValidToken('t6')).toBe('recovered-tok');
+  });
+
+  test('a reconnect failure surfaces the underlying reason, not just a generic "reconnect first"', async () => {
+    reconnectXero.mockRejectedValue(new Error('invalid_grant'));
+    const cache = tokenCache.forUser('user-7');
+    await expect(cache.getValidToken('t7')).rejects.toThrow(/invalid_grant/);
+  });
+
+  test('concurrent cold-cache calls for the same user share one reconnect, not one each (refresh-token rotation would break a second concurrent call)', async () => {
+    let resolveReconnect;
+    reconnectXero.mockImplementation(userId => new Promise(resolve => {
+      resolveReconnect = () => {
+        tokenCache.forUser(userId).cacheToken('t8a', 'Org', 'tok-a', new Date(Date.now() + 10 * 60_000));
+        tokenCache.forUser(userId).cacheToken('t8b', 'Org', 'tok-b', new Date(Date.now() + 10 * 60_000));
+        resolve();
+      };
+    }));
+    const cache = tokenCache.forUser('user-8');
+    const p1 = cache.getValidToken('t8a');
+    const p2 = cache.getValidToken('t8b');
+    expect(reconnectXero).toHaveBeenCalledTimes(1); // the 2nd call joined the 1st's in-flight promise, not a fresh one
+    resolveReconnect();
+    expect(await p1).toBe('tok-a');
+    expect(await p2).toBe('tok-b');
   });
 
   test('clear() empties both tokens and tenants', () => {
