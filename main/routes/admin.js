@@ -3,7 +3,7 @@ const router       = express.Router();
 const fs           = require('fs');
 const path         = require('path');
 const { requireAdmin } = require('../middleware/auth-middleware');
-const { getAllUsers, createUser, updateUserRole, deleteUser, readUsers, getSetupStatus } = require('../utils/users');
+const { getAllUsers, createUser, updateUserRole, deleteUser, readUsers, getSetupStatus, isOnline } = require('../utils/users');
 const invoiceStore     = require('../utils/invoice-store');
 const settingsStore    = require('../utils/settings-store');
 const processState     = require('../utils/process-state');
@@ -176,6 +176,11 @@ router.get('/monitoring', requireAdmin, (_req, res) => {
       lastActivity:   processState.forUser(u.id).getStatus(watcherRegistry.isRunning(u.id)).lastActivity,
       xeroConnected:  tenants.length > 0,
       imapConfigured: setup.imap.configured,
+      // Real browser presence (an authenticated request landed recently) — distinct
+      // from lastActivity above, which is the email pipeline's own activity and says
+      // nothing about whether anyone is actually looking at the app right now.
+      lastSeenAt:     u.last_seen_at || null,
+      online:         isOnline(u.last_seen_at),
     };
   });
 
@@ -195,6 +200,50 @@ router.get('/monitoring', requireAdmin, (_req, res) => {
     },
     users: userStats,
   });
+});
+
+// GET /api/admin/stats/daily — invoice volume by day, for the Monitoring chart.
+// Derived entirely from invoices.processed_at, which every invoice already has —
+// no separate metrics-tracking table needed for this one. Optional ?userId= scopes
+// it to one user (used by the admin's per-user drill-down); omitted, it's every
+// user combined. Always returns one entry per day in the range, zero-filled, so the
+// chart's x-axis doesn't skip days with no activity.
+router.get('/stats/daily', requireAdmin, (req, res) => {
+  const days   = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 90);
+  const userId = (req.query.userId || '').trim();
+
+  const params = [`-${days} days`];
+  let sql = `
+    SELECT date(processed_at) AS day, status, COUNT(*) AS count
+    FROM invoices
+    WHERE date(processed_at) >= date('now', ?)
+  `;
+  if (userId) { sql += ' AND user_id = ?'; params.push(userId); }
+  sql += ' GROUP BY day, status ORDER BY day';
+
+  const rows = db.prepare(sql).all(...params);
+
+  const byDay = new Map();
+  for (const r of rows) {
+    if (!byDay.has(r.day)) byDay.set(r.day, { day: r.day, posted: 0, error: 0, pending: 0, other: 0 });
+    const bucket = byDay.get(r.day);
+    if (r.status === 'posted')                                  bucket.posted += r.count;
+    else if (r.status === 'error')                               bucket.error  += r.count;
+    else if (r.status === 'pending' || r.status === 'submitting') bucket.pending += r.count;
+    else                                                          bucket.other  += r.count;
+  }
+
+  // Zero-fill every day in the range, even ones with no rows at all.
+  const out = [];
+  const today = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d   = new Date(today);
+    d.setUTCDate(d.getUTCDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    out.push(byDay.get(key) || { day: key, posted: 0, error: 0, pending: 0, other: 0 });
+  }
+
+  res.json({ days: out });
 });
 
 // GET /api/admin/logs — tail the active combined/error log for on-call debugging

@@ -16,6 +16,14 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
+  // Re-fetches /auth/me without a full page reload — used after Setup saves a
+  // preference (like timezone) that other already-mounted components read off
+  // the user object, so the change is reflected immediately everywhere.
+  async function refreshUser() {
+    if (!localStorage.getItem('token')) return;
+    try { setUser((await api.get('/auth/me')).user); } catch { /* ignore */ }
+  }
+
   async function login(email, password) {
     const data = await api.post('/auth/login', { email, password });
     localStorage.setItem('token', data.token);
@@ -38,7 +46,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, register }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, register, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

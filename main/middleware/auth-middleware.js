@@ -9,6 +9,11 @@ function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Authentication required' });
   try {
     req.user = jwt.verify(token, jwtSecret());
+    // Lazily required to avoid a require-cycle at module load (users.js doesn't need
+    // this module, but plenty of routes require both). Internally throttled to at
+    // most one DB write per user per minute — see users.js#touchLastSeen. Failure
+    // here must never turn into a 401 — it's presence tracking, not auth.
+    try { require('../utils/users').touchLastSeen(req.user.id); } catch {}
     next();
   } catch {
     res.status(401).json({ error: 'Invalid or expired token' });

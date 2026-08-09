@@ -33,6 +33,18 @@ describe('users store (SQLite)', () => {
     expect(await users.validatePassword('pw@test.com', 'wrongpass')).toBeNull();
   });
 
+  test('getAllUsers includes online/lastSeenAt, sanitized from the raw last_seen_at column', async () => {
+    const u = await users.createUser('list@test.com', 'password123', 'user');
+    let listed = users.getAllUsers().find(x => x.id === u.id);
+    expect(listed.online).toBe(false);
+    expect(listed.lastSeenAt).toBeNull();
+
+    users.touchLastSeen(u.id);
+    listed = users.getAllUsers().find(x => x.id === u.id);
+    expect(listed.online).toBe(true);
+    expect(listed.lastSeenAt).toBeTruthy();
+  });
+
   test('updateUserRole', async () => {
     const u = await users.createUser('role@test.com', 'password123', 'user');
     const updated = users.updateUserRole(u.id, 'admin');
@@ -136,6 +148,53 @@ describe('users store (SQLite)', () => {
     const cfg = users.getUserConfig(u.id);
     expect(cfg.XERO_OAUTH_CLIENT_ID).toBe('this-users-client-id');
     expect(cfg.XERO_OAUTH_CLIENT_SECRET).toBe('this-users-secret');
+  });
+
+  test('TIMEZONE round-trips through saveUserConfig / getUserConfig, stored plain (not secret)', async () => {
+    const u = await users.createUser('tz@test.com', 'password123', 'user');
+    users.saveUserConfig(u.id, { TIMEZONE: 'Asia/Singapore' });
+
+    const db  = require('../db');
+    const row = db.prepare('SELECT timezone FROM user_credentials WHERE user_id = ?').get(u.id);
+    expect(row.timezone).toBe('Asia/Singapore'); // plain, not "enc:v1:" prefixed
+
+    expect(users.getUserConfig(u.id).TIMEZONE).toBe('Asia/Singapore');
+  });
+
+  describe('touchLastSeen / isOnline', () => {
+    test('a brand-new user has no last_seen_at and is not online', async () => {
+      const u = await users.createUser('fresh@test.com', 'password123', 'user');
+      const found = users.findById(u.id);
+      expect(found.last_seen_at).toBeFalsy();
+      expect(users.isOnline(found.last_seen_at)).toBe(false);
+    });
+
+    test('touchLastSeen sets last_seen_at, and isOnline is true immediately after', async () => {
+      const u = await users.createUser('touch@test.com', 'password123', 'user');
+      users.touchLastSeen(u.id);
+      const found = users.findById(u.id);
+      expect(found.last_seen_at).toBeTruthy();
+      expect(users.isOnline(found.last_seen_at)).toBe(true);
+    });
+
+    test('isOnline is false once last_seen_at is older than the online window', async () => {
+      const u = await users.createUser('stale@test.com', 'password123', 'user');
+      const db = require('../db');
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      db.prepare('UPDATE users SET last_seen_at = ? WHERE id = ?').run(tenMinutesAgo, u.id);
+      expect(users.isOnline(tenMinutesAgo)).toBe(false);
+    });
+
+    test('a second touchLastSeen call within the throttle window does not re-write the DB', async () => {
+      const u = await users.createUser('throttle@test.com', 'password123', 'user');
+      users.touchLastSeen(u.id);
+      const first = users.findById(u.id).last_seen_at;
+
+      // Immediately touching again should be throttled — same timestamp, no new write.
+      users.touchLastSeen(u.id);
+      const second = users.findById(u.id).last_seen_at;
+      expect(second).toBe(first);
+    });
   });
 
   test('deleteUser cascades to credentials/settings/invoices', async () => {

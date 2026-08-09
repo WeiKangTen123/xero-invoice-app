@@ -1,7 +1,7 @@
 const express = require('express');
 const router  = express.Router();
 const jwt     = require('jsonwebtoken');
-const { hasUsers, createUser, validatePassword } = require('../utils/users');
+const { hasUsers, createUser, validatePassword, getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
 const logger  = require('../utils/logger');
 
@@ -63,7 +63,8 @@ router.post('/login', async (req, res) => {
 
 // Get current user (validate token)
 router.get('/me', requireAuth, (req, res) => {
-  res.json({ user: req.user });
+  const config = getUserConfig(req.user.id);
+  res.json({ user: { ...req.user, timezone: config.TIMEZONE || DEFAULT_TIMEZONE } });
 });
 
 module.exports = router;

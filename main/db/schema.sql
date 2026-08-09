@@ -4,11 +4,17 @@
 -- invoices, and reports automatically.
 
 CREATE TABLE IF NOT EXISTS users (
-  id         TEXT PRIMARY KEY,
-  email      TEXT NOT NULL UNIQUE,
-  password   TEXT NOT NULL,
-  role       TEXT NOT NULL DEFAULT 'user',
-  created_at TEXT NOT NULL
+  id           TEXT PRIMARY KEY,
+  email        TEXT NOT NULL UNIQUE,
+  password     TEXT NOT NULL,
+  role         TEXT NOT NULL DEFAULT 'user',
+  created_at   TEXT NOT NULL,
+  -- Updated (throttled — at most once/minute, see users.js#touchLastSeen) on every
+  -- authenticated request. This is real browser presence ("is this person using the
+  -- app right now"), distinct from process-state.js's lastActivity, which tracks the
+  -- EMAIL PIPELINE's activity (an invoice was processed) and says nothing about
+  -- whether anyone is actually looking at the app.
+  last_seen_at TEXT
 );
 
 -- 1:1 with users — Xero/IMAP/LLM credentials (was data/users/<id>/config.json)
@@ -45,7 +51,11 @@ CREATE TABLE IF NOT EXISTS user_credentials (
   xero_oauth_client_id     TEXT,
   xero_oauth_client_secret TEXT,
   xero_oauth_refresh_token TEXT,
-  xero_oauth_connected_at  TEXT
+  xero_oauth_connected_at  TEXT,
+  -- IANA timezone name (e.g. 'Asia/Singapore'), used only to FORMAT timestamps for
+  -- display — every timestamp is still stored in UTC everywhere in this schema.
+  -- Defaults to 'Asia/Singapore' at the application layer when unset, not here.
+  timezone TEXT
 );
 
 -- 1:1 with users — app behaviour toggles (was data/users/<id>/settings.json)

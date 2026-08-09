@@ -21,6 +21,8 @@ function run() {
   _ensureColumn('user_credentials', 'xero_oauth_client_secret', 'xero_oauth_client_secret TEXT');
   _ensureColumn('user_credentials', 'xero_oauth_refresh_token', 'xero_oauth_refresh_token TEXT');
   _ensureColumn('user_credentials', 'xero_oauth_connected_at',  'xero_oauth_connected_at TEXT');
+  _ensureColumn('user_credentials', 'timezone', 'timezone TEXT');
+  _ensureColumn('users', 'last_seen_at', 'last_seen_at TEXT');
 }
 
 module.exports = { run };

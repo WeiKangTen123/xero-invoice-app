@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { formatDateTime, formatRelative } from '../utils/formatDate';
 
 function Avatar({ email }) {
   return (
@@ -20,6 +21,17 @@ export default function Admin() {
   const { user: me } = useAuth();
   const navigate     = useNavigate();
   const [tab, setTab] = useState('users');
+  // Set when the admin clicks a user in Monitoring's per-user table to drill into
+  // that user's logs — lifted up here (rather than living inside LogsPanel) so a
+  // click from a different tab can both switch to Logs AND pre-filter it.
+  const [logsUserId, setLogsUserId] = useState('');
+  const [logsUserEmail, setLogsUserEmail] = useState('');
+
+  function viewUserLogs(userId, email) {
+    setLogsUserId(userId);
+    setLogsUserEmail(email);
+    setTab('logs');
+  }
   const [users,   setUsers]   = useState([]);
   const [loading, setLoading] = useState(true);
   const [email,   setEmail]   = useState('');
@@ -91,8 +103,8 @@ export default function Admin() {
       {success && <div className="alert alert-success"><span className="alert-icon">✓</span>{success}</div>}
 
       {tab === 'reports'    && <ReportsPanel navigate={navigate} />}
-      {tab === 'monitoring' && <MonitoringPanel />}
-      {tab === 'logs'       && <LogsPanel />}
+      {tab === 'monitoring' && <MonitoringPanel timezone={me?.timezone} onViewLogs={viewUserLogs} />}
+      {tab === 'logs'       && <LogsPanel timezone={me?.timezone} initialUserId={logsUserId} initialUserEmail={logsUserEmail} />}
 
       {tab === 'users' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20, alignItems: 'start' }}>
 
@@ -149,9 +161,12 @@ export default function Admin() {
                       </span>
                       {u.createdAt && (
                         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                          Joined {new Date(u.createdAt).toLocaleDateString()}
+                          Joined {formatDateTime(u.createdAt, me?.timezone)}
                         </span>
                       )}
+                      <span className={`badge ${u.online ? 'badge-green' : 'badge-gray'}`} title={u.lastSeenAt ? `Last seen ${formatDateTime(u.lastSeenAt, me?.timezone)}` : 'Never signed in'}>
+                        {u.online ? '● Online' : formatRelative(u.lastSeenAt) === '—' ? 'Never online' : `Offline · ${formatRelative(u.lastSeenAt)}`}
+                      </span>
                     </div>
                   </div>
 
@@ -405,9 +420,10 @@ function formatUptime(seconds) {
   return `${h}h ${m}m`;
 }
 
-function MonitoringPanel() {
+function MonitoringPanel({ timezone, onViewLogs }) {
   const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
+  const [daily,   setDaily]   = useState(null);
 
   async function fetchMonitoring() {
     setLoading(true);
@@ -416,7 +432,12 @@ function MonitoringPanel() {
     finally { setLoading(false); }
   }
 
-  useEffect(() => { fetchMonitoring(); }, []);
+  async function fetchDaily() {
+    try { setDaily((await api.get('/admin/stats/daily?days=30')).days); }
+    catch (_) { setDaily([]); }
+  }
+
+  useEffect(() => { fetchMonitoring(); fetchDaily(); }, []);
 
   if (loading) {
     return (
@@ -436,7 +457,7 @@ function MonitoringPanel() {
       <div className="card">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
           <div className="card-title">System Health</div>
-          <button className="btn btn-outline btn-sm" onClick={fetchMonitoring}>↻</button>
+          <button className="btn btn-outline btn-sm" onClick={() => { fetchMonitoring(); fetchDaily(); }}>↻</button>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
           <StatCard label="Uptime"        value={formatUptime(system.uptimeSeconds)} />
@@ -451,26 +472,52 @@ function MonitoringPanel() {
         </div>
       </div>
 
+      {/* Invoice volume trend */}
+      <div className="card">
+        <div className="card-title" style={{ marginBottom: 2 }}>Invoice Volume — Last 30 Days</div>
+        <div className="card-subtitle">Every user combined, by day processed</div>
+        {daily === null ? (
+          <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
+        ) : (
+          <DailyVolumeChart data={daily} />
+        )}
+      </div>
+
       {/* Per-user activity */}
       <div className="card">
-        <div className="card-title" style={{ marginBottom: 14 }}>Per-User Activity</div>
+        <div className="card-title" style={{ marginBottom: 2 }}>Per-User Activity</div>
+        <div className="card-subtitle">Click a row to view that user's logs</div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
                 <th style={{ padding: '6px 10px' }}>User</th>
+                <th style={{ padding: '6px 10px' }}>Online</th>
                 <th style={{ padding: '6px 10px' }}>Watcher</th>
                 <th style={{ padding: '6px 10px' }}>Xero</th>
                 <th style={{ padding: '6px 10px' }}>IMAP</th>
                 <th style={{ padding: '6px 10px' }}>Queue (pend/proc/dead)</th>
                 <th style={{ padding: '6px 10px' }}>Invoices (pend/posted/err)</th>
                 <th style={{ padding: '6px 10px' }}>Last Activity</th>
+                <th style={{ padding: '6px 10px' }}>Last Seen</th>
               </tr>
             </thead>
             <tbody>
               {users.map(u => (
-                <tr key={u.id} style={{ borderTop: '1px solid var(--border)' }}>
+                <tr
+                  key={u.id}
+                  onClick={() => onViewLogs?.(u.id, u.email)}
+                  style={{ borderTop: '1px solid var(--border)', cursor: onViewLogs ? 'pointer' : undefined }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+                  title="View this user's logs"
+                >
                   <td style={{ padding: '8px 10px' }}>{u.email}</td>
+                  <td style={{ padding: '8px 10px' }}>
+                    <span className={`badge ${u.online ? 'badge-green' : 'badge-gray'}`}>
+                      {u.online ? '● Online' : 'Offline'}
+                    </span>
+                  </td>
                   <td style={{ padding: '8px 10px' }}>
                     <span className={`badge ${u.watcherRunning ? 'badge-green' : 'badge-gray'}`}>
                       {u.watcherRunning ? 'Running' : 'Stopped'}
@@ -493,13 +540,135 @@ function MonitoringPanel() {
                     {u.invoices.pending} / {u.invoices.posted} / {u.invoices.error}
                   </td>
                   <td style={{ padding: '8px 10px', color: 'var(--text-muted)' }}>
-                    {u.lastActivity ? new Date(u.lastActivity).toLocaleString() : '—'}
+                    {formatDateTime(u.lastActivity, timezone)}
+                  </td>
+                  <td style={{ padding: '8px 10px', color: 'var(--text-muted)' }} title={u.lastSeenAt ? formatDateTime(u.lastSeenAt, timezone) : 'Never signed in'}>
+                    {formatRelative(u.lastSeenAt)}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Daily invoice volume chart ───────────────────────────────────────────────
+// Plain inline SVG — three status-colored lines (posted/error/pending), reusing
+// this app's existing --success/--danger/--warning tokens so "error" here means
+// the same red as everywhere else in the product. A hover crosshair + tooltip
+// gives exact values; the legend is always text-labeled so identity never
+// depends on color alone.
+const CHART_SERIES = [
+  { key: 'posted',  label: 'Posted',  color: 'var(--success)' },
+  { key: 'error',   label: 'Error',   color: 'var(--danger)' },
+  { key: 'pending', label: 'Pending', color: 'var(--warning)' },
+];
+
+function DailyVolumeChart({ data }) {
+  const [hoverIdx, setHoverIdx] = useState(null);
+  const svgRef = useRef(null);
+
+  if (!data || data.length === 0) {
+    return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>No invoice activity yet.</div>;
+  }
+
+  const W = 760, H = 200, PAD_L = 32, PAD_R = 12, PAD_T = 10, PAD_B = 24;
+  const innerW = W - PAD_L - PAD_R;
+  const innerH = H - PAD_T - PAD_B;
+
+  const showOther = data.some(d => d.other > 0);
+  const series = showOther ? [...CHART_SERIES, { key: 'other', label: 'Other', color: 'var(--text-muted)' }] : CHART_SERIES;
+
+  const maxY = Math.max(1, ...data.flatMap(d => series.map(s => d[s.key] || 0)));
+  const x = i => PAD_L + (data.length === 1 ? innerW / 2 : (i / (data.length - 1)) * innerW);
+  const y = v => PAD_T + innerH - (v / maxY) * innerH;
+
+  const linePath = key => data.map((d, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(d[key] || 0).toFixed(1)}`).join(' ');
+
+  // Y-axis ticks — 4 evenly spaced values including 0 and the max.
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => Math.round(maxY * f));
+
+  function onMove(e) {
+    const rect = svgRef.current.getBoundingClientRect();
+    const relX = ((e.clientX - rect.left) / rect.width) * W;
+    const frac = Math.min(1, Math.max(0, (relX - PAD_L) / innerW));
+    setHoverIdx(Math.round(frac * (data.length - 1)));
+  }
+
+  const hover = hoverIdx != null ? data[hoverIdx] : null;
+  // Flip the tooltip to the left of the crosshair once it would run off the right
+  // edge of the chart, rather than letting it clip.
+  const tooltipRight = hoverIdx != null && x(hoverIdx) > W * 0.65;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 10, flexWrap: 'wrap' }}>
+        {series.map(s => (
+          <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+            <span style={{ width: 10, height: 10, borderRadius: 3, background: s.color, display: 'inline-block' }} />
+            {s.label}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ position: 'relative', overflowX: 'auto' }}>
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${W} ${H}`}
+          style={{ width: '100%', minWidth: 480, height: 'auto', display: 'block', cursor: 'crosshair' }}
+          onMouseMove={onMove}
+          onMouseLeave={() => setHoverIdx(null)}
+        >
+          {/* Recessive gridlines + y-axis labels */}
+          {yTicks.map((t, i) => (
+            <g key={i}>
+              <line x1={PAD_L} x2={W - PAD_R} y1={y(t)} y2={y(t)} stroke="var(--border)" strokeWidth="1" />
+              <text x={PAD_L - 6} y={y(t)} textAnchor="end" dominantBaseline="middle" fontSize="10" fill="var(--text-muted)">{t}</text>
+            </g>
+          ))}
+
+          {/* Sparse x-axis labels — first, middle, last day, to avoid a wall of text */}
+          {[0, Math.floor((data.length - 1) / 2), data.length - 1].map(i => (
+            <text key={i} x={x(i)} y={H - 6} textAnchor="middle" fontSize="10" fill="var(--text-muted)">
+              {data[i].day.slice(5)}
+            </text>
+          ))}
+
+          {/* Series lines */}
+          {series.map(s => (
+            <path key={s.key} d={linePath(s.key)} fill="none" stroke={s.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          ))}
+
+          {/* Hover crosshair + per-series markers */}
+          {hover && (
+            <g>
+              <line x1={x(hoverIdx)} x2={x(hoverIdx)} y1={PAD_T} y2={PAD_T + innerH} stroke="var(--text-muted)" strokeWidth="1" strokeDasharray="3,3" />
+              {series.map(s => (
+                <circle key={s.key} cx={x(hoverIdx)} cy={y(hover[s.key] || 0)} r="4" fill={s.color} stroke="var(--bg-card)" strokeWidth="2" />
+              ))}
+            </g>
+          )}
+        </svg>
+
+        {hover && (
+          <div style={{
+            position: 'absolute', top: 4, [tooltipRight ? 'right' : 'left']: `${(x(hoverIdx) / W) * 100}%`,
+            transform: tooltipRight ? 'translateX(8px)' : 'translateX(-108%)',
+            background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8,
+            padding: '8px 10px', fontSize: 11.5, boxShadow: 'var(--shadow-sm)', pointerEvents: 'none', minWidth: 110,
+          }}>
+            <div style={{ fontWeight: 700, marginBottom: 4, color: 'var(--text-primary)' }}>{hover.day}</div>
+            {series.map(s => (
+              <div key={s.key} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                <span style={{ color: 'var(--text-muted)' }}>{s.label}</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>{hover[s.key] || 0}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -516,19 +685,23 @@ function levelStyle(level) {
   }
 }
 
-function LogsPanel() {
+function LogsPanel({ timezone, initialUserId, initialUserEmail }) {
   const [file,    setFile]    = useState('combined');
-  const [userId,  setUserId]  = useState('');
+  // Seeded from the Monitoring tab's row click — this panel remounts fresh each
+  // time the parent switches `tab` to 'logs' (conditional rendering, not a CSS
+  // show/hide), so the prop's value at that moment is exactly what's wanted here.
+  const [userId,  setUserId]  = useState(initialUserId || '');
   const [q,       setQ]       = useState('');
   const [lines,   setLines]   = useState(200);
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  async function fetchLogs(overrideFile) {
+  async function fetchLogs(overrideFile, overrideUserId) {
     setLoading(true);
     try {
       const params = new URLSearchParams({ file: overrideFile || file, lines: String(lines) });
-      if (userId.trim()) params.set('userId', userId.trim());
+      const uid = overrideUserId !== undefined ? overrideUserId : userId;
+      if (uid.trim())    params.set('userId', uid.trim());
       if (q.trim())      params.set('q', q.trim());
       const d = await api.get(`/admin/logs?${params.toString()}`);
       setEntries(d.entries || []);
@@ -557,6 +730,19 @@ function LogsPanel() {
         </div>
         <button className="btn btn-outline btn-sm" onClick={() => fetchLogs()}>↻</button>
       </div>
+
+      {initialUserId && userId === initialUserId && (
+        <div className="alert" style={{ background: 'var(--accent-subtle)', color: 'var(--accent)', marginBottom: 14 }}>
+          <span className="alert-icon">👤</span>
+          Showing logs for {initialUserEmail || `user ${initialUserId}`} only.
+          <button
+            type="button" className="btn btn-sm" style={{ marginLeft: 'auto', background: 'none', color: 'var(--accent)', border: '1px solid currentColor' }}
+            onClick={() => { setUserId(''); fetchLogs(undefined, ''); }}
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
 
       <form
         onSubmit={e => { e.preventDefault(); fetchLogs(); }}
@@ -624,7 +810,7 @@ function LogsPanel() {
                 }}
               >
                 <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap', flexShrink: 0 }}>
-                  {e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '—'}
+                  {formatDateTime(e.timestamp, timezone)}
                 </span>
                 <span style={{
                   background: c.background, color: c.color, borderRadius: 4, padding: '1px 6px',
