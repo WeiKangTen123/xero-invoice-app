@@ -1,4 +1,12 @@
-const { _buildSummary, computeRange, _buildPeriod, _buildAccounts, _buildBankAccounts, _buildContacts } = require('./reports');
+const {
+  _buildSummary, computeRange, _buildPeriod, _buildAccounts, _buildBankAccounts, _buildContacts,
+  _buildBankTransactions, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
+} = require('./reports');
+
+// Helper matching Xero's real report cell shape: { value }.
+function cell(value) { return { value }; }
+function row(title, cells, rowType = 'Row') { return { rowType, title, cells: cells.map(cell) }; }
+function section(title, rows) { return { rowType: 'Section', title, rows }; }
 
 describe('xero/reports — _buildSummary (pure)', () => {
   const ORG = { name: 'Blacklab Pte. Ltd.', countryCode: 'SG', baseCurrency: 'SGD', financialYearEndDay: 31, financialYearEndMonth: 12 };
@@ -212,6 +220,115 @@ describe('xero/reports — directory builders (pure)', () => {
     expect(contacts[0]).toMatchObject({ name: 'Acme Corp', isCustomer: true, isSupplier: false });
     expect(contacts[1]).toMatchObject({ name: 'Unknown', isSupplier: true });
   });
+
+  test('_buildBankTransactions maps RECEIVE/SPEND to Money In/Out, sorts newest first', () => {
+    const txs = _buildBankTransactions([
+      { bankTransactionID: 't1', type: 'SPEND', contact: { name: 'Landlord' }, reference: 'Rent', date: '2026-08-01', total: 2000, isReconciled: true, status: 'AUTHORISED' },
+      { bankTransactionID: 't2', type: 'RECEIVE', contact: { name: 'Kind Living' }, date: '2026-08-10', total: 2400, isReconciled: false, status: 'AUTHORISED' },
+    ]);
+    expect(txs.map(t => t.transactionId)).toEqual(['t2', 't1']); // newest first
+    expect(txs[0]).toMatchObject({ type: 'Money In', contact: 'Kind Living', isReconciled: false });
+    expect(txs[1]).toMatchObject({ type: 'Money Out', contact: 'Landlord', reference: 'Rent', isReconciled: true });
+  });
+});
+
+describe('xero/reports — _flattenReportRows (pure)', () => {
+  test('walks nested sections into a flat title/cells list', () => {
+    const tree = [
+      section('Income', [row('Sales', ['Sales', '50,000.00'])]),
+      row('Net Profit', ['Net Profit', '40,000.00'], 'SummaryRow'),
+    ];
+    const flat = _flattenReportRows(tree);
+    expect(flat).toEqual([
+      { title: 'Sales', cells: ['Sales', '50,000.00'] },
+      { title: 'Net Profit', cells: ['Net Profit', '40,000.00'] },
+    ]);
+  });
+
+  test('rows with neither nested rows nor cells are skipped, not crashed on', () => {
+    const tree = [{ rowType: 'Header', title: 'Empty header' }];
+    expect(_flattenReportRows(tree)).toEqual([]);
+  });
+});
+
+describe('xero/reports — _buildProfitAndLoss (pure)', () => {
+  test('extracts income, expenses, and net profit from a realistic report tree', () => {
+    const tree = [
+      section('Income', [
+        row('Sales', ['Sales', '50,000.00']),
+        row('Total Income', ['Total Income', '50,000.00'], 'SummaryRow'),
+      ]),
+      section('Expenses', [
+        row('Rent', ['Rent', '10,000.00']),
+        row('Total Expenses', ['Total Expenses', '10,000.00'], 'SummaryRow'),
+      ]),
+      row('Net Profit', ['Net Profit', '40,000.00'], 'SummaryRow'),
+    ];
+    expect(_buildProfitAndLoss(tree)).toEqual({ income: 50000, expenses: 10000, netProfit: 40000 });
+  });
+
+  test('a net LOSS renders in parentheses and parses as negative', () => {
+    const tree = [
+      row('Total Income', ['Total Income', '10,000.00'], 'SummaryRow'),
+      row('Total Expenses', ['Total Expenses', '15,000.00'], 'SummaryRow'),
+      row('Net Loss', ['Net Loss', '(5,000.00)'], 'SummaryRow'),
+    ];
+    expect(_buildProfitAndLoss(tree).netProfit).toBe(-5000);
+  });
+
+  test('falls back to income-minus-expenses if no explicit Net Profit/Loss row is found', () => {
+    const tree = [
+      row('Total Income', ['Total Income', '10,000.00'], 'SummaryRow'),
+      row('Total Expenses', ['Total Expenses', '4,000.00'], 'SummaryRow'),
+    ];
+    expect(_buildProfitAndLoss(tree)).toEqual({ income: 10000, expenses: 4000, netProfit: 6000 });
+  });
+
+  test('an empty report tree yields all zeros, not a crash', () => {
+    expect(_buildProfitAndLoss([])).toEqual({ income: 0, expenses: 0, netProfit: 0 });
+  });
+});
+
+describe('xero/reports — _buildBankSummary (pure)', () => {
+  test('extracts cash received/spent/closing balance per account section, plus totals', () => {
+    const tree = [
+      section('Business Bank Account', [
+        row('Opening Balance', ['Opening Balance', '1,000.00']),
+        row('Cash Received', ['Cash Received', '5,000.00']),
+        row('Cash Spent', ['Cash Spent', '(2,000.00)']),
+        row('Closing Balance', ['Closing Balance', '4,000.00']),
+      ]),
+      section('Savings Account', [
+        row('Opening Balance', ['Opening Balance', '500.00']),
+        row('Cash Received', ['Cash Received', '100.00']),
+        row('Cash Spent', ['Cash Spent', '(50.00)']),
+        row('Closing Balance', ['Closing Balance', '550.00']),
+      ]),
+    ];
+    const result = _buildBankSummary(tree);
+    expect(result.accounts).toEqual([
+      { name: 'Business Bank Account', cashReceived: 5000, cashSpent: 2000, closingBalance: 4000 },
+      { name: 'Savings Account', cashReceived: 100, cashSpent: 50, closingBalance: 550 },
+    ]);
+    expect(result).toMatchObject({ cashIn: 5100, cashOut: 2050, net: 3050 });
+  });
+
+  test('a non-account section (e.g. a report-wide totals row with no cash rows) is skipped', () => {
+    const tree = [
+      section('Business Bank Account', [
+        row('Cash Received', ['Cash Received', '100.00']),
+        row('Cash Spent', ['Cash Spent', '(50.00)']),
+        row('Closing Balance', ['Closing Balance', '50.00']),
+      ]),
+      section('Notes', [row('Some disclaimer text', ['Some disclaimer text'])]),
+    ];
+    const result = _buildBankSummary(tree);
+    expect(result.accounts).toHaveLength(1);
+  });
+
+  test('no sections — zeroed totals, empty account list', () => {
+    expect(_buildBankSummary([])).toEqual({ accounts: [], cashIn: 0, cashOut: 0, net: 0 });
+  });
 });
 
 describe('xero/reports — getSummary caching', () => {
@@ -328,5 +445,64 @@ describe('xero/reports — getPeriod / getAccounts / getBankAccounts / getContac
     expect(getInvoices).toHaveBeenCalledTimes(2);
     expect(getAccounts).toHaveBeenCalledTimes(2);
     expect(getContacts).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSummary caching', () => {
+  let reports, getBankTransactions, getReportProfitAndLoss, getReportBankSummary;
+
+  beforeEach(() => {
+    jest.resetModules();
+    getBankTransactions   = jest.fn().mockResolvedValue({ body: { bankTransactions: [] } });
+    getReportProfitAndLoss = jest.fn().mockResolvedValue({ body: { reports: [{ rows: [] }] } });
+    getReportBankSummary   = jest.fn().mockResolvedValue({ body: { reports: [{ rows: [] }] } });
+
+    jest.doMock('xero-node', () => ({
+      AccountingApi: jest.fn().mockImplementation(() => ({ getBankTransactions, getReportProfitAndLoss, getReportBankSummary })),
+    }));
+    jest.doMock('../utils/token-cache', () => ({
+      forUser: jest.fn(() => ({ getValidToken: jest.fn().mockResolvedValue('fake-token') })),
+    }));
+
+    reports = require('./reports');
+  });
+
+  test('getBankTransactions filters by the given account and caches per account', async () => {
+    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
+    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1'); // cached
+    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-2'); // different account, refetches
+    expect(getBankTransactions).toHaveBeenCalledTimes(2);
+    expect(getBankTransactions.mock.calls[0][2]).toBe('BankAccount.AccountID==Guid("acct-1")');
+  });
+
+  test('getProfitAndLoss passes from/to through and caches per date range', async () => {
+    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
+    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' }); // cached
+    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-02-01', to: '2026-02-28' }); // different range
+    expect(getReportProfitAndLoss).toHaveBeenCalledTimes(2);
+    expect(getReportProfitAndLoss).toHaveBeenCalledWith('tenant-1', '2026-01-01', '2026-01-31');
+  });
+
+  test('getBankSummary passes from/to through and caches per date range', async () => {
+    await reports.getBankSummary('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
+    await reports.getBankSummary('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
+    expect(getReportBankSummary).toHaveBeenCalledTimes(1);
+  });
+
+  test('force:true bypasses the cache for all three', async () => {
+    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
+    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1', { force: true });
+    expect(getBankTransactions).toHaveBeenCalledTimes(2);
+  });
+
+  test('clearCache clears bank-transaction/P&L/bank-summary entries too', async () => {
+    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
+    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
+    reports.clearCache('user-1');
+
+    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
+    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
+    expect(getBankTransactions).toHaveBeenCalledTimes(2);
+    expect(getReportProfitAndLoss).toHaveBeenCalledTimes(2);
   });
 });

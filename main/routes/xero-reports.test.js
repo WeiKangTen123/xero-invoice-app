@@ -236,4 +236,92 @@ describe('routes/xero-reports', () => {
       expect(res.body.error).toMatch(/rate limit/i);
     });
   });
+
+  describe('GET /bank-transactions, /profit-loss, /bank-summary', () => {
+    test('all three require authentication', async () => {
+      await request(app).get('/api/xero-reports/bank-transactions?accountId=a1').expect(401);
+      await request(app).get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31').expect(401);
+      await request(app).get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31').expect(401);
+    });
+
+    test('/bank-transactions requires accountId', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      const res = await request(app)
+        .get('/api/xero-reports/bank-transactions')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(400);
+      expect(res.body.error).toMatch(/accountId/i);
+      expect(reports.getBankTransactions).not.toHaveBeenCalled();
+    });
+
+    test('/bank-transactions calls reports.getBankTransactions with the account and resolved tenant', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getBankTransactions.mockResolvedValue({ transactions: [] });
+
+      await request(app)
+        .get('/api/xero-reports/bank-transactions?accountId=acct-1')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+
+      expect(reports.getBankTransactions).toHaveBeenCalledWith(testUser.id, 't1', 'acct-1', { force: false });
+    });
+
+    test('/profit-loss and /bank-summary require from and to', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      const res1 = await request(app).get('/api/xero-reports/profit-loss').set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(400);
+      expect(res1.body.error).toMatch(/from and to/i);
+      const res2 = await request(app).get('/api/xero-reports/bank-summary?from=2026-01-01').set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(400);
+      expect(res2.body.error).toMatch(/from and to/i);
+    });
+
+    test('/profit-loss calls reports.getProfitAndLoss with the resolved tenant and date range', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getProfitAndLoss.mockResolvedValue({ income: 0, expenses: 0, netProfit: 0 });
+
+      await request(app)
+        .get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+
+      expect(reports.getProfitAndLoss).toHaveBeenCalledWith(testUser.id, 't1', { from: '2026-01-01', to: '2026-01-31', force: false });
+    });
+
+    test('/bank-summary calls reports.getBankSummary with the resolved tenant and date range', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getBankSummary.mockResolvedValue({ accounts: [], cashIn: 0, cashOut: 0, net: 0 });
+
+      await request(app)
+        .get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+
+      expect(reports.getBankSummary).toHaveBeenCalledWith(testUser.id, 't1', { from: '2026-01-01', to: '2026-01-31', force: false });
+    });
+
+    // The whole reason these three routes exist behind a wider scope than the
+    // rest of Insights: someone still on the old, narrower connection hits a
+    // real Xero 403 here. That must read as "reconnect", not a generic failure.
+    test('a Xero 403 (insufficient scope) surfaces as a clear reconnect prompt, not a generic error', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      const scopeErr = new Error(JSON.stringify({ response: { statusCode: 403 }, body: { Detail: 'Forbidden resource' } }));
+      reports.getProfitAndLoss.mockRejectedValue(scopeErr);
+
+      const res = await request(app)
+        .get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(403);
+      expect(res.body.error).toMatch(/reconnect/i);
+    });
+
+    test('a non-scope Xero failure on these three still surfaces as 500', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      reports.getBankSummary.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
+
+      const res = await request(app)
+        .get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(500);
+      expect(res.body.error).toMatch(/rate limit/i);
+    });
+  });
 });

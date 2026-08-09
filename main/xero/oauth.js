@@ -4,7 +4,16 @@ const oauthState = require('../utils/oauth-state');
 
 // offline_access is what actually grants a refresh token — without it Xero only
 // ever hands back a 30-minute access token with no way to renew it silently.
-const SCOPES = 'offline_access accounting.invoices accounting.contacts accounting.settings.read';
+//
+// All granular (post-March-2026) scopes — Xero split the old broad
+// accounting.transactions/accounting.reports.read into per-resource scopes and
+// apps created after that cutoff can't request the broad ones at all, so this
+// app only ever uses the granular names. Adding banktransactions/reports scopes
+// here means anyone who already connected under the old, narrower list needs to
+// click "Connect to Xero" again — Xero fixes scopes at consent time, an existing
+// token doesn't retroactively gain new permissions.
+const SCOPES = 'offline_access accounting.invoices accounting.contacts accounting.settings.read '
+  + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read';
 const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
 const TOKEN_URL      = 'https://identity.xero.com/connect/token';
 
