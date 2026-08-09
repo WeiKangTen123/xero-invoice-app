@@ -73,13 +73,21 @@ function ActionCard({ proposal, invoiceId }) {
 
   function cancel() { setState('cancelled'); }
 
-  const kindLabel = {
-    field_update:        '✎ Field update',
-    submit_to_xero:       '→ Xero action',
-    mark_reviewed:        '✓ Mark reviewed',
-    bulk_field_update:    `✎ Bulk field update — ${proposal.items.length} invoice${proposal.items.length > 1 ? 's' : ''}`,
-    bulk_submit_to_xero:  `→ Bulk Xero action — ${proposal.items.length} invoice${proposal.items.length > 1 ? 's' : ''}`,
-  }[proposal.type];
+  // A plain object-literal lookup would evaluate every value up front — including
+  // the bulk branches' `proposal.items.length` — even for a non-bulk proposal that
+  // has no `items` at all, crashing the whole panel. A function only evaluates the
+  // branch that's actually taken.
+  function kindLabelFor(p) {
+    switch (p.type) {
+      case 'field_update':       return '✎ Field update';
+      case 'submit_to_xero':     return '→ Xero action';
+      case 'mark_reviewed':      return '✓ Mark reviewed';
+      case 'bulk_field_update':  return `✎ Bulk field update — ${p.items.length} invoice${p.items.length > 1 ? 's' : ''}`;
+      case 'bulk_submit_to_xero':return `→ Bulk Xero action — ${p.items.length} invoice${p.items.length > 1 ? 's' : ''}`;
+      default:                  return '';
+    }
+  }
+  const kindLabel = kindLabelFor(proposal);
 
   return (
     <div style={{
