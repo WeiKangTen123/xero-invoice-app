@@ -44,10 +44,27 @@ function _statusLabel(inv) {
   return 'awaiting';
 }
 
+// Buckets an outstanding invoice by how soon it's due — same shape as Xero's
+// own "Invoices owed to you" / "Bills to pay" dashboard widgets (grouped into
+// overdue, due this week, due soon, due later), just with fixed day windows
+// instead of Xero's dynamic weekly columns, since those shift with "today".
+function _agingBucketOf(dueDate) {
+  if (!dueDate) return 'later';
+  const days = Math.floor((new Date(dueDate) - new Date()) / 86400000);
+  if (days < 0) return 'overdue';
+  if (days <= 7) return 'within7';
+  if (days <= 30) return 'within30';
+  return 'later';
+}
+function _emptyAging() {
+  return { overdue: { count: 0, amount: 0 }, within7: { count: 0, amount: 0 }, within30: { count: 0, amount: 0 }, later: { count: 0, amount: 0 } };
+}
+
 function _buildSummary(org, invoices) {
   let totalReceivables = 0, totalPayables = 0, overdueAmount = 0;
   let receivablesCount = 0, payablesCount = 0;
   const statusBreakdown = { paid: 0, awaiting: 0, overdue: 0 };
+  const aging = { receivables: _emptyAging(), payables: _emptyAging() };
 
   const list = invoices.map(inv => {
     const isReceivable = inv.type === 'ACCREC';
@@ -59,6 +76,8 @@ function _buildSummary(org, invoices) {
     if (inv.status === 'AUTHORISED' && amountDue > 0) {
       if (isReceivable) { totalReceivables += amountDue; receivablesCount++; }
       else               { totalPayables    += amountDue; payablesCount++; }
+      const bucket = aging[isReceivable ? 'receivables' : 'payables'][_agingBucketOf(inv.dueDate)];
+      bucket.count++; bucket.amount += amountDue;
     }
 
     return {
@@ -86,6 +105,7 @@ function _buildSummary(org, invoices) {
         : '—',
     },
     kpis: { totalReceivables, totalPayables, receivablesCount, payablesCount, overdueAmount, statusBreakdown },
+    aging,
     invoices: list,
   };
 }
@@ -137,7 +157,13 @@ function _parseISODate(s) {
   return { year, month, day };
 }
 
-const RANGE_PRESETS = new Set(['day', 'week', 'month', 'year', 'custom']);
+const RANGE_PRESETS = new Set(['day', 'week', 'month', 'year', 'all', 'custom']);
+
+// "All time" has no real org-inception date available without an extra
+// lookup, so it uses a fixed anchor far enough back that no real Xero org
+// predates it — functionally identical to "since inception" as a filter
+// bound, without needing to query for the actual first transaction date.
+const ALL_TIME_START = { year: 2000, month: 1, day: 1 };
 
 // Pure. Returns { preset, fromISO, toISO, where, days } — `where` is a ready-to-use
 // Xero filter clause; `toExclusive` never leaks out since every caller only needs
@@ -153,6 +179,8 @@ function computeRange(preset, timezone, customFrom, customTo) {
     from = _addDays(today, -_weekdayMon0(today)); toExclusive = _addDays(today, 1);
   } else if (usePreset === 'year') {
     from = { year: today.year, month: 1, day: 1 }; toExclusive = _addDays(today, 1);
+  } else if (usePreset === 'all') {
+    from = ALL_TIME_START; toExclusive = _addDays(today, 1);
   } else if (usePreset === 'custom') {
     const f = _parseISODate(customFrom), t = _parseISODate(customTo);
     if (!f || !t) throw new Error('Custom range requires valid "from" and "to" dates (YYYY-MM-DD)');
@@ -376,7 +404,11 @@ function _buildProfitAndLoss(reportRows) {
   // "Net Profit" is Xero's default label; some orgs' report layouts say "Net Loss"
   // instead when negative, or "Net Profit/(Loss)" — match broadly.
   const netProfit = _findRow(flat, /^net (profit|loss)/i) || (income - expenses);
-  return { income, expenses, netProfit };
+  // Only net margin, not gross margin — the P&L data here doesn't separate a
+  // Cost of Sales section from Operating Expenses, so there's no distinct
+  // "gross profit" figure to divide by; fabricating one would be a guess.
+  const netMargin = income > 0 ? netProfit / income : 0;
+  return { income, expenses, netProfit, netMargin };
 }
 
 // Bank Summary is COLUMNAR, not sectioned-with-labeled-rows like it visually

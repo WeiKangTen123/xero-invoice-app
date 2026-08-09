@@ -21,8 +21,17 @@ const RANGE_PRESETS = [
   { key: 'week',  label: 'This Week' },
   { key: 'month', label: 'This Month' },
   { key: 'year',  label: 'This Year' },
+  { key: 'all',   label: 'All Time' },
   { key: 'custom',label: 'Custom' },
 ];
+
+function fmtPct(fraction) { return `${(Number(fraction || 0) * 100).toFixed(1)}%`; }
+
+// Small provenance caption under a card title — which live Xero API/report the
+// numbers below it came from, so "where did this come from" never needs asking.
+function SourceNote({ children }) {
+  return <div style={{ fontSize: 10.5, color: 'var(--text-muted)', opacity: 0.75, marginBottom: 10 }}>Source: {children}</div>;
+}
 
 function fmtMoney(n, currency) {
   const v = Number(n || 0);
@@ -66,6 +75,48 @@ function TwoBarChart({ leftLabel, leftValue, leftColor = 'var(--success)', right
               {active ? fmtMoney(b.value, currency) : b.value.toLocaleString(undefined, { maximumFractionDigits: 0 })}
             </text>
             <text x={b.x + barW / 2} y={H - 8} textAnchor="middle" fontSize="11" fill="var(--text-secondary)">{b.label}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ── Aging bars: outstanding amount bucketed by how soon it's due ────────────
+// Mirrors Xero's own "Invoices owed to you" / "Bills to pay" widgets, just
+// with fixed day windows instead of Xero's dynamic weekly columns.
+const AGING_BUCKETS = [
+  { key: 'overdue',  label: 'Overdue' },
+  { key: 'within7',  label: 'Due ≤7d' },
+  { key: 'within30', label: 'Due ≤30d' },
+  { key: 'later',    label: 'Later' },
+];
+function AgingChart({ aging, color, currency }) {
+  const [hover, setHover] = useState(null);
+  const total = AGING_BUCKETS.reduce((s, b) => s + (aging?.[b.key]?.amount || 0), 0);
+  if (!total) return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0', textAlign: 'center' }}>Nothing outstanding</div>;
+
+  const max = Math.max(...AGING_BUCKETS.map(b => aging[b.key].amount), 1);
+  const W = 360, H = 150, PAD_B = 26, PAD_T = 14, barW = 62, gap = 20;
+  const scale = v => (v / max) * (H - PAD_T - PAD_B);
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+      <line x1="0" y1={H - PAD_B} x2={W} y2={H - PAD_B} stroke="var(--border)" strokeWidth="1" />
+      {AGING_BUCKETS.map((b, i) => {
+        const bucket = aging[b.key];
+        const x = 14 + i * (barW + gap);
+        const h = scale(bucket.amount);
+        const y = H - PAD_B - h;
+        const active = hover === b.key;
+        return (
+          <g key={b.key} onMouseEnter={() => setHover(b.key)} onMouseLeave={() => setHover(null)} style={{ cursor: 'pointer' }}>
+            <rect x={x} y={PAD_T} width={barW} height={H - PAD_T - PAD_B} fill="transparent" />
+            <rect x={x} y={y} width={barW} height={Math.max(h, 2)} rx="6" fill={color} opacity={active ? 1 : 0.55 + 0.15 * (bucket.amount > 0)} />
+            <text x={x + barW / 2} y={y - 8} textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--text-primary)">
+              {active ? fmtMoney(bucket.amount, currency) : bucket.count}
+            </text>
+            <text x={x + barW / 2} y={H - 8} textAnchor="middle" fontSize="10.5" fill="var(--text-secondary)">{b.label}</text>
           </g>
         );
       })}
@@ -562,7 +613,8 @@ export default function XeroInsights() {
           <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16, marginBottom: 16 }}>
             <div className="card">
               <div className="card-title" style={{ marginBottom: 2 }}>Receivables vs. Payables</div>
-              <div className="card-subtitle">Hover a bar for the exact amount · right now</div>
+              <div className="card-subtitle" style={{ marginBottom: 2 }}>Hover a bar for the exact amount · right now</div>
+              <SourceNote>Xero Invoices API (AUTHORISED, unpaid)</SourceNote>
               <TwoBarChart leftLabel="Receivables" leftValue={kpis.totalReceivables} rightLabel="Payables" rightValue={kpis.totalPayables} currency={currency} />
             </div>
             <div className="card">
@@ -572,11 +624,27 @@ export default function XeroInsights() {
             </div>
           </div>
 
+          {data.aging && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+              <div className="card">
+                <div className="card-title" style={{ marginBottom: 2 }}>Invoices Owed to You</div>
+                <div className="card-subtitle" style={{ marginBottom: 10 }}>Outstanding sales invoices, by how soon they're due · right now</div>
+                <AgingChart aging={data.aging.receivables} color="var(--success)" currency={currency} />
+              </div>
+              <div className="card">
+                <div className="card-title" style={{ marginBottom: 2 }}>Bills to Pay</div>
+                <div className="card-subtitle" style={{ marginBottom: 10 }}>Outstanding bills, by how soon they're due · right now</div>
+                <AgingChart aging={data.aging.payables} color="var(--danger)" currency={currency} />
+              </div>
+            </div>
+          )}
+
           <div className="card">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 4 }}>
               <div className="card-title" style={{ marginBottom: 0 }}>Invoiced Over Time</div>
             </div>
-            <div className="card-subtitle" style={{ marginBottom: 14 }}>Review daily, weekly, monthly, yearly, or a custom range</div>
+            <div className="card-subtitle" style={{ marginBottom: 2 }}>Review daily, weekly, monthly, yearly, all time, or a custom range</div>
+            <SourceNote>Xero Invoices API</SourceNote>
             <DateRangeControl
               preset={rangePreset} setPreset={setRangePreset}
               from={rangeFrom} to={rangeTo} setFrom={setRangeFrom} setTo={setRangeTo}
@@ -614,7 +682,8 @@ export default function XeroInsights() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
             <div className="card">
               <div className="card-title" style={{ marginBottom: 2 }}>Cash In and Out</div>
-              <div className="card-subtitle" style={{ marginBottom: 14 }}>{period ? `${period.range.fromISO} → ${period.range.toISO}` : 'Same date range as above'}</div>
+              <div className="card-subtitle" style={{ marginBottom: 2 }}>{period ? `${period.range.fromISO} → ${period.range.toISO}` : 'Same date range as above'}</div>
+              <SourceNote>Xero Bank Summary report</SourceNote>
               {cashFlowError ? (
                 <div className="alert alert-error"><span className="alert-icon">✕</span>{cashFlowError}</div>
               ) : !cashFlow ? (
@@ -636,7 +705,8 @@ export default function XeroInsights() {
                 <div className="card-title" style={{ marginBottom: 0 }}>Net Profit or Loss</div>
                 <button type="button" className="btn btn-sm" style={{ background: 'none', color: 'var(--accent)', border: 'none' }} onClick={() => setTab('pnl')}>Full P&amp;L →</button>
               </div>
-              <div className="card-subtitle" style={{ marginBottom: 14 }}>{period ? `${period.range.fromISO} → ${period.range.toISO}` : 'Same date range as above'}</div>
+              <div className="card-subtitle" style={{ marginBottom: 2 }}>{period ? `${period.range.fromISO} → ${period.range.toISO}` : 'Same date range as above'}</div>
+              <SourceNote>Xero Profit &amp; Loss report</SourceNote>
               {pnlError ? (
                 <div className="alert alert-error"><span className="alert-icon">✕</span>{pnlError}</div>
               ) : !pnl ? (
@@ -649,6 +719,7 @@ export default function XeroInsights() {
                   <div style={{ display: 'flex', gap: 16, fontSize: 12.5, color: 'var(--text-muted)' }}>
                     <span>Income <b style={{ color: 'var(--text-primary)' }}>{fmtMoney(pnl.income, currency)}</b></span>
                     <span>Expenses <b style={{ color: 'var(--text-primary)' }}>{fmtMoney(pnl.expenses, currency)}</b></span>
+                    <span>Net margin <b style={{ color: 'var(--text-primary)' }}>{fmtPct(pnl.netMargin)}</b></span>
                   </div>
                 </div>
               )}
@@ -719,7 +790,8 @@ export default function XeroInsights() {
         <>
           <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-title" style={{ marginBottom: 2 }}>Bank &amp; Cash Accounts</div>
-            <div className="card-subtitle" style={{ marginBottom: 14 }}>Live balances aren't in Xero's read API for this — see Cash In/Out on Overview for period movement instead. Click an account for its transaction statement.</div>
+            <div className="card-subtitle" style={{ marginBottom: 2 }}>Live balances aren't in Xero's read API for this — see Cash In/Out on Overview for period movement instead. Click an account for its transaction statement.</div>
+            <SourceNote>Xero Accounts API (Type=BANK)</SourceNote>
             {banking.status !== 'done' ? (
               <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
             ) : banking.error ? (
@@ -757,7 +829,8 @@ export default function XeroInsights() {
                 <div className="card-title" style={{ marginBottom: 0 }}>Statement — {selectedBankAccount.name}</div>
                 <button type="button" className="btn btn-sm" style={{ background: 'none', color: 'var(--text-muted)', border: 'none' }} onClick={() => setSelectedBankAccount(null)}>✕ Close</button>
               </div>
-              <div className="card-subtitle" style={{ marginBottom: 14 }}>Most recent transactions for this account</div>
+              <div className="card-subtitle" style={{ marginBottom: 2 }}>Most recent transactions for this account</div>
+              <SourceNote>Xero Bank Transactions API</SourceNote>
               {statement.status !== 'done' ? (
                 <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
               ) : statement.error ? (
@@ -798,6 +871,7 @@ export default function XeroInsights() {
             <div className="card-title" style={{ marginBottom: 0 }}>Chart of Accounts</div>
             <SearchBox value={accountSearch} onChange={setAccountSearch} placeholder="Search by code, name, or type..." />
           </div>
+          <SourceNote>Xero Accounts API</SourceNote>
           {accounts.status !== 'done' ? (
             <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
           ) : accounts.error ? (
@@ -833,6 +907,7 @@ export default function XeroInsights() {
             <div className="card-title" style={{ marginBottom: 0 }}>Contacts</div>
             <SearchBox value={contactSearch} onChange={setContactSearch} placeholder="Search by name or email..." />
           </div>
+          <SourceNote>Xero Contacts API</SourceNote>
           {contacts.status !== 'done' ? (
             <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
           ) : contacts.error ? (
@@ -865,7 +940,8 @@ export default function XeroInsights() {
       {tab === 'pnl' && (
         <div className="card">
           <div className="card-title" style={{ marginBottom: 2 }}>Profit &amp; Loss</div>
-          <div className="card-subtitle" style={{ marginBottom: 14 }}>Same date range as Overview's Invoiced Over Time</div>
+          <div className="card-subtitle" style={{ marginBottom: 2 }}>Same date range as Overview's Invoiced Over Time</div>
+          <SourceNote>Xero Profit &amp; Loss report</SourceNote>
           <DateRangeControl
             preset={rangePreset} setPreset={setRangePreset}
             from={rangeFrom} to={rangeTo} setFrom={setRangeFrom} setTo={setRangeTo}
@@ -888,6 +964,10 @@ export default function XeroInsights() {
                 <div className="card" style={{ flex: 1, minWidth: 160, background: 'var(--bg-secondary)' }}>
                   <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Net {pnl.netProfit >= 0 ? 'Profit' : 'Loss'}</div>
                   <div style={{ fontSize: 22, fontWeight: 800, color: pnl.netProfit >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtMoney(pnl.netProfit, currency)}</div>
+                </div>
+                <div className="card" style={{ flex: 1, minWidth: 160, background: 'var(--bg-secondary)' }}>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Net Margin</div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: pnl.netMargin >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtPct(pnl.netMargin)}</div>
                 </div>
               </div>
               <TwoBarChart leftLabel="Income" leftValue={pnl.income} rightLabel="Expenses" rightValue={pnl.expenses} currency={currency} />
