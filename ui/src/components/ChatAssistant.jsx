@@ -96,7 +96,30 @@ function ActionCard({ proposal, invoiceId }) {
         <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{proposal.label}</div>
       )}
 
-      {proposal.type === 'field_update' && (
+      {proposal.type === 'field_update' && proposal.field === 'lineItems' && Array.isArray(proposal.newValue) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {proposal.newValue.map((item, i) => {
+            const old = Array.isArray(proposal.oldValue) ? proposal.oldValue[i] : null;
+            const changed = old && Number(old.unitAmount) !== Number(item.unitAmount);
+            return (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, background: 'var(--bg-hover)', borderRadius: 8, padding: '6px 9px' }}>
+                <span style={{ flex: 1, color: 'var(--text-secondary)' }}>{item.description}</span>
+                {changed ? (
+                  <>
+                    <span style={{ color: 'var(--text-muted)', textDecoration: 'line-through' }}>{Number(old.unitAmount).toFixed(2)}</span>
+                    <span style={{ color: 'var(--text-muted)' }}>→</span>
+                    <span style={{ color: 'var(--success)', fontWeight: 700 }}>{Number(item.unitAmount).toFixed(2)}</span>
+                  </>
+                ) : (
+                  <span style={{ color: 'var(--text-muted)' }}>{Number(item.unitAmount).toFixed(2)}</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {proposal.type === 'field_update' && proposal.field !== 'lineItems' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, background: 'var(--bg-hover)', borderRadius: 8, padding: '7px 9px' }}>
           <span style={{ color: 'var(--text-muted)', textDecoration: 'line-through' }}>{String(proposal.oldValue ?? '—')}</span>
           <span style={{ color: 'var(--text-muted)' }}>→</span>

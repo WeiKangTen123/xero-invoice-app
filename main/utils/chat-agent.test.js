@@ -96,6 +96,45 @@ describe('chat-agent', () => {
     expect(result.proposals[0].items).toHaveLength(2);
   });
 
+  test('passes through a valid lineItems field_update, normalizing item shape', async () => {
+    mockReply({
+      reply: "Here's the change:",
+      proposals: [{
+        type: 'field_update', invoiceId, field: 'lineItems', label: 'Line items',
+        oldValue: [{ description: 'Accounting', unitAmount: 300 }, { description: 'Payroll', unitAmount: 100 }],
+        newValue: [{ description: 'Accounting', unitAmount: 300 }, { description: 'Payroll', unitAmount: 150 }],
+      }],
+    });
+    const result = await chatAgent.respond(userId, { message: 'bump the payroll line to 150' });
+    expect(result.proposals).toHaveLength(1);
+    expect(result.proposals[0].newValue).toEqual([
+      { description: 'Accounting', unitAmount: 300, discountRate: null },
+      { description: 'Payroll', unitAmount: 150, discountRate: null },
+    ]);
+  });
+
+  test('drops a lineItems field_update with a non-numeric amount', async () => {
+    mockReply({
+      reply: 'Sure',
+      proposals: [{
+        type: 'field_update', invoiceId, field: 'lineItems',
+        oldValue: [{ description: 'Accounting', unitAmount: 300 }],
+        newValue: [{ description: 'Accounting', unitAmount: 'lots' }],
+      }],
+    });
+    const result = await chatAgent.respond(userId, { message: 'change it' });
+    expect(result.proposals).toHaveLength(0);
+  });
+
+  test('drops a lineItems field_update that is not an array', async () => {
+    mockReply({
+      reply: 'Sure',
+      proposals: [{ type: 'field_update', invoiceId, field: 'lineItems', oldValue: [], newValue: 'not an array' }],
+    });
+    const result = await chatAgent.respond(userId, { message: 'change it' });
+    expect(result.proposals).toHaveLength(0);
+  });
+
   test('strips markdown code fences before parsing JSON', async () => {
     callGemini.mockResolvedValue('```json\n{"reply": "ok", "proposals": []}\n```');
     const result = await chatAgent.respond(userId, { message: 'hi' });
