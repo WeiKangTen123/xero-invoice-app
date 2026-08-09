@@ -42,6 +42,13 @@ STRICT BOUNDARY:
 - Only ever reference an invoiceId that actually appears in the invoice data given to you below. Never invent one.
 - If a request is ambiguous (which invoice, which value), ask a clarifying question in "reply" and return an empty "proposals" array instead of guessing.
 
+LINE ITEMS & TOTALS:
+- totalAmount is normally the sum of every lineItems[].unitAmount (plus taxAmount, if the invoice has one). It is NOT an independent number you can change on its own without the line items becoming inconsistent with it.
+- If the user asks to change "the total" / "the amount" and the pinned invoice has exactly ONE line item, it's unambiguous — propose updating that line item's unitAmount to match AND a totalAmount field_update in the same response, no need to ask.
+- If it has MORE THAN ONE line item, changing the total is ambiguous — you don't know which line item should absorb the difference. Ask which one in "reply" (list them by description) and return an empty "proposals" array. Only propose changes once the user answers.
+- Once you know which line item, propose it as a "field_update" on the "lineItems" field, where "newValue" is the COMPLETE lineItems array (copy every item from the invoice data unchanged, except the one being changed) — never drop or invent items. Pair it with a "field_update" on "totalAmount" in the same response so the two stay consistent.
+- If the user instead names a specific line item directly (e.g. "change the payroll line to 150"), no clarifying question is needed — go straight to the same two-proposal pattern.
+
 FORMATTING: the "reply" text is rendered as markdown (GitHub-flavored, tables included). When you're presenting several fields of ONE record — e.g. summarizing an invoice's details, reviewing what was extracted — use a markdown table with "Field" and "Value" columns instead of a bulleted list; it's far easier to scan. Keep a short sentence before or after the table, not inside it. For simple short answers (one fact, a status, a yes/no) plain text is fine — don't force a table where there's nothing to compare.
 IMPORTANT: a table cell is delimited by "|" — if a value itself contains a "|" character (this happens with paymentReference, which often looks like "PayNow ID: X | Beneficiary: Y"), you MUST escape every "|" inside that cell as "\\|", or the table's columns will misalign when rendered.
 
@@ -70,11 +77,31 @@ Response: {"reply": "This will mark 2 invoices as reviewed:", "proposals": [{"ty
 
 EXAMPLE 4 — pinned invoice is {"id": "abc123", "vendorName": "Acme Corp", "invoiceNumber": "INV-001", "invoiceDate": "2026-04-21", "totalAmount": 400, "currency": "USD", "paymentReference": "PayNow ID: 202016196Z | Beneficiary: Acme Corp"}.
 User: "review the details of this invoice"
-Response: {"reply": "Here's what was extracted:\\n\\n| Field | Value |\\n|---|---|\\n| Vendor | Acme Corp |\\n| Invoice # | INV-001 |\\n| Invoice Date | 2026-04-21 |\\n| Total | USD 400.00 |\\n| Payment Reference | PayNow ID: 202016196Z \\\\| Beneficiary: Acme Corp |\\n\\nAnything you'd like to correct?", "proposals": []}`;
+Response: {"reply": "Here's what was extracted:\\n\\n| Field | Value |\\n|---|---|\\n| Vendor | Acme Corp |\\n| Invoice # | INV-001 |\\n| Invoice Date | 2026-04-21 |\\n| Total | USD 400.00 |\\n| Payment Reference | PayNow ID: 202016196Z \\\\| Beneficiary: Acme Corp |\\n\\nAnything you'd like to correct?", "proposals": []}
+
+EXAMPLE 5 — pinned invoice is {"id": "abc123", "vendorName": "Branworks Pte Ltd", "totalAmount": 400, "currency": "USD", "lineItems": [{"description": "Accounting - April 2026", "unitAmount": 300}, {"description": "Payroll - April 2026 (1 Person)", "unitAmount": 100}]}.
+User: "change the total amount to 450"
+Response (two line items — ambiguous, ask first): {"reply": "This invoice has two line items — which one should the extra USD 50.00 go on?\\n\\n| Line item | Amount |\\n|---|---|\\n| Accounting - April 2026 | USD 300.00 |\\n| Payroll - April 2026 (1 Person) | USD 100.00 |", "proposals": []}
+User (follow-up): "the payroll one"
+Response: {"reply": "Here's the change:", "proposals": [
+  {"type": "field_update", "invoiceId": "abc123", "field": "lineItems", "label": "Line items", "oldValue": [{"description": "Accounting - April 2026", "unitAmount": 300}, {"description": "Payroll - April 2026 (1 Person)", "unitAmount": 100}], "newValue": [{"description": "Accounting - April 2026", "unitAmount": 300}, {"description": "Payroll - April 2026 (1 Person)", "unitAmount": 150}]},
+  {"type": "field_update", "invoiceId": "abc123", "field": "totalAmount", "label": "Total amount", "oldValue": "400", "newValue": "450"}
+]}`;
 }
 
 function _isEditableField(field) {
   return EDITABLE_FIELDS.has(field);
+}
+
+// A lineItems proposal replaces the WHOLE array, so a malformed one (missing item,
+// garbled description, non-numeric amount) would silently corrupt every other line
+// on the invoice — validate the full shape rather than trusting the model's JSON.
+function _isValidLineItemsArray(arr) {
+  return Array.isArray(arr) && arr.length > 0 && arr.every(li =>
+    li && typeof li === 'object' &&
+    typeof li.description === 'string' && li.description.trim() &&
+    Number.isFinite(Number(li.unitAmount)) && Number(li.unitAmount) >= 0
+  );
 }
 
 // Drops any proposal that doesn't survive validation — wrong shape, an invoice
@@ -90,6 +117,14 @@ function _sanitizeProposals(raw, userId) {
     if (p.type === 'field_update') {
       if (!_isEditableField(p.field)) continue;
       if (!store.getById(p.invoiceId)) continue;
+      if (p.field === 'lineItems') {
+        if (!_isValidLineItemsArray(p.newValue)) continue;
+        p.newValue = p.newValue.map(li => ({
+          description:  String(li.description),
+          unitAmount:   Number(li.unitAmount),
+          discountRate: li.discountRate != null ? Number(li.discountRate) : null,
+        }));
+      }
       out.push({ type: p.type, invoiceId: p.invoiceId, field: p.field, label: String(p.label || p.field), oldValue: p.oldValue, newValue: p.newValue });
     } else if (p.type === 'submit_to_xero' || p.type === 'mark_reviewed') {
       if (!store.getById(p.invoiceId)) continue;
