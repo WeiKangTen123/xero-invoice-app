@@ -80,6 +80,42 @@ describe('xero/reports — _buildSummary (pure)', () => {
     expect(invoices).toHaveLength(50);
     expect(invoices[0].invoiceNumber).toBe('INV-0');
   });
+
+  // Mirrors Xero's own "Invoices owed to you" / "Bills to pay" widgets —
+  // outstanding amounts bucketed by how soon they're due.
+  test('aging: buckets outstanding receivables and payables by days-until-due, separately', () => {
+    const days = n => new Date(Date.now() + n * 24 * 60 * 60 * 1000).toISOString();
+    const invoices = [
+      { type: 'ACCREC', status: 'AUTHORISED', amountDue: 100, dueDate: days(-3) },  // overdue
+      { type: 'ACCREC', status: 'AUTHORISED', amountDue: 200, dueDate: days(5) },   // within7
+      { type: 'ACCREC', status: 'AUTHORISED', amountDue: 300, dueDate: days(20) },  // within30
+      { type: 'ACCREC', status: 'AUTHORISED', amountDue: 400, dueDate: days(90) },  // later
+      { type: 'ACCPAY', status: 'AUTHORISED', amountDue: 50,  dueDate: days(2) },   // within7
+    ];
+    const { aging } = _buildSummary(ORG, invoices);
+    expect(aging.receivables).toEqual({
+      overdue: { count: 1, amount: 100 }, within7: { count: 1, amount: 200 },
+      within30: { count: 1, amount: 300 }, later: { count: 1, amount: 400 },
+    });
+    expect(aging.payables).toEqual({
+      overdue: { count: 0, amount: 0 }, within7: { count: 1, amount: 50 },
+      within30: { count: 0, amount: 0 }, later: { count: 0, amount: 0 },
+    });
+  });
+
+  test('aging: a missing due date falls into "later" rather than crashing', () => {
+    const { aging } = _buildSummary(ORG, [{ type: 'ACCREC', status: 'AUTHORISED', amountDue: 10, dueDate: null }]);
+    expect(aging.receivables.later).toEqual({ count: 1, amount: 10 });
+  });
+
+  test('aging: paid invoices and drafts (no amountDue) never enter any bucket', () => {
+    const { aging } = _buildSummary(ORG, [
+      { type: 'ACCREC', status: 'PAID', amountDue: 0, dueDate: new Date().toISOString() },
+      { type: 'ACCREC', status: 'DRAFT', amountDue: 0, dueDate: new Date().toISOString() },
+    ]);
+    const total = b => Object.values(b).reduce((s, x) => s + x.count, 0);
+    expect(total(aging.receivables)).toBe(0);
+  });
 });
 
 describe('xero/reports — computeRange (pure, date math only)', () => {
@@ -110,6 +146,11 @@ describe('xero/reports — computeRange (pure, date math only)', () => {
     const r = computeRange('year', 'UTC');
     expect(r.fromISO).toBe('2026-01-01');
     expect(r.toISO).toBe('2026-08-12');
+  });
+
+  test('all — from is a fixed far-past anchor, to is today', () => {
+    const r = computeRange('all', 'UTC');
+    expect(r).toMatchObject({ preset: 'all', fromISO: '2000-01-01', toISO: '2026-08-12' });
   });
 
   test('custom — uses the given from/to verbatim', () => {
@@ -264,7 +305,7 @@ describe('xero/reports — _buildProfitAndLoss (pure)', () => {
       ]),
       row('Net Profit', ['Net Profit', '40,000.00'], 'SummaryRow'),
     ];
-    expect(_buildProfitAndLoss(tree)).toEqual({ income: 50000, expenses: 10000, netProfit: 40000 });
+    expect(_buildProfitAndLoss(tree)).toEqual({ income: 50000, expenses: 10000, netProfit: 40000, netMargin: 0.8 });
   });
 
   test('a net LOSS renders in parentheses and parses as negative', () => {
@@ -281,11 +322,11 @@ describe('xero/reports — _buildProfitAndLoss (pure)', () => {
       row('Total Income', ['Total Income', '10,000.00'], 'SummaryRow'),
       row('Total Expenses', ['Total Expenses', '4,000.00'], 'SummaryRow'),
     ];
-    expect(_buildProfitAndLoss(tree)).toEqual({ income: 10000, expenses: 4000, netProfit: 6000 });
+    expect(_buildProfitAndLoss(tree)).toEqual({ income: 10000, expenses: 4000, netProfit: 6000, netMargin: 0.6 });
   });
 
-  test('an empty report tree yields all zeros, not a crash', () => {
-    expect(_buildProfitAndLoss([])).toEqual({ income: 0, expenses: 0, netProfit: 0 });
+  test('an empty report tree yields all zeros, not a crash (no division by zero income)', () => {
+    expect(_buildProfitAndLoss([])).toEqual({ income: 0, expenses: 0, netProfit: 0, netMargin: 0 });
   });
 });
 

@@ -35,7 +35,7 @@ router.get('/summary', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/xero-reports/period?preset=day|week|month|year|custom&from=&to=
+// GET /api/xero-reports/period?preset=day|week|month|year|all|custom&from=&to=
 // Invoiced-value trend for a date range, for the "monthly review" style view —
 // distinct from /summary, which is always "right now" outstanding balances.
 router.get('/period', requireAuth, async (req, res) => {
