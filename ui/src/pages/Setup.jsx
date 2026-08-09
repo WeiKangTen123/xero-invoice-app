@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api/client';
 import HelpTooltip from '../components/HelpTooltip';
+import { useAuth } from '../context/AuthContext';
+import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
 
 const HELP = {
   XERO_CLIENT_ID:        'Your Xero Custom Connection client ID. Found in developer.xero.com → My Apps → your app.',
@@ -20,6 +22,7 @@ const HELP = {
   XERO_OAUTH_CLIENT_ID:     'Client ID from your own Xero "Web app" (not Custom Connection). Each user brings their own — not shared with other accounts.',
   XERO_OAUTH_CLIENT_SECRET: 'Client secret for the same Xero Web app.',
   XERO_OAUTH_REDIRECT_URI:  'Set once for this whole server — register this exact value as a redirect URI on every user\'s Xero Web app. Must be HTTPS in production (http://localhost is fine for local dev).',
+  TIMEZONE:                 'Controls what timezone dates/times are DISPLAYED in throughout the app — everything is still stored and processed the same way regardless of this setting.',
 };
 
 // helpUrl/helpLabel — where to actually go get the credentials this section asks
@@ -37,8 +40,9 @@ const SECTION_META = {
     testKey: 'imap', testLabel: 'Test IMAP',
     helpUrl: 'https://myaccount.google.com/apppasswords', helpLabel: 'Generate a Gmail App Password ↗',
   },
-  defaults: { label: 'Invoice Defaults', desc: 'Fallback values when fields cannot be detected automatically', icon: '⚙', testKey: null },
-  optional: { label: 'Optional',         desc: 'Slack error notifications, Redis queue', icon: '◎', testKey: null },
+  defaults:    { label: 'Invoice Defaults', desc: 'Fallback values when fields cannot be detected automatically', icon: '⚙', testKey: null },
+  preferences: { label: 'Preferences',      desc: 'Personal display settings — do not affect processing', icon: '🕒', testKey: null },
+  optional:    { label: 'Optional',         desc: 'Slack error notifications, Redis queue', icon: '◎', testKey: null },
   xeroOAuth: {
     label: 'Xero OAuth Redirect URI (admin)', icon: '🔐',
     desc: 'Set once for the whole server — every user registers this same value on their own Xero Web app',
@@ -68,6 +72,26 @@ function Field({ name, meta, value, onChange }) {
   const [show, setShow] = useState(false);
   const isSecret  = isSecretKey(name);
   const isReadOnly = !!meta.readOnly;
+
+  if (name === 'TIMEZONE') {
+    return (
+      <div className="form-group">
+        <label className="form-label">
+          {name}
+          {HELP[name] && <HelpTooltip text={HELP[name]} />}
+        </label>
+        <select
+          className="form-input"
+          value={value || DEFAULT_TIMEZONE}
+          onChange={e => onChange(name, e.target.value)}
+        >
+          {TIMEZONE_OPTIONS.map(opt => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }
 
   return (
     <div className="form-group">
@@ -500,6 +524,7 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
 }
 
 export default function Setup() {
+  const { user, refreshUser } = useAuth();
   const [config,  setConfig]  = useState(null);
   const [values,  setValues]  = useState({});
   const [saving,  setSaving]  = useState(false);
@@ -513,9 +538,12 @@ export default function Setup() {
       const flat = {};
       for (const section of Object.values(data))
         for (const [k, fieldMeta] of Object.entries(section)) flat[k] = fieldMeta.value || '';
+      // TIMEZONE has never been explicitly saved yet — default the dropdown to
+      // this account's current effective timezone rather than showing it blank.
+      if (!flat.TIMEZONE) flat.TIMEZONE = user?.timezone || DEFAULT_TIMEZONE;
       setValues(flat);
     }).catch(() => {});
-  }, []);
+  }, [user]);
 
   function handleChange(key, val) {
     setValues(prev => ({ ...prev, [key]: val }));
@@ -534,6 +562,10 @@ export default function Setup() {
       for (const section of Object.values(fresh))
         for (const [k, fieldMeta] of Object.entries(section)) flat[k] = fieldMeta.value || '';
       setValues(flat);
+      // Picks up a changed TIMEZONE (or any other /auth/me-visible field) so every
+      // already-mounted component reading it (Admin.jsx's timestamps, etc.)
+      // reflects the change immediately instead of needing a full reload.
+      refreshUser();
       setTimeout(() => setSaved(false), 3500);
     } catch (err) {
       setMsgs(prev => ({ ...prev, _save: { ok: false, text: err.message } }));
@@ -605,7 +637,7 @@ export default function Setup() {
 
         <LlmKeysCard idx={2} testing={testing} msgs={msgs} onTest={runTest} />
 
-        {['defaults', 'optional', 'xeroOAuth'].map((key, i) => {
+        {['defaults', 'preferences', 'optional', 'xeroOAuth'].map((key, i) => {
           const sectionData = config[key];
           if (!sectionData) return null;
           return (

@@ -26,7 +26,25 @@ const CONFIG_KEY_TO_COLUMN = {
   XERO_OAUTH_CLIENT_SECRET: 'xero_oauth_client_secret',
   XERO_OAUTH_REFRESH_TOKEN: 'xero_oauth_refresh_token',
   XERO_OAUTH_CONNECTED_AT:  'xero_oauth_connected_at',
+  TIMEZONE:                 'timezone',
 };
+
+// IANA timezone used to FORMAT timestamps for display when a user hasn't picked
+// one yet — every timestamp is still stored/compared in UTC everywhere. Chosen as
+// the default because that's where this deployment's users are.
+const DEFAULT_TIMEZONE = 'Asia/Singapore';
+
+// A user counts as "online" if an authenticated request landed inside this window.
+// This is real browser presence, not the email pipeline's own activity tracking
+// (see process-state.js) — a value long enough that normal polling gaps (the
+// dashboard's pipeline-status poll backs off to every 15s when idle) don't flicker
+// someone in and out of "online" between requests.
+const ONLINE_THRESHOLD_MS = 3 * 60 * 1000;
+
+function isOnline(lastSeenAt) {
+  if (!lastSeenAt) return false;
+  return Date.now() - new Date(lastSeenAt).getTime() < ONLINE_THRESHOLD_MS;
+}
 const COLUMN_TO_CONFIG_KEY = Object.fromEntries(
   Object.entries(CONFIG_KEY_TO_COLUMN).map(([k, v]) => [v, k])
 );
@@ -83,6 +101,21 @@ function findById(id) {
 
 function findByEmail(email) {
   return db.prepare('SELECT * FROM users WHERE lower(email) = lower(?)').get(email) || null;
+}
+
+// In-memory throttle so a chatty client (the dashboard's pipeline-status poll can
+// fire every few seconds) doesn't turn every request into a DB write — at most one
+// UPDATE per user per minute, same throttling philosophy as token-cache.js/
+// oauth-state.js's in-memory stores elsewhere in this app.
+const _lastTouchWrite = new Map(); // userId -> ms timestamp of last DB write
+const TOUCH_THROTTLE_MS = 60 * 1000;
+
+function touchLastSeen(userId) {
+  const now = Date.now();
+  const last = _lastTouchWrite.get(userId) || 0;
+  if (now - last < TOUCH_THROTTLE_MS) return;
+  _lastTouchWrite.set(userId, now);
+  db.prepare('UPDATE users SET last_seen_at = ? WHERE id = ?').run(new Date(now).toISOString(), userId);
 }
 
 async function createUser(email, password, role = 'user') {
@@ -149,7 +182,11 @@ function readUsers() {
 }
 
 function sanitize(u) {
-  return { id: u.id, email: u.email, role: u.role, createdAt: u.created_at || u.createdAt };
+  const lastSeenAt = u.last_seen_at ?? u.lastSeenAt ?? null;
+  return {
+    id: u.id, email: u.email, role: u.role, createdAt: u.created_at || u.createdAt,
+    lastSeenAt, online: isOnline(lastSeenAt),
+  };
 }
 
 // Returns which setup sections are configured for a user, and whether the
@@ -217,5 +254,6 @@ module.exports = {
   getAllUsers, updateUserRole, deleteUser, readUsers,
   getUserConfig, saveUserConfig, getSetupStatus, ensureUserDirectories,
   getGeminiKeys, addGeminiKey, removeGeminiKey,
+  touchLastSeen, isOnline, DEFAULT_TIMEZONE,
   CONFIG_KEY_TO_COLUMN, ENCRYPTED_COLUMNS, // exposed for the one-time JSON->SQLite importer
 };

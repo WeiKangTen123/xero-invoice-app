@@ -75,6 +75,75 @@ describe('admin routes', () => {
     expect(res.body.users[0].invoices).toEqual({ pending: 0, submitting: 0, posted: 0, error: 0, reviewNeeded: 0 });
   });
 
+  test('GET /monitoring reports the requesting admin as online (their own request just touched last_seen_at)', async () => {
+    const res = await request(app)
+      .get('/api/admin/monitoring')
+      .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
+      .expect(200);
+    const self = res.body.users.find(u => u.id === adminUser.id);
+    expect(self.online).toBe(true);
+    expect(self.lastSeenAt).toBeTruthy();
+  });
+
+  test('GET /monitoring reports a user who has never made a request as offline', async () => {
+    const other = await users.createUser('never-seen@test.com', 'password123', 'user');
+    const res = await request(app)
+      .get('/api/admin/monitoring')
+      .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
+      .expect(200);
+    const found = res.body.users.find(u => u.id === other.id);
+    expect(found.online).toBe(false);
+    expect(found.lastSeenAt).toBeNull();
+  });
+
+  describe('GET /stats/daily', () => {
+    test('requires authentication', async () => {
+      await request(app).get('/api/admin/stats/daily').expect(401);
+    });
+
+    test('zero-fills every day in range, even with no invoices at all', async () => {
+      const res = await request(app)
+        .get('/api/admin/stats/daily?days=7')
+        .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
+        .expect(200);
+      expect(res.body.days).toHaveLength(7);
+      for (const d of res.body.days) {
+        expect(d).toMatchObject({ posted: 0, error: 0, pending: 0, other: 0 });
+        expect(d.day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      }
+    });
+
+    test('buckets invoices by day and status', async () => {
+      const invoiceStore = require('../utils/invoice-store');
+      const store = invoiceStore.forUser(adminUser.id);
+      const today = new Date().toISOString();
+      store.add({ id: 'inv-posted', status: 'posted', totalAmount: 100, processedAt: today });
+      store.add({ id: 'inv-error',  status: 'error',  totalAmount: 50,  processedAt: today });
+      store.add({ id: 'inv-pending', status: 'pending', totalAmount: 25, processedAt: today });
+
+      const res = await request(app)
+        .get('/api/admin/stats/daily?days=1')
+        .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
+        .expect(200);
+      expect(res.body.days).toHaveLength(1);
+      expect(res.body.days[0]).toMatchObject({ posted: 1, error: 1, pending: 1 });
+    });
+
+    test('?userId scopes the aggregation to one user', async () => {
+      const other = await users.createUser('other-stats@test.com', 'password123', 'user');
+      const invoiceStore = require('../utils/invoice-store');
+      const today = new Date().toISOString();
+      invoiceStore.forUser(adminUser.id).add({ id: 'mine', status: 'posted', totalAmount: 10, processedAt: today });
+      invoiceStore.forUser(other.id).add({ id: 'theirs', status: 'posted', totalAmount: 10, processedAt: today });
+
+      const res = await request(app)
+        .get(`/api/admin/stats/daily?days=1&userId=${other.id}`)
+        .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
+        .expect(200);
+      expect(res.body.days[0].posted).toBe(1); // only "theirs", not "mine"
+    });
+  });
+
   describe('GET /logs', () => {
     let logsDir, regularUser;
 

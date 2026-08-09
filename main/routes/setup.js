@@ -19,9 +19,12 @@ const logger  = require('../utils/logger');
 // same per-user model as the Custom Connection fields — see xero/oauth.js for why
 // (Xero's rate limit is per-app, so per-user apps give each user their own budget).
 const USER_SECTIONS = {
-  xero:     ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_ID', 'XERO_OAUTH_CLIENT_SECRET'],
-  imap:     ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_FILTER_FROM', 'IMAP_POLL_INTERVAL_MS', 'IMAP_LOOKBACK_DAYS'],
-  defaults: ['DEFAULT_ACCOUNT_CODE', 'DEFAULT_CURRENCY', 'ZERO_TAX_RATE'],
+  xero:        ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_ID', 'XERO_OAUTH_CLIENT_SECRET'],
+  imap:        ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_FILTER_FROM', 'IMAP_POLL_INTERVAL_MS', 'IMAP_LOOKBACK_DAYS'],
+  defaults:    ['DEFAULT_ACCOUNT_CODE', 'DEFAULT_CURRENCY', 'ZERO_TAX_RATE'],
+  // Display-only preference — every timestamp is stored in UTC regardless; this only
+  // controls what timezone it's FORMATTED in for this user (see ui's formatDate.js).
+  preferences: ['TIMEZONE'],
 };
 
 // Shared/global fields — stored in .env; only admins can set these
