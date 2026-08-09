@@ -306,6 +306,127 @@ async function getContacts(userId, tenantId, { force = false } = {}) {
   return _cacheSet(key, data);
 }
 
+// ── Bank statement, Profit & Loss, Cash In/Out ───────────────────────────────
+// Everything below needs the three wider scopes added alongside this feature
+// (accounting.banktransactions.read, accounting.reports.profitandloss.read,
+// accounting.reports.banksummary.read) — see xero/oauth.js for why that means
+// a one-time reconnect for anyone already connected under the old scope list.
+
+function _buildBankTransactions(transactions) {
+  return transactions.map(t => ({
+    transactionId: t.bankTransactionID,
+    type:          t.type === 'RECEIVE' ? 'Money In' : 'Money Out',
+    contact:       t.contact?.name || 'Unknown',
+    reference:     t.reference || '',
+    date:          t.date || null,
+    total:         Number(t.total || 0),
+    isReconciled:  !!t.isReconciled,
+    status:        t.status || '',
+  })).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+
+async function getBankTransactions(userId, tenantId, accountId, { force = false } = {}) {
+  const key    = `banktx:${userId}:${tenantId}:${accountId}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached;
+
+  const tokenCache = require('../utils/token-cache').forUser(userId);
+  const token      = await tokenCache.getValidToken(tenantId);
+  const api        = _apiFor(token);
+
+  const res = await withRetry(() => api.getBankTransactions(
+    tenantId, undefined, `BankAccount.AccountID==Guid("${accountId}")`, 'Date DESC'
+  ));
+  const data = { transactions: _buildBankTransactions(res.body.bankTransactions || []) };
+  return _cacheSet(key, data);
+}
+
+// Xero's Report API returns a tree (sections contain rows contain cells) rather
+// than flat fields — this walks it into a flat { title, cells } list so the P&L
+// and Bank Summary builders below can just search by row title instead of
+// knowing the tree shape. Pure, and exactly what's unit-tested — the real
+// nested Xero response shape only needs to be right in the tests' fixtures.
+function _flattenReportRows(rows, out = []) {
+  for (const row of rows || []) {
+    if (row.rows?.length) _flattenReportRows(row.rows, out);
+    if (row.cells?.length) out.push({ title: row.title || row.cells[0]?.value || '', cells: row.cells.map(c => c.value) });
+  }
+  return out;
+}
+
+// Xero formats report cell values like "1,234.56" or "(123.45)" for negatives —
+// never a plain parseable number.
+function _parseReportNumber(s) {
+  if (!s) return 0;
+  const negative = /^\(.*\)$/.test(s.trim());
+  const n = Number(s.replace(/[(),]/g, ''));
+  if (Number.isNaN(n)) return 0;
+  return negative ? -n : n;
+}
+
+function _findRow(flatRows, pattern) {
+  const row = flatRows.find(r => pattern.test(r.title));
+  return row ? _parseReportNumber(row.cells[row.cells.length - 1]) : 0;
+}
+
+function _buildProfitAndLoss(reportRows) {
+  const flat = _flattenReportRows(reportRows);
+  const income   = _findRow(flat, /^total income$/i);
+  const expenses = _findRow(flat, /^total expenses$/i) || _findRow(flat, /^total operating expenses$/i);
+  // "Net Profit" is Xero's default label; some orgs' report layouts say "Net Loss"
+  // instead when negative, or "Net Profit/(Loss)" — match broadly.
+  const netProfit = _findRow(flat, /^net (profit|loss)/i) || (income - expenses);
+  return { income, expenses, netProfit };
+}
+
+function _buildBankSummary(reportRows) {
+  const flat = _flattenReportRows(reportRows);
+  // Each bank account gets its own section in this report; walking the raw tree
+  // (not the flattened list) keeps each account's rows grouped correctly rather
+  // than guessing which "Cash Received" belongs to which account.
+  const accounts = [];
+  for (const section of reportRows || []) {
+    if (section.rowType !== 'Section' || !section.rows?.length) continue;
+    const flatSection = _flattenReportRows(section.rows);
+    const received = _findRow(flatSection, /cash received/i);
+    const spent    = _findRow(flatSection, /cash spent/i);
+    const closing  = _findRow(flatSection, /closing balance/i);
+    if (!received && !spent && !closing) continue; // not an account section (e.g. a totals row)
+    accounts.push({ name: section.title || 'Account', cashReceived: received, cashSpent: Math.abs(spent), closingBalance: closing });
+  }
+  const cashIn  = accounts.reduce((s, a) => s + a.cashReceived, 0);
+  const cashOut = accounts.reduce((s, a) => s + a.cashSpent, 0);
+  return { accounts, cashIn, cashOut, net: cashIn - cashOut };
+}
+
+async function getProfitAndLoss(userId, tenantId, { from, to, force = false } = {}) {
+  const key    = `pnl:${userId}:${tenantId}:${from}:${to}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached;
+
+  const tokenCache = require('../utils/token-cache').forUser(userId);
+  const token      = await tokenCache.getValidToken(tenantId);
+  const api        = _apiFor(token);
+
+  const res  = await withRetry(() => api.getReportProfitAndLoss(tenantId, from, to));
+  const rows = res.body.reports?.[0]?.rows || [];
+  return _cacheSet(key, _buildProfitAndLoss(rows));
+}
+
+async function getBankSummary(userId, tenantId, { from, to, force = false } = {}) {
+  const key    = `banksum:${userId}:${tenantId}:${from}:${to}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached;
+
+  const tokenCache = require('../utils/token-cache').forUser(userId);
+  const token      = await tokenCache.getValidToken(tenantId);
+  const api        = _apiFor(token);
+
+  const res  = await withRetry(() => api.getReportBankSummary(tenantId, from, to));
+  const rows = res.body.reports?.[0]?.rows || [];
+  return _cacheSet(key, _buildBankSummary(rows));
+}
+
 // Called on disconnect so nothing here can outlive the connection it came from.
 function clearCache(userId) {
   for (const key of _cache.keys()) {
@@ -314,6 +435,8 @@ function clearCache(userId) {
 }
 
 module.exports = {
-  getSummary, getPeriod, getAccounts, getBankAccounts, getContacts, clearCache,
+  getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
+  getBankTransactions, getProfitAndLoss, getBankSummary, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
+  _buildBankTransactions, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
 };

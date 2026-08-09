@@ -10,10 +10,11 @@ const TABS = [
   { key: 'banking',  label: 'Banking' },
   { key: 'accounts', label: 'Chart of Accounts' },
   { key: 'contacts', label: 'Contacts' },
+  { key: 'pnl',      label: 'P&L' },
 ];
-// Still needs a Xero Reports scope that hasn't been added to this app's OAuth
-// consent yet — shown so the shape of what's coming is visible, not built.
-const PHASE2_TABS = [{ key: 'pnl', label: 'P&L' }];
+// Nothing left here for now — kept as an array (rather than removed outright)
+// since it's the natural place to list whatever needs the next scope widening.
+const PHASE2_TABS = [];
 
 const RANGE_PRESETS = [
   { key: 'day',   label: 'Today' },
@@ -35,16 +36,18 @@ function fmtBucketLabel(bucket, granularity) {
   return bucket.slice(5); // MM-DD
 }
 
-// ── Bar chart: Receivables vs Payables — interactive hover ──────────────────
-function ReceivablesPayablesChart({ receivables, payables, currency }) {
+// ── Bar chart: any two values compared — interactive hover ──────────────────
+// Generic enough to serve Receivables/Payables (Overview), Income/Expenses
+// (P&L), and Cash In/Cash Out (Cash Flow) — same visual language throughout.
+function TwoBarChart({ leftLabel, leftValue, leftColor = 'var(--success)', rightLabel, rightValue, rightColor = 'var(--danger)', currency }) {
   const [hover, setHover] = useState(null);
-  const max = Math.max(receivables, payables, 1);
+  const max = Math.max(leftValue, rightValue, 1);
   const W = 360, H = 170, PAD_B = 26, PAD_T = 14, barW = 78;
   const scale = v => (v / max) * (H - PAD_T - PAD_B);
 
   const bars = [
-    { key: 'recv', label: 'Receivables', value: receivables, x: 70,  color: 'var(--success)' },
-    { key: 'pay',  label: 'Payables',    value: payables,    x: 210, color: 'var(--danger)' },
+    { key: 'left',  label: leftLabel,  value: leftValue,  x: 70,  color: leftColor },
+    { key: 'right', label: rightLabel, value: rightValue, x: 210, color: rightColor },
   ];
 
   return (
@@ -264,6 +267,14 @@ export default function XeroInsights() {
   const [rangeTo, setRangeTo]         = useState(today);
   const [period, setPeriod]           = useState(null);
   const [periodError, setPeriodError] = useState('');
+  // Cash Flow and P&L both need real bank-transaction/report scopes, and both
+  // ride on the exact same resolved date range as the trend chart above — they
+  // fetch off `period.range`, the server-resolved dates, rather than
+  // recomputing preset math a second time on the frontend.
+  const [cashFlow, setCashFlow]           = useState(null);
+  const [cashFlowError, setCashFlowError] = useState('');
+  const [pnl, setPnl]                     = useState(null);
+  const [pnlError, setPnlError]           = useState('');
 
   // Lazily-loaded directory tabs — fetched once, the first time each is opened.
   // data starts as [] (not null) so the very first render after switching to
@@ -274,6 +285,10 @@ export default function XeroInsights() {
   const [contacts, setContacts] = useState({ status: 'idle', data: [], error: '' });
   const [accountSearch, setAccountSearch] = useState('');
   const [contactSearch, setContactSearch] = useState('');
+
+  // Banking tab's statement drill-down — which account, and its transactions.
+  const [selectedBankAccount, setSelectedBankAccount] = useState(null);
+  const [statement, setStatement] = useState({ status: 'idle', data: [], error: '' });
 
   async function fetchSummary(opts = {}) {
     if (opts.force) setRefreshing(true);
@@ -306,6 +321,32 @@ export default function XeroInsights() {
     }
   }
 
+  async function fetchCashFlow(fromISO, toISO, opts = {}) {
+    try {
+      const params = new URLSearchParams({ from: fromISO, to: toISO });
+      if (activeTenantId) params.set('tenantId', activeTenantId);
+      if (opts.force) params.set('force', 'true');
+      const d = await api.get(`/xero-reports/bank-summary?${params.toString()}`);
+      setCashFlow(d);
+      setCashFlowError('');
+    } catch (err) {
+      setCashFlowError(err.message || 'Could not load cash flow');
+    }
+  }
+
+  async function fetchPnl(fromISO, toISO, opts = {}) {
+    try {
+      const params = new URLSearchParams({ from: fromISO, to: toISO });
+      if (activeTenantId) params.set('tenantId', activeTenantId);
+      if (opts.force) params.set('force', 'true');
+      const d = await api.get(`/xero-reports/profit-loss?${params.toString()}`);
+      setPnl(d);
+      setPnlError('');
+    } catch (err) {
+      setPnlError(err.message || 'Could not load profit & loss');
+    }
+  }
+
   useEffect(() => { fetchSummary(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (activeTenantId) { fetchSummary(); fetchPeriod(); }
@@ -313,6 +354,15 @@ export default function XeroInsights() {
   useEffect(() => {
     if (rangePreset !== 'custom') fetchPeriod();
   }, [rangePreset]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Fires off the server-RESOLVED range (not preset math redone client-side) —
+  // covers both preset changes and a custom range's Apply click, since either
+  // way `period.range` is what actually changes.
+  useEffect(() => {
+    if (period?.range?.fromISO && period?.range?.toISO) {
+      fetchCashFlow(period.range.fromISO, period.range.toISO);
+      fetchPnl(period.range.fromISO, period.range.toISO);
+    }
+  }, [period?.range?.fromISO, period?.range?.toISO]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     tickRef.current = setInterval(() => forceTick(t => t + 1), 15000);
@@ -340,6 +390,16 @@ export default function XeroInsights() {
         .catch(err => setContacts({ status: 'done', data: [], error: err.message }));
     }
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function viewStatement(account) {
+    setSelectedBankAccount(account);
+    setStatement({ status: 'loading', data: [], error: '' });
+    const params = new URLSearchParams({ accountId: account.accountId });
+    if (activeTenantId) params.set('tenantId', activeTenantId);
+    api.get(`/xero-reports/bank-transactions?${params.toString()}`)
+      .then(d => setStatement({ status: 'done', data: d.transactions || [], error: '' }))
+      .catch(err => setStatement({ status: 'done', data: [], error: err.message }));
+  }
 
   const filteredInvoices = useMemo(() => {
     if (!data?.invoices) return [];
@@ -425,7 +485,10 @@ export default function XeroInsights() {
             Synced {formatRelative(new Date(data.fetchedAt).toISOString())}
             {data.cached === false && <span style={{ color: 'var(--accent)', fontWeight: 600 }}>· fresh</span>}
           </div>
-          <button className="btn btn-outline btn-sm" disabled={refreshing} onClick={() => { fetchSummary({ force: true }); fetchPeriod({ force: true }); }}>
+          <button className="btn btn-outline btn-sm" disabled={refreshing} onClick={() => {
+            fetchSummary({ force: true }); fetchPeriod({ force: true });
+            if (period?.range) { fetchCashFlow(period.range.fromISO, period.range.toISO, { force: true }); fetchPnl(period.range.fromISO, period.range.toISO, { force: true }); }
+          }}>
             {refreshing ? <span className="btn-spinner" /> : '↻'} Refresh
           </button>
         </div>
@@ -500,7 +563,7 @@ export default function XeroInsights() {
             <div className="card">
               <div className="card-title" style={{ marginBottom: 2 }}>Receivables vs. Payables</div>
               <div className="card-subtitle">Hover a bar for the exact amount · right now</div>
-              <ReceivablesPayablesChart receivables={kpis.totalReceivables} payables={kpis.totalPayables} currency={currency} />
+              <TwoBarChart leftLabel="Receivables" leftValue={kpis.totalReceivables} rightLabel="Payables" rightValue={kpis.totalPayables} currency={currency} />
             </div>
             <div className="card">
               <div className="card-title" style={{ marginBottom: 2 }}>Invoice Status</div>
@@ -546,6 +609,50 @@ export default function XeroInsights() {
                 <PeriodTrendChart trend={period.trend} granularity={period.granularity} currency={currency} />
               </>
             )}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
+            <div className="card">
+              <div className="card-title" style={{ marginBottom: 2 }}>Cash In and Out</div>
+              <div className="card-subtitle" style={{ marginBottom: 14 }}>{period ? `${period.range.fromISO} → ${period.range.toISO}` : 'Same date range as above'}</div>
+              {cashFlowError ? (
+                <div className="alert alert-error"><span className="alert-icon">✕</span>{cashFlowError}</div>
+              ) : !cashFlow ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: 14, fontSize: 12.5 }}>
+                    <div><span style={{ color: 'var(--text-muted)' }}>Cash in </span><b style={{ color: 'var(--success)' }}>{fmtMoney(cashFlow.cashIn, currency)}</b></div>
+                    <div><span style={{ color: 'var(--text-muted)' }}>Cash out </span><b style={{ color: 'var(--danger)' }}>{fmtMoney(cashFlow.cashOut, currency)}</b></div>
+                    <div><span style={{ color: 'var(--text-muted)' }}>Difference </span><b style={{ color: cashFlow.net >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtMoney(cashFlow.net, currency)}</b></div>
+                  </div>
+                  <TwoBarChart leftLabel="Cash In" leftValue={cashFlow.cashIn} rightLabel="Cash Out" rightValue={cashFlow.cashOut} currency={currency} />
+                </>
+              )}
+            </div>
+
+            <div className="card">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                <div className="card-title" style={{ marginBottom: 0 }}>Net Profit or Loss</div>
+                <button type="button" className="btn btn-sm" style={{ background: 'none', color: 'var(--accent)', border: 'none' }} onClick={() => setTab('pnl')}>Full P&amp;L →</button>
+              </div>
+              <div className="card-subtitle" style={{ marginBottom: 14 }}>{period ? `${period.range.fromISO} → ${period.range.toISO}` : 'Same date range as above'}</div>
+              {pnlError ? (
+                <div className="alert alert-error"><span className="alert-icon">✕</span>{pnlError}</div>
+              ) : !pnl ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
+              ) : (
+                <div>
+                  <div style={{ fontSize: 26, fontWeight: 800, color: pnl.netProfit >= 0 ? 'var(--success)' : 'var(--danger)', marginBottom: 4 }}>
+                    {fmtMoney(pnl.netProfit, currency)}
+                  </div>
+                  <div style={{ display: 'flex', gap: 16, fontSize: 12.5, color: 'var(--text-muted)' }}>
+                    <span>Income <b style={{ color: 'var(--text-primary)' }}>{fmtMoney(pnl.income, currency)}</b></span>
+                    <span>Expenses <b style={{ color: 'var(--text-primary)' }}>{fmtMoney(pnl.expenses, currency)}</b></span>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </>
       )}
@@ -609,36 +716,80 @@ export default function XeroInsights() {
       )}
 
       {tab === 'banking' && (
-        <div className="card">
-          <div className="card-title" style={{ marginBottom: 2 }}>Bank &amp; Cash Accounts</div>
-          <div className="card-subtitle" style={{ marginBottom: 14 }}>Account listing only — live balances need a wider connection scope, coming later</div>
-          {banking.status !== 'done' ? (
-            <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
-          ) : banking.error ? (
-            <div className="alert alert-error"><span className="alert-icon">✕</span>{banking.error}</div>
-          ) : banking.data.length === 0 ? (
-            <div className="empty-state" style={{ padding: '30px 0' }}><div className="empty-state-icon">🏦</div><div>No bank accounts found in Xero</div></div>
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                <thead><tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
-                  <th style={{ padding: '6px 10px' }}>Code</th><th style={{ padding: '6px 10px' }}>Name</th>
-                  <th style={{ padding: '6px 10px' }}>Account Number</th><th style={{ padding: '6px 10px' }}>Currency</th>
-                  <th style={{ padding: '6px 10px' }}>Status</th>
-                </tr></thead>
-                <tbody>{banking.data.map(a => (
-                  <tr key={a.accountId} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '9px 10px' }}>{a.code || '—'}</td>
-                    <td style={{ padding: '9px 10px' }}>{a.name}</td>
-                    <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{a.accountNumber || '—'}</td>
-                    <td style={{ padding: '9px 10px' }}>{a.currency || '—'}</td>
-                    <td style={{ padding: '9px 10px' }}><span className={`badge ${a.status === 'ACTIVE' ? 'badge-green' : 'badge-gray'}`}>{a.status || '—'}</span></td>
-                  </tr>
-                ))}</tbody>
-              </table>
+        <>
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div className="card-title" style={{ marginBottom: 2 }}>Bank &amp; Cash Accounts</div>
+            <div className="card-subtitle" style={{ marginBottom: 14 }}>Live balances aren't in Xero's read API for this — see Cash In/Out on Overview for period movement instead. Click an account for its transaction statement.</div>
+            {banking.status !== 'done' ? (
+              <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
+            ) : banking.error ? (
+              <div className="alert alert-error"><span className="alert-icon">✕</span>{banking.error}</div>
+            ) : banking.data.length === 0 ? (
+              <div className="empty-state" style={{ padding: '30px 0' }}><div className="empty-state-icon">🏦</div><div>No bank accounts found in Xero</div></div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                  <thead><tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
+                    <th style={{ padding: '6px 10px' }}>Code</th><th style={{ padding: '6px 10px' }}>Name</th>
+                    <th style={{ padding: '6px 10px' }}>Account Number</th><th style={{ padding: '6px 10px' }}>Currency</th>
+                    <th style={{ padding: '6px 10px' }}>Status</th><th style={{ padding: '6px 10px' }}></th>
+                  </tr></thead>
+                  <tbody>{banking.data.map(a => (
+                    <tr key={a.accountId} style={{ borderTop: '1px solid var(--border)', background: selectedBankAccount?.accountId === a.accountId ? 'var(--bg-hover)' : undefined }}>
+                      <td style={{ padding: '9px 10px' }}>{a.code || '—'}</td>
+                      <td style={{ padding: '9px 10px' }}>{a.name}</td>
+                      <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{a.accountNumber || '—'}</td>
+                      <td style={{ padding: '9px 10px' }}>{a.currency || '—'}</td>
+                      <td style={{ padding: '9px 10px' }}><span className={`badge ${a.status === 'ACTIVE' ? 'badge-green' : 'badge-gray'}`}>{a.status || '—'}</span></td>
+                      <td style={{ padding: '9px 10px', textAlign: 'right' }}>
+                        <button type="button" className="btn btn-outline btn-sm" onClick={() => viewStatement(a)}>View Transactions</button>
+                      </td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {selectedBankAccount && (
+            <div className="card">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                <div className="card-title" style={{ marginBottom: 0 }}>Statement — {selectedBankAccount.name}</div>
+                <button type="button" className="btn btn-sm" style={{ background: 'none', color: 'var(--text-muted)', border: 'none' }} onClick={() => setSelectedBankAccount(null)}>✕ Close</button>
+              </div>
+              <div className="card-subtitle" style={{ marginBottom: 14 }}>Most recent transactions for this account</div>
+              {statement.status !== 'done' ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
+              ) : statement.error ? (
+                <div className="alert alert-error"><span className="alert-icon">✕</span>{statement.error}</div>
+              ) : statement.data.length === 0 ? (
+                <div className="empty-state" style={{ padding: '30px 0' }}><div className="empty-state-icon">📄</div><div>No transactions found for this account</div></div>
+              ) : (
+                <div style={{ overflowX: 'auto', maxHeight: 480, overflowY: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+                    <thead><tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
+                      <th style={{ padding: '6px 10px' }}>Date</th><th style={{ padding: '6px 10px' }}>Type</th>
+                      <th style={{ padding: '6px 10px' }}>Contact</th><th style={{ padding: '6px 10px' }}>Reference</th>
+                      <th style={{ padding: '6px 10px' }}>Reconciled</th><th style={{ padding: '6px 10px', textAlign: 'right' }}>Amount</th>
+                    </tr></thead>
+                    <tbody>{statement.data.map(t => (
+                      <tr key={t.transactionId} style={{ borderTop: '1px solid var(--border)' }}>
+                        <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{formatDateTime(t.date, user?.timezone).split(',')[0]}</td>
+                        <td style={{ padding: '9px 10px' }}><span className={`badge ${t.type === 'Money In' ? 'badge-green' : 'badge-red'}`}>{t.type}</span></td>
+                        <td style={{ padding: '9px 10px' }}>{t.contact}</td>
+                        <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{t.reference || '—'}</td>
+                        <td style={{ padding: '9px 10px' }}>{t.isReconciled ? '✓' : '—'}</td>
+                        <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: t.type === 'Money In' ? 'var(--success)' : 'var(--danger)' }}>
+                          {t.type === 'Money In' ? '+' : '−'}{fmtMoney(t.total, currency)}
+                        </td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
-        </div>
+        </>
       )}
 
       {tab === 'accounts' && (
@@ -707,6 +858,40 @@ export default function XeroInsights() {
                 ))}</tbody>
               </table>
             </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'pnl' && (
+        <div className="card">
+          <div className="card-title" style={{ marginBottom: 2 }}>Profit &amp; Loss</div>
+          <div className="card-subtitle" style={{ marginBottom: 14 }}>Same date range as Overview's Invoiced Over Time</div>
+          <DateRangeControl
+            preset={rangePreset} setPreset={setRangePreset}
+            from={rangeFrom} to={rangeTo} setFrom={setRangeFrom} setTo={setRangeTo}
+            onApplyCustom={() => fetchPeriod()}
+          />
+
+          {pnlError && <div className="alert alert-error" style={{ marginTop: 14 }}><span className="alert-icon">✕</span>{pnlError}</div>}
+
+          {pnl && !pnlError && (
+            <>
+              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', margin: '20px 0' }}>
+                <div className="card" style={{ flex: 1, minWidth: 160, background: 'var(--bg-secondary)' }}>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Total Income</div>
+                  <div style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(pnl.income, currency)}</div>
+                </div>
+                <div className="card" style={{ flex: 1, minWidth: 160, background: 'var(--bg-secondary)' }}>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Total Expenses</div>
+                  <div style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(pnl.expenses, currency)}</div>
+                </div>
+                <div className="card" style={{ flex: 1, minWidth: 160, background: 'var(--bg-secondary)' }}>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Net {pnl.netProfit >= 0 ? 'Profit' : 'Loss'}</div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: pnl.netProfit >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtMoney(pnl.netProfit, currency)}</div>
+                </div>
+              </div>
+              <TwoBarChart leftLabel="Income" leftValue={pnl.income} rightLabel="Expenses" rightValue={pnl.expenses} currency={currency} />
+            </>
           )}
         </div>
       )}

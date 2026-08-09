@@ -3,7 +3,7 @@ const router           = express.Router();
 const { requireAuth }  = require('../middleware/auth-middleware');
 const tokenCache        = require('../utils/token-cache');
 const reports           = require('../xero/reports');
-const { xeroErrMsg }    = require('../xero/xero-utils');
+const { xeroErrMsg, _parseXeroErr } = require('../xero/xero-utils');
 const { getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const logger             = require('../utils/logger');
 
@@ -92,5 +92,70 @@ router.get('/contacts', requireAuth, async (req, res) => {
     res.status(500).json({ error: xeroErrMsg(err) });
   }
 });
+
+// GET /api/xero-reports/bank-transactions?accountId=&force=
+// The statement view behind Banking's "View transactions" — needs
+// accounting.banktransactions.read, so it 400s with a clear message for anyone
+// still connected under the older, narrower scope list rather than a raw Xero
+// 403 the user can't act on.
+router.get('/bank-transactions', requireAuth, async (req, res) => {
+  try {
+    const { tenants, tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false, tenants: [] });
+    if (!req.query.accountId) return res.status(400).json({ error: 'accountId is required' });
+
+    const data = await reports.getBankTransactions(req.user.id, tenantId, req.query.accountId, { force: req.query.force === 'true' });
+    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
+  } catch (err) {
+    logger.error('Insights bank transactions failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
+  }
+});
+
+// GET /api/xero-reports/profit-loss?from=&to=
+router.get('/profit-loss', requireAuth, async (req, res) => {
+  try {
+    const { tenants, tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false, tenants: [] });
+    if (!req.query.from || !req.query.to) return res.status(400).json({ error: 'from and to dates are required' });
+
+    const data = await reports.getProfitAndLoss(req.user.id, tenantId, { from: req.query.from, to: req.query.to, force: req.query.force === 'true' });
+    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
+  } catch (err) {
+    logger.error('Insights P&L failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
+  }
+});
+
+// GET /api/xero-reports/bank-summary?from=&to=
+router.get('/bank-summary', requireAuth, async (req, res) => {
+  try {
+    const { tenants, tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false, tenants: [] });
+    if (!req.query.from || !req.query.to) return res.status(400).json({ error: 'from and to dates are required' });
+
+    const data = await reports.getBankSummary(req.user.id, tenantId, { from: req.query.from, to: req.query.to, force: req.query.force === 'true' });
+    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
+  } catch (err) {
+    logger.error('Insights bank summary failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
+  }
+});
+
+// Xero returns a 403 with "Forbidden" for a call outside the token's granted
+// scopes — that's exactly the situation for anyone who connected before these
+// three report/bank-transaction scopes existed. Surface it as a clear
+// reconnect prompt instead of a generic failure. Reuses xero-utils's own error
+// parser since xero-node v7 JSON-stringifies the real HTTP status into
+// err.message rather than populating err.response/err.statusCode directly.
+function _isScopeError(err) {
+  return _parseXeroErr(err).status === 403;
+}
+function _scopeAwareStatus(err) { return _isScopeError(err) ? 403 : 500; }
+function _scopeAwareMessage(err) {
+  return _isScopeError(err)
+    ? 'This needs a wider Xero connection than you have — reconnect in Setup to grant access to bank transactions and reports.'
+    : xeroErrMsg(err);
+}
 
 module.exports = router;
