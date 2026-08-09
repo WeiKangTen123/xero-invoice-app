@@ -57,6 +57,11 @@ describe('routes/xero-oauth', () => {
   });
 
   describe('GET /oauth/callback', () => {
+    // This route must NEVER complete the connection itself — it has no way to
+    // verify the browser sitting here is the same one that started the flow
+    // (no cookies/sessions in this app). It only forwards code+state to the SPA,
+    // which completes the connection via an authenticated call. See
+    // POST /oauth/complete below for the actual security boundary.
     test('redirects with an error flag when Xero reports a consent error, without touching state', async () => {
       const res = await request(app).get('/api/xero/oauth/callback?error=access_denied');
       expect(res.status).toBe(302);
@@ -64,45 +69,95 @@ describe('routes/xero-oauth', () => {
       expect(oauthState.consume).not.toHaveBeenCalled();
     });
 
-    test('redirects with an error flag when state is missing/invalid', async () => {
-      oauthState.consume.mockReturnValue(null);
-      const res = await request(app).get('/api/xero/oauth/callback?code=abc&state=bogus');
+    test('redirects with an error flag when code or state is missing', async () => {
+      const res = await request(app).get('/api/xero/oauth/callback?code=abc');
       expect(res.headers.location).toContain('xero_oauth=error');
       expect(xeroOAuth.completeConnection).not.toHaveBeenCalled();
     });
 
-    test('redirects with an error flag when code is missing even if state is valid', async () => {
-      oauthState.consume.mockReturnValue(testUser.id);
-      const res = await request(app).get('/api/xero/oauth/callback?state=valid-state');
-      expect(res.headers.location).toContain('xero_oauth=error');
-    });
-
-    test('completes the connection and redirects with a success flag on the happy path', async () => {
-      oauthState.consume.mockReturnValue(testUser.id);
-      xeroOAuth.completeConnection.mockResolvedValue([{ tenantId: 't1', tenantName: 'Org' }]);
-
-      const res = await request(app).get('/api/xero/oauth/callback?code=the-code&state=valid-state');
-
-      expect(xeroOAuth.completeConnection).toHaveBeenCalledWith(testUser.id, 'the-code');
-      expect(res.headers.location).toContain('xero_oauth=success');
-    });
-
-    test('redirects with an error flag (not a 500) when completeConnection throws', async () => {
-      oauthState.consume.mockReturnValue(testUser.id);
-      xeroOAuth.completeConnection.mockRejectedValue(new Error('Xero rejected the code'));
-
-      const res = await request(app).get('/api/xero/oauth/callback?code=bad-code&state=valid-state');
-
+    test('never calls completeConnection itself — only forwards code+state pending', async () => {
+      const res = await request(app).get('/api/xero/oauth/callback?code=the-code&state=some-state');
+      expect(xeroOAuth.completeConnection).not.toHaveBeenCalled();
+      expect(oauthState.consume).not.toHaveBeenCalled();
       expect(res.status).toBe(302);
-      expect(res.headers.location).toContain('xero_oauth=error');
+      expect(res.headers.location).toContain('xero_oauth=pending');
+      expect(res.headers.location).toContain('code=the-code');
+      expect(res.headers.location).toContain('state=some-state');
     });
 
     test('does not require an Authorization header at all (browser redirect has none)', async () => {
-      oauthState.consume.mockReturnValue(testUser.id);
-      xeroOAuth.completeConnection.mockResolvedValue([{ tenantId: 't1', tenantName: 'Org' }]);
       // Deliberately no .set('Authorization', ...) here.
       const res = await request(app).get('/api/xero/oauth/callback?code=c&state=s');
       expect(res.status).toBe(302);
+    });
+  });
+
+  describe('POST /oauth/complete', () => {
+    test('requires authentication', async () => {
+      await request(app).post('/api/xero/oauth/complete').send({ code: 'c', state: 's' }).expect(401);
+    });
+
+    test('rejects when code or state is missing', async () => {
+      const res = await request(app)
+        .post('/api/xero/oauth/complete')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .send({ code: 'c' })
+        .expect(400);
+      expect(res.body.error).toMatch(/missing/i);
+    });
+
+    test('rejects when state is missing/invalid/expired', async () => {
+      oauthState.consume.mockReturnValue(null);
+      const res = await request(app)
+        .post('/api/xero/oauth/complete')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .send({ code: 'c', state: 'bogus' })
+        .expect(400);
+      expect(xeroOAuth.completeConnection).not.toHaveBeenCalled();
+      expect(res.body.error).toMatch(/invalid or expired/i);
+    });
+
+    // The actual security fix: a state minted for one user must not be completable
+    // by a different, currently-authenticated user — this is what prevents an
+    // attacker from harvesting their own connect link, handing it to a victim, and
+    // having the victim's Xero org linked to the attacker's account instead.
+    test('rejects when the authenticated caller is not who the state was minted for', async () => {
+      const otherUser = await users.createUser('other@test.com', 'password123', 'user');
+      oauthState.consume.mockReturnValue(otherUser.id); // state belongs to a DIFFERENT user
+      const res = await request(app)
+        .post('/api/xero/oauth/complete')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`) // caller is testUser, not otherUser
+        .send({ code: 'the-code', state: 'attacker-harvested-state' })
+        .expect(400);
+      expect(xeroOAuth.completeConnection).not.toHaveBeenCalled();
+      expect(res.body.error).toMatch(/invalid or expired/i);
+    });
+
+    test('completes the connection when the caller matches who started it', async () => {
+      oauthState.consume.mockReturnValue(testUser.id);
+      xeroOAuth.completeConnection.mockResolvedValue([{ tenantId: 't1', tenantName: 'Org' }]);
+
+      const res = await request(app)
+        .post('/api/xero/oauth/complete')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .send({ code: 'the-code', state: 'valid-state' })
+        .expect(200);
+
+      expect(xeroOAuth.completeConnection).toHaveBeenCalledWith(testUser.id, 'the-code');
+      expect(res.body).toEqual({ success: true });
+    });
+
+    test('surfaces a completeConnection failure as 400, not a 500 crash', async () => {
+      oauthState.consume.mockReturnValue(testUser.id);
+      xeroOAuth.completeConnection.mockRejectedValue(new Error('Xero rejected the code'));
+
+      const res = await request(app)
+        .post('/api/xero/oauth/complete')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .send({ code: 'bad-code', state: 'valid-state' })
+        .expect(400);
+
+      expect(res.body.error).toMatch(/rejected/i);
     });
   });
 

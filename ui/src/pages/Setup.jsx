@@ -204,15 +204,38 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const flag = params.get('xero_oauth');
-    if (flag) {
-      setBanner(flag === 'success'
-        ? { ok: true, text: 'Xero connected via OAuth.' }
-        : { ok: false, text: 'Xero OAuth connection failed — try again.' });
-      params.delete('xero_oauth');
-      const qs = params.toString();
-      window.history.replaceState({}, '', `${window.location.pathname}${qs ? '?' + qs : ''}`);
+
+    async function settle() {
+      if (flag === 'pending') {
+        // The unauthenticated /oauth/callback route never completes the connection
+        // itself — it only forwards code+state here. This authenticated call is
+        // what actually finishes it, and the server re-checks that whoever is
+        // logged in right now is the same account that started the flow (closes
+        // an account-hijack path where an attacker's connect link, if completed by
+        // someone else's browser, would otherwise link the victim's Xero org to
+        // the attacker's account instead of the victim's).
+        const code  = params.get('code');
+        const state = params.get('state');
+        try {
+          await api.post('/xero/oauth/complete', { code, state });
+          setBanner({ ok: true, text: 'Xero connected via OAuth.' });
+        } catch (err) {
+          setBanner({ ok: false, text: err.message || 'Xero OAuth connection failed — try again.' });
+        }
+      } else if (flag) {
+        setBanner(flag === 'success'
+          ? { ok: true, text: 'Xero connected via OAuth.' }
+          : { ok: false, text: 'Xero OAuth connection failed — try again.' });
+      }
+
+      if (flag) {
+        ['xero_oauth', 'code', 'state'].forEach(k => params.delete(k));
+        const qs = params.toString();
+        window.history.replaceState({}, '', `${window.location.pathname}${qs ? '?' + qs : ''}`);
+      }
+      fetchTenants();
     }
-    fetchTenants();
+    settle();
   }, []);
 
   // A successful Custom Connection test also connects tenants server-side —
