@@ -28,8 +28,17 @@ router.get('/oauth/connect', requireAuth, (req, res) => {
 
 // GET /api/xero/oauth/callback — Xero redirects the user's browser here after
 // consent. This is a plain browser GET with no Authorization header, so it can't go
-// through requireAuth — the `state` param IS the auth boundary (see utils/oauth-state.js).
-router.get('/oauth/callback', async (req, res) => {
+// through requireAuth, and MUST NOT complete the connection itself: `state` only
+// proves the flow was started by someone — not that the browser sitting here now is
+// that same someone (this app has no cookies/sessions to tie the two together).
+// Trusting state alone here lets an attacker start a flow bound to their own
+// account, hand the resulting Xero consent link to a victim, and have the victim's
+// Xero org silently connected to the ATTACKER's app account instead of the victim's.
+// So this route does nothing privileged — it just hands code+state to the SPA, which
+// completes the connection via POST /oauth/complete while authenticated as whoever
+// is actually sitting in that browser, and the server re-checks that they're the
+// same person who started it before touching anything.
+router.get('/oauth/callback', (req, res) => {
   const { code, state, error: xeroError } = req.query;
   const base = _frontendSetupUrl();
 
@@ -37,19 +46,33 @@ router.get('/oauth/callback', async (req, res) => {
     logger.warn('Xero OAuth consent denied or errored', { error: xeroError });
     return res.redirect(`${base}?xero_oauth=error`);
   }
-
-  const userId = oauthState.consume(state);
-  if (!userId || !code) {
-    logger.warn('Xero OAuth callback with missing/invalid state or code');
+  if (!code || !state) {
+    logger.warn('Xero OAuth callback with missing code or state');
     return res.redirect(`${base}?xero_oauth=error`);
   }
 
+  res.redirect(`${base}?xero_oauth=pending&code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`);
+});
+
+// POST /api/xero/oauth/complete — authenticated SPA call that actually finishes the
+// connection. Rejects unless the caller is the same user `state` was minted for —
+// this is the check that closes the hijack described above.
+router.post('/oauth/complete', requireAuth, async (req, res) => {
+  const { code, state } = req.body;
+  if (!code || !state) return res.status(400).json({ error: 'Missing code or state' });
+
+  const boundUserId = oauthState.consume(state);
+  if (!boundUserId || boundUserId !== req.user.id) {
+    logger.warn('Xero OAuth completion rejected — state does not belong to this user', { userId: req.user.id });
+    return res.status(400).json({ error: 'This Xero connection link is invalid or expired — try connecting again.' });
+  }
+
   try {
-    await xeroOAuth.completeConnection(userId, code);
-    res.redirect(`${base}?xero_oauth=success`);
+    await xeroOAuth.completeConnection(req.user.id, code);
+    res.json({ success: true });
   } catch (err) {
-    logger.error('Xero OAuth callback failed', { error: err.message, userId });
-    res.redirect(`${base}?xero_oauth=error`);
+    logger.error('Xero OAuth completion failed', { error: err.message, userId: req.user.id });
+    res.status(400).json({ error: err.message });
   }
 });
 
