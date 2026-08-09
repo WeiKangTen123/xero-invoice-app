@@ -9,6 +9,7 @@ import Setup from './pages/Setup';
 import Invoices from './pages/Invoices';
 import InvoiceReview from './pages/InvoiceReview';
 import Admin from './pages/Admin';
+import XeroInsights from './pages/XeroInsights';
 
 function PrivateRoute({ children, adminOnly }) {
   const { user, loading } = useAuth();
@@ -38,6 +39,7 @@ function AppRoutes() {
         <Route path="setup"            element={<Setup />} />
         <Route path="invoices"         element={<Invoices />} />
         <Route path="invoices/:id"     element={<InvoiceReview />} />
+        <Route path="xero-insights"    element={<XeroInsights />} />
         <Route
           path="admin"
           element={

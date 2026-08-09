@@ -82,6 +82,7 @@ router.delete('/oauth/disconnect', requireAuth, (req, res) => {
   const cache = tokenCache.forUser(req.user.id);
   for (const tenant of cache.getAllTenants()) cache.removeTenant(tenant.tenant_id);
   saveUserConfig(req.user.id, { XERO_OAUTH_REFRESH_TOKEN: '', XERO_CONNECTION_TYPE: '' });
+  require('../xero/reports').clearCache(req.user.id); // don't let Xero Insights serve stale data post-disconnect
   logger.info('Xero OAuth connection disconnected', { by: req.user.email });
   res.json({ success: true });
 });

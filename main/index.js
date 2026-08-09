@@ -48,6 +48,7 @@ const adminRoutes   = require('./routes/admin');
 const dashRoutes    = require('./routes/dashboard');
 const chatRoutes    = require('./routes/chat');
 const xeroOAuthRoutes = require('./routes/xero-oauth');
+const xeroReportsRoutes = require('./routes/xero-reports');
 
 
 const app  = express();
@@ -92,6 +93,7 @@ app.use('/api/invoices', invoiceRoutes);
 app.use('/api/admin',    adminRoutes);
 app.use('/api/chat',     chatRoutes);
 app.use('/api/xero',     xeroOAuthRoutes);
+app.use('/api/xero-reports', xeroReportsRoutes);
 app.use('/dashboard',    dashRoutes);   // legacy health check
 
 // ── Serve React UI ───────────────────────────────────────────────────────────
