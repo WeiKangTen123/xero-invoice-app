@@ -5,6 +5,17 @@ const db     = require('../db');
 // Keyed by userId → { tokens: { [tenantId]: { access_token, expires_at } }, tenants: [...] }
 const _userCaches = new Map();
 
+// De-dupes concurrent cold-cache reconnects per user. Access tokens are never
+// persisted (see getPersistedTenants below), so every restart starts with an
+// empty cache even for an already-connected user — and Insights alone fires
+// 4+ requests on page load, all racing to notice the same cold cache. Xero
+// rotates the refresh token on every use, so firing reconnectXero() once per
+// request would have the 2nd..nth calls redeem an already-rotated (now
+// stale) refresh token and fail. Sharing one in-flight promise per user
+// keyed here means only the first caller actually reconnects; the rest just
+// await the same result.
+const _reconnecting = new Map(); // userId -> Promise
+
 function _getCache(userId) {
   if (!_userCaches.has(userId)) {
     _userCaches.set(userId, { tokens: {}, tenants: [] });
@@ -52,8 +63,21 @@ function forUser(userId) {
   }
 
   async function getValidToken(tenantId) {
-    const mem = cache.tokens[tenantId];
-    if (!mem) throw new Error(`No Xero token for tenant ${tenantId} — reconnect Xero first`);
+    let mem = cache.tokens[tenantId];
+    if (!mem) {
+      let inFlight = _reconnecting.get(userId);
+      if (!inFlight) {
+        inFlight = require('../xero/reconnect').reconnectXero(userId).finally(() => _reconnecting.delete(userId));
+        _reconnecting.set(userId, inFlight);
+      }
+      try {
+        await inFlight;
+      } catch (err) {
+        throw new Error(`No Xero token for tenant ${tenantId} — reconnect Xero first (${err.message})`);
+      }
+      mem = cache.tokens[tenantId];
+      if (!mem) throw new Error(`No Xero token for tenant ${tenantId} — reconnect Xero first`);
+    }
     if (Date.now() < mem.expires_at - 60_000) return mem.access_token;
 
     logger.info('Token expired — refreshing', { tenantId, userId, connectionType: mem.connection_type });
