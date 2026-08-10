@@ -689,15 +689,18 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
     expect(transactions[1]).toMatchObject({ type: 'Money In', contact: 'Customer Co', total: 500, source: 'bank' });
   });
 
-  // Xero's real shape for "valid token, missing scope" is a 401 with a
-  // WWW-Authenticate: insufficient_scope header — confirmed live requesting
-  // Payments without accounting.payments.read. Not always 403, despite what
-  // an earlier version of this check assumed.
+  // Xero's real shape for "valid token, missing scope" — confirmed live
+  // requesting Payments without accounting.payments.read — is xero-node
+  // throwing a raw STRING (not an Error, no .message) holding the
+  // JSON-stringified response, a 401 with a WWW-Authenticate:
+  // insufficient_scope header. Using the exact real shape here (not a
+  // convenient object mock) is what would have caught this failing before
+  // it shipped.
   test('getBankTransactions falls back to bank-transactions-only if Payments comes back insufficient_scope (not yet reconnected under accounting.payments.read)', async () => {
     getBankTransactions.mockResolvedValue({ body: { bankTransactions: [
       { bankTransactionID: 'bt1', type: 'RECEIVE', date: '2026-08-05', total: 500 },
     ] } });
-    getPayments.mockRejectedValue({ response: { statusCode: 401, headers: { 'www-authenticate': 'insufficient_scope' }, body: {} } });
+    getPayments.mockRejectedValue(JSON.stringify({ response: { statusCode: 401, headers: { 'www-authenticate': 'insufficient_scope' }, body: {} } }));
 
     const { transactions } = await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
     expect(transactions).toHaveLength(1);

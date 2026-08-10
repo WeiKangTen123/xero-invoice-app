@@ -6,8 +6,20 @@ describe('xero/xero-utils — _parseXeroErr (pure)', () => {
     expect(_parseXeroErr(err)).toMatchObject({ status: 401, wwwAuthenticate: 'insufficient_scope', body: { Detail: 'AuthorizationUnsuccessful' } });
   });
 
-  test('extracts the same fields from xero-node v7\'s JSON-stringified-into-err.message shape', () => {
+  test('extracts the same fields from err.message holding the JSON-stringified response', () => {
     const err = { message: JSON.stringify({ response: { statusCode: 401, headers: { 'www-authenticate': 'insufficient_scope' }, body: '{"Detail":"AuthorizationUnsuccessful"}' } }) };
+    expect(_parseXeroErr(err)).toMatchObject({ status: 401, wwwAuthenticate: 'insufficient_scope', body: { Detail: 'AuthorizationUnsuccessful' } });
+  });
+
+  // The actual real-world shape, confirmed live against a genuine
+  // getPayments() scope failure: xero-node throws a raw STRING (typeof
+  // err === 'string'), not an Error and not even a plain object - it has no
+  // .message property at all (strings don't have one), so a check that only
+  // ever looked at err.message never even tried to parse it, and every
+  // error shaped this way fell straight through to a raw JSON dump.
+  test('extracts the same fields when err itself is the raw JSON-stringified response (not wrapped in .message)', () => {
+    const err = JSON.stringify({ response: { statusCode: 401, headers: { 'www-authenticate': 'insufficient_scope' }, body: '{"Detail":"AuthorizationUnsuccessful"}' } });
+    expect(typeof err).toBe('string');
     expect(_parseXeroErr(err)).toMatchObject({ status: 401, wwwAuthenticate: 'insufficient_scope', body: { Detail: 'AuthorizationUnsuccessful' } });
   });
 
@@ -38,6 +50,11 @@ describe('xero/xero-utils — isScopeError', () => {
   test('a 500 is not a scope error', () => {
     expect(isScopeError({ response: { statusCode: 500, headers: {} } })).toBe(false);
   });
+
+  test('the real-world raw-string error shape is correctly detected too', () => {
+    const err = JSON.stringify({ response: { statusCode: 401, headers: { 'www-authenticate': 'insufficient_scope' } } });
+    expect(isScopeError(err)).toBe(true);
+  });
 });
 
 describe('xero/xero-utils — xeroErrMsg', () => {
@@ -48,5 +65,13 @@ describe('xero/xero-utils — xeroErrMsg', () => {
   test('prefers the Xero validation error detail when present', () => {
     const err = { response: { statusCode: 400, body: { Detail: 'The fromDate and toDate parameters must be with 365 days of each other.' } } };
     expect(xeroErrMsg(err)).toBe('The fromDate and toDate parameters must be with 365 days of each other.');
+  });
+
+  // This is the actual user-facing symptom the raw-string bug caused: a
+  // real Xero failure showing as a wall of unreadable JSON instead of the
+  // Detail message Xero actually sent.
+  test('extracts a real message from the raw-string error shape instead of falling through to a JSON dump', () => {
+    const err = JSON.stringify({ response: { statusCode: 401, body: { Detail: 'AuthorizationUnsuccessful' } } });
+    expect(xeroErrMsg(err)).toBe('AuthorizationUnsuccessful');
   });
 });
