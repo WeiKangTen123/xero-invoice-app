@@ -313,6 +313,21 @@ describe('routes/xero-reports', () => {
       expect(res.body.error).toMatch(/reconnect/i);
     });
 
+    // Xero's actual shape for a missing scope, confirmed live: a 401 with a
+    // WWW-Authenticate: insufficient_scope header, not always a 403 — this
+    // is the realistic case the 403 test above wouldn't have caught.
+    test('a Xero 401 with WWW-Authenticate: insufficient_scope also surfaces as a clear reconnect prompt', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+      const scopeErr = new Error(JSON.stringify({ response: { statusCode: 401, headers: { 'www-authenticate': 'insufficient_scope' } }, body: {} }));
+      reports.getBankSummary.mockRejectedValue(scopeErr);
+
+      const res = await request(app)
+        .get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31')
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(403);
+      expect(res.body.error).toMatch(/reconnect/i);
+    });
+
     test('a non-scope Xero failure on these three still surfaces as 500', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getBankSummary.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
