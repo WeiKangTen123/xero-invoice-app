@@ -13,7 +13,8 @@ const oauthState = require('../utils/oauth-state');
 // click "Connect to Xero" again — Xero fixes scopes at consent time, an existing
 // token doesn't retroactively gain new permissions.
 const SCOPES = 'offline_access accounting.invoices accounting.contacts accounting.settings.read '
-  + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read';
+  + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read '
+  + 'accounting.payments.read';
 const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
 const TOKEN_URL      = 'https://identity.xero.com/connect/token';
 

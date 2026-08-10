@@ -132,6 +132,21 @@ async function getSummary(userId, tenantId, { force = false } = {}) {
   return _cacheSet(key, data);
 }
 
+// Cached separately from getSummary's own org fetch (same underlying Xero
+// call, but this one's only reached for the 'year' preset, and keeping it
+// standalone avoids reshaping getSummary's existing parallel fetch).
+async function _getOrganisation(userId, tenantId, force) {
+  const key    = `org:${userId}:${tenantId}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached.org;
+
+  const tokenCache = require('../utils/token-cache').forUser(userId);
+  const token      = await tokenCache.getValidToken(tenantId);
+  const api        = _apiFor(token);
+  const res = await withRetry(() => api.getOrganisations(tenantId));
+  return _cacheSet(key, { org: res.body.organisations?.[0] || {} }).org;
+}
+
 // ── Date-range engine (daily/weekly/monthly/yearly/custom) ──────────────────
 // Everything here works in calendar dates (Y/M/D), never real instants — Xero's
 // filter syntax (`DateTime(y,m,d)`) takes a plain calendar date with no
@@ -165,10 +180,26 @@ const RANGE_PRESETS = new Set(['day', 'week', 'month', 'year', 'all', 'custom'])
 // bound, without needing to query for the actual first transaction date.
 const ALL_TIME_START = { year: 2000, month: 1, day: 1 };
 
+// The org's fiscal year doesn't necessarily run Jan-Dec (Xero's own "Year to
+// date" dashboard widget uses it, not the calendar year) — defaults to a
+// calendar year (Dec 31 end) when the caller doesn't have fiscal-year-end
+// info to hand, which reproduces the old hardcoded Jan-1 behavior exactly.
+function _fiscalYearStart(today, fiscalYearEnd) {
+  const feMonth = fiscalYearEnd?.month || 12;
+  const feDay   = fiscalYearEnd?.day   || 31;
+  const thisCalendarYearEnd = { year: today.year, month: feMonth, day: feDay };
+  // "Today" is inside the fiscal year that ends on the NEXT occurrence of the
+  // fiscal-year-end date — so if that date (this calendar year) hasn't
+  // happened yet, the current fiscal year started the year before.
+  const endYear = _dateFromParts(today) <= _dateFromParts(thisCalendarYearEnd) ? today.year - 1 : today.year;
+  return _addDays({ year: endYear, month: feMonth, day: feDay }, 1);
+}
+
 // Pure. Returns { preset, fromISO, toISO, where, days } — `where` is a ready-to-use
 // Xero filter clause; `toExclusive` never leaks out since every caller only needs
-// an inclusive display range or the filter string.
-function computeRange(preset, timezone, customFrom, customTo) {
+// an inclusive display range or the filter string. `fiscalYearEnd` (optional
+// { month, day }) only affects the 'year' preset.
+function computeRange(preset, timezone, customFrom, customTo, fiscalYearEnd) {
   const today = _todayPartsInTz(timezone || 'UTC');
   const usePreset = RANGE_PRESETS.has(preset) ? preset : 'month';
 
@@ -178,7 +209,7 @@ function computeRange(preset, timezone, customFrom, customTo) {
   } else if (usePreset === 'week') {
     from = _addDays(today, -_weekdayMon0(today)); toExclusive = _addDays(today, 1);
   } else if (usePreset === 'year') {
-    from = { year: today.year, month: 1, day: 1 }; toExclusive = _addDays(today, 1);
+    from = _fiscalYearStart(today, fiscalYearEnd); toExclusive = _addDays(today, 1);
   } else if (usePreset === 'all') {
     from = ALL_TIME_START; toExclusive = _addDays(today, 1);
   } else if (usePreset === 'custom') {
@@ -242,7 +273,14 @@ function _buildPeriod(invoices, range) {
 }
 
 async function getPeriod(userId, tenantId, { preset = 'month', from, to, timezone = 'UTC', force = false } = {}) {
-  const range = computeRange(preset, timezone, from, to);
+  // Fiscal-year-end only matters for the 'year' preset — skip the extra org
+  // lookup entirely for every other preset.
+  let fiscalYearEnd;
+  if (preset === 'year') {
+    const org = await _getOrganisation(userId, tenantId, force);
+    fiscalYearEnd = { month: org.financialYearEndMonth || 12, day: org.financialYearEndDay || 31 };
+  }
+  const range = computeRange(preset, timezone, from, to, fiscalYearEnd);
   const key   = `period:${userId}:${tenantId}:${range.preset}:${range.fromISO}:${range.toISO}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
