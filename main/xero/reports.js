@@ -1,5 +1,5 @@
 const { AccountingApi }  = require('xero-node');
-const { withRetry }      = require('./xero-utils');
+const { withRetry, _parseXeroErr } = require('./xero-utils');
 const logger             = require('../utils/logger');
 
 // Read-only financial data for the "Insights" tab. Every function here either
@@ -393,6 +393,30 @@ function _buildBankTransactions(transactions) {
     total:         Number(t.total || 0),
     isReconciled:  !!t.isReconciled,
     status:        t.status || '',
+    source:        'bank',
+  })).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+
+// A bank account's real cash movement isn't fully captured by BankTransactions
+// alone — confirmed against live data: paying a bill or receiving a customer
+// payment against an invoice creates a Payment record instead, which never
+// shows up in getBankTransactions at all. paymentType's 8 real values (per
+// the xero-node SDK) aren't uniformly prefixed — the two common ones are
+// ACCRECPAYMENT/ACCPAYPAYMENT (confirmed live), and only the other 6
+// credit-note/overpayment/prepayment variants actually start with AR/AP, so
+// "contains REC, or starts with AR" is what actually covers every
+// receivable (money in) type; everything else is payable (money out).
+function _buildPayments(payments) {
+  return payments.map(p => ({
+    transactionId: p.paymentID,
+    type:          /REC/.test(p.paymentType || '') || (p.paymentType || '').startsWith('AR') ? 'Money In' : 'Money Out',
+    contact:       p.invoice?.contact?.name || 'Unknown',
+    reference:     p.reference || (p.invoice?.invoiceNumber ? `Payment - ${p.invoice.invoiceNumber}` : 'Payment'),
+    date:          p.date ? new Date(p.date).toISOString().slice(0, 10) : null,
+    total:         Number(p.amount || 0),
+    isReconciled:  !!p.isReconciled,
+    status:        p.status || '',
+    source:        'payment',
   })).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 }
 
@@ -408,7 +432,28 @@ async function getBankTransactions(userId, tenantId, accountId, { force = false 
   const res = await withRetry(() => api.getBankTransactions(
     tenantId, undefined, `BankAccount.AccountID==Guid("${accountId}")`, 'Date DESC'
   ));
-  const data = { transactions: _buildBankTransactions(res.body.bankTransactions || []) };
+
+  // Bank transactions alone miss real cash movement that goes through
+  // Payment records instead (paying a bill, receiving a customer payment
+  // against an invoice — confirmed against live data, never shows up in
+  // getBankTransactions). Fetched separately, own try/catch: anyone who
+  // hasn't reconnected under the accounting.payments.read scope yet still
+  // gets a working (bank-transactions-only) statement instead of the whole
+  // view breaking on their 403.
+  let payments = [];
+  try {
+    const payRes = await withRetry(() => api.getPayments(
+      tenantId, undefined, `Account.AccountID==Guid("${accountId}")`, 'Date DESC'
+    ));
+    payments = _buildPayments(payRes.body.payments || []);
+  } catch (err) {
+    if (_parseXeroErr(err).status !== 403) throw err; // a real failure, not just a missing scope, should still surface
+    logger.info('Skipping Payments in statement — not yet reconnected under accounting.payments.read', { userId, tenantId });
+  }
+
+  const transactions = [..._buildBankTransactions(res.body.bankTransactions || []), ...payments]
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const data = { transactions };
   return _cacheSet(key, data);
 }
 
@@ -593,6 +638,6 @@ module.exports = {
   getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
   getBankTransactions, getProfitAndLoss, getBankSummary, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
-  _buildBankTransactions, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
+  _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
 };

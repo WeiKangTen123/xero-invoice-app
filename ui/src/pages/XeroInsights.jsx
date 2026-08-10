@@ -849,7 +849,7 @@ export default function XeroInsights() {
                 <button type="button" className="btn btn-sm" style={{ background: 'none', color: 'var(--text-muted)', border: 'none' }} onClick={() => setSelectedBankAccount(null)}>✕ Close</button>
               </div>
               <div className="card-subtitle" style={{ marginBottom: 2 }}>Most recent transactions for this account</div>
-              <SourceNote>Xero Bank Transactions API</SourceNote>
+              <SourceNote>Xero Bank Transactions + Payments API — bill/invoice payments show up here too, not just raw bank entries</SourceNote>
               {statement.status !== 'done' ? (
                 <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
               ) : statement.error ? (
@@ -862,6 +862,7 @@ export default function XeroInsights() {
                     <thead><tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
                       <th style={{ padding: '6px 10px' }}>Date</th><th style={{ padding: '6px 10px' }}>Type</th>
                       <th style={{ padding: '6px 10px' }}>Contact</th><th style={{ padding: '6px 10px' }}>Reference</th>
+                      <th style={{ padding: '6px 10px' }}>Source</th>
                       <th style={{ padding: '6px 10px' }}>Reconciled</th><th style={{ padding: '6px 10px', textAlign: 'right' }}>Amount</th>
                     </tr></thead>
                     <tbody>{statement.data.map(t => (
@@ -870,6 +871,7 @@ export default function XeroInsights() {
                         <td style={{ padding: '9px 10px' }}><span className={`badge ${t.type === 'Money In' ? 'badge-green' : 'badge-red'}`}>{t.type}</span></td>
                         <td style={{ padding: '9px 10px' }}>{t.contact}</td>
                         <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{t.reference || '—'}</td>
+                        <td style={{ padding: '9px 10px', color: 'var(--text-muted)', fontSize: 11 }}>{t.source === 'payment' ? 'Invoice payment' : 'Bank'}</td>
                         <td style={{ padding: '9px 10px' }}>{t.isReconciled ? '✓' : '—'}</td>
                         <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: t.type === 'Money In' ? 'var(--success)' : 'var(--danger)' }}>
                           {t.type === 'Money In' ? '+' : '−'}{fmtMoney(t.total, currency)}
