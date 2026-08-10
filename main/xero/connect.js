@@ -4,7 +4,8 @@ const logger = require('../utils/logger');
 // See xero/oauth.js for why these three were added and why it requires
 // re-authorizing — same reasoning applies to Custom Connection users.
 const SCOPES = 'accounting.invoices accounting.contacts accounting.settings.read '
-  + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read';
+  + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read '
+  + 'accounting.payments.read';
 
 async function refreshClientCredentialsToken(userId) {
   const { getUserConfig } = require('../utils/users');

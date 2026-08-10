@@ -142,10 +142,29 @@ describe('xero/reports — computeRange (pure, date math only)', () => {
     expect(r.toISO).toBe('2026-08-12');
   });
 
-  test('year — from is Jan 1 of this year', () => {
+  test('year — from is Jan 1 of this year (default, no fiscal year end given)', () => {
     const r = computeRange('year', 'UTC');
     expect(r.fromISO).toBe('2026-01-01');
     expect(r.toISO).toBe('2026-08-12');
+  });
+
+  test('year — with a non-calendar fiscal year end, follows the fiscal year instead of Jan 1', () => {
+    // "Today" (Aug 12) is after this calendar year's Mar 31 fiscal-year-end,
+    // so the current fiscal year started Apr 1 of THIS year — matches what
+    // Xero's own "Year to date" dashboard widget shows for such an org.
+    const r = computeRange('year', 'UTC', undefined, undefined, { month: 3, day: 31 });
+    expect(r.fromISO).toBe('2026-04-01');
+  });
+
+  test('year — fiscal year end still ahead this calendar year falls back to the fiscal year that started last year', () => {
+    jest.setSystemTime(new Date('2026-02-15T10:00:00Z')); // before this year's Mar 31 fiscal year end
+    const r = computeRange('year', 'UTC', undefined, undefined, { month: 3, day: 31 });
+    expect(r.fromISO).toBe('2025-04-01');
+  });
+
+  test('year — a fiscal year end of Dec 31 behaves exactly like the calendar-year default', () => {
+    const r = computeRange('year', 'UTC', undefined, undefined, { month: 12, day: 31 });
+    expect(r.fromISO).toBe('2026-01-01');
   });
 
   test('all — from is a fixed far-past anchor, to is today', () => {
@@ -450,16 +469,17 @@ describe('xero/reports — getSummary caching', () => {
 });
 
 describe('xero/reports — getPeriod / getAccounts / getBankAccounts / getContacts caching', () => {
-  let reports, getInvoices, getAccounts, getContacts;
+  let reports, getInvoices, getAccounts, getContacts, getOrganisations;
 
   beforeEach(() => {
     jest.resetModules();
     getInvoices = jest.fn().mockResolvedValue({ body: { invoices: [] } });
     getAccounts = jest.fn().mockResolvedValue({ body: { accounts: [] } });
     getContacts = jest.fn().mockResolvedValue({ body: { contacts: [] } });
+    getOrganisations = jest.fn().mockResolvedValue({ body: { organisations: [{ financialYearEndMonth: 3, financialYearEndDay: 31 }] } });
 
     jest.doMock('xero-node', () => ({
-      AccountingApi: jest.fn().mockImplementation(() => ({ getInvoices, getAccounts, getContacts })),
+      AccountingApi: jest.fn().mockImplementation(() => ({ getInvoices, getAccounts, getContacts, getOrganisations })),
     }));
     jest.doMock('../utils/token-cache', () => ({
       forUser: jest.fn(() => ({ getValidToken: jest.fn().mockResolvedValue('fake-token') })),
@@ -479,6 +499,25 @@ describe('xero/reports — getPeriod / getAccounts / getBankAccounts / getContac
     await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' }); // same range, cached
     await reports.getPeriod('user-1', 'tenant-1', { preset: 'year', timezone: 'UTC' });   // different range, refetches
     expect(getInvoices).toHaveBeenCalledTimes(2);
+  });
+
+  test('getPeriod only looks up the org (for fiscal-year-end) on the "year" preset, not the others', async () => {
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' });
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'week', timezone: 'UTC' });
+    expect(getOrganisations).not.toHaveBeenCalled();
+
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'year', timezone: 'UTC' });
+    expect(getOrganisations).toHaveBeenCalledTimes(1);
+  });
+
+  test('getPeriod\'s "year" preset applies the org\'s real fiscal year end to the Xero filter, not Jan 1', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-12T10:00:00Z'));
+    // mocked org above has financialYearEndMonth: 3, day: 31 — fiscal year
+    // starting Apr 1 2026, not the calendar-year Jan 1 2026.
+    await reports.getPeriod('user-1', 'tenant-1', { preset: 'year', timezone: 'UTC' });
+    const whereArg = getInvoices.mock.calls[0][2];
+    expect(whereArg).toBe('Date >= DateTime(2026,4,1) && Date < DateTime(2026,8,13)');
+    jest.useRealTimers();
   });
 
   test('getAccounts and getBankAccounts cache independently of getSummary/getPeriod', async () => {
