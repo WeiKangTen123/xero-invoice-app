@@ -346,7 +346,12 @@ function _buildBankTransactions(transactions) {
     type:          t.type === 'RECEIVE' ? 'Money In' : 'Money Out',
     contact:       t.contact?.name || 'Unknown',
     reference:     t.reference || '',
-    date:          t.date || null,
+    // xero-node returns a real Date object here (confirmed against a live
+    // response) — unlike Invoices, where the same SDK returns a plain ISO
+    // string for .date/.dueDate. Normalize to an ISO date string so the sort
+    // below (and the frontend's formatDateTime) can treat every "date" field
+    // the same way regardless of which endpoint it came from.
+    date:          t.date ? new Date(t.date).toISOString().slice(0, 10) : null,
     total:         Number(t.total || 0),
     isReconciled:  !!t.isReconciled,
     status:        t.status || '',

@@ -271,6 +271,20 @@ describe('xero/reports — directory builders (pure)', () => {
     expect(txs[0]).toMatchObject({ type: 'Money In', contact: 'Kind Living', isReconciled: false });
     expect(txs[1]).toMatchObject({ type: 'Money Out', contact: 'Landlord', reference: 'Rent', isReconciled: true });
   });
+
+  // xero-node's real getBankTransactions response returns .date as an actual
+  // Date object, not a string (confirmed against a live response) — a plain
+  // string fixture wouldn't have caught the ".localeCompare is not a
+  // function" crash this shape causes if the sort ever stops normalizing it.
+  test('handles a real Date-object .date (not a string) without crashing, and normalizes it to an ISO date string', () => {
+    const txs = _buildBankTransactions([
+      { bankTransactionID: 't1', type: 'SPEND', date: new Date('2026-07-20T00:00:00.000Z'), total: 100 },
+      { bankTransactionID: 't2', type: 'RECEIVE', date: new Date('2026-07-22T00:00:00.000Z'), total: 200 },
+    ]);
+    expect(txs.map(t => t.transactionId)).toEqual(['t2', 't1']); // newest first
+    expect(txs[0].date).toBe('2026-07-22');
+    expect(txs[1].date).toBe('2026-07-20');
+  });
 });
 
 describe('xero/reports — _flattenReportRows (pure)', () => {
