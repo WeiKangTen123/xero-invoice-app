@@ -1,6 +1,6 @@
 const {
   _buildSummary, computeRange, _buildPeriod, _buildAccounts, _buildBankAccounts, _buildContacts,
-  _buildBankTransactions, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
+  _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
 } = require('./reports');
 
@@ -307,6 +307,52 @@ describe('xero/reports — directory builders (pure)', () => {
   });
 });
 
+// Payment records capture cash movement that never appears in
+// getBankTransactions — paying a bill or receiving payment against an
+// invoice, confirmed against live data.
+describe('xero/reports — _buildPayments (pure)', () => {
+  test('the two common payment types (confirmed live) classify correctly: ACCRECPAYMENT in, ACCPAYPAYMENT out', () => {
+    const payments = _buildPayments([
+      { paymentID: 'p1', paymentType: 'ACCRECPAYMENT', date: '2026-08-05', amount: 500, invoice: { contact: { name: 'Customer Co' } } },
+      { paymentID: 'p2', paymentType: 'ACCPAYPAYMENT', date: '2026-08-07', amount: 300, invoice: { contact: { name: 'Supplier Co' } } },
+    ]);
+    expect(payments[0]).toMatchObject({ transactionId: 'p2', type: 'Money Out', contact: 'Supplier Co', total: 300 });
+    expect(payments[1]).toMatchObject({ transactionId: 'p1', type: 'Money In', contact: 'Customer Co', total: 500 });
+  });
+
+  // All 8 real PaymentTypeEnum values (per the xero-node SDK) — only 6 of
+  // them actually start with AR/AP, the other 2 (the most common ones) don't.
+  test('every real PaymentTypeEnum value classifies to the correct direction, not just the ones that happen to start with AR/AP', () => {
+    const IN  = ['ACCRECPAYMENT', 'ARCREDITPAYMENT', 'AROVERPAYMENTPAYMENT', 'ARPREPAYMENTPAYMENT'];
+    const OUT = ['ACCPAYPAYMENT', 'APCREDITPAYMENT', 'APPREPAYMENTPAYMENT', 'APOVERPAYMENTPAYMENT'];
+    for (const paymentType of IN) {
+      expect(_buildPayments([{ paymentID: 'p', paymentType, date: '2026-08-05', amount: 1 }])[0].type).toBe('Money In');
+    }
+    for (const paymentType of OUT) {
+      expect(_buildPayments([{ paymentID: 'p', paymentType, date: '2026-08-05', amount: 1 }])[0].type).toBe('Money Out');
+    }
+  });
+
+  test('falls back to a "Payment - <invoice number>" reference when Xero gives no explicit reference', () => {
+    const payments = _buildPayments([
+      { paymentID: 'p1', paymentType: 'ACCPAYPAYMENT', date: '2026-08-07', amount: 2983, invoice: { invoiceNumber: 'Payroll - Jul' } },
+    ]);
+    expect(payments[0].reference).toBe('Payment - Payroll - Jul');
+  });
+
+  test('handles a real Date-object .date the same way _buildBankTransactions does', () => {
+    const payments = _buildPayments([
+      { paymentID: 'p1', paymentType: 'ACCPAYPAYMENT', date: new Date('2026-08-07T00:00:00.000Z'), amount: 100 },
+    ]);
+    expect(payments[0].date).toBe('2026-08-07');
+  });
+
+  test('an unknown contact falls back to "Unknown", same as bank transactions', () => {
+    const payments = _buildPayments([{ paymentID: 'p1', paymentType: 'ACCPAYPAYMENT', date: '2026-08-07', amount: 100 }]);
+    expect(payments[0].contact).toBe('Unknown');
+  });
+});
+
 describe('xero/reports — _flattenReportRows (pure)', () => {
   test('walks nested sections into a flat title/cells list', () => {
     const tree = [
@@ -596,16 +642,17 @@ describe('xero/reports — getPeriod / getAccounts / getBankAccounts / getContac
 });
 
 describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSummary caching', () => {
-  let reports, getBankTransactions, getReportProfitAndLoss, getReportBankSummary;
+  let reports, getBankTransactions, getPayments, getReportProfitAndLoss, getReportBankSummary;
 
   beforeEach(() => {
     jest.resetModules();
     getBankTransactions   = jest.fn().mockResolvedValue({ body: { bankTransactions: [] } });
+    getPayments            = jest.fn().mockResolvedValue({ body: { payments: [] } });
     getReportProfitAndLoss = jest.fn().mockResolvedValue({ body: { reports: [{ rows: [] }] } });
     getReportBankSummary   = jest.fn().mockResolvedValue({ body: { reports: [{ rows: [] }] } });
 
     jest.doMock('xero-node', () => ({
-      AccountingApi: jest.fn().mockImplementation(() => ({ getBankTransactions, getReportProfitAndLoss, getReportBankSummary })),
+      AccountingApi: jest.fn().mockImplementation(() => ({ getBankTransactions, getPayments, getReportProfitAndLoss, getReportBankSummary })),
     }));
     jest.doMock('../utils/token-cache', () => ({
       forUser: jest.fn(() => ({ getValidToken: jest.fn().mockResolvedValue('fake-token') })),
@@ -620,6 +667,42 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
     await reports.getBankTransactions('user-1', 'tenant-1', 'acct-2'); // different account, refetches
     expect(getBankTransactions).toHaveBeenCalledTimes(2);
     expect(getBankTransactions.mock.calls[0][2]).toBe('BankAccount.AccountID==Guid("acct-1")');
+  });
+
+  // A bank account's real cash movement isn't fully captured by
+  // BankTransactions alone — paying a bill or receiving a customer payment
+  // against an invoice creates a Payment record instead (confirmed against
+  // live data, never appears in getBankTransactions at all).
+  test('getBankTransactions also fetches Payments for the same account and merges both into one date-sorted statement', async () => {
+    getBankTransactions.mockResolvedValue({ body: { bankTransactions: [
+      { bankTransactionID: 'bt1', type: 'RECEIVE', contact: { name: 'Customer Co' }, date: '2026-08-05', total: 500 },
+    ] } });
+    getPayments.mockResolvedValue({ body: { payments: [
+      { paymentID: 'p1', paymentType: 'ACCPAYPAYMENT', invoice: { invoiceNumber: 'Payroll - Jul', contact: { name: 'Chua Jia Hern' } }, date: '2026-08-07', amount: 2983 },
+    ] } });
+
+    const { transactions } = await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
+
+    expect(getPayments.mock.calls[0][2]).toBe('Account.AccountID==Guid("acct-1")');
+    expect(transactions.map(t => t.transactionId)).toEqual(['p1', 'bt1']); // newest (Aug 7) first
+    expect(transactions[0]).toMatchObject({ type: 'Money Out', contact: 'Chua Jia Hern', total: 2983, source: 'payment' });
+    expect(transactions[1]).toMatchObject({ type: 'Money In', contact: 'Customer Co', total: 500, source: 'bank' });
+  });
+
+  test('getBankTransactions falls back to bank-transactions-only if Payments 403s (not yet reconnected under accounting.payments.read)', async () => {
+    getBankTransactions.mockResolvedValue({ body: { bankTransactions: [
+      { bankTransactionID: 'bt1', type: 'RECEIVE', date: '2026-08-05', total: 500 },
+    ] } });
+    getPayments.mockRejectedValue({ response: { statusCode: 403, body: {} } });
+
+    const { transactions } = await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0].transactionId).toBe('bt1');
+  });
+
+  test('getBankTransactions still throws on a real (non-403) Payments failure, not a silent empty result', async () => {
+    getPayments.mockRejectedValue({ response: { statusCode: 500, body: {} } });
+    await expect(reports.getBankTransactions('user-1', 'tenant-1', 'acct-1')).rejects.toBeTruthy();
   });
 
   test('getProfitAndLoss passes from/to through and caches per date range', async () => {
