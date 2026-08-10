@@ -26,14 +26,20 @@ async function withRetry(fn, retries = 5, delayMs = 2000) {
 }
 
 /**
- * xero-node v7 throws errors where the full HTTP response is JSON-stringified
- * into err.message rather than populating err.response. Parse it out.
+ * xero-node throws the full HTTP response JSON-stringified — confirmed live
+ * that for at least some calls (getPayments) the thrown value is a raw
+ * string itself (typeof err === 'string', not an Error, no .message at
+ * all), not "an Error object whose .message holds the JSON" as this used to
+ * assume. A raw string has no .message property, so that assumption meant
+ * this never even attempted to parse it — every error of that shape fell
+ * through to a raw JSON dump instead of a real message. Handles both shapes.
  * Returns { status, body } — body is always a plain object (or null).
  */
 function _parseXeroErr(err) {
   let parsed = null;
-  if (err?.message && typeof err.message === 'string') {
-    try { parsed = JSON.parse(err.message); } catch (_) {}
+  const raw = typeof err === 'string' ? err : (typeof err?.message === 'string' ? err.message : null);
+  if (raw) {
+    try { parsed = JSON.parse(raw); } catch (_) {}
   }
   const status = parsed?.response?.statusCode || parsed?.statusCode
     || err?.response?.statusCode || err?.statusCode || 0;
