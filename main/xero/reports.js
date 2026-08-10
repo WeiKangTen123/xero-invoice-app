@@ -492,8 +492,45 @@ function _buildBankSummary(reportRows) {
   return { accounts, cashIn, cashOut, net: cashIn - cashOut };
 }
 
+// Xero's Report endpoints (unlike the Invoices/BankTransactions list APIs)
+// reject any fromDate/toDate pair more than 365 days apart outright —
+// confirmed via a live 400 ValidationException ("The fromDate and toDate
+// parameters must be with 365 days of each other"), triggered by the "All
+// Time" preset's wide range. Anything wider has to be split into consecutive
+// <=365-day windows and the results merged, not just clamped down to "really
+// only the last year" silently mislabeled as all time.
+const REPORT_WINDOW_MAX_DAYS = 365;
+// Bounds how far back "All Time" (or any other very wide range) actually
+// reaches for these two endpoints specifically — otherwise a 26-year-wide
+// "All Time" anchor would mean ~26 sequential Report calls per card, almost
+// all of them for years that can't have any real data anyway.
+const REPORT_LOOKBACK_YEARS = 10;
+
+function _clampReportFrom(fromISO, toISO) {
+  const from = _parseISODate(fromISO);
+  const to   = _parseISODate(toISO);
+  const earliestAllowed = { year: to.year - REPORT_LOOKBACK_YEARS, month: 1, day: 1 };
+  return _dateFromParts(from) < _dateFromParts(earliestAllowed) ? _fmtISODate(earliestAllowed) : fromISO;
+}
+
+// Pure. Splits an inclusive date range into consecutive windows of at most
+// maxDays each, covering every day exactly once.
+function _splitIntoReportWindows(fromISO, toISO, maxDays = REPORT_WINDOW_MAX_DAYS) {
+  const windows = [];
+  let winStart = _parseISODate(fromISO);
+  const end    = _parseISODate(toISO);
+  while (_dateFromParts(winStart) <= _dateFromParts(end)) {
+    let winEnd = _addDays(winStart, maxDays - 1);
+    if (_dateFromParts(winEnd) > _dateFromParts(end)) winEnd = end;
+    windows.push({ from: _fmtISODate(winStart), to: _fmtISODate(winEnd) });
+    winStart = _addDays(winEnd, 1);
+  }
+  return windows;
+}
+
 async function getProfitAndLoss(userId, tenantId, { from, to, force = false } = {}) {
-  const key    = `pnl:${userId}:${tenantId}:${from}:${to}`;
+  const clampedFrom = _clampReportFrom(from, to);
+  const key    = `pnl:${userId}:${tenantId}:${clampedFrom}:${to}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
@@ -501,13 +538,23 @@ async function getProfitAndLoss(userId, tenantId, { from, to, force = false } = 
   const token      = await tokenCache.getValidToken(tenantId);
   const api        = _apiFor(token);
 
-  const res  = await withRetry(() => api.getReportProfitAndLoss(tenantId, from, to));
-  const rows = res.body.reports?.[0]?.rows || [];
-  return _cacheSet(key, _buildProfitAndLoss(rows));
+  const windows = _splitIntoReportWindows(clampedFrom, to);
+  let income = 0, expenses = 0;
+  for (const w of windows) {
+    const res  = await withRetry(() => api.getReportProfitAndLoss(tenantId, w.from, w.to));
+    const part = _buildProfitAndLoss(res.body.reports?.[0]?.rows || []);
+    income   += part.income;
+    expenses += part.expenses;
+  }
+  const netProfit = income - expenses;
+  const netMargin = income > 0 ? netProfit / income : 0;
+  logger.info('Insights P&L fetched', { userId, tenantId, from: clampedFrom, to, windows: windows.length });
+  return _cacheSet(key, { income, expenses, netProfit, netMargin, from: clampedFrom, to });
 }
 
 async function getBankSummary(userId, tenantId, { from, to, force = false } = {}) {
-  const key    = `banksum:${userId}:${tenantId}:${from}:${to}`;
+  const clampedFrom = _clampReportFrom(from, to);
+  const key    = `banksum:${userId}:${tenantId}:${clampedFrom}:${to}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
@@ -515,9 +562,24 @@ async function getBankSummary(userId, tenantId, { from, to, force = false } = {}
   const token      = await tokenCache.getValidToken(tenantId);
   const api        = _apiFor(token);
 
-  const res  = await withRetry(() => api.getReportBankSummary(tenantId, from, to));
-  const rows = res.body.reports?.[0]?.rows || [];
-  return _cacheSet(key, _buildBankSummary(rows));
+  const windows   = _splitIntoReportWindows(clampedFrom, to);
+  const byAccount = new Map(); // name -> merged account row
+  for (const w of windows) {
+    const res  = await withRetry(() => api.getReportBankSummary(tenantId, w.from, w.to));
+    const part = _buildBankSummary(res.body.reports?.[0]?.rows || []);
+    for (const acc of part.accounts) {
+      const existing = byAccount.get(acc.name) || { name: acc.name, cashReceived: 0, cashSpent: 0, closingBalance: 0 };
+      existing.cashReceived += acc.cashReceived;
+      existing.cashSpent    += acc.cashSpent;
+      existing.closingBalance = acc.closingBalance; // a running balance, not additive — windows are processed oldest-first, so the last write wins and holds the most recent balance
+      byAccount.set(acc.name, existing);
+    }
+  }
+  const accounts = [...byAccount.values()];
+  const cashIn   = accounts.reduce((s, a) => s + a.cashReceived, 0);
+  const cashOut  = accounts.reduce((s, a) => s + a.cashSpent, 0);
+  logger.info('Insights bank summary fetched', { userId, tenantId, from: clampedFrom, to, windows: windows.length });
+  return _cacheSet(key, { accounts, cashIn, cashOut, net: cashIn - cashOut, from: clampedFrom, to });
 }
 
 // Called on disconnect so nothing here can outlive the connection it came from.
@@ -532,4 +594,5 @@ module.exports = {
   getBankTransactions, getProfitAndLoss, getBankSummary, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
+  _splitIntoReportWindows, _clampReportFrom,
 };

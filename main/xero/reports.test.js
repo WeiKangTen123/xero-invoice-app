@@ -1,6 +1,7 @@
 const {
   _buildSummary, computeRange, _buildPeriod, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
+  _splitIntoReportWindows, _clampReportFrom,
 } = require('./reports');
 
 // Helper matching Xero's real report cell shape: { value }.
@@ -411,6 +412,52 @@ describe('xero/reports — _buildBankSummary (pure)', () => {
   });
 });
 
+// Xero's Report endpoints (ProfitAndLoss, BankSummary) reject any
+// fromDate/toDate pair more than 365 days apart — confirmed via a live 400
+// ValidationException triggered by the "All Time" preset. These two pure
+// helpers are what keeps getProfitAndLoss/getBankSummary inside that limit.
+describe('xero/reports — _splitIntoReportWindows (pure)', () => {
+  test('a range within the limit is a single window, unchanged', () => {
+    expect(_splitIntoReportWindows('2026-01-01', '2026-01-31')).toEqual([
+      { from: '2026-01-01', to: '2026-01-31' },
+    ]);
+  });
+
+  test('a range of exactly 365 days is still a single window', () => {
+    const windows = _splitIntoReportWindows('2026-01-01', '2026-12-31');
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toEqual({ from: '2026-01-01', to: '2026-12-31' });
+  });
+
+  test('a wider range splits into consecutive <=365-day windows covering every day exactly once, no gaps or overlaps', () => {
+    const windows = _splitIntoReportWindows('2024-01-01', '2026-08-10', 365);
+    expect(windows[0].from).toBe('2024-01-01');
+    expect(windows[windows.length - 1].to).toBe('2026-08-10');
+    for (let i = 1; i < windows.length; i++) {
+      // the next window starts exactly the day after the previous one ends
+      const prevEnd = new Date(windows[i - 1].to + 'T00:00:00Z');
+      const nextStart = new Date(windows[i].from + 'T00:00:00Z');
+      expect(nextStart - prevEnd).toBe(24 * 60 * 60 * 1000);
+    }
+  });
+
+  test('a single-day range is a single one-day window, not zero windows', () => {
+    expect(_splitIntoReportWindows('2026-08-10', '2026-08-10')).toEqual([
+      { from: '2026-08-10', to: '2026-08-10' },
+    ]);
+  });
+});
+
+describe('xero/reports — _clampReportFrom (pure)', () => {
+  test('a recent range is left untouched', () => {
+    expect(_clampReportFrom('2026-01-01', '2026-08-10')).toBe('2026-01-01');
+  });
+
+  test('an ultra-wide range (e.g. the "All Time" preset\'s anchor) is clamped to 10 years back from "to"', () => {
+    expect(_clampReportFrom('2000-01-01', '2026-08-10')).toBe('2016-01-01');
+  });
+});
+
 describe('xero/reports — getSummary caching', () => {
   let reports, tokenCacheMock, getOrganisations, getInvoices;
 
@@ -587,6 +634,56 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
     await reports.getBankSummary('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
     await reports.getBankSummary('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
     expect(getReportBankSummary).toHaveBeenCalledTimes(1);
+  });
+
+  // Xero's Report API 400s on a >365-day range — a range wider than that
+  // must never reach api.getReportProfitAndLoss/getReportBankSummary in one
+  // call; every call this mock records must itself span <=365 days.
+  test('getProfitAndLoss splits a >365-day range into multiple calls, each within the limit, and sums the results', async () => {
+    getReportProfitAndLoss
+      .mockResolvedValueOnce({ body: { reports: [{ rows: [
+        row('Total Income', ['Total Income', '10,000.00'], 'SummaryRow'),
+        row('Total Expenses', ['Total Expenses', '4,000.00'], 'SummaryRow'),
+      ] }] } })
+      .mockResolvedValueOnce({ body: { reports: [{ rows: [
+        row('Total Income', ['Total Income', '5,000.00'], 'SummaryRow'),
+        row('Total Expenses', ['Total Expenses', '1,000.00'], 'SummaryRow'),
+      ] }] } });
+
+    const result = await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2024-01-01', to: '2026-08-10' });
+
+    expect(getReportProfitAndLoss.mock.calls.length).toBeGreaterThan(1);
+    for (const [, callFrom, callTo] of getReportProfitAndLoss.mock.calls) {
+      const days = (new Date(callTo) - new Date(callFrom)) / 86400000;
+      expect(days).toBeLessThanOrEqual(365);
+    }
+    expect(result).toMatchObject({ income: 15000, expenses: 5000, netProfit: 10000 });
+  });
+
+  test('getBankSummary merges per-window results: cash received/spent add up across windows, closing balance keeps only the most recent window\'s value', async () => {
+    const header = row('Bank Accounts', ['Bank Accounts', 'Opening Balance', 'Cash Received', 'Cash Spent', 'Closing Balance'], 'Header');
+    getReportBankSummary
+      .mockResolvedValueOnce({ body: { reports: [{ rows: [
+        header, row('Aspire SGD account', ['Aspire SGD account', '0.00', '1,000.00', '(200.00)', '800.00']),
+      ] }] } })
+      .mockResolvedValueOnce({ body: { reports: [{ rows: [
+        header, row('Aspire SGD account', ['Aspire SGD account', '800.00', '500.00', '(300.00)', '1,000.00']),
+      ] }] } });
+
+    const result = await reports.getBankSummary('user-1', 'tenant-1', { from: '2024-01-01', to: '2026-08-10' });
+
+    expect(getReportBankSummary.mock.calls.length).toBeGreaterThan(1);
+    expect(result.accounts).toEqual([
+      { name: 'Aspire SGD account', cashReceived: 1500, cashSpent: 500, closingBalance: 1000 }, // 1000 (2nd/latest window), not 800+1000
+    ]);
+    expect(result).toMatchObject({ cashIn: 1500, cashOut: 500, net: 1000 });
+  });
+
+  test('an ultra-wide range (e.g. "All Time") is clamped before windowing — never generates decades of near-empty calls', async () => {
+    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2000-01-01', to: '2026-08-10' });
+    // 10-year lookback cap → ~10 windows, nowhere near the ~27 a literal 2000-2026 split would need.
+    expect(getReportProfitAndLoss.mock.calls.length).toBeLessThanOrEqual(11);
+    expect(getReportProfitAndLoss.mock.calls[0][1]).toBe('2016-01-01'); // clamped from, not 2000-01-01
   });
 
   test('force:true bypasses the cache for all three', async () => {
