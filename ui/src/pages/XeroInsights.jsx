@@ -27,6 +27,18 @@ const RANGE_PRESETS = [
 
 function fmtPct(fraction) { return `${(Number(fraction || 0) * 100).toFixed(1)}%`; }
 
+// P&L/Cash Flow are Xero Report-API-backed, and Xero rejects >365-day report
+// ranges outright — the backend silently clamps a very wide request (like
+// "All Time") to the most recent ~10 years instead. Showing the range the
+// API actually used (echoed back on the response) rather than the raw
+// preset's own range keeps "All Time" from implying more than it delivers.
+function reportRangeLabel(applied, periodRange) {
+  if (!applied) return periodRange ? `${periodRange.fromISO} → ${periodRange.toISO}` : 'Same date range as above';
+  const label = `${applied.from} → ${applied.to}`;
+  const clamped = periodRange && applied.from !== periodRange.fromISO;
+  return clamped ? `${label} · Xero's reports cap out at ~10 years of history per view` : label;
+}
+
 // Small provenance caption under a card title — which live Xero API/report the
 // numbers below it came from, so "where did this come from" never needs asking.
 function SourceNote({ children }) {
@@ -51,7 +63,12 @@ function fmtBucketLabel(bucket, granularity) {
 function TwoBarChart({ leftLabel, leftValue, leftColor = 'var(--success)', rightLabel, rightValue, rightColor = 'var(--danger)', currency }) {
   const [hover, setHover] = useState(null);
   const max = Math.max(leftValue, rightValue, 1);
-  const W = 360, H = 170, PAD_B = 26, PAD_T = 14, barW = 78;
+  // PAD_T needs headroom for the value label drawn *above* the tallest bar
+  // (label baseline sits 8px above the bar top, and the text itself extends
+  // further up from its baseline by roughly the font's ascent) — 14 wasn't
+  // enough and let the whole-value label for whichever bar hit the chart's
+  // max clip off the top of the SVG.
+  const W = 360, H = 170, PAD_B = 26, PAD_T = 26, barW = 78;
   const scale = v => (v / max) * (H - PAD_T - PAD_B);
 
   const bars = [
@@ -97,7 +114,9 @@ function AgingChart({ aging, color, currency }) {
   if (!total) return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0', textAlign: 'center' }}>Nothing outstanding</div>;
 
   const max = Math.max(...AGING_BUCKETS.map(b => aging[b.key].amount), 1);
-  const W = 360, H = 150, PAD_B = 26, PAD_T = 14, barW = 62, gap = 20;
+  // Same headroom fix as TwoBarChart — 14 clipped the value label on
+  // whichever bucket happened to be the tallest bar.
+  const W = 360, H = 150, PAD_B = 26, PAD_T = 26, barW = 62, gap = 20;
   const scale = v => (v / max) * (H - PAD_T - PAD_B);
 
   return (
@@ -682,7 +701,7 @@ export default function XeroInsights() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
             <div className="card">
               <div className="card-title" style={{ marginBottom: 2 }}>Cash In and Out</div>
-              <div className="card-subtitle" style={{ marginBottom: 2 }}>{period ? `${period.range.fromISO} → ${period.range.toISO}` : 'Same date range as above'}</div>
+              <div className="card-subtitle" style={{ marginBottom: 2 }}>{reportRangeLabel(cashFlow, period?.range)}</div>
               <SourceNote>Xero Bank Summary report</SourceNote>
               {cashFlowError ? (
                 <div className="alert alert-error"><span className="alert-icon">✕</span>{cashFlowError}</div>
@@ -705,7 +724,7 @@ export default function XeroInsights() {
                 <div className="card-title" style={{ marginBottom: 0 }}>Net Profit or Loss</div>
                 <button type="button" className="btn btn-sm" style={{ background: 'none', color: 'var(--accent)', border: 'none' }} onClick={() => setTab('pnl')}>Full P&amp;L →</button>
               </div>
-              <div className="card-subtitle" style={{ marginBottom: 2 }}>{period ? `${period.range.fromISO} → ${period.range.toISO}` : 'Same date range as above'}</div>
+              <div className="card-subtitle" style={{ marginBottom: 2 }}>{reportRangeLabel(pnl, period?.range)}</div>
               <SourceNote>Xero Profit &amp; Loss report</SourceNote>
               {pnlError ? (
                 <div className="alert alert-error"><span className="alert-icon">✕</span>{pnlError}</div>
@@ -947,6 +966,10 @@ export default function XeroInsights() {
             from={rangeFrom} to={rangeTo} setFrom={setRangeFrom} setTo={setRangeTo}
             onApplyCustom={() => fetchPeriod()}
           />
+
+          {pnl && !pnlError && (
+            <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 10 }}>{reportRangeLabel(pnl, period?.range)}</div>
+          )}
 
           {pnlError && <div className="alert alert-error" style={{ marginTop: 14 }}><span className="alert-icon">✕</span>{pnlError}</div>}
 
