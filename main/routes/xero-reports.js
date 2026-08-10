@@ -3,7 +3,7 @@ const router           = express.Router();
 const { requireAuth }  = require('../middleware/auth-middleware');
 const tokenCache        = require('../utils/token-cache');
 const reports           = require('../xero/reports');
-const { xeroErrMsg, _parseXeroErr } = require('../xero/xero-utils');
+const { xeroErrMsg, isScopeError } = require('../xero/xero-utils');
 const { getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const logger             = require('../utils/logger');
 
@@ -142,18 +142,12 @@ router.get('/bank-summary', requireAuth, async (req, res) => {
   }
 });
 
-// Xero returns a 403 with "Forbidden" for a call outside the token's granted
-// scopes — that's exactly the situation for anyone who connected before these
-// three report/bank-transaction scopes existed. Surface it as a clear
-// reconnect prompt instead of a generic failure. Reuses xero-utils's own error
-// parser since xero-node v7 JSON-stringifies the real HTTP status into
-// err.message rather than populating err.response/err.statusCode directly.
-function _isScopeError(err) {
-  return _parseXeroErr(err).status === 403;
-}
-function _scopeAwareStatus(err) { return _isScopeError(err) ? 403 : 500; }
+// A call outside the token's granted scopes — the situation for anyone who
+// connected before these report/bank-transaction/payments scopes existed.
+// Surface it as a clear reconnect prompt instead of a generic failure.
+function _scopeAwareStatus(err) { return isScopeError(err) ? 403 : 500; }
 function _scopeAwareMessage(err) {
-  return _isScopeError(err)
+  return isScopeError(err)
     ? 'This needs a wider Xero connection than you have — reconnect in Setup to grant access to bank transactions and reports.'
     : xeroErrMsg(err);
 }

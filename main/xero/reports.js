@@ -1,5 +1,5 @@
 const { AccountingApi }  = require('xero-node');
-const { withRetry, _parseXeroErr } = require('./xero-utils');
+const { withRetry, isScopeError } = require('./xero-utils');
 const logger             = require('../utils/logger');
 
 // Read-only financial data for the "Insights" tab. Every function here either
@@ -439,7 +439,7 @@ async function getBankTransactions(userId, tenantId, accountId, { force = false 
   // getBankTransactions). Fetched separately, own try/catch: anyone who
   // hasn't reconnected under the accounting.payments.read scope yet still
   // gets a working (bank-transactions-only) statement instead of the whole
-  // view breaking on their 403.
+  // view breaking on their scope error.
   let payments = [];
   try {
     const payRes = await withRetry(() => api.getPayments(
@@ -447,7 +447,7 @@ async function getBankTransactions(userId, tenantId, accountId, { force = false 
     ));
     payments = _buildPayments(payRes.body.payments || []);
   } catch (err) {
-    if (_parseXeroErr(err).status !== 403) throw err; // a real failure, not just a missing scope, should still surface
+    if (!isScopeError(err)) throw err; // a real failure, not just a missing scope, should still surface
     logger.info('Skipping Payments in statement — not yet reconnected under accounting.payments.read', { userId, tenantId });
   }
 

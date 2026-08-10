@@ -45,7 +45,25 @@ function _parseXeroErr(err) {
   const retryAfter = parsed?.response?.headers?.['retry-after']
     || err?.response?.headers?.['retry-after']
     || err?.headers?.['retry-after'] || null;
-  return { status, body, retryAfter };
+  const wwwAuthenticate = parsed?.response?.headers?.['www-authenticate']
+    || err?.response?.headers?.['www-authenticate']
+    || err?.headers?.['www-authenticate'] || null;
+  return { status, body, retryAfter, wwwAuthenticate };
+}
+
+/**
+ * A token that's valid but missing a required OAuth scope. Confirmed against
+ * a live call (Payments, requested without accounting.payments.read): Xero
+ * signals this with a 401 — not always 403, despite what this used to
+ * assume — plus a `WWW-Authenticate: insufficient_scope` header. The header
+ * is what actually distinguishes "right token, just missing a scope" from
+ * "wrong/expired token", since both can come back as a plain 401; a bare 403
+ * is kept as a defensive fallback in case some other endpoint does use it.
+ */
+function isScopeError(err) {
+  const { status, wwwAuthenticate } = _parseXeroErr(err);
+  if (wwwAuthenticate && /insufficient_scope/i.test(wwwAuthenticate)) return true;
+  return status === 403;
 }
 
 /**
@@ -63,4 +81,4 @@ function xeroErrMsg(err) {
   );
 }
 
-module.exports = { withRetry, xeroErrMsg, _parseXeroErr };
+module.exports = { withRetry, xeroErrMsg, _parseXeroErr, isScopeError };
