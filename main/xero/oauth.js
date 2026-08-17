@@ -12,9 +12,15 @@ const oauthState = require('../utils/oauth-state');
 // here means anyone who already connected under the old, narrower list needs to
 // click "Connect to Xero" again — Xero fixes scopes at consent time, an existing
 // token doesn't retroactively gain new permissions.
+// budgetsummary.read backs the Budget vs Actual report's budget columns —
+// Reports/BudgetSummary returns the OVERALL budget as a sectioned report tree,
+// the same shape as ProfitAndLoss, which is what makes the two mergeable
+// column-for-column. budgets.read isn't needed for that report, but it's the
+// only way to enumerate budgets or read tracking-category ones, and requesting
+// it now avoids a SECOND reconnect later for anyone who reconnects today.
 const SCOPES = 'offline_access accounting.invoices accounting.contacts accounting.settings.read '
   + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read '
-  + 'accounting.payments.read';
+  + 'accounting.payments.read accounting.reports.budgetsummary.read accounting.budgets.read';
 const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
 const TOKEN_URL      = 'https://identity.xero.com/connect/token';
 
