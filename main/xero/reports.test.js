@@ -1000,3 +1000,102 @@ describe('xero/reports — Budget vs Actual (pure)', () => {
     expect(out.kpis.forecastNet).toBe(0);
   });
 });
+
+// ── Budget Variance report ───────────────────────────────────────────────────
+// Asserted against the org's own Xero "Budget Variance" PDF (for the month ended
+// 31 Aug 2026). Note this report compares the CURRENT, part-elapsed month using
+// the actuals booked so far — the opposite of the monthly grid, which shows the
+// current month as budget. Both PDFs came from the same day and disagree on that
+// point, because Xero treats the two reports differently.
+describe('xero/reports — Budget Variance per month (pure)', () => {
+  const { _variancePct } = require('./reports');
+
+  test('variance % divides by the ABSOLUTE budget, keeping Xero\'s sign', () => {
+    // Sep gross profit: nil actual against a budget of -1,030 reads +100%, not -100%.
+    expect(_variancePct(1030, -1030)).toBeCloseTo(1, 10);
+    expect(_variancePct(-7330, 7330)).toBeCloseTo(-1, 10);
+    // 34,385 over a 17,615 budget = the PDF's 195.20%.
+    expect(_variancePct(34385, 17615) * 100).toBeCloseTo(195.20, 2);
+    // 7,330 over 44,670 = the PDF's 16.41%.
+    expect(_variancePct(7330, 44670) * 100).toBeCloseTo(16.41, 2);
+  });
+
+  test('a nil budget yields null, never Infinity or NaN', () => {
+    expect(_variancePct(500, 0)).toBeNull();
+    expect(_variancePct(0, 0)).toBeNull();
+    expect(Number.isFinite(_variancePct(1, -0.5))).toBe(true);
+  });
+
+  test('every Aug and Sep 2026 figure matches the Budget Variance PDF', () => {
+    const FY_END = { month: 3, day: 31 };
+    const TODAY  = { year: 2026, month: 8, day: 17 };
+    const months = _fiscalYearMonths(TODAY, FY_END);
+
+    // Minimal fixtures: only the rows the PDF shows figures for. Budget is
+    // oldest-first; the P&L is newest-first, as each endpoint really returns.
+    const oldest = (augVal, sepVal) => { const a = Array(12).fill(0); a[4] = augVal; a[5] = sepVal; return a; };
+    const newest = (augVal, sepVal) => { const a = Array(12).fill(0); a[7] = augVal; a[6] = sepVal; return a; };
+    const money  = v => v.toFixed(2);
+    const bRow   = (l, vals, t = 'Row') => row(l, [l, ...vals.map(money)], t);
+
+    const budgetRows = [
+      { rowType: 'Header', cells: ['Account', ...months.map(m => m.label)].map(cell) },
+      section('Income', [
+        bRow('Sales - Implementation', oldest(37000, 0)),
+        bRow('Total Income', oldest(52000, 0), 'SummaryRow'),
+      ]),
+      section('Less Cost of Sales', [bRow('Cost of Goods Sold', oldest(7330, 1030))]),
+      section('', [bRow('Gross Profit', oldest(44670, -1030), 'SummaryRow')]),
+      section('Other Income', [bRow('Other Income - Grant', oldest(0, 16667))]),
+      section('Less Operating Expenses', [
+        bRow('Bank Fees', oldest(10, 10)),
+        bRow('Wages and Salaries', oldest(24603, 24603)),
+        bRow('Total Operating Expenses', oldest(27055, 27055), 'SummaryRow'),
+      ]),
+      section('', [bRow('Net Profit', oldest(17615, -11418), 'SummaryRow')]),
+    ];
+    const pnlRows = [
+      { rowType: 'Header', cells: ['', ...months.map(m => m.label).reverse()].map(cell) },
+      section('Income', [
+        bRow('Sales - Implementation', newest(37000, 0)),
+        bRow('Total Income', newest(52000, 0), 'SummaryRow'),
+      ]),
+      section('', [bRow('Gross Profit', newest(52000, 0), 'SummaryRow')]),
+      section('', [bRow('Net Profit', newest(52000, 0), 'SummaryRow')]),
+    ];
+
+    const { rows } = _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx: 3 });
+    const at = (label, monthIdx) => rows.find(r => r.label === label).monthly[monthIdx];
+    const AUG = 4, SEP = 5;
+
+    // ---- August: actuals ARE compared, even though August hasn't closed ----
+    expect(at('Sales - Implementation', AUG)).toMatchObject({ actual: 37000, budget: 37000, variance: 0 });
+    expect(at('Total Income', AUG)).toMatchObject({ actual: 52000, budget: 52000, variance: 0 });
+    expect(at('Cost of Goods Sold', AUG)).toMatchObject({ actual: 0, budget: 7330, variance: -7330 });
+    expect(at('Cost of Goods Sold', AUG).variancePct * 100).toBeCloseTo(-100.00, 2);
+    expect(at('Gross Profit', AUG)).toMatchObject({ actual: 52000, budget: 44670, variance: 7330 });
+    expect(at('Gross Profit', AUG).variancePct * 100).toBeCloseTo(16.41, 2);
+    expect(at('Wages and Salaries', AUG)).toMatchObject({ actual: 0, budget: 24603, variance: -24603 });
+    expect(at('Total Operating Expenses', AUG)).toMatchObject({ actual: 0, budget: 27055, variance: -27055 });
+    expect(at('Net Profit', AUG)).toMatchObject({ actual: 52000, budget: 17615, variance: 34385 });
+    expect(at('Net Profit', AUG).variancePct * 100).toBeCloseTo(195.20, 2);
+
+    // ---- September: nothing actual yet, so variance is the budget inverted ----
+    expect(at('Other Income - Grant', SEP)).toMatchObject({ actual: 0, budget: 16667, variance: -16667 });
+    expect(at('Other Income - Grant', SEP).variancePct * 100).toBeCloseTo(-100.00, 2);
+    expect(at('Gross Profit', SEP)).toMatchObject({ actual: 0, budget: -1030, variance: 1030 });
+    expect(at('Gross Profit', SEP).variancePct * 100).toBeCloseTo(100.00, 2); // positive, per Xero
+    expect(at('Net Profit', SEP)).toMatchObject({ actual: 0, budget: -11418, variance: 11418 });
+    expect(at('Net Profit', SEP).variancePct * 100).toBeCloseTo(100.00, 2);
+  });
+
+  test('monthly[] covers all 12 months, so any month can be compared', () => {
+    const months = _fiscalYearMonths({ year: 2026, month: 8, day: 17 }, { month: 3, day: 31 });
+    const budgetRows = [
+      { rowType: 'Header', cells: ['Account', ...months.map(m => m.label)].map(cell) },
+      section('Income', [row('X', ['X', ...Array(12).fill('1.00')])]),
+    ];
+    const { rows } = _buildBudgetVariance({ budgetRows, pnlRows: [], months, actualThroughIdx: 3 });
+    expect(rows.find(r => r.label === 'X').monthly).toHaveLength(12);
+  });
+});
