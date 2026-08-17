@@ -160,7 +160,7 @@ export default function Invoices() {
   return (
     <div>
       <div className="page-header">
-        <h1>Invoices</h1>
+        <h1>AR &amp; AP</h1>
         <p>Persisted across restarts — up to 500 records stored. Click any row to review.</p>
       </div>
 

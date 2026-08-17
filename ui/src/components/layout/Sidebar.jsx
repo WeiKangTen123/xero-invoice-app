@@ -4,10 +4,15 @@ import { useTheme } from '../../context/ThemeContext';
 import { usePipeline } from '../../context/PipelineContext';
 
 const NAV = [
-  { to: '/dashboard',     label: 'Dashboard',     icon: '▦',  desc: 'Overview' },
-  { to: '/invoices',      label: 'Invoices',      icon: '◧',  desc: 'History' },
-  { to: '/xero-insights', label: 'Insights',      icon: '◆',  desc: 'Financial reports' },
-  { to: '/setup',         label: 'Setup',         icon: '◈',  desc: 'Config' },
+  { to: '/dashboard',  label: 'Dashboard',  icon: '▦',  desc: 'Financial reports' },
+  { to: '/invoices',   label: 'AR & AP',    icon: '◧',  desc: 'Invoices & bills' },
+  { to: '/automation', label: 'Automation', icon: '◆',  desc: 'Pipeline & controls' },
+];
+
+// Setup sits in its own group rather than inline with the day-to-day pages —
+// it's configured once, not visited daily.
+const SETTINGS_NAV = [
+  { to: '/setup', label: 'Setup', icon: '◈', desc: 'Config' },
 ];
 
 const ADMIN_NAV = [
@@ -80,6 +85,23 @@ function NavItem({ to, label, icon, desc, isDark }) {
         </>
       )}
     </NavLink>
+  );
+}
+
+// `first` is the group heading that sits directly above the <nav> element, so it
+// carries no top padding of its own; every later group needs the gap.
+function SectionLabel({ children, isDark, first }) {
+  return (
+    <div style={{
+      fontSize:      10,
+      fontWeight:    700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.1em',
+      color:         isDark ? 'rgba(255,255,255,0.2)' : '#aaaacc',
+      padding:       first ? '0 16px 6px' : '14px 12px 6px',
+    }}>
+      {children}
+    </div>
   );
 }
 
@@ -163,8 +185,6 @@ export default function Sidebar() {
 
   const initials = user?.email?.slice(0, 2).toUpperCase() || '?';
 
-  const sectionLabelColor = isDark ? 'rgba(255,255,255,0.2)' : '#aaaacc';
-
   return (
     <aside style={{
       position:   'fixed',
@@ -221,34 +241,18 @@ export default function Sidebar() {
         </div>
       </div>
 
-      {/* Section label */}
-      <div style={{
-        padding:       '0 16px 6px',
-        fontSize:      10,
-        fontWeight:    700,
-        textTransform: 'uppercase',
-        letterSpacing: '0.1em',
-        color:         sectionLabelColor,
-      }}>
-        Navigation
-      </div>
+      <SectionLabel isDark={isDark} first>Navigation</SectionLabel>
 
       {/* Nav */}
       <nav style={{ flex: 1, padding: '0 8px', overflow: 'auto' }}>
         {NAV.map(item => <NavItem key={item.to} {...item} isDark={isDark} />)}
 
+        <SectionLabel isDark={isDark}>Settings</SectionLabel>
+        {SETTINGS_NAV.map(item => <NavItem key={item.to} {...item} isDark={isDark} />)}
+
         {user?.role === 'admin' && (
           <>
-            <div style={{
-              fontSize:      10,
-              fontWeight:    700,
-              textTransform: 'uppercase',
-              letterSpacing: '0.1em',
-              color:         sectionLabelColor,
-              padding:       '14px 12px 6px',
-            }}>
-              Admin
-            </div>
+            <SectionLabel isDark={isDark}>Admin</SectionLabel>
             {ADMIN_NAV.map(item => <NavItem key={item.to} {...item} isDark={isDark} />)}
           </>
         )}
