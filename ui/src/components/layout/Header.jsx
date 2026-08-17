@@ -2,12 +2,13 @@ import { useTheme } from '../../context/ThemeContext';
 import { useLocation, Link } from 'react-router-dom';
 
 function getBreadcrumbs(pathname) {
-  if (pathname === '/dashboard') return [{ label: 'Dashboard' }];
-  if (pathname === '/setup')     return [{ label: 'Setup' }];
-  if (pathname === '/admin')     return [{ label: 'Admin' }];
-  if (pathname === '/invoices')  return [{ label: 'Invoices' }];
+  if (pathname === '/dashboard')  return [{ label: 'Dashboard' }];
+  if (pathname === '/automation') return [{ label: 'Automation' }];
+  if (pathname === '/setup')      return [{ label: 'Setup' }];
+  if (pathname === '/admin')      return [{ label: 'Admin' }];
+  if (pathname === '/invoices')   return [{ label: 'AR & AP' }];
   if (pathname.startsWith('/invoices/')) return [
-    { label: 'Invoices', to: '/invoices' },
+    { label: 'AR & AP', to: '/invoices' },
     { label: 'Review' },
   ];
   return [];

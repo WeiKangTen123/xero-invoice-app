@@ -4,12 +4,16 @@ import { ThemeProvider } from './context/ThemeContext';
 import { PipelineProvider } from './context/PipelineContext';
 import Layout from './components/layout/Layout';
 import Login from './pages/Login';
-import Dashboard from './pages/Dashboard';
 import Setup from './pages/Setup';
 import Invoices from './pages/Invoices';
 import InvoiceReview from './pages/InvoiceReview';
 import Admin from './pages/Admin';
-import XeroInsights from './pages/XeroInsights';
+// The filenames still carry the pre-rename names: pages/Dashboard.jsx is the
+// email→Xero control panel (now "Automation") and pages/XeroInsights.jsx is the
+// financial reporting page (now "Dashboard"). Aliased so the route table below
+// reads in the current vocabulary rather than the old one.
+import Automation from './pages/Dashboard';
+import Dashboard from './pages/XeroInsights';
 
 function PrivateRoute({ children, adminOnly }) {
   const { user, loading } = useAuth();
@@ -36,10 +40,13 @@ function AppRoutes() {
       >
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard"        element={<Dashboard />} />
+        <Route path="automation"       element={<Automation />} />
         <Route path="setup"            element={<Setup />} />
         <Route path="invoices"         element={<Invoices />} />
         <Route path="invoices/:id"     element={<InvoiceReview />} />
-        <Route path="xero-insights"    element={<XeroInsights />} />
+        {/* /xero-insights was the financial page's path before the rename —
+            kept as a redirect so existing bookmarks still land somewhere real. */}
+        <Route path="xero-insights"    element={<Navigate to="/dashboard" replace />} />
         <Route
           path="admin"
           element={

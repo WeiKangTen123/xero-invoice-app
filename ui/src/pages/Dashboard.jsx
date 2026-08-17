@@ -323,8 +323,8 @@ export default function Dashboard() {
   return (
     <div>
       <div className="page-header">
-        <h1>Dashboard</h1>
-        <p>Monitor your email-to-Xero invoice pipeline in real time</p>
+        <h1>Automation</h1>
+        <p>Monitor and control your email-to-Xero invoice pipeline in real time</p>
       </div>
 
       {/* Stats */}

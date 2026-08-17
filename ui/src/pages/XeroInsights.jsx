@@ -371,7 +371,7 @@ export default function XeroInsights() {
       setError('');
       if (d.activeTenantId) setActiveTenantId(d.activeTenantId);
     } catch (err) {
-      setError(err.message || 'Could not load Insights');
+      setError(err.message || 'Could not load the dashboard');
     } finally {
       setRefreshing(false);
     }
@@ -499,7 +499,7 @@ export default function XeroInsights() {
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)', padding: 32 }}>
         <span style={{ width: 16, height: 16, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.65s linear infinite', display: 'inline-block' }} />
-        Loading Insights...
+        Loading dashboard...
       </div>
     );
   }
@@ -507,7 +507,7 @@ export default function XeroInsights() {
   if (error && !data) {
     return (
       <div>
-        <div className="page-header"><h1>Insights</h1></div>
+        <div className="page-header"><h1>Dashboard</h1></div>
         <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>
       </div>
     );
@@ -517,14 +517,14 @@ export default function XeroInsights() {
     return (
       <div>
         <div className="page-header">
-          <h1>Insights</h1>
+          <h1>Dashboard</h1>
           <p>Live financial data pulled read-only from your connected Xero organisation.</p>
         </div>
         <div className="card" style={{ textAlign: 'center', padding: '48px 24px' }}>
           <div style={{ fontSize: 34, marginBottom: 12 }}>🔗</div>
           <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>No Xero connection yet</div>
           <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 18, maxWidth: 380, marginInline: 'auto' }}>
-            Insights reads from whatever connection you already set up — nothing to configure here.
+            This dashboard reads from whatever connection you already set up — nothing to configure here.
             Connect via Custom Connection or your own Xero Web app in Setup first.
           </div>
           <button className="btn btn-primary" onClick={() => navigate('/setup')}>Go to Setup →</button>
@@ -540,7 +540,7 @@ export default function XeroInsights() {
     <div>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
         <div className="page-header" style={{ marginBottom: 0 }}>
-          <h1>Insights</h1>
+          <h1>Dashboard</h1>
           <p>Live financial data pulled read-only from your connected Xero organisation.</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
