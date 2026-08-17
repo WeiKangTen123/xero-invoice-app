@@ -21,3 +21,10 @@ ui/dist/
 # Personal credential scratch notes — contain live API keys/secrets in plaintext
 unused/notes/*.txt
 unused/notes/*.bak
+
+# Backup copies of env files — the `.env` rule above doesn't match `.env.bak`, and
+# those backups carry the same live JWT_SECRET/ENCRYPTION_KEY as the original.
+*.bak
+
+# Server access notes — external IP and SSH key material, not for the public repo.
+server.MD
