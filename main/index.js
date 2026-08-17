@@ -94,7 +94,16 @@ app.use('/api/admin',    adminRoutes);
 app.use('/api/chat',     chatRoutes);
 app.use('/api/xero',     xeroOAuthRoutes);
 app.use('/api/xero-reports', xeroReportsRoutes);
-app.use('/dashboard',    dashRoutes);   // legacy health check
+// Mounted under /api, not /dashboard — Express matches mounted routers before the
+// SPA catch-all below, so owning /dashboard here meant a hard refresh or bookmark
+// on the React app's own /dashboard route got this router's JSON (in practice a
+// 401, since requireAuth needs an Authorization header a browser navigation never
+// sends) instead of index.html.
+app.use('/api/dashboard', dashRoutes);
+// Legacy alias for the one path that is genuinely a server endpoint rather than a
+// SPA route: README, the deployment roadmap, and any external uptime monitor all
+// point at /dashboard/health. The org-list root moved to /api/dashboard.
+app.get('/dashboard/health', dashRoutes.health);
 
 // ── Serve React UI ───────────────────────────────────────────────────────────
 const UI_DIST = path.join(__dirname, '../ui/dist');
