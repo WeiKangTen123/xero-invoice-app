@@ -56,6 +56,24 @@ describe('xero/oauth', () => {
       expect(url.searchParams.get('state')).toBe('fake-state-abc');
       expect(getUserConfig).toHaveBeenCalledWith('user-1');
     });
+
+    // Xero fixes scopes at consent time, so a scope missing from this URL can
+    // never be gained by an existing token — it takes a fresh reconnect. Pinning
+    // the report scopes here means dropping one shows up as a test failure rather
+    // than as a 401 insufficient_scope in production.
+    test('requests every scope the app\'s features actually need', () => {
+      getUserConfig.mockReturnValue({ XERO_OAUTH_CLIENT_ID: 'cid', XERO_OAUTH_CLIENT_SECRET: 'secret' });
+      const scopes = new URL(oauth.buildAuthorizeUrl('user-1')).searchParams.get('scope').split(' ');
+      for (const required of [
+        'offline_access',
+        'accounting.invoices', 'accounting.contacts', 'accounting.settings.read',
+        'accounting.banktransactions.read', 'accounting.payments.read',
+        'accounting.reports.profitandloss.read', 'accounting.reports.banksummary.read',
+        'accounting.reports.budgetsummary.read', 'accounting.budgets.read',
+      ]) {
+        expect(scopes).toContain(required);
+      }
+    });
   });
 
   describe('exchangeCodeForTokens', () => {
