@@ -86,7 +86,7 @@ https://yourapp.up.railway.app/xero/connect ← Railway
 
 Verify it worked:
 ```bash
-curl http://localhost:3000/dashboard
+curl http://localhost:3000/api/dashboard
 ```
 Expected response:
 ```json
@@ -112,7 +112,7 @@ Expected: `{ "status": "healthy", "timestamp": "..." }`
 
 **2. Xero connection**
 ```bash
-curl http://localhost:3000/dashboard
+curl http://localhost:3000/api/dashboard
 ```
 Expected: your Xero org listed in `tenants`
 
@@ -178,7 +178,7 @@ Check all invoices created so far:
 curl http://localhost:3000/dashboard/invoices/YOUR_TENANT_ID
 ```
 
-Replace `YOUR_TENANT_ID` with the UUID from the `/dashboard` response.
+Replace `YOUR_TENANT_ID` with the UUID from the `/api/dashboard` response.
 
 Check any failed invoices:
 ```bash
@@ -240,7 +240,7 @@ type: Invoice.TypeEnum.ACCREC
 | Task | How |
 |---|---|
 | Check if server is healthy | `GET /dashboard/health` |
-| See connected Xero orgs | `GET /dashboard` |
+| See connected Xero orgs | `GET /api/dashboard` |
 | See invoice history | `GET /dashboard/invoices/:tenantId` |
 | See failed invoices | `GET /dashboard/dead-letter` |
 | Watch real-time activity | Server console logs |

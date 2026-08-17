@@ -4,7 +4,7 @@ const tokenCache = require('../utils/token-cache');
 const { requireAuth } = require('../middleware/auth-middleware');
 const logger     = require('../utils/logger');
 
-// GET /dashboard — connected Xero orgs for the calling user
+// GET /api/dashboard — connected Xero orgs for the calling user
 router.get('/', requireAuth, async (req, res) => {
   try {
     const tenants = await tokenCache.forUser(req.user.id).getAllTenants();
@@ -21,9 +21,14 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-// GET /dashboard/health — used by deployment health checks (no auth required)
-router.get('/health', (_req, res) => {
+// GET /health — used by deployment health checks (no auth required). Exported
+// alongside the router so index.js can also serve it at the legacy
+// /dashboard/health path without duplicating the payload.
+function health(_req, res) {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
-});
+}
 
-module.exports = router;
+router.get('/health', health);
+
+module.exports        = router;
+module.exports.health = health;

@@ -210,7 +210,8 @@ xero-invoice-app/
 │   │   │                              PATCH /api/admin/users/:id (promote/demote role)
 │   │   │                              DELETE /api/admin/users/:id
 │   │   │                              PATCH /api/admin/reports/:userId/:id/resolve
-│   │   └── dashboard.js               GET /dashboard/health, Xero org list
+│   │   └── dashboard.js               GET /api/dashboard (Xero org list),
+│   │                                  GET /dashboard/health (legacy alias)
 │   │
 │   ├── middleware/
 │   │   └── auth-middleware.js         requireAuth, requireAdmin, jwtSecret()
