@@ -11,6 +11,7 @@ const TABS = [
   { key: 'accounts', label: 'Chart of Accounts' },
   { key: 'contacts', label: 'Contacts' },
   { key: 'pnl',      label: 'P&L' },
+  { key: 'budget',   label: 'Budget vs Actual' },
 ];
 // Nothing left here for now — kept as an array (rather than removed outright)
 // since it's the natural place to list whatever needs the next scope widening.
@@ -312,6 +313,132 @@ const STATUS_BADGE = {
   overdue:  { cls: 'badge-red',    label: 'Overdue' },
 };
 
+// Report cells: a dash for zero (matching Xero's own reports, where 0 and "no
+// activity" are visually the same thing) and parentheses for negatives.
+function fmtCell(n) {
+  const v = Number(n || 0);
+  if (v === 0) return '-';
+  const abs = Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v < 0 ? `(${abs})` : abs;
+}
+
+// The monthly actual/budget grid. 14 columns don't fit any normal screen, so the
+// table scrolls horizontally inside its own container while the row-label column
+// stays pinned — without that you scroll to December and lose track of the row.
+function BudgetGrid({ months, rows }) {
+  const firstBudgetIdx = months.findIndex(m => m.source === 'budget');
+  const actualCount    = firstBudgetIdx === -1 ? months.length : firstBudgetIdx;
+
+  const labelCell = (extra = {}) => ({
+    position: 'sticky', left: 0, zIndex: 1, background: 'var(--bg-primary)',
+    textAlign: 'left', padding: '7px 12px 7px 0', whiteSpace: 'nowrap', ...extra,
+  });
+  // The seam between the last actual month and the first budget month. Xero's own
+  // PDF only signals this in the column headers, which is easy to miss.
+  const seam = i => (i === firstBudgetIdx ? { borderLeft: '2px solid var(--accent)' } : {});
+
+  return (
+    <div style={{ overflowX: 'auto', marginTop: 14 }}>
+      <table style={{ borderCollapse: 'collapse', fontSize: 12, fontVariantNumeric: 'tabular-nums', minWidth: '100%' }}>
+        <thead>
+          {/* Band spanning the two blocks, so ACTUAL and BUDGET read as two things */}
+          <tr>
+            <th style={labelCell()} />
+            {actualCount > 0 && (
+              <th colSpan={actualCount} style={{ padding: '2px 8px', fontSize: 10, letterSpacing: '0.08em', color: 'var(--success)', textTransform: 'uppercase' }}>Actual</th>
+            )}
+            {actualCount < months.length && (
+              <th colSpan={months.length - actualCount} style={{ padding: '2px 8px', fontSize: 10, letterSpacing: '0.08em', color: 'var(--accent)', textTransform: 'uppercase', ...seam(firstBudgetIdx) }}>Overall Budget</th>
+            )}
+            <th style={{ padding: '2px 8px' }} />
+          </tr>
+          <tr style={{ borderBottom: '1px solid var(--border)' }}>
+            <th style={labelCell({ fontSize: 11, color: 'var(--text-muted)' })}>Account</th>
+            {months.map((m, i) => (
+              <th key={m.key} style={{ padding: '6px 10px', textAlign: 'right', fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap',
+                                       color: m.source === 'actual' ? 'var(--text-secondary)' : 'var(--text-muted)', ...seam(i) }}>
+                {m.label}
+              </th>
+            ))}
+            <th style={{ padding: '6px 10px 6px 16px', textAlign: 'right', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap', borderLeft: '1px solid var(--border)' }}>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, idx) => {
+            if (r.kind === 'section') return (
+              <tr key={`s-${idx}`}>
+                <td colSpan={months.length + 2} style={{ padding: '14px 0 4px', fontWeight: 700, fontSize: 12 }}>{r.label}</td>
+              </tr>
+            );
+            const strong  = r.kind === 'subtotal' || r.kind === 'summary';
+            const rowLine = r.kind === 'summary' ? { borderTop: '1px solid var(--border)' } : {};
+            return (
+              <tr key={`r-${idx}`} style={rowLine}>
+                <td style={labelCell({ paddingLeft: r.kind === 'account' ? 14 : 0, fontWeight: strong ? 700 : 400 })}>{r.label}</td>
+                {r.cells.map((v, i) => (
+                  <td key={i} style={{ padding: '7px 10px', textAlign: 'right', fontWeight: strong ? 700 : 400,
+                                       color: v < 0 ? 'var(--danger)' : undefined, ...seam(i) }}>
+                    {fmtCell(v)}
+                  </td>
+                ))}
+                <td style={{ padding: '7px 10px 7px 16px', textAlign: 'right', fontWeight: 700, borderLeft: '1px solid var(--border)',
+                             color: r.total < 0 ? 'var(--danger)' : undefined }}>
+                  {fmtCell(r.total)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Actual vs budget for the ELAPSED months only — comparing against a month that
+// hasn't happened yet isn't a variance, it's just the budget.
+function VarianceTable({ rows, monthsElapsed, currency }) {
+  return (
+    <div style={{ overflowX: 'auto', marginTop: 14 }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}>
+        <thead>
+          <tr style={{ borderBottom: '1px solid var(--border)' }}>
+            {['Account', 'Actual', 'Budget', 'Variance', 'Variance %'].map((h, i) => (
+              <th key={h} style={{ padding: '8px 10px', textAlign: i === 0 ? 'left' : 'right', fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                {h}{i > 0 && i < 3 ? ` (${monthsElapsed}mo)` : ''}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, idx) => {
+            if (r.kind === 'section') return (
+              <tr key={`s-${idx}`}><td colSpan={5} style={{ padding: '14px 10px 4px', fontWeight: 700, fontSize: 12 }}>{r.label}</td></tr>
+            );
+            const strong = r.kind === 'subtotal' || r.kind === 'summary';
+            // For an expense, spending less than budget is good; for income it's bad.
+            // Without knowing each account's sign convention, colour the direction
+            // only and let the reader judge — never label it "good" or "bad".
+            const vColor = r.variance === 0 ? undefined : r.variance > 0 ? 'var(--success)' : 'var(--danger)';
+            return (
+              <tr key={`r-${idx}`} style={{ borderTop: r.kind === 'summary' ? '1px solid var(--border)' : undefined }}>
+                <td style={{ padding: '7px 10px', paddingLeft: r.kind === 'account' ? 24 : 10, fontWeight: strong ? 700 : 400 }}>{r.label}</td>
+                <td style={{ padding: '7px 10px', textAlign: 'right', fontWeight: strong ? 700 : 400 }}>{fmtMoney(r.actualToDate, currency)}</td>
+                <td style={{ padding: '7px 10px', textAlign: 'right', color: 'var(--text-muted)' }}>{fmtMoney(r.budgetToDate, currency)}</td>
+                <td style={{ padding: '7px 10px', textAlign: 'right', fontWeight: 700, color: vColor }}>
+                  {r.variance > 0 ? '+' : ''}{fmtMoney(r.variance, currency)}
+                </td>
+                <td style={{ padding: '7px 10px', textAlign: 'right', color: vColor }}>
+                  {r.variancePct === null ? '—' : `${r.variancePct > 0 ? '+' : ''}${(r.variancePct * 100).toFixed(1)}%`}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // Generic "search this table" box, reused for accounts/contacts.
 function SearchBox({ value, onChange, placeholder }) {
   return <input type="text" className="form-input" placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)} style={{ maxWidth: 240 }} />;
@@ -359,6 +486,12 @@ export default function XeroInsights() {
   // Banking tab's statement drill-down — which account, and its transactions.
   const [selectedBankAccount, setSelectedBankAccount] = useState(null);
   const [statement, setStatement] = useState({ status: 'idle', data: [], error: '' });
+
+  // Budget vs Actual — lazily loaded like the directory tabs. `data` stays null
+  // until loaded (unlike those, it's an object not a list, so there's nothing
+  // meaningful to render half-populated).
+  const [budget, setBudget] = useState({ status: 'idle', data: null, error: '' });
+  const [budgetView, setBudgetView] = useState('grid'); // 'grid' (the Xero report) | 'variance'
 
   async function fetchSummary(opts = {}) {
     if (opts.force) setRefreshing(true);
@@ -420,6 +553,10 @@ export default function XeroInsights() {
   useEffect(() => { fetchSummary(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (activeTenantId) { fetchSummary(); fetchPeriod(); }
+    // Budget vs Actual is per-organisation, so a tenant switch invalidates it —
+    // refetch if it's on screen, otherwise let the lazy loader pick it up.
+    if (tab === 'budget') fetchBudget();
+    else setBudget({ status: 'idle', data: null, error: '' });
   }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (rangePreset !== 'custom') fetchPeriod();
@@ -459,7 +596,18 @@ export default function XeroInsights() {
         .then(d => setContacts({ status: 'done', data: d.contacts || [], error: '' }))
         .catch(err => setContacts({ status: 'done', data: [], error: err.message }));
     }
+    if (tab === 'budget' && budget.status === 'idle') fetchBudget();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function fetchBudget(opts = {}) {
+    setBudget(s => ({ ...s, status: 'loading', error: '' }));
+    const params = new URLSearchParams();
+    if (activeTenantId) params.set('tenantId', activeTenantId);
+    if (opts.force) params.set('force', 'true');
+    api.get(`/xero-reports/budget-variance?${params.toString()}`)
+      .then(d => setBudget({ status: 'done', data: d, error: '' }))
+      .catch(err => setBudget({ status: 'done', data: null, error: err.message }));
+  }
 
   function viewStatement(account) {
     setSelectedBankAccount(account);
@@ -998,6 +1146,92 @@ export default function XeroInsights() {
               <TwoBarChart leftLabel="Income" leftValue={pnl.income} rightLabel="Expenses" rightValue={pnl.expenses} currency={currency} />
             </>
           )}
+        </div>
+      )}
+
+      {tab === 'budget' && (
+        <div className="card">
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+            <div>
+              <div className="card-title" style={{ marginBottom: 2 }}>Budget vs Actual</div>
+              <div className="card-subtitle" style={{ marginBottom: 2 }}>
+                {budget.data?.fiscalYear?.label || 'Current financial year by month'}
+              </div>
+              <SourceNote>Xero Profit &amp; Loss (actuals) + Budget Summary — Overall Budget</SourceNote>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 2, background: 'var(--bg-secondary)', borderRadius: 8, padding: 2 }}>
+                {[{ k: 'grid', l: 'Monthly' }, { k: 'variance', l: 'Variance' }].map(v => (
+                  <button key={v.k} type="button" onClick={() => setBudgetView(v.k)} style={{
+                    padding: '5px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, cursor: 'pointer', border: 'none',
+                    background: budgetView === v.k ? 'var(--accent-gradient)' : 'transparent',
+                    color: budgetView === v.k ? '#fff' : 'var(--text-muted)',
+                  }}>{v.l}</button>
+                ))}
+              </div>
+              <button className="btn btn-outline btn-sm" disabled={budget.status === 'loading'} onClick={() => fetchBudget({ force: true })}>
+                {budget.status === 'loading' ? <span className="btn-spinner" /> : '↻'} Refresh
+              </button>
+            </div>
+          </div>
+
+          {budget.status === 'loading' && <div style={{ padding: 28, color: 'var(--text-muted)', fontSize: 13 }}>Loading budget report...</div>}
+
+          {budget.error && (
+            <div className="alert alert-error" style={{ marginTop: 14 }}><span className="alert-icon">✕</span>{budget.error}</div>
+          )}
+
+          {budget.status === 'done' && !budget.error && budget.data && (() => {
+            const d   = budget.data;
+            const cur = d.organisation?.currency || currency;
+            const k   = d.kpis;
+            const tiles = [
+              { label: `Actual to date (${k.monthsElapsed}mo)`, value: k.ytdActualNet, hint: 'Net profit, completed months' },
+              { label: `Budget remaining (${k.monthsTotal - k.monthsElapsed}mo)`, value: k.restOfYearNet, hint: 'Net profit still budgeted' },
+              { label: 'Full-year forecast', value: k.forecastNet, hint: 'Actual to date + budget ahead' },
+            ];
+            return (
+              <>
+                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', margin: '18px 0 4px' }}>
+                  {tiles.map(t => (
+                    <div key={t.label} className="card" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
+                      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>{t.label}</div>
+                      <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: t.value < 0 ? 'var(--danger)' : 'var(--success)' }}>
+                        {fmtMoney(t.value, cur)}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>{t.hint}</div>
+                    </div>
+                  ))}
+                  <div className="card" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
+                    <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Progress</div>
+                    <div style={{ fontSize: 21, fontWeight: 800 }}>{k.monthsElapsed} <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>of {k.monthsTotal} months</span></div>
+                    <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>
+                      {d.months.find(m => m.source === 'budget')?.label || '—'} onward is budget
+                    </div>
+                  </div>
+                </div>
+
+                {budgetView === 'grid'
+                  ? <BudgetGrid months={d.months} rows={d.rows} />
+                  : (
+                    <>
+                      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 16, lineHeight: 1.5 }}>
+                        Actual against budget for the {k.monthsElapsed} completed month{k.monthsElapsed === 1 ? '' : 's'} only.
+                        Where a line was never budgeted for those months, the percentage shows as &mdash; rather than a
+                        division by zero.
+                      </div>
+                      <VarianceTable rows={d.rows} monthsElapsed={k.monthsElapsed} currency={cur} />
+                    </>
+                  )}
+
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 14, lineHeight: 1.6 }}>
+                  A month shows actuals only once it has fully closed — the current month reads as budget, since its
+                  income may be invoiced before its costs are entered. Section names come from Xero&apos;s standard
+                  Profit &amp; Loss layout; a custom report layout in Xero may label them differently.
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
     </div>

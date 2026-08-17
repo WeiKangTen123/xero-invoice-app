@@ -142,6 +142,24 @@ router.get('/bank-summary', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/xero-reports/budget-variance?force=
+// The monthly actual/budget grid. Needs accounting.reports.budgetsummary.read,
+// which is newer than the other report scopes — so anyone who hasn't reconnected
+// since it was added gets the reconnect prompt rather than a raw Xero 401.
+router.get('/budget-variance', requireAuth, async (req, res) => {
+  try {
+    const { tenants, tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false, tenants: [] });
+
+    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
+    const data = await reports.getBudgetVariance(req.user.id, tenantId, { timezone, force: req.query.force === 'true' });
+    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
+  } catch (err) {
+    logger.error('Budget vs Actual failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
+  }
+});
+
 // A call outside the token's granted scopes — the situation for anyone who
 // connected before these report/bank-transaction/payments scopes existed.
 // Surface it as a clear reconnect prompt instead of a generic failure.

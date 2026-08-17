@@ -2,6 +2,7 @@ const {
   _buildSummary, computeRange, _buildPeriod, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
+  _fiscalYearMonths, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
 } = require('./reports');
 
 // Helper matching Xero's real report cell shape: { value }.
@@ -803,5 +804,199 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
     await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
     expect(getBankTransactions).toHaveBeenCalledTimes(2);
     expect(getReportProfitAndLoss).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── Budget vs Actual ─────────────────────────────────────────────────────────
+// Fixtures below are the REAL shapes returned by a live Xero org (Nexsoss Pte
+// Ltd, FY Apr 2026–Mar 2027), captured from a read-only probe — including the
+// two traps that make the endpoints easy to misalign:
+//   * ProfitAndLoss returns columns NEWEST-first; BudgetSummary OLDEST-first.
+//   * BudgetSummary's header first cell is "Account"; ProfitAndLoss's is "".
+// The expected numbers are the ones printed on the org's own Xero PDF.
+describe('xero/reports — Budget vs Actual (pure)', () => {
+  const FY_END = { month: 3, day: 31 };
+  const TODAY  = { year: 2026, month: 8, day: 17 }; // mid-August: Aug is NOT complete
+
+  // 12 monthly values, oldest-first (Apr 2026 → Mar 2027), exactly as
+  // BudgetSummary(date=2026-04-30, periods=12) returned them.
+  const BUDGET = [
+    ['Sales - Implementation',          [0,0,0,57330,37000,0,0,0,54500,0,27000,27500]],
+    ['Sales - Maintenance (Recurring)', [0,0,0,0,15000,0,0,0,0,0,10000,15000]],
+    ['Total Income',                    [0,0,0,57330,52000,0,0,0,54500,0,37000,42500]],
+    ['Cost of Goods Sold',              [0,0,0,0,7330,1030,1030,1030,1030,1030,7630,7930]],
+    ['Total Cost of Sales',             [0,0,0,0,7330,1030,1030,1030,1030,1030,7630,7930]],
+    ['Gross Profit',                    [0,0,0,57330,44670,-1030,-1030,-1030,53470,-1030,29370,34570]],
+    ['Other Income - Grant',            [0,0,0,0,0,16667,8333,8333,8333,8333,0,0]],
+    ['Total Other Income',              [0,0,0,0,0,16667,8333,8333,8333,8333,0,0]],
+    ['Bank Fees',                       [0,0,0,0,10,10,10,10,10,10,10,10]],
+    ['Consulting & Accounting',         [0,0,0,0,500,500,500,500,500,500,500,500]],
+    ['Insurance',                       [0,0,0,0,800,800,800,800,800,1400,1400,1400]],
+    ['Legal expenses',                  [0,0,0,0,1000,1000,1000,1000,1000,1000,1000,1000]],
+    ['Subscriptions',                   [0,0,0,0,142,142,142,142,142,642,642,642]],
+    ['Wages and Salaries',              [0,0,0,24603,24603,24603,24603,24603,24603,24603,24603,24603]],
+    ['Total Operating Expenses',        [0,0,0,24603,27055,27055,27055,27055,27055,28155,28155,28155]],
+    ['Net Profit',                      [0,0,0,32727,17615,-11418,-19752,-19752,34748,-20852,1215,6415]],
+  ];
+  const money = v => (v === 0 ? '0.00' : String(v.toFixed(2)));
+  const bRow  = (label, vals, rowType = 'Row') => row(label, [label, ...vals.map(money)], rowType);
+  const pick  = label => BUDGET.find(([l]) => l === label)[1];
+
+  const budgetRows = [
+    { rowType: 'Header', cells: ['Account','Apr-26','May-26','Jun-26','Jul-26','Aug-26','Sep-26','Oct-26','Nov-26','Dec-26','Jan-27','Feb-27','Mar-27'].map(cell) },
+    section('Income', [
+      bRow('Sales - Implementation', pick('Sales - Implementation')),
+      bRow('Sales - Maintenance (Recurring)', pick('Sales - Maintenance (Recurring)')),
+      bRow('Total Income', pick('Total Income'), 'SummaryRow'),
+    ]),
+    section('Less Cost of Sales', [
+      bRow('Cost of Goods Sold', pick('Cost of Goods Sold')),
+      bRow('Total Cost of Sales', pick('Total Cost of Sales'), 'SummaryRow'),
+    ]),
+    section('', [bRow('Gross Profit', pick('Gross Profit'), 'SummaryRow')]),
+    section('Other Income', [
+      bRow('Other Income - Grant', pick('Other Income - Grant')),
+      bRow('Total Other Income', pick('Total Other Income'), 'SummaryRow'),
+    ]),
+    section('Less Operating Expenses', [
+      bRow('Bank Fees', pick('Bank Fees')),
+      bRow('Consulting & Accounting', pick('Consulting & Accounting')),
+      bRow('Insurance', pick('Insurance')),
+      bRow('Legal expenses', pick('Legal expenses')),
+      bRow('Subscriptions', pick('Subscriptions')),
+      bRow('Wages and Salaries', pick('Wages and Salaries')),
+      bRow('Total Operating Expenses', pick('Total Operating Expenses'), 'SummaryRow'),
+    ]),
+    section('', [bRow('Net Profit', pick('Net Profit'), 'SummaryRow')]),
+  ];
+
+  // ProfitAndLoss(anchor Mar-2027, periods=11) — NEWEST-first, and it omits every
+  // account with no actual transactions (no Cost of Sales, no overheads at all).
+  const pnlNewestFirst = {
+    'Sales - Implementation':          [0,0,0,0,0,0,0,37000,-17670,0,0,0],
+    'Sales - Maintenance (Recurring)': [0,0,0,0,0,0,0,15000,75000,0,0,0],
+    'Total Income':                    [0,0,0,0,0,0,0,52000,57330,0,0,0],
+    'Gross Profit':                    [0,0,0,0,0,0,0,52000,57330,0,0,0],
+    'Wages and Salaries':              [0,0,0,0,0,0,0,0,24603,0,0,0],
+    'Total Operating Expenses':        [0,0,0,0,0,0,0,0,24603,0,0,0],
+    'Net Profit':                      [0,0,0,0,0,0,0,52000,32727,0,0,0],
+  };
+  const p = label => row(label, [label, ...pnlNewestFirst[label].map(money)]);
+  const pnlRows = [
+    { rowType: 'Header', cells: ['','31 Mar 27','28 Feb 27','31 Jan 27','31 Dec 26','30 Nov 26','31 Oct 26','30 Sep 26','31 Aug 26','31 Jul 26','30 Jun 26','31 May 26','30 Apr 26'].map(cell) },
+    section('Income', [p('Sales - Implementation'), p('Sales - Maintenance (Recurring)'), row('Total Income', ['Total Income', ...pnlNewestFirst['Total Income'].map(money)], 'SummaryRow')]),
+    section('', [p('Gross Profit')]),
+    section('Less Operating Expenses', [p('Wages and Salaries'), row('Total Operating Expenses', ['Total Operating Expenses', ...pnlNewestFirst['Total Operating Expenses'].map(money)], 'SummaryRow')]),
+    section('', [p('Net Profit')]),
+  ];
+
+  const months = _fiscalYearMonths(TODAY, FY_END);
+  const build  = () => _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx: _actualThroughIndex(months, TODAY) });
+  const find   = (rows, label) => rows.find(r => r.label === label);
+
+  test('the fiscal year runs Apr 2026 → Mar 2027, not Jan → Dec', () => {
+    expect(months).toHaveLength(12);
+    expect(months[0]).toMatchObject({ key: '2026-04', label: 'Apr 2026', startISO: '2026-04-01', endISO: '2026-04-30' });
+    expect(months[11]).toMatchObject({ key: '2027-03', label: 'Mar 2027', endISO: '2027-03-31' });
+  });
+
+  test('a part-way-through month counts as budget, not actual', () => {
+    // 17 Aug: Jul (index 3) is the last COMPLETE month.
+    expect(_actualThroughIndex(months, TODAY)).toBe(3);
+    // On the 1st of a month the previous month has just closed...
+    expect(_actualThroughIndex(months, { year: 2026, month: 8, day: 1 })).toBe(3);
+    // ...and on the final day, that month itself still isn't complete.
+    expect(_actualThroughIndex(months, { year: 2026, month: 8, day: 31 })).toBe(3);
+    // Before any month of the FY has closed at all.
+    expect(_actualThroughIndex(months, { year: 2026, month: 4, day: 15 })).toBe(-1);
+  });
+
+  test('ProfitAndLoss columns are reversed into month order; BudgetSummary are not', () => {
+    const actual = _rowValuesByLabel(pnlRows, { reverse: true });
+    // Jul 2026 = index 3. Newest-first the same value sits at index 8.
+    expect(actual.get('Sales - Implementation')[3]).toBe(-17670);
+    expect(actual.get('Sales - Implementation')[4]).toBe(37000); // Aug
+    const budget = _rowValuesByLabel(budgetRows);
+    expect(budget.get('Cost of Goods Sold')[4]).toBe(7330); // Aug, already oldest-first
+  });
+
+  test('the skeleton keeps Xero\'s reading order, with floating summary lines', () => {
+    const skel = _skeletonFromBudget(budgetRows);
+    expect(skel.slice(0, 4)).toEqual([
+      { kind: 'section',  label: 'Income' },
+      { kind: 'account',  label: 'Sales - Implementation' },
+      { kind: 'account',  label: 'Sales - Maintenance (Recurring)' },
+      { kind: 'subtotal', label: 'Total Income' },
+    ]);
+    // Gross Profit / Net Profit live in untitled sections -> 'summary', not 'subtotal'.
+    expect(find(skel, 'Gross Profit').kind).toBe('summary');
+    expect(find(skel, 'Net Profit').kind).toBe('summary');
+  });
+
+  test('every row matches the org\'s own Xero PDF, actual months and budget months', () => {
+    const { rows } = build();
+    // Apr–Jul come from the P&L (actuals), Aug–Mar from BudgetSummary.
+    expect(find(rows, 'Sales - Implementation').cells)
+      .toEqual([0, 0, 0, -17670, 37000, 0, 0, 0, 54500, 0, 27000, 27500]);
+    expect(find(rows, 'Total Income').cells)
+      .toEqual([0, 0, 0, 57330, 52000, 0, 0, 0, 54500, 0, 37000, 42500]);
+    expect(find(rows, 'Net Profit').cells)
+      .toEqual([0, 0, 0, 32727, 17615, -11418, -19752, -19752, 34748, -20852, 1215, 6415]);
+    // Budget-only accounts survive even though the P&L never mentions them.
+    expect(find(rows, 'Cost of Goods Sold').cells[4]).toBe(7330);
+    expect(find(rows, 'Other Income - Grant').cells[5]).toBe(16667);
+  });
+
+  test('row totals reproduce the PDF\'s blended TOTAL column', () => {
+    const { rows } = build();
+    expect(find(rows, 'Sales - Implementation').total).toBe(128330);
+    expect(find(rows, 'Sales - Maintenance (Recurring)').total).toBe(115000);
+    expect(find(rows, 'Total Income').total).toBe(243330);
+    expect(find(rows, 'Cost of Goods Sold').total).toBe(28040);
+    expect(find(rows, 'Gross Profit').total).toBe(215290);
+    expect(find(rows, 'Other Income - Grant').total).toBe(49999);
+    expect(find(rows, 'Total Operating Expenses').total).toBe(244343);
+    expect(find(rows, 'Net Profit').total).toBe(20946);
+  });
+
+  test('variance covers elapsed months only, and a zero budget yields null not Infinity', () => {
+    const { rows } = build();
+    const net = find(rows, 'Net Profit');
+    expect(net.actualToDate).toBe(32727);            // Apr–Jul actual
+    expect(net.budgetToDate).toBe(32727);            // this org back-filled elapsed budget from actuals
+    expect(net.variance).toBe(0);
+    // Nothing budgeted for Apr–Jul on this line, so a percentage is meaningless.
+    expect(find(rows, 'Bank Fees').budgetToDate).toBe(0);
+    expect(find(rows, 'Bank Fees').variancePct).toBeNull();
+    // A real difference does produce a percentage.
+    const cogs = find(rows, 'Cost of Goods Sold');
+    expect(cogs.variancePct === null || Number.isFinite(cogs.variancePct)).toBe(true);
+  });
+
+  test('KPIs split the year at the actual/budget boundary', () => {
+    const { kpis } = build();
+    expect(kpis).toEqual({
+      monthsElapsed: 4, monthsTotal: 12,
+      ytdActualNet:  32727,
+      restOfYearNet: 20946 - 32727, // budget Aug–Mar
+      forecastNet:   20946,
+    });
+  });
+
+  test('an account with actuals but no budget is appended, never dropped', () => {
+    const withOrphan = [...pnlRows, section('Less Operating Expenses', [
+      row('Surprise Expense', ['Surprise Expense', ...Array(12).fill('0.00').map((v, i) => (i === 8 ? '99.00' : v))]),
+    ])];
+    const { rows } = _buildBudgetVariance({ budgetRows, pnlRows: withOrphan, months, actualThroughIdx: 3 });
+    const orphan = find(rows, 'Surprise Expense');
+    expect(orphan).toBeDefined();
+    expect(orphan.cells[3]).toBe(99); // Jul, after the newest-first reversal
+    expect(find(rows, 'Other (actuals only, not budgeted)').kind).toBe('section');
+  });
+
+  test('an empty pair of reports yields no rows and zeroed KPIs, not a crash', () => {
+    const out = _buildBudgetVariance({ budgetRows: [], pnlRows: [], months, actualThroughIdx: 3 });
+    expect(out.rows).toEqual([]);
+    expect(out.kpis.forecastNet).toBe(0);
   });
 });

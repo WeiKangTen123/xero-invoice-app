@@ -627,6 +627,201 @@ async function getBankSummary(userId, tenantId, { from, to, force = false } = {}
   return _cacheSet(key, { accounts, cashIn, cashOut, net: cashIn - cashOut, from: clampedFrom, to });
 }
 
+// ── Budget vs Actual (monthly grid) ─────────────────────────────────────────
+// Reproduces Xero's "Current financial year by month – actual and budget" custom
+// layout, which the API can't return directly (custom report layouts aren't
+// exposed). Built by merging two report endpoints column-for-column.
+//
+// Everything below was confirmed against live Xero data, not inferred from docs —
+// the two endpoints disagree in ways that would silently misalign every column:
+//
+//   ProfitAndLoss   anchor = LAST  month of the FY, periods=11 → NEWEST-first
+//   BudgetSummary   anchor = FIRST month of the FY, periods=12 → OLDEST-first
+//
+// Opposite anchors AND opposite order. periods=13 is rejected by BudgetSummary,
+// so 12 is the ceiling — exactly one fiscal year. Their column headers are also
+// formatted differently ("31 Aug 26" vs "Aug-26"), so columns are matched
+// POSITIONALLY off the known anchor, never by parsing header text.
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Pure. The 12 months of the fiscal year containing `today`, oldest first.
+function _fiscalYearMonths(today, fiscalYearEnd) {
+  const start  = _fiscalYearStart(today, fiscalYearEnd);
+  const months = [];
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(Date.UTC(start.year, start.month - 1 + i, 1));
+    const year = d.getUTCFullYear(), month = d.getUTCMonth() + 1;
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    months.push({
+      key:      `${year}-${String(month).padStart(2, '0')}`,
+      label:    `${MONTH_NAMES[month - 1]} ${year}`,
+      startISO: _fmtISODate({ year, month, day: 1 }),
+      endISO:   _fmtISODate({ year, month, day: lastDay }),
+    });
+  }
+  return months;
+}
+
+// Pure. Index of the last FULLY elapsed month, or -1 if none has completed.
+//
+// A partially elapsed month must read as budget, not actual: confirmed live that
+// Aug 2026 already had 52,000 of real sales but zero booked costs, so showing it
+// as "actual" mid-month invents a profit spike. This is the same rule Xero's own
+// custom layout uses.
+function _actualThroughIndex(months, today) {
+  const todayDate = _dateFromParts(today);
+  let idx = -1;
+  for (let i = 0; i < months.length; i++) {
+    if (_dateFromParts(_parseISODate(months[i].endISO)) < todayDate) idx = i;
+  }
+  return idx;
+}
+
+// Pure. label -> 12 monthly values. `reverse` flips ProfitAndLoss's newest-first
+// columns into the oldest-first order the month list uses.
+function _rowValuesByLabel(reportRows, { reverse = false } = {}) {
+  const out = new Map();
+  (function walk(rows) {
+    for (const row of rows || []) {
+      if (row.rowType !== 'Header' && row.cells?.length > 1) {
+        const label = (row.cells[0].value || '').trim();
+        if (label && !out.has(label)) {
+          const values = row.cells.slice(1).map(c => _parseReportNumber(c.value));
+          out.set(label, reverse ? values.reverse() : values);
+        }
+      }
+      if (row.rows?.length) walk(row.rows);
+    }
+  })(reportRows);
+  return out;
+}
+
+// Pure. Row order/kind skeleton taken from BudgetSummary, which is the richer of
+// the two: confirmed live that it returns every row the P&L does plus the
+// budget-only accounts (Cost of Goods Sold, Other Income - Grant, the overheads),
+// because the P&L omits any account with no actual transactions entirely.
+//
+// A section with an empty title holds a floating summary line — Gross Profit,
+// Total Expenses, Net Profit — which is exactly how they sit in Xero's layout.
+function _skeletonFromBudget(reportRows) {
+  const out = [];
+  for (const section of reportRows || []) {
+    if (section.rowType === 'Header') continue;
+    const title = (section.title || '').trim();
+    if (title) out.push({ kind: 'section', label: title });
+    for (const row of section.rows || []) {
+      const label = (row.cells?.[0]?.value || '').trim();
+      if (!label) continue;
+      out.push({
+        kind: !title ? 'summary' : (row.rowType === 'SummaryRow' ? 'subtotal' : 'account'),
+        label,
+      });
+    }
+  }
+  return out;
+}
+
+// Pure. Merges the two reports into one flat, ordered row list.
+//
+// Each cell is actual OR budget depending on whether its month has fully
+// elapsed — never both, and never a sum of the two. Subtotals are taken from
+// whichever report supplied that column rather than recomputed, so they stay
+// internally consistent with the figures above them.
+function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx }) {
+  const budget   = _rowValuesByLabel(budgetRows);
+  const actual   = _rowValuesByLabel(pnlRows, { reverse: true });
+  const skeleton = _skeletonFromBudget(budgetRows);
+
+  // An account with actuals but no budget appears only in the P&L. Rare (this
+  // org has none), but dropping it would silently understate the report, so it
+  // gets appended under its own heading rather than omitted.
+  const known    = new Set(skeleton.map(r => r.label));
+  const pnlOnly  = [...actual.keys()].filter(l => !known.has(l));
+  if (pnlOnly.length) {
+    skeleton.push({ kind: 'section', label: 'Other (actuals only, not budgeted)' });
+    for (const label of pnlOnly) skeleton.push({ kind: 'account', label });
+  }
+
+  const elapsed = actualThroughIdx + 1;
+  const rows = skeleton.map(row => {
+    if (row.kind === 'section') return { ...row };
+    const a = actual.get(row.label) || [];
+    const b = budget.get(row.label) || [];
+    const cells = months.map((_, i) => (i <= actualThroughIdx ? (a[i] || 0) : (b[i] || 0)));
+
+    // Variance is elapsed months only — comparing against a budget month that
+    // hasn't happened yet isn't a variance, it's just the budget.
+    let actualToDate = 0, budgetToDate = 0;
+    for (let i = 0; i < elapsed; i++) { actualToDate += a[i] || 0; budgetToDate += b[i] || 0; }
+    const variance = actualToDate - budgetToDate;
+
+    return {
+      ...row,
+      cells,
+      total:        cells.reduce((s, v) => s + v, 0),
+      actualToDate,
+      budgetToDate,
+      variance,
+      // Against a zero budget any variance is undefined rather than infinite —
+      // the frontend renders null as a dash.
+      variancePct: budgetToDate !== 0 ? variance / Math.abs(budgetToDate) : null,
+    };
+  });
+
+  const net = rows.find(r => r.kind === 'summary' && /^net (profit|loss)/i.test(r.label));
+  return {
+    rows,
+    kpis: {
+      monthsElapsed:  elapsed,
+      monthsTotal:    months.length,
+      ytdActualNet:   net ? net.actualToDate : 0,
+      restOfYearNet:  net ? net.cells.slice(elapsed).reduce((s, v) => s + v, 0) : 0,
+      forecastNet:    net ? net.total : 0,
+    },
+  };
+}
+
+async function getBudgetVariance(userId, tenantId, { force = false, timezone = 'UTC' } = {}) {
+  const org           = await _getOrganisation(userId, tenantId, force);
+  const fiscalYearEnd = { month: org.financialYearEndMonth || 12, day: org.financialYearEndDay || 31 };
+  const today         = _todayPartsInTz(timezone);
+  const months        = _fiscalYearMonths(today, fiscalYearEnd);
+  const actualThroughIdx = _actualThroughIndex(months, today);
+
+  const key    = `budgetvar:${userId}:${tenantId}:${months[0].key}:${actualThroughIdx}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached;
+
+  const tokenCache = require('../utils/token-cache').forUser(userId);
+  const token      = await tokenCache.getValidToken(tenantId);
+  const api        = _apiFor(token);
+
+  const first = months[0], last = months[months.length - 1];
+  const [pnlRes, budRes] = await Promise.all([
+    // Anchored on the LAST month — periods counts backwards from here.
+    withRetry(() => api.getReportProfitAndLoss(tenantId, last.startISO, last.endISO, 11, 'MONTH')),
+    // Anchored on the FIRST month — periods counts forwards from here. timeframe 1 = month.
+    withRetry(() => api.getReportBudgetSummary(tenantId, first.endISO, 12, 1)),
+  ]);
+
+  const built = _buildBudgetVariance({
+    budgetRows: budRes.body.reports?.[0]?.rows || [],
+    pnlRows:    pnlRes.body.reports?.[0]?.rows || [],
+    months, actualThroughIdx,
+  });
+
+  const fyEndLabel = `${_parseISODate(last.endISO).day} ${['January','February','March','April','May','June','July','August','September','October','November','December'][_parseISODate(last.endISO).month - 1]} ${_parseISODate(last.endISO).year}`;
+  logger.info('Budget vs Actual fetched', { userId, tenantId, fy: `${first.key}..${last.key}`, actualMonths: actualThroughIdx + 1 });
+
+  return _cacheSet(key, {
+    organisation: { name: org.name || org.legalName || 'Organisation', currency: org.baseCurrency || '' },
+    fiscalYear:   { label: `For the year ended ${fyEndLabel}`, fromISO: first.startISO, toISO: last.endISO },
+    months:       months.map((m, i) => ({ key: m.key, label: m.label, source: i <= actualThroughIdx ? 'actual' : 'budget' })),
+    ...built,
+  });
+}
+
 // Called on disconnect so nothing here can outlive the connection it came from.
 function clearCache(userId) {
   for (const key of _cache.keys()) {
@@ -636,8 +831,9 @@ function clearCache(userId) {
 
 module.exports = {
   getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
-  getBankTransactions, getProfitAndLoss, getBankSummary, clearCache,
+  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
+  _fiscalYearMonths, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
 };
