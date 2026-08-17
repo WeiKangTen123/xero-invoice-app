@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import AccountCodeSelect, { useAccountName } from '../components/AccountCodeSelect';
 
 // Statuses that allow the user to trigger a Xero submission.
 // 'posted' is included so a correction can be re-posted — this updates the existing
@@ -83,6 +84,26 @@ function InfoRow({ label, value, mono }) {
 }
 
 // ── Mini field (compact 2-per-row variant of InfoRow, for the summary grid) ─────
+// The read-only twin of the account picker: leads with the account NAME and keeps
+// the code as a quiet monospace suffix, so the summary reads the same way the
+// editor does. Falls back to the bare code when the name can't be resolved —
+// no Xero connection, or a code this org doesn't have.
+function AccountMiniField({ code }) {
+  const name = useAccountName(code);
+  if (!code) return null;
+  return (
+    <div>
+      <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: 3 }}>
+        Account
+      </div>
+      <div style={{ fontSize: 13, color: 'var(--text-primary)', wordBreak: 'break-word' }}>
+        {name || <span style={{ fontFamily: 'monospace' }}>{code}</span>}
+        {name && <span style={{ fontFamily: 'monospace', fontSize: 11.5, color: 'var(--text-muted)', marginLeft: 6 }}>{code}</span>}
+      </div>
+    </div>
+  );
+}
+
 function MiniField({ label, value, mono }) {
   if (!value && value !== 0) return null;
   return (
@@ -580,9 +601,14 @@ export default function InvoiceReview() {
                     </div>
                   </div>
                   <div className="form-group" style={{ marginBottom: 0 }}>
-                    <label className="form-label">Account Code</label>
-                    <input className="form-input" value={form.accountCode}
-                      onChange={e => updateField('accountCode', e.target.value)} />
+                    <label className="form-label">Account</label>
+                    {/* invoiceType floats the relevant account types to the top —
+                        cost accounts for a bill, revenue accounts for a sale. */}
+                    <AccountCodeSelect
+                      value={form.accountCode}
+                      onChange={v => updateField('accountCode', v)}
+                      invoiceType={form.invoiceType}
+                    />
                   </div>
                 </>
               ) : (
@@ -599,7 +625,7 @@ export default function InvoiceReview() {
                   {/* Compact 2-col grid instead of one full-width row per field */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px' }}>
                     <MiniField label="Invoice #"    value={inv.invoiceNumber} mono />
-                    <MiniField label="Account"      value={inv.accountCode} mono />
+                    <AccountMiniField code={inv.accountCode} />
                     <MiniField label="Invoice Date" value={inv.invoiceDate} />
                     <MiniField label="Due Date"     value={inv.dueDate} />
                   </div>

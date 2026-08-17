@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api/client';
 import HelpTooltip from '../components/HelpTooltip';
+import AccountCodeSelect from '../components/AccountCodeSelect';
 import { useAuth } from '../context/AuthContext';
 import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
 
@@ -14,7 +15,7 @@ const HELP = {
   IMAP_FILTER_FROM:      'Optional — only process emails from this sender address. Leave blank to process all.',
   IMAP_POLL_INTERVAL_MS: 'How often to check for new emails in milliseconds. Default: 60000 (60 seconds).',
   IMAP_LOOKBACK_DAYS:    'How many days back to search for unread invoice emails. Default: 100. Max: 365.',
-  DEFAULT_ACCOUNT_CODE:  'Xero account code for line items when no code is detected (e.g. 200).',
+  DEFAULT_ACCOUNT_CODE:  'Xero account used for line items when the parser detects no account. Picked from your connected organisation\'s chart of accounts — or type any code your org uses.',
   DEFAULT_CURRENCY:      'Default invoice currency code (e.g. SGD, USD, AUD).',
   ZERO_TAX_RATE:         'Tax rate name in Xero for zero-rated items (e.g. NONE, TAX001).',
   SLACK_WEBHOOK_URL:     'Optional Slack incoming webhook URL for error notifications.',
@@ -72,6 +73,21 @@ function Field({ name, meta, value, onChange }) {
   const [show, setShow] = useState(false);
   const isSecret  = isSecretKey(name);
   const isReadOnly = !!meta.readOnly;
+
+  // Same picker the invoice editor uses, so the default is chosen from the real
+  // chart of accounts rather than typed from memory. No invoiceType here — this
+  // one default covers both bills and sales invoices.
+  if (name === 'DEFAULT_ACCOUNT_CODE') {
+    return (
+      <div className="form-group">
+        <label className="form-label">
+          {name}
+          {HELP[name] && <HelpTooltip text={HELP[name]} />}
+        </label>
+        <AccountCodeSelect value={value} onChange={v => onChange(name, v)} disabled={isReadOnly} />
+      </div>
+    );
+  }
 
   if (name === 'TIMEZONE') {
     return (
