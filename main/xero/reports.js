@@ -722,6 +722,17 @@ function _skeletonFromBudget(reportRows) {
   return out;
 }
 
+// Xero's variance percentage, matched against the org's own Budget Variance
+// report: variance over the ABSOLUTE budget, so a negative budget still yields a
+// signed percentage the same way Xero shows it (Sep gross profit budgeted at
+// -1,030 against nil actual reads +100.00%, not -100.00%).
+//
+// Against a nil budget the percentage is undefined rather than infinite, so it's
+// null and the frontend prints a dash — again matching Xero.
+function _variancePct(variance, budget) {
+  return budget !== 0 ? variance / Math.abs(budget) : null;
+}
+
 // Pure. Merges the two reports into one flat, ordered row list.
 //
 // Each cell is actual OR budget depending on whether its month has fully
@@ -750,8 +761,17 @@ function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx })
     const b = budget.get(row.label) || [];
     const cells = months.map((_, i) => (i <= actualThroughIdx ? (a[i] || 0) : (b[i] || 0)));
 
-    // Variance is elapsed months only — comparing against a budget month that
-    // hasn't happened yet isn't a variance, it's just the budget.
+    // Per-month actual/budget/variance, kept for every month including ones not
+    // yet elapsed. Xero's own Budget Variance report compares the CURRENT
+    // (part-elapsed) month too — confirmed against the org's report, which shows
+    // August actuals of 52,000 against a 17,615 August budget — so the actuals
+    // can't be suppressed here the way the monthly grid suppresses them.
+    const monthly = months.map((_, i) => {
+      const av = a[i] || 0, bv = b[i] || 0;
+      return { actual: av, budget: bv, variance: av - bv, variancePct: _variancePct(av - bv, bv) };
+    });
+
+    // Year-to-date rolls up the fully elapsed months only.
     let actualToDate = 0, budgetToDate = 0;
     for (let i = 0; i < elapsed; i++) { actualToDate += a[i] || 0; budgetToDate += b[i] || 0; }
     const variance = actualToDate - budgetToDate;
@@ -760,12 +780,11 @@ function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx })
       ...row,
       cells,
       total:        cells.reduce((s, v) => s + v, 0),
+      monthly,
       actualToDate,
       budgetToDate,
       variance,
-      // Against a zero budget any variance is undefined rather than infinite —
-      // the frontend renders null as a dash.
-      variancePct: budgetToDate !== 0 ? variance / Math.abs(budgetToDate) : null,
+      variancePct: _variancePct(variance, budgetToDate),
     };
   });
 
@@ -836,4 +855,5 @@ module.exports = {
   _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
+  _variancePct,
 };
