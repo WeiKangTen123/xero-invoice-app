@@ -160,6 +160,23 @@ router.get('/budget-variance', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/xero-reports/performance?force=
+// Powers Dashboard -> Overview and Revenue. Composed from the budget-variance
+// fetch plus a bank summary, so it needs no scope those two don't already have.
+router.get('/performance', requireAuth, async (req, res) => {
+  try {
+    const { tenants, tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false, tenants: [] });
+
+    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
+    const data = await reports.getPerformance(req.user.id, tenantId, { timezone, force: req.query.force === 'true' });
+    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
+  } catch (err) {
+    logger.error('Performance overview failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
+  }
+});
+
 // A call outside the token's granted scopes — the situation for anyone who
 // connected before these report/bank-transaction/payments scopes existed.
 // Surface it as a clear reconnect prompt instead of a generic failure.

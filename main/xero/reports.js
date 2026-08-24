@@ -716,6 +716,9 @@ function _skeletonFromBudget(reportRows) {
       out.push({
         kind: !title ? 'summary' : (row.rowType === 'SummaryRow' ? 'subtotal' : 'account'),
         label,
+        // Which section this row sits under, so downstream consumers can tell a
+        // revenue account from an overhead without re-walking the tree.
+        section: title,
       });
     }
   }
@@ -841,6 +844,160 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
   });
 }
 
+// ── Performance overview (Dashboard → Overview + Revenue) ───────────────────
+// Composed entirely from data already fetched elsewhere: getBudgetVariance
+// supplies 12 months of per-account actuals AND budget in one cached pair of
+// calls, and getBankSummary supplies cash. No new Xero scope, and the monthly
+// series are returned whole so the frontend's month-range slider can re-slice
+// without another request.
+
+// Which P&L section a row belongs to. Order matters: "Less Cost of Sales"
+// contains the word "Sales", so it has to be tested before the revenue pattern.
+function _sectionKind(section) {
+  const s = (section || '').trim();
+  if (/^less cost of sales/i.test(s))                      return 'cogs';
+  if (/^less (operating expenses|overheads)/i.test(s))     return 'opex';
+  if (/^other income/i.test(s))                            return 'otherIncome';
+  if (/income|revenue|sales/i.test(s))                     return 'revenue';
+  return 'other';
+}
+
+// Recurring revenue is a business concept Xero doesn't record — there's no flag
+// on an account saying "this is subscription income". The account NAME is the
+// only signal available, and it's a reliable one because people name these
+// accounts deliberately ("Sales - Maintenance (Recurring)"). Every classified
+// account is reported back so the UI can show its working rather than assert it.
+const RECURRING_PATTERN = /recurring|subscription|maintenance|retainer|manage(d)?\s*service|support|licen[cs]e|hosting|saas|manag(e|ed)/i;
+function _isRecurringName(label) { return RECURRING_PATTERN.test(label || ''); }
+
+const _zeros = n => Array(n).fill(0);
+const _sum   = a => a.reduce((s, v) => s + v, 0);
+
+// Pure. Reshapes budget-variance rows into the series the dashboard charts need.
+function _buildPerformance({ months, rows, cash }) {
+  const n = months.length;
+  const find = re => rows.find(r => r.kind !== 'section' && re.test(r.label));
+  // A subtotal Xero didn't emit (this org books no cost of sales, so there's no
+  // "Total Cost of Sales" row at all) must read as a flat zero series, not undefined.
+  const seriesOf = row => ({
+    actual: row ? row.monthly.map(m => m.actual) : _zeros(n),
+    budget: row ? row.monthly.map(m => m.budget) : _zeros(n),
+  });
+
+  const totals = {
+    revenue:     seriesOf(find(/^total income$/i)),
+    otherIncome: seriesOf(find(/^total other income$/i)),
+    cogs:        seriesOf(find(/^total cost of sales$/i)),
+    grossProfit: seriesOf(find(/^gross profit$/i)),
+    opex:        seriesOf(find(/^total operating expenses$/i)),
+    netProfit:   seriesOf(find(/^net (profit|loss)/i)),
+  };
+
+  // One entry per revenue account — this is what drives "Revenue by service line"
+  // and the recurring/project split.
+  const serviceLines = rows
+    .filter(r => r.kind === 'account' && ['revenue', 'otherIncome'].includes(_sectionKind(r.section)))
+    .map(r => ({
+      label:       r.label,
+      section:     r.section,
+      otherIncome: _sectionKind(r.section) === 'otherIncome',
+      recurring:   _isRecurringName(r.label),
+      actual:      r.monthly.map(m => m.actual),
+      budget:      r.monthly.map(m => m.budget),
+    }));
+
+  // Recurring vs project, summed from the classified accounts rather than a
+  // separate Xero figure — Xero has no such split.
+  const pick = (want, field) => months.map((_, i) =>
+    _sum(serviceLines.filter(l => !l.otherIncome && l.recurring === want).map(l => l[field][i])));
+  const split = {
+    recurring: { actual: pick(true,  'actual'), budget: pick(true,  'budget') },
+    project:   { actual: pick(false, 'actual'), budget: pick(false, 'budget') },
+  };
+
+  const expenseLines = rows
+    .filter(r => r.kind === 'account' && ['cogs', 'opex'].includes(_sectionKind(r.section)))
+    .map(r => ({ label: r.label, section: r.section, kind: _sectionKind(r.section),
+                 actual: r.monthly.map(m => m.actual), budget: r.monthly.map(m => m.budget) }));
+
+  return { totals, serviceLines, split, expenseLines, cash };
+}
+
+// Pure. Data-quality flags, computed from the figures rather than asserted.
+// Deliberately rule-based: every line is traceable to a number on screen, so
+// nothing here can say something the data doesn't support.
+function _buildWatchList({ months, totals, actualThroughIdx }) {
+  const out = [];
+  const rev = totals.revenue.actual, cogs = totals.cogs.actual, opex = totals.opex.actual;
+  const elapsed = actualThroughIdx + 1;
+
+  // Scanned across ALL months, not just closed ones. Booked actual revenue is
+  // evidence of real transactions whether or not the month has ended, and the
+  // current open month is precisely where costs lag invoicing. A month with no
+  // actuals at all has rev[i] === 0, so it can never trip this on its own.
+  for (let i = 0; i < months.length; i++) {
+    if (rev[i] > 0 && cogs[i] === 0 && opex[i] === 0) {
+      out.push({ severity: 'warn', text: `${months[i].label} booked ${Math.round(rev[i]).toLocaleString()} of revenue but no costs at all — expenses may not be recorded yet, which overstates profit.` });
+    }
+  }
+
+  const firstActive = rev.findIndex(v => v !== 0);
+  if (firstActive > 0) {
+    out.push({ severity: 'info', text: `No activity recorded before ${months[firstActive].label} — trend comparisons over the earlier months are not meaningful.` });
+  }
+
+  const ytdRev  = _sum(rev);
+  const ytdCogs = _sum(cogs);
+  if (ytdRev > 0 && ytdCogs === 0) {
+    out.push({ severity: 'warn', text: 'No cost of sales has been booked this year, so gross margin reads 100%. It is not a pricing signal.' });
+  }
+  if (elapsed === 0) out.push({ severity: 'info', text: 'No month of this financial year has closed yet — every figure shown is budget.' });
+  return out;
+}
+
+async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false } = {}) {
+  // Reuses the budget-variance fetch and its cache — on a warm cache this whole
+  // endpoint costs one Xero call (the bank summary) rather than three.
+  const bv = await getBudgetVariance(userId, tenantId, { timezone, force });
+
+  const first = bv.fiscalYear.fromISO;
+  const today = _fmtISODate(_todayPartsInTz(timezone));
+  let cash = { total: 0, accounts: [], available: false };
+  try {
+    const bank = await getBankSummary(userId, tenantId, { from: first, to: today, force });
+    cash = {
+      total:     bank.accounts.reduce((s, a) => s + a.closingBalance, 0),
+      accounts:  bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance })),
+      available: true,
+    };
+  } catch (err) {
+    // Cash is one card out of many — a bank-scope problem shouldn't blank the
+    // whole dashboard, so it degrades to "—" instead.
+    if (!isScopeError(err)) logger.warn('Performance: bank summary failed', { userId, tenantId, error: err.message });
+    else logger.info('Performance: bank summary skipped — scope not granted', { userId, tenantId });
+  }
+
+  const actualThroughIdx = bv.months.filter(m => m.source === 'actual').length - 1;
+  const built = _buildPerformance({ months: bv.months, rows: bv.rows, cash });
+  const watchList = _buildWatchList({ months: bv.months, totals: built.totals, actualThroughIdx });
+
+  logger.info('Performance overview built', { userId, tenantId, serviceLines: built.serviceLines.length, actualMonths: actualThroughIdx + 1 });
+
+  return {
+    organisation:     bv.organisation,
+    fiscalYear:       bv.fiscalYear,
+    months:           bv.months,
+    actualThroughIdx,
+    ...built,
+    watchList,
+    // Surfaced so the UI can show which accounts were treated as recurring —
+    // a guess made from names should never be invisible.
+    recurringAccounts: built.serviceLines.filter(l => l.recurring).map(l => l.label),
+    cached:    bv.cached,
+    fetchedAt: bv.fetchedAt,
+  };
+}
+
 // Called on disconnect so nothing here can outlive the connection it came from.
 function clearCache(userId) {
   for (const key of _cache.keys()) {
@@ -850,10 +1007,10 @@ function clearCache(userId) {
 
 module.exports = {
   getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
-  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, clearCache,
+  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
-  _variancePct,
+  _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
 };

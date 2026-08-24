@@ -924,9 +924,9 @@ describe('xero/reports — Budget vs Actual (pure)', () => {
     const skel = _skeletonFromBudget(budgetRows);
     expect(skel.slice(0, 4)).toEqual([
       { kind: 'section',  label: 'Income' },
-      { kind: 'account',  label: 'Sales - Implementation' },
-      { kind: 'account',  label: 'Sales - Maintenance (Recurring)' },
-      { kind: 'subtotal', label: 'Total Income' },
+      { kind: 'account',  label: 'Sales - Implementation',          section: 'Income' },
+      { kind: 'account',  label: 'Sales - Maintenance (Recurring)', section: 'Income' },
+      { kind: 'subtotal', label: 'Total Income',                    section: 'Income' },
     ]);
     // Gross Profit / Net Profit live in untitled sections -> 'summary', not 'subtotal'.
     expect(find(skel, 'Gross Profit').kind).toBe('summary');
@@ -1097,5 +1097,114 @@ describe('xero/reports — Budget Variance per month (pure)', () => {
     ];
     const { rows } = _buildBudgetVariance({ budgetRows, pnlRows: [], months, actualThroughIdx: 3 });
     expect(rows.find(r => r.label === 'X').monthly).toHaveLength(12);
+  });
+});
+
+// ── Performance overview (Dashboard → Overview + Revenue) ────────────────────
+describe('xero/reports — performance overview (pure)', () => {
+  const { _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList } = require('./reports');
+
+  test('section classification: "Less Cost of Sales" is NOT revenue despite containing "Sales"', () => {
+    expect(_sectionKind('Less Cost of Sales')).toBe('cogs');
+    expect(_sectionKind('Income')).toBe('revenue');
+    expect(_sectionKind('Trading Income')).toBe('revenue');
+    expect(_sectionKind('Other Income')).toBe('otherIncome');
+    expect(_sectionKind('Less Operating Expenses')).toBe('opex');
+    expect(_sectionKind('Less Overheads')).toBe('opex');
+    expect(_sectionKind('')).toBe('other');
+  });
+
+  test('recurring is inferred from the account name, since Xero records no such flag', () => {
+    expect(_isRecurringName('Sales - Maintenance (Recurring)')).toBe(true);
+    expect(_isRecurringName('Managed Services ARR')).toBe(true);
+    expect(_isRecurringName('Software and Licenses')).toBe(true);
+    expect(_isRecurringName('Monthly Subscription')).toBe(true);
+    expect(_isRecurringName('Sales - Implementation')).toBe(false);
+    expect(_isRecurringName('Consulting')).toBe(false);
+    expect(_isRecurringName('')).toBe(false);
+  });
+
+  const months = Array.from({ length: 12 }, (_, i) => ({ key: `2026-${i + 1}`, label: `M${i + 1}`, source: i < 4 ? 'actual' : 'budget' }));
+  const mk = (label, kind, section, actual, budget = []) => ({
+    label, kind, section,
+    monthly: months.map((_, i) => ({ actual: actual[i] || 0, budget: budget[i] || 0, variance: 0, variancePct: null })),
+  });
+
+  const rows = [
+    { kind: 'section', label: 'Income' },
+    mk('Sales - Implementation',          'account',  'Income', [0,0,0,-17670,37000]),
+    mk('Sales - Maintenance (Recurring)', 'account',  'Income', [0,0,0,75000,15000]),
+    mk('Total Income',                    'subtotal', 'Income', [0,0,0,57330,52000]),
+    { kind: 'section', label: 'Less Cost of Sales' },
+    mk('Cost of Goods Sold',  'account',  'Less Cost of Sales', [0,0,0,0,0], [0,0,0,0,7330]),
+    { kind: 'section', label: 'Other Income' },
+    mk('Other Income - Grant', 'account', 'Other Income', [0,0,0,0,0], [0,0,0,0,0,16667]),
+    { kind: 'section', label: 'Less Operating Expenses' },
+    mk('Wages and Salaries',           'account',  'Less Operating Expenses', [0,0,0,24603,0]),
+    mk('Total Operating Expenses',     'subtotal', 'Less Operating Expenses', [0,0,0,24603,0]),
+    mk('Net Profit', 'summary', '', [0,0,0,32727,52000]),
+  ];
+  const build = () => _buildPerformance({ months, rows, cash: { total: 75397, accounts: [], available: true } });
+
+  test('only revenue accounts become service lines — costs and overheads never do', () => {
+    const { serviceLines } = build();
+    expect(serviceLines.map(l => l.label)).toEqual([
+      'Sales - Implementation', 'Sales - Maintenance (Recurring)', 'Other Income - Grant',
+    ]);
+    // The trap: Cost of Goods Sold sits under a section containing "Sales".
+    expect(serviceLines.find(l => l.label === 'Cost of Goods Sold')).toBeUndefined();
+    expect(serviceLines.find(l => l.label === 'Wages and Salaries')).toBeUndefined();
+  });
+
+  test('recurring/project split sums the classified revenue accounts, excluding other income', () => {
+    const { split } = build();
+    expect(split.recurring.actual[3]).toBe(75000); // Maintenance, Jul
+    expect(split.project.actual[3]).toBe(-17670);  // Implementation, Jul (a credit note)
+    expect(split.recurring.actual[4]).toBe(15000);
+    expect(split.project.actual[4]).toBe(37000);
+    // Other Income is real income but not a service line — it must not inflate either side.
+    expect(split.recurring.budget[5]).toBe(0);
+    expect(split.project.budget[5]).toBe(0);
+  });
+
+  test('a subtotal Xero never emitted reads as a flat zero series, not undefined', () => {
+    const { totals } = build();
+    // This org books no cost of sales, so BudgetSummary emits no "Total Cost of Sales".
+    expect(totals.cogs.actual).toHaveLength(12);
+    expect(totals.cogs.actual.every(v => v === 0)).toBe(true);
+    expect(totals.revenue.actual[3]).toBe(57330);
+    expect(totals.netProfit.actual[4]).toBe(52000);
+  });
+
+  test('expense lines are collected separately from revenue', () => {
+    const { expenseLines } = build();
+    expect(expenseLines.map(l => l.label)).toEqual(['Cost of Goods Sold', 'Wages and Salaries']);
+    expect(expenseLines.find(l => l.label === 'Cost of Goods Sold').kind).toBe('cogs');
+    expect(expenseLines.find(l => l.label === 'Wages and Salaries').kind).toBe('opex');
+  });
+
+  test('watch list flags revenue booked with no costs, and says why it matters', () => {
+    const { totals } = build();
+    const list = _buildWatchList({ months, totals, actualThroughIdx: 3 });
+    const noCost = list.find(w => /no costs at all/.test(w.text));
+    expect(noCost).toBeDefined();
+    expect(noCost.severity).toBe('warn');
+    // M5 is the open month: real revenue booked, no costs yet.
+    expect(noCost.text).toContain('M5');
+    // M4 had revenue AND wages, so it must NOT be flagged.
+    expect(list.filter(w => /no costs at all/.test(w.text))).toHaveLength(1);
+  });
+
+  test('watch list flags a year with no cost of sales, and a late first month', () => {
+    const { totals } = build();
+    const list = _buildWatchList({ months, totals, actualThroughIdx: 3 });
+    expect(list.some(w => /gross margin reads 100%/.test(w.text))).toBe(true);
+    expect(list.some(w => /No activity recorded before M4/.test(w.text))).toBe(true);
+  });
+
+  test('before any month has closed, the list says so instead of showing nothing', () => {
+    const { totals } = build();
+    const list = _buildWatchList({ months, totals, actualThroughIdx: -1 });
+    expect(list.some(w => /No month of this financial year has closed/.test(w.text))).toBe(true);
   });
 });
