@@ -3,9 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
+import { fmtMoney, fmtPct, fmtCell } from '../utils/format';
+import { MonthRange, OverviewPanel, RevenuePanel } from '../components/performance/PerformancePanels';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
+  { key: 'revenue',  label: 'Revenue' },
   { key: 'invoices', label: 'Invoices & Bills' },
   { key: 'banking',  label: 'Banking' },
   { key: 'accounts', label: 'Chart of Accounts' },
@@ -27,7 +30,6 @@ const RANGE_PRESETS = [
   { key: 'custom',label: 'Custom' },
 ];
 
-function fmtPct(fraction) { return `${(Number(fraction || 0) * 100).toFixed(1)}%`; }
 
 // P&L/Cash Flow are Xero Report-API-backed, and Xero rejects >365-day report
 // ranges outright — the backend silently clamps a very wide request (like
@@ -47,10 +49,6 @@ function SourceNote({ children }) {
   return <div style={{ fontSize: 10.5, color: 'var(--text-muted)', opacity: 0.75, marginBottom: 10 }}>Source: {children}</div>;
 }
 
-function fmtMoney(n, currency) {
-  const v = Number(n || 0);
-  return `${currency ? currency + ' ' : ''}${v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
 function fmtBucketLabel(bucket, granularity) {
   if (granularity === 'month') {
     const [y, m] = bucket.split('-');
@@ -314,14 +312,6 @@ const STATUS_BADGE = {
   overdue:  { cls: 'badge-red',    label: 'Overdue' },
 };
 
-// Report cells: a dash for zero (matching Xero's own reports, where 0 and "no
-// activity" are visually the same thing) and parentheses for negatives.
-function fmtCell(n) {
-  const v = Number(n || 0);
-  if (v === 0) return '-';
-  const abs = Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return v < 0 ? `(${abs})` : abs;
-}
 
 // The monthly actual/budget grid. 14 columns don't fit any normal screen, so the
 // table scrolls horizontally inside its own container while the row-label column
@@ -518,6 +508,14 @@ export default function XeroInsights() {
   // until loaded (unlike those, it's an object not a list, so there's nothing
   // meaningful to render half-populated).
   const [budget, setBudget] = useState({ status: 'idle', data: null, error: '' });
+
+  // Performance overview — feeds BOTH the Overview and Revenue tabs from one
+  // fetch. monthFrom/monthTo index into data.months, so changing the range
+  // re-slices in place without touching the network.
+  const [perf, setPerf] = useState({ status: 'idle', data: null, error: '' });
+  const [monthFrom, setMonthFrom] = useState(0);
+  const [monthTo,   setMonthTo]   = useState(11);
+  const [revenueLine, setRevenueLine] = useState('overall');
   // Which month the Budget Variance tab compares — a month key, or 'ytd'. Defaults
   // to the current month on load (see fetchBudget), matching Xero's own report,
   // which is titled "For the month ended <current month>".
@@ -587,6 +585,8 @@ export default function XeroInsights() {
     // refetch if it's on screen, otherwise let the lazy loader pick it up.
     if (tab === 'budget' || tab === 'variance') fetchBudget();
     else setBudget({ status: 'idle', data: null, error: '' });
+    if (tab === 'overview' || tab === 'revenue') fetchPerf();
+    else setPerf({ status: 'idle', data: null, error: '' });
   }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (rangePreset !== 'custom') fetchPeriod();
@@ -629,7 +629,25 @@ export default function XeroInsights() {
     // Both budget tabs share one fetch and one cache entry — the Budget Variance
     // view is a different presentation of the same merged data, not a second call.
     if ((tab === 'budget' || tab === 'variance') && budget.status === 'idle') fetchBudget();
+    if ((tab === 'overview' || tab === 'revenue') && perf.status === 'idle') fetchPerf();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function fetchPerf(opts = {}) {
+    setPerf(s => ({ ...s, status: 'loading', error: '' }));
+    const params = new URLSearchParams();
+    if (activeTenantId) params.set('tenantId', activeTenantId);
+    if (opts.force) params.set('force', 'true');
+    api.get(`/xero-reports/performance?${params.toString()}`)
+      .then(d => {
+        setPerf({ status: 'done', data: d, error: '' });
+        // Default the range to the whole financial year the first time only —
+        // re-clamped afterwards so a tenant switch can't leave it out of bounds.
+        const last = Math.max(0, (d.months || []).length - 1);
+        setMonthFrom(f => Math.min(f, last));
+        setMonthTo(t => (t === 11 || t > last ? last : t));
+      })
+      .catch(err => setPerf({ status: 'done', data: null, error: err.message }));
+  }
 
   function fetchBudget(opts = {}) {
     setBudget(s => ({ ...s, status: 'loading', error: '' }));
@@ -815,8 +833,42 @@ export default function XeroInsights() {
         ))}
       </div>
 
+      {(tab === 'overview' || tab === 'revenue') && perf.data && !perf.error && (
+        <div className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                       gap: 14, flexWrap: 'wrap', marginBottom: 16, padding: '12px 16px' }}>
+          <MonthRange months={perf.data.months} from={monthFrom} to={monthTo}
+                      onChange={(f, t) => { setMonthFrom(f); setMonthTo(t); }}
+                      label={perf.data.fiscalYear?.label} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+              {perf.data.months.filter(m => m.source === 'actual').length} closed · {perf.data.months.filter(m => m.source === 'budget').length} budgeted
+            </span>
+            <button className="btn btn-outline btn-sm" disabled={perf.status === 'loading'} onClick={() => fetchPerf({ force: true })}>
+              {perf.status === 'loading' ? <span className="btn-spinner" /> : '↻'} Refresh
+            </button>
+          </div>
+        </div>
+      )}
+
       {tab === 'overview' && (
         <>
+          {perf.status === 'loading' && !perf.data && (
+            <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading performance data…</div>
+          )}
+          {perf.error && (
+            <div className="alert alert-error" style={{ marginBottom: 16 }}><span className="alert-icon">✕</span>{perf.error}</div>
+          )}
+          {perf.data && !perf.error && (
+            <OverviewPanel data={perf.data} from={monthFrom} to={monthTo} />
+          )}
+
+          {/* The operational view that predates this dashboard — kept below the
+              financial summary rather than discarded, since AR/AP aging answers
+              a different question from margin. */}
+          <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
+                        color: 'var(--text-muted)', margin: '26px 0 12px' }}>
+            Working capital · right now
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16, marginBottom: 16 }}>
             <div className="card">
               <div className="card-title" style={{ marginBottom: 2 }}>Receivables vs. Payables</div>
@@ -932,6 +984,21 @@ export default function XeroInsights() {
               )}
             </div>
           </div>
+        </>
+      )}
+
+      {tab === 'revenue' && (
+        <>
+          {perf.status === 'loading' && !perf.data && (
+            <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading revenue data…</div>
+          )}
+          {perf.error && (
+            <div className="alert alert-error"><span className="alert-icon">✕</span>{perf.error}</div>
+          )}
+          {perf.data && !perf.error && (
+            <RevenuePanel data={perf.data} from={monthFrom} to={monthTo}
+                          selectedLine={revenueLine} onSelectLine={setRevenueLine} />
+          )}
         </>
       )}
 
