@@ -169,7 +169,11 @@ router.get('/performance', requireAuth, async (req, res) => {
     if (!tenantId) return res.json({ connected: false, tenants: [] });
 
     const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-    const data = await reports.getPerformance(req.user.id, tenantId, { timezone, window: req.query.window, force: req.query.force === 'true' });
+    // Either a named preset, or an explicit from/to span of any length.
+    const period = (req.query.from && req.query.to)
+      ? { from: req.query.from, to: req.query.to }
+      : { preset: req.query.preset || req.query.window };
+    const data = await reports.getPerformance(req.user.id, tenantId, { timezone, period, force: req.query.force === 'true' });
     res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
   } catch (err) {
     logger.error('Performance overview failed', { error: xeroErrMsg(err), userId: req.user.id });

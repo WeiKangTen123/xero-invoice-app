@@ -370,7 +370,11 @@ export default function XeroInsights() {
   const [perf, setPerf] = useState({ status: 'idle', data: null, error: '' });
   const [monthFrom, setMonthFrom] = useState(0);
   const [monthTo,   setMonthTo]   = useState(11);
-  const [perfWindow, setPerfWindow] = useState('fy');
+  // The period is now server-resolved: either a named preset, or an explicit
+  // from/to span of any length. Month range and preset are independent — picking
+  // a range simply switches the preset to 'custom'.
+  const [perfPreset, setPerfPreset] = useState('fy-ytd');
+  const [perfRange,  setPerfRange]  = useState(null); // { from, to } when custom
   const [revenueLine, setRevenueLine] = useState('overall');
   // Fetched separately from the figures so an LLM outage or a missing API key
   // can never delay or blank the dashboard itself.
@@ -449,21 +453,19 @@ export default function XeroInsights() {
     setPerf(s => ({ ...s, status: 'loading', error: '' }));
     const params = new URLSearchParams();
     if (activeTenantId) params.set('tenantId', activeTenantId);
-    params.set('window', opts.window || perfWindow);
+    const range  = opts.range !== undefined ? opts.range : perfRange;
+    const preset = opts.preset || perfPreset;
+    if (range) { params.set('from', range.from); params.set('to', range.to); }
+    else       { params.set('preset', preset); }
     if (opts.force) params.set('force', 'true');
     api.get(`/xero-reports/performance?${params.toString()}`)
       .then(d => {
         setPerf({ status: 'done', data: d, error: '' });
-        // Land on a single month rather than the whole year: a monthly figure is
-        // what gets reviewed. Prefer the current month; if the window doesn't
-        // contain it (a past or future period), use its last month instead.
-        const ms = d.months || [];
-        const last = Math.max(0, ms.length - 1);
-        const nowKey = new Date().toISOString().slice(0, 7);
-        const idx = ms.findIndex(m => m.key === nowKey);
-        const target = idx >= 0 ? idx : last;
-        setMonthFrom(target);
-        setMonthTo(target);
+        // The server already resolved exactly which months this period covers,
+        // so the panels span all of them. Narrowing further is done by changing
+        // the period itself, not by a second control fighting the first.
+        setMonthFrom(0);
+        setMonthTo(Math.max(0, (d.months || []).length - 1));
       })
       .catch(err => setPerf({ status: 'done', data: null, error: err.message }));
 
@@ -664,10 +666,17 @@ export default function XeroInsights() {
         <div className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                                        gap: 14, flexWrap: 'wrap', marginBottom: 16, padding: '12px 16px' }}>
           <MonthRange months={perf.data.months} from={monthFrom} to={monthTo}
-                      onChange={(f, t) => { setMonthFrom(f); setMonthTo(t); }}
-                      label={perf.data.fiscalYear?.label}
-                      window={perfWindow}
-                      onWindow={w => { setPerfWindow(w); fetchPerf({ window: w }); }} />
+                      label={perf.data.period?.label}
+                      chunks={perf.data.period?.chunks}
+                      preset={perfRange ? 'custom' : perfPreset}
+                      onPreset={p => {
+                        if (p === 'custom') return;      // range pickers drive that
+                        setPerfPreset(p); setPerfRange(null); fetchPerf({ preset: p, range: null });
+                      }}
+                      onRange={(from, to) => {
+                        const r = { from, to };
+                        setPerfRange(r); fetchPerf({ range: r });
+                      }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
               {perf.data.months.filter(m => m.source === 'actual').length} closed · {perf.data.months.filter(m => m.source === 'budget').length} budgeted

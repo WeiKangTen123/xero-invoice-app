@@ -1367,3 +1367,104 @@ describe('xero/reports — calendar year and custom windows ride on the anchor',
     }
   });
 });
+
+// ── Free-form periods ───────────────────────────────────────────────────────
+// Twelve months is the ceiling of one Xero call pair, not of a reporting period.
+// These pin that a period can be any length and any span, that presets derive
+// from the ORG's fiscal year rather than a hardcoded one, and that stitching
+// several chunks together never slides a month.
+describe('xero/reports — period resolution (pure)', () => {
+  const { _resolvePeriod, _monthsBetween, _chunkMonths, _mergeChunks } = require('./reports');
+  const TODAY = { year: 2026, month: 8, day: 25 };
+  const MAR   = { month: 3, day: 31 };   // Apr–Mar fiscal year
+  const DEC   = { month: 12, day: 31 };  // Jan–Dec fiscal year
+  const span  = w => `${w.months[0].label} .. ${w.months[w.months.length - 1].label}`;
+
+  test('presets follow the ORG fiscal year — the same preset differs per company', () => {
+    // This is the whole point: one org's "year to date" is not another's.
+    expect(span(_resolvePeriod('fy-ytd', TODAY, MAR))).toBe('Apr 2026 .. Aug 2026');
+    expect(span(_resolvePeriod('fy-ytd', TODAY, DEC))).toBe('Jan 2026 .. Aug 2026');
+    expect(span(_resolvePeriod('fy',     TODAY, MAR))).toBe('Apr 2026 .. Mar 2027');
+    expect(span(_resolvePeriod('fy',     TODAY, DEC))).toBe('Jan 2026 .. Dec 2026');
+  });
+
+  test('calendar presets ignore the fiscal year entirely', () => {
+    for (const fye of [MAR, DEC, { month: 6, day: 30 }]) {
+      expect(span(_resolvePeriod('cy',     TODAY, fye))).toBe('Jan 2026 .. Dec 2026');
+      expect(span(_resolvePeriod('cy-ytd', TODAY, fye))).toBe('Jan 2026 .. Aug 2026');
+    }
+  });
+
+  test('month and quarter presets resolve to real calendar quarters', () => {
+    expect(span(_resolvePeriod('this-month',   TODAY, MAR))).toBe('Aug 2026 .. Aug 2026');
+    expect(span(_resolvePeriod('last-month',   TODAY, MAR))).toBe('Jul 2026 .. Jul 2026');
+    expect(span(_resolvePeriod('this-quarter', TODAY, MAR))).toBe('Jul 2026 .. Sep 2026');
+    expect(span(_resolvePeriod('last-quarter', TODAY, MAR))).toBe('Apr 2026 .. Jun 2026');
+    expect(_resolvePeriod('this-month', TODAY, MAR).months).toHaveLength(1);
+  });
+
+  test('an explicit range wins over any preset, and may be any length', () => {
+    const w = _resolvePeriod({ preset: 'fy', from: '2024-01', to: '2026-08' }, TODAY, MAR);
+    expect(w.months).toHaveLength(32);
+    expect(span(w)).toBe('Jan 2024 .. Aug 2026');
+  });
+
+  test('a backwards range is swapped, not rejected', () => {
+    expect(_monthsBetween('2026-08', '2025-01')).toHaveLength(20);
+    expect(_monthsBetween('2025-01', '2026-08')).toHaveLength(20);
+  });
+
+  test('unparseable input yields null rather than a wrong span', () => {
+    expect(_monthsBetween('nonsense', '2026-08')).toBeNull();
+    expect(_monthsBetween('2026-08', null)).toBeNull();
+  });
+
+  test('an unrecognised preset falls back to year-to-date, never blank', () => {
+    const w = _resolvePeriod('made-up', TODAY, MAR);
+    expect(w.key).toBe('fy-ytd');
+    expect(w.months.length).toBeGreaterThan(0);
+  });
+
+  test('chunking covers every month exactly once, in order', () => {
+    const months = _monthsBetween('2024-01', '2026-08');   // 32
+    const chunks = _chunkMonths(months, 12);
+    expect(chunks.map(c => c.length)).toEqual([12, 12, 8]);
+    expect(chunks.flat().map(m => m.key)).toEqual(months.map(m => m.key));
+  });
+
+  test('merging chunks places each value at the right month offset', () => {
+    const cell = v => ({ value: String(v) });
+    const rowOf = (label, vals, rowType = 'Row') => ({ rowType, cells: [cell(label), ...vals.map(cell)] });
+    const months = _monthsBetween('2026-01', '2026-04'); // 4 months, 2 chunks of 2
+    const chunks = _chunkMonths(months, 2);
+
+    const parts = [
+      { months: chunks[0],
+        budgetRows: [{ rowType: 'Section', title: 'Income', rows: [rowOf('Sales', [10, 20])] }],
+        // ProfitAndLoss returns NEWEST-first, so this is Feb then Jan.
+        pnlRows:    [{ rowType: 'Section', title: 'Income', rows: [rowOf('Sales', [2, 1])] }] },
+      { months: chunks[1],
+        budgetRows: [{ rowType: 'Section', title: 'Income', rows: [rowOf('Sales', [30, 40])] }],
+        pnlRows:    [{ rowType: 'Section', title: 'Income', rows: [rowOf('Sales', [4, 3])] }] },
+    ];
+    const m = _mergeChunks(parts, months.length);
+    expect(m.budget.get('Sales')).toEqual([10, 20, 30, 40]);
+    expect(m.actual.get('Sales')).toEqual([1, 2, 3, 4]);   // reversed per chunk, then concatenated
+    expect(m.skeleton.filter(r => r.kind === 'section')).toHaveLength(1); // not duplicated per chunk
+  });
+
+  test('an account missing from one chunk is zero-filled, not shifted', () => {
+    const cell = v => ({ value: String(v) });
+    const rowOf = (label, vals) => ({ rowType: 'Row', cells: [cell(label), ...vals.map(cell)] });
+    const months = _monthsBetween('2026-01', '2026-04');
+    const chunks = _chunkMonths(months, 2);
+    const parts = [
+      { months: chunks[0], budgetRows: [{ rowType: 'Section', title: 'Income', rows: [rowOf('A', [1, 2])] }], pnlRows: [] },
+      // Chunk 2 introduces B and drops A entirely.
+      { months: chunks[1], budgetRows: [{ rowType: 'Section', title: 'Income', rows: [rowOf('B', [7, 8])] }], pnlRows: [] },
+    ];
+    const m = _mergeChunks(parts, months.length);
+    expect(m.budget.get('A')).toEqual([1, 2, 0, 0]);
+    expect(m.budget.get('B')).toEqual([0, 0, 7, 8]);
+  });
+});
