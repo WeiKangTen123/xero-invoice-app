@@ -31,7 +31,11 @@ export function AuthProvider({ children }) {
     return data.user;
   }
 
-  function logout() {
+  // Tell the server first, so it can stop this account's mailbox watcher —
+  // otherwise it keeps polling for someone who has signed out. Best-effort: a
+  // failed request must never trap the user in a session they asked to leave.
+  async function logout() {
+    try { await api.post('/auth/logout', {}); } catch (_) { /* leaving anyway */ }
     localStorage.removeItem('token');
     setUser(null);
   }

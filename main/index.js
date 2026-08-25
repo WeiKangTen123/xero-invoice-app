@@ -126,6 +126,10 @@ app.use((err, _req, res, _next) => {
 });
 
 // ── Start ────────────────────────────────────────────────────────────────────
+// Backstop for abandoned sessions — logout stops a watcher immediately, this
+// catches the ones nobody ever came back to. See email/idle-sweeper.js.
+require('./email/idle-sweeper').start();
+
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('===========================================');
   console.log(`Server running on port ${PORT}`);
@@ -148,8 +152,17 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   // Firing all at once causes 429 rate-limit errors that then also fail silently.
   setTimeout(async () => {
     try {
+      const settingsStore = require('./utils/settings-store');
       const userIds = getAllUsers().map(u => String(u.id));
       for (const userId of userIds) {
+        // Respect the same switch the live pipeline does. This retry used to run
+        // unconditionally, so a user who had deliberately turned auto-process OFF
+        // still had their queued invoices posted to Xero by the next restart —
+        // the toggle held right up until the server bounced.
+        if (!settingsStore.forUser(userId).get('autoProcess')) {
+          logger.info('Boot retry skipped — auto-process is off for this user', { userId });
+          continue;
+        }
         const stuck = invoiceStore.forUser(userId).getAll()
           .filter(i => i.status === 'pending' || i.status === 'submitting');
         if (!stuck.length) continue;

@@ -62,6 +62,31 @@ router.post('/login', async (req, res) => {
 });
 
 // Get current user (validate token)
+// POST /api/auth/logout — stops this user's mailbox watcher.
+//
+// Logout was purely client-side (drop the token, forget the user), so the server
+// never learned about it and the watcher kept polling for an account nobody was
+// signed into. The JWT itself is stateless and can't be revoked here; this is
+// about not leaving a mailbox connection running for someone who has left.
+//
+// Deliberately best-effort: a failure to stop must not block the user from
+// logging out, so it never returns an error for that.
+router.post('/logout', requireAuth, (req, res) => {
+  try {
+    const registry = require('../email/watcher-registry');
+    const wasRunning = registry.isRunning(req.user.id);
+    if (wasRunning) {
+      registry.stop(req.user.id);
+      try { require('../utils/process-state').forUser(req.user.id).notifyStopped(); } catch (_) {}
+      logger.info('Logout — mailbox watcher stopped', { userId: req.user.id });
+    }
+    res.json({ ok: true, watcherStopped: wasRunning });
+  } catch (err) {
+    logger.warn('Logout: could not stop watcher', { userId: req.user.id, error: err.message });
+    res.json({ ok: true, watcherStopped: false });
+  }
+});
+
 router.get('/me', requireAuth, (req, res) => {
   const config = getUserConfig(req.user.id);
   res.json({ user: { ...req.user, timezone: config.TIMEZONE || DEFAULT_TIMEZONE } });
