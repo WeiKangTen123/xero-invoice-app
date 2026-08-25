@@ -991,6 +991,8 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
     merged: _mergeChunks(parts, months.length),
   });
 
+  // Re-derived here: the loop above scopes its own first/last to each chunk.
+  const first = months[0], last = months[months.length - 1];
   const end = _parseISODate(last.endISO);
   const MONTHS_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   // Only a true fiscal-year window can honestly be called "the year ended X".
