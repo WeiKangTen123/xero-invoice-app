@@ -169,11 +169,11 @@ router.get('/performance', requireAuth, async (req, res) => {
     if (!tenantId) return res.json({ connected: false, tenants: [] });
 
     const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-    // Either a named preset, or an explicit from/to span of any length.
-    const period = (req.query.from && req.query.to)
-      ? { from: req.query.from, to: req.query.to }
-      : { preset: req.query.preset || req.query.window };
-    const data = await reports.getPerformance(req.user.id, tenantId, { timezone, period, force: req.query.force === 'true' });
+    const data = await reports.getPerformance(req.user.id, tenantId, {
+      timezone, period: _periodFromQuery(req),
+      cashFlow: req.query.cashFlow === 'true',
+      force: req.query.force === 'true',
+    });
     res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
   } catch (err) {
     logger.error('Performance overview failed', { error: xeroErrMsg(err), userId: req.user.id });
@@ -192,13 +192,24 @@ router.get('/variance-insights', requireAuth, async (req, res) => {
     if (!tenantId) return res.json({ connected: false });
 
     const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-    const data = await reports.getVarianceInsights(req.user.id, tenantId, { timezone, force: req.query.force === 'true' });
+    // Same period the figures used — otherwise the commentary describes months
+    // the reader isn't looking at.
+    const data = await reports.getVarianceInsights(req.user.id, tenantId, {
+      timezone, period: _periodFromQuery(req), force: req.query.force === 'true',
+    });
     res.json({ connected: true, ...data });
   } catch (err) {
     logger.error('Variance insights failed', { error: xeroErrMsg(err), userId: req.user.id });
     res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
   }
 });
+
+// Either a named preset, or an explicit from/to span of any length.
+function _periodFromQuery(req) {
+  return (req.query.from && req.query.to)
+    ? { from: req.query.from, to: req.query.to }
+    : { preset: req.query.preset || req.query.window };
+}
 
 // A call outside the token's granted scopes — the situation for anyone who
 // connected before these report/bank-transaction/payments scopes existed.

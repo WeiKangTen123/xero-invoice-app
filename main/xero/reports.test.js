@@ -1468,3 +1468,71 @@ describe('xero/reports — period resolution (pure)', () => {
     expect(m.budget.get('B')).toEqual([0, 0, 7, 8]);
   });
 });
+
+// ── Cache lifetime and fetch concurrency ────────────────────────────────────
+describe('xero/reports — period cache tiering (pure)', () => {
+  const { _periodCacheTtl } = require('./reports');
+  const TODAY = { year: 2026, month: 8, day: 25 };
+  const upTo  = endISO => [{ endISO }];
+  const MIN = 60000, HOUR = 3600000;
+
+  test('a period still running keeps the short TTL', () => {
+    expect(_periodCacheTtl(upTo('2026-08-31'), TODAY)).toBe(90 * 1000);   // current month
+    expect(_periodCacheTtl(upTo('2027-03-31'), TODAY)).toBe(90 * 1000);   // future
+    expect(_periodCacheTtl(upTo('2026-08-25'), TODAY)).toBe(90 * 1000);   // ends today
+  });
+
+  test('a recently closed period gets a SHORT life, because back-dating happens', () => {
+    // Month-end close means late invoices and adjustments still land here — this
+    // must not be cached for hours.
+    expect(_periodCacheTtl(upTo('2026-07-31'), TODAY)).toBe(10 * MIN);
+    expect(_periodCacheTtl(upTo('2026-08-24'), TODAY)).toBe(10 * MIN);
+  });
+
+  test('a long-closed period is cached for hours — it cannot meaningfully change', () => {
+    expect(_periodCacheTtl(upTo('2026-06-30'), TODAY)).toBe(6 * HOUR);
+    expect(_periodCacheTtl(upTo('2024-12-31'), TODAY)).toBe(6 * HOUR);
+  });
+
+  test('missing or unparseable months fall back to the short TTL, never a long one', () => {
+    // Caching something we cannot date for six hours would be the dangerous
+    // direction to fail in.
+    expect(_periodCacheTtl([], TODAY)).toBe(90 * 1000);
+    expect(_periodCacheTtl(null, TODAY)).toBe(90 * 1000);
+    expect(_periodCacheTtl(upTo('nonsense'), TODAY)).toBe(90 * 1000);
+  });
+});
+
+describe('xero/reports — bounded concurrency (pure)', () => {
+  const { _mapWithConcurrency } = require('./reports');
+
+  test('results keep input order even when later items finish first', async () => {
+    const out = await _mapWithConcurrency([1, 2, 3, 4, 5], 2, async x => {
+      await new Promise(r => setTimeout(r, (6 - x) * 5)); // earlier items are SLOWER
+      return x * 10;
+    });
+    expect(out).toEqual([10, 20, 30, 40, 50]);
+  });
+
+  test('never exceeds the limit in flight — the point is not bursting Xero', async () => {
+    let inFlight = 0, peak = 0;
+    await _mapWithConcurrency([1, 2, 3, 4, 5, 6, 7], 2, async () => {
+      peak = Math.max(peak, ++inFlight);
+      await new Promise(r => setTimeout(r, 5));
+      inFlight--;
+    });
+    expect(peak).toBe(2);
+  });
+
+  test('handles fewer items than the limit, and an empty list', async () => {
+    expect(await _mapWithConcurrency([9], 4, async x => x)).toEqual([9]);
+    expect(await _mapWithConcurrency([], 4, async x => x)).toEqual([]);
+  });
+
+  test('a rejection propagates rather than being silently dropped', async () => {
+    await expect(_mapWithConcurrency([1, 2], 2, async x => {
+      if (x === 2) throw new Error('chunk failed');
+      return x;
+    })).rejects.toThrow('chunk failed');
+  });
+});
