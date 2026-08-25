@@ -1290,3 +1290,54 @@ describe('xero/reports — variance insight grounding (pure)', () => {
     expect(_parseInsights(JSON.stringify({ reasons: [] }), c)).toEqual([]);
   });
 });
+
+// ── Sliding 12-month window ─────────────────────────────────────────────────
+// Twelve months is a per-CALL limit (ProfitAndLoss caps periods at 11,
+// BudgetSummary at 12), not a fiscal-year limit — both anchor on an arbitrary
+// date. These pin that the window can leave the fiscal year without extra cost.
+describe('xero/reports — window resolution (pure)', () => {
+  const { _resolveWindow, _monthsFrom } = require('./reports');
+  const TODAY = { year: 2026, month: 8, day: 17 };
+  const FYE   = { month: 3, day: 31 };
+  const span  = w => `${w.months[0].label} .. ${w.months[11].label}`;
+
+  test('every window is exactly 12 months, oldest first', () => {
+    for (const k of ['fy', 'prev-fy', 'next-fy', 'rolling', '2025-12']) {
+      const w = _resolveWindow(k, TODAY, FYE);
+      expect(w.months).toHaveLength(12);
+      expect(w.months[0].key < w.months[11].key).toBe(true);
+    }
+  });
+
+  test('fiscal windows shift by whole years, keeping the Apr–Mar boundary', () => {
+    expect(span(_resolveWindow('fy',      TODAY, FYE))).toBe('Apr 2026 .. Mar 2027');
+    expect(span(_resolveWindow('prev-fy', TODAY, FYE))).toBe('Apr 2025 .. Mar 2026');
+    expect(span(_resolveWindow('next-fy', TODAY, FYE))).toBe('Apr 2027 .. Mar 2028');
+  });
+
+  test('rolling ends on the current month — the view Xero\'s own report uses', () => {
+    expect(span(_resolveWindow('rolling', TODAY, FYE))).toBe('Sep 2025 .. Aug 2026');
+  });
+
+  test('an explicit YYYY-MM anchors the window on that month', () => {
+    expect(span(_resolveWindow('2025-12', TODAY, FYE))).toBe('Jan 2025 .. Dec 2025');
+    expect(_resolveWindow('2025-12', TODAY, FYE).label).toBe('12 months to Dec 2025');
+  });
+
+  test('a bad window falls back to the fiscal year instead of throwing', () => {
+    for (const bad of ['garbage', '', null, undefined, '2025-13', '2025-00']) {
+      const w = _resolveWindow(bad, TODAY, FYE);
+      expect(w.key).toBe('fy');
+      expect(span(w)).toBe('Apr 2026 .. Mar 2027');
+    }
+  });
+
+  test('months carry the anchors the two Xero calls need, and cross year ends', () => {
+    const w = _resolveWindow('rolling', TODAY, FYE);
+    expect(w.months[0]).toMatchObject({ key: '2025-09', startISO: '2025-09-01', endISO: '2025-09-30' });
+    expect(w.months[11]).toMatchObject({ key: '2026-08', startISO: '2026-08-01', endISO: '2026-08-31' });
+    // February length is computed, not assumed.
+    const feb = _monthsFrom({ year: 2028, month: 2, day: 1 }, 1)[0];
+    expect(feb.endISO).toBe('2028-02-29'); // leap year
+  });
+});

@@ -20,11 +20,31 @@ function sliceSum(series, from, to) { return sum(slice(series, from, to)); }
 // ── Month range ──────────────────────────────────────────────────────────────
 // Two selects rather than a date picker: the underlying reports are monthly, so
 // offering arbitrary days would imply a precision the data doesn't have.
-export function MonthRange({ months, from, to, onChange, label }) {
+// The 12-month windows a single pair of Xero calls can cover. Anything wider
+// would need several calls stitched together, so it isn't offered here.
+export const WINDOWS = [
+  { key: 'fy',      label: 'This financial year' },
+  { key: 'rolling', label: 'Last 12 months' },
+  { key: 'prev-fy', label: 'Previous financial year' },
+  { key: 'next-fy', label: 'Next financial year' },
+];
+
+export function MonthRange({ months, from, to, onChange, label, window: win, onWindow }) {
   if (!months?.length) return null;
   const opt = (m, i) => <option key={m.key} value={i}>{m.label}</option>;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      {onWindow && (
+        <>
+          <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
+            Period
+          </span>
+          <select className="form-input" style={{ width: 'auto', fontSize: 12, padding: '5px 8px' }}
+                  value={win} onChange={e => onWindow(e.target.value)}>
+            {WINDOWS.map(w => <option key={w.key} value={w.key}>{w.label}</option>)}
+          </select>
+        </>
+      )}
       <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
         Month range
       </span>
@@ -516,9 +536,15 @@ export function OverviewPanel({ data, from, to, insights, summary }) {
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
         <Surface title="Revenue trend" right={<ChartModeToggle mode={trendMode} onChange={setTrendMode} />} flex={7} minWidth={380}>
-          <TrendChart mode={trendMode} months={months} currency={cur}
-                      actual={slice(data.totals.revenue.actual, from, to)}
-                      budget={slice(data.totals.revenue.budget, from, to)} />
+          {/* Deliberately spans the whole window, not the selected range — a
+              single-month selection would otherwise render one bar, which is
+              not a trend. The KPIs above still follow the range. */}
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginBottom: 8 }}>
+            Full period · {data.months[0].label} – {data.months[data.months.length - 1].label}
+          </div>
+          <TrendChart mode={trendMode} months={data.months} currency={cur}
+                      actual={data.totals.revenue.actual}
+                      budget={data.totals.revenue.budget} />
           <Legend items={[{ label: 'Actual', color: 'var(--accent)' }, { label: 'Budget', color: 'var(--text-muted)', opacity: 0.32 }]} />
         </Surface>
         <Surface title="Variance reasons"

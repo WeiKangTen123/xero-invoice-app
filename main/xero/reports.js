@@ -648,11 +648,15 @@ async function getBankSummary(userId, tenantId, { from, to, force = false } = {}
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-// Pure. The 12 months of the fiscal year containing `today`, oldest first.
-function _fiscalYearMonths(today, fiscalYearEnd) {
-  const start  = _fiscalYearStart(today, fiscalYearEnd);
+// Pure. `n` consecutive months starting at `start`, oldest first.
+//
+// Twelve months is a per-CALL limit, not a fiscal-year limit: ProfitAndLoss caps
+// `periods` at 11 (12 columns) and BudgetSummary at 12, but both anchor on an
+// arbitrary date. So any 12 consecutive months cost exactly one pair of calls —
+// which is what lets the window slide off the fiscal year entirely.
+function _monthsFrom(start, n = 12) {
   const months = [];
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < n; i++) {
     const d = new Date(Date.UTC(start.year, start.month - 1 + i, 1));
     const year = d.getUTCFullYear(), month = d.getUTCMonth() + 1;
     const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
@@ -664,6 +668,39 @@ function _fiscalYearMonths(today, fiscalYearEnd) {
     });
   }
   return months;
+}
+
+// Pure. The 12 months of the fiscal year containing `today`.
+function _fiscalYearMonths(today, fiscalYearEnd) {
+  return _monthsFrom(_fiscalYearStart(today, fiscalYearEnd));
+}
+
+// Pure. Resolves a window key into its 12 months plus a human label.
+//   fy | prev-fy | next-fy   fiscal years relative to today
+//   rolling                  the 12 months ending with the current month
+//   YYYY-MM                  the 12 months ending with that month
+// Anything unrecognised falls back to the current fiscal year rather than
+// throwing — a bad query string shouldn't blank the dashboard.
+function _resolveWindow(key, today, fiscalYearEnd) {
+  const shiftFY = years => {
+    const s = _fiscalYearStart(today, fiscalYearEnd);
+    return _monthsFrom({ ...s, year: s.year + years });
+  };
+  const endingAt = (year, month) => _monthsFrom(_partsFromDate(new Date(Date.UTC(year, month - 1 - 11, 1))));
+
+  if (key === 'prev-fy') return { key, months: shiftFY(-1), label: 'Previous financial year' };
+  if (key === 'next-fy') return { key, months: shiftFY(1),  label: 'Next financial year' };
+  if (key === 'rolling') return { key, months: endingAt(today.year, today.month), label: 'Last 12 months' };
+
+  const m = /^(\d{4})-(\d{2})$/.exec(key || '');
+  if (m) {
+    const year = Number(m[1]), month = Number(m[2]);
+    if (month >= 1 && month <= 12) {
+      const months = endingAt(year, month);
+      return { key, months, label: `12 months to ${months[11].label}` };
+    }
+  }
+  return { key: 'fy', months: _fiscalYearMonths(today, fiscalYearEnd), label: 'This financial year' };
 }
 
 // Pure. Index of the last FULLY elapsed month, or -1 if none has completed.
@@ -807,14 +844,17 @@ function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx })
   };
 }
 
-async function getBudgetVariance(userId, tenantId, { force = false, timezone = 'UTC' } = {}) {
+async function getBudgetVariance(userId, tenantId, { force = false, timezone = 'UTC', window = 'fy' } = {}) {
   const org           = await _getOrganisation(userId, tenantId, force);
   const fiscalYearEnd = { month: org.financialYearEndMonth || 12, day: org.financialYearEndDay || 31 };
   const today         = _todayPartsInTz(timezone);
-  const months        = _fiscalYearMonths(today, fiscalYearEnd);
+  const win           = _resolveWindow(window, today, fiscalYearEnd);
+  const months        = win.months;
   const actualThroughIdx = _actualThroughIndex(months, today);
 
-  const key    = `budgetvar:${userId}:${tenantId}:${months[0].key}:${actualThroughIdx}`;
+  // The window is part of the key — two windows are two different reports, and
+  // serving one for the other would silently show the wrong year.
+  const key    = `budgetvar:${userId}:${tenantId}:${win.key}:${months[0].key}:${actualThroughIdx}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
@@ -836,12 +876,18 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
     months, actualThroughIdx,
   });
 
-  const fyEndLabel = `${_parseISODate(last.endISO).day} ${['January','February','March','April','May','June','July','August','September','October','November','December'][_parseISODate(last.endISO).month - 1]} ${_parseISODate(last.endISO).year}`;
-  logger.info('Budget vs Actual fetched', { userId, tenantId, fy: `${first.key}..${last.key}`, actualMonths: actualThroughIdx + 1 });
+  const end = _parseISODate(last.endISO);
+  const MONTHS_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  // Only a true fiscal-year window can honestly be called "the year ended X".
+  const periodLabel = win.key === 'fy'
+    ? `For the year ended ${end.day} ${MONTHS_LONG[end.month - 1]} ${end.year}`
+    : `${win.label} · ${months[0].label} – ${last.label}`;
+  logger.info('Budget vs Actual fetched', { userId, tenantId, window: win.key, range: `${first.key}..${last.key}`, actualMonths: actualThroughIdx + 1 });
 
   return _cacheSet(key, {
     organisation: { name: org.name || org.legalName || 'Organisation', currency: org.baseCurrency || '' },
-    fiscalYear:   { label: `For the year ended ${fyEndLabel}`, fromISO: first.startISO, toISO: last.endISO },
+    fiscalYear:   { label: periodLabel, fromISO: first.startISO, toISO: last.endISO },
+    window:       { key: win.key, label: win.label },
     months:       months.map((m, i) => ({ key: m.key, label: m.label, source: i <= actualThroughIdx ? 'actual' : 'budget' })),
     ...built,
   });
@@ -958,10 +1004,10 @@ function _buildWatchList({ months, totals, actualThroughIdx }) {
   return out;
 }
 
-async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false } = {}) {
+async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy' } = {}) {
   // Reuses the budget-variance fetch and its cache — on a warm cache this whole
   // endpoint costs one Xero call (the bank summary) rather than three.
-  const bv = await getBudgetVariance(userId, tenantId, { timezone, force });
+  const bv = await getBudgetVariance(userId, tenantId, { timezone, force, window });
 
   const first = bv.fiscalYear.fromISO;
   const today = _fmtISODate(_todayPartsInTz(timezone));
@@ -994,6 +1040,7 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
   return {
     organisation:     bv.organisation,
     fiscalYear:       bv.fiscalYear,
+    window:           bv.window,
     months:           bv.months,
     actualThroughIdx,
     ...built,
@@ -1149,7 +1196,7 @@ module.exports = {
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
-  _fiscalYearMonths, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
+  _fiscalYearMonths, _monthsFrom, _resolveWindow, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
   _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
 };

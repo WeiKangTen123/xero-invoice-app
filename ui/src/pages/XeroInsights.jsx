@@ -370,6 +370,7 @@ export default function XeroInsights() {
   const [perf, setPerf] = useState({ status: 'idle', data: null, error: '' });
   const [monthFrom, setMonthFrom] = useState(0);
   const [monthTo,   setMonthTo]   = useState(11);
+  const [perfWindow, setPerfWindow] = useState('fy');
   const [revenueLine, setRevenueLine] = useState('overall');
   // Fetched separately from the figures so an LLM outage or a missing API key
   // can never delay or blank the dashboard itself.
@@ -448,15 +449,21 @@ export default function XeroInsights() {
     setPerf(s => ({ ...s, status: 'loading', error: '' }));
     const params = new URLSearchParams();
     if (activeTenantId) params.set('tenantId', activeTenantId);
+    params.set('window', opts.window || perfWindow);
     if (opts.force) params.set('force', 'true');
     api.get(`/xero-reports/performance?${params.toString()}`)
       .then(d => {
         setPerf({ status: 'done', data: d, error: '' });
-        // Default the range to the whole financial year the first time only —
-        // re-clamped afterwards so a tenant switch can't leave it out of bounds.
-        const last = Math.max(0, (d.months || []).length - 1);
-        setMonthFrom(f => Math.min(f, last));
-        setMonthTo(t => (t === 11 || t > last ? last : t));
+        // Land on a single month rather than the whole year: a monthly figure is
+        // what gets reviewed. Prefer the current month; if the window doesn't
+        // contain it (a past or future period), use its last month instead.
+        const ms = d.months || [];
+        const last = Math.max(0, ms.length - 1);
+        const nowKey = new Date().toISOString().slice(0, 7);
+        const idx = ms.findIndex(m => m.key === nowKey);
+        const target = idx >= 0 ? idx : last;
+        setMonthFrom(target);
+        setMonthTo(target);
       })
       .catch(err => setPerf({ status: 'done', data: null, error: err.message }));
 
@@ -658,7 +665,9 @@ export default function XeroInsights() {
                                        gap: 14, flexWrap: 'wrap', marginBottom: 16, padding: '12px 16px' }}>
           <MonthRange months={perf.data.months} from={monthFrom} to={monthTo}
                       onChange={(f, t) => { setMonthFrom(f); setMonthTo(t); }}
-                      label={perf.data.fiscalYear?.label} />
+                      label={perf.data.fiscalYear?.label}
+                      window={perfWindow}
+                      onWindow={w => { setPerfWindow(w); fetchPerf({ window: w }); }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
               {perf.data.months.filter(m => m.source === 'actual').length} closed · {perf.data.months.filter(m => m.source === 'budget').length} budgeted
