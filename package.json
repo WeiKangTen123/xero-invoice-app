@@ -9,7 +9,7 @@
     "dev:ui": "npm --prefix ui run dev",
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:ui\"",
     "build:ui": "npm --prefix ui run build",
-    "test": "jest --runInBand",
+    "test": "jest --runInBand --forceExit",
     "backup": "node main/db/backup.js"
   },
   "dependencies": {

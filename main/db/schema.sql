@@ -61,7 +61,9 @@ CREATE TABLE IF NOT EXISTS user_credentials (
 -- 1:1 with users — app behaviour toggles (was data/users/<id>/settings.json)
 CREATE TABLE IF NOT EXISTS user_settings (
   user_id      TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-  auto_process INTEGER NOT NULL DEFAULT 1
+  -- Defaults OFF: auto-submit posts invoices to a live accounting system,
+  -- so it must be opted into, never inherited.
+  auto_process INTEGER NOT NULL DEFAULT 0
 );
 
 -- 1:many — invoice records (was data/users/<id>/invoices.json array)

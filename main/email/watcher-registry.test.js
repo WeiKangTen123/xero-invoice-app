@@ -121,3 +121,93 @@ describe('rescan vs. mailbox-open race', () => {
     watcherRegistry.stop('race-user-4');
   });
 });
+
+// ── Reconnect storm ─────────────────────────────────────────────────────────
+// Regression coverage for the bug that silently killed a healthy mailbox.
+//
+// node-imap emits BOTH 'error' and 'end' for a single dropped socket. The old
+// code incremented the attempt counter and scheduled a retry in each handler
+// independently, so one disconnect cost two attempts and started two
+// reconnects — each building a fresh Imap instance while the previous stayed
+// alive with its listeners attached. The next drop fired four events, then
+// eight. Gmail closes idle IDLE connections routinely, so a mailbox with
+// perfectly valid credentials burned its 20-attempt budget in about ten normal
+// drops and stopped for good.
+describe('IMAP reconnect is de-duplicated per disconnect', () => {
+  const CREDS2 = { IMAP_USER: 'b@test.com', IMAP_PASS: 'pw', IMAP_HOST: 'imap.test.com', IMAP_PORT: 993 };
+
+  beforeEach(() => { jest.useFakeTimers(); Imap.mockClear(); Imap.mockImplementation(o => new FakeImap(o)); });
+  afterEach(() => {
+    jest.clearAllTimers(); jest.useRealTimers(); jest.clearAllMocks();
+    Imap.mockImplementation(o => new FakeImap(o));
+  });
+
+  test('error + end from ONE socket drop schedules exactly ONE reconnect', () => {
+    watcherRegistry.start('storm-1', CREDS2, jest.fn());
+    const first = lastImapInstance();
+    expect(Imap).toHaveBeenCalledTimes(1);
+
+    // A real drop: node-imap emits both.
+    first.emit('error', new Error('This socket has been ended by the other party'));
+    first.emit('end');
+
+    // Only one retry should be pending, so only one new connection appears.
+    jest.runOnlyPendingTimers();
+    expect(Imap).toHaveBeenCalledTimes(2);
+    watcherRegistry.stop('storm-1');
+  });
+
+  test('repeated drops grow linearly, not exponentially', () => {
+    watcherRegistry.start('storm-2', CREDS2, jest.fn());
+    for (let i = 0; i < 5; i++) {
+      const inst = lastImapInstance();
+      inst.emit('error', new Error('socket ended'));
+      inst.emit('end');
+      jest.runOnlyPendingTimers();
+    }
+    // 1 initial + 5 reconnects. The old code doubled each round.
+    expect(Imap).toHaveBeenCalledTimes(6);
+    watcherRegistry.stop('storm-2');
+  });
+
+  test('an orphaned instance cannot schedule a reconnect after being replaced', () => {
+    watcherRegistry.start('storm-3', CREDS2, jest.fn());
+    const orphan = lastImapInstance();
+    orphan.emit('end');
+    jest.runOnlyPendingTimers();          // replaced by a new instance
+    const live = lastImapInstance();
+    expect(live).not.toBe(orphan);
+
+    const before = Imap.mock.calls.length;
+    orphan.emit('error', new Error('late event from a dead socket'));
+    orphan.emit('end');
+    jest.runOnlyPendingTimers();
+    expect(Imap.mock.calls.length).toBe(before);   // stale events ignored
+    watcherRegistry.stop('storm-3');
+  });
+
+  test('a successful connection resets the budget, so transient drops never accumulate', () => {
+    watcherRegistry.start('storm-4', CREDS2, jest.fn());
+    for (let i = 0; i < 30; i++) {          // far beyond the 20-attempt cap
+      const inst = lastImapInstance();
+      inst.emit('ready');                   // healthy connect resets the counter
+      inst.resolveOpenBox(null);
+      inst.emit('error', new Error('socket ended'));
+      inst.emit('end');
+      jest.runOnlyPendingTimers();
+    }
+    // Still reconnecting after 30 normal drops — this is the whole point.
+    expect(Imap).toHaveBeenCalledTimes(31);
+    watcherRegistry.stop('storm-4');
+  });
+
+  test('stop() cancels a pending retry — a stopped watcher must not revive', () => {
+    watcherRegistry.start('storm-5', CREDS2, jest.fn());
+    lastImapInstance().emit('end');        // schedules a retry
+    const before = Imap.mock.calls.length;
+    watcherRegistry.stop('storm-5');
+    jest.runOnlyPendingTimers();
+    expect(Imap.mock.calls.length).toBe(before);
+    expect(watcherRegistry.isRunning('storm-5')).toBe(false);
+  });
+});

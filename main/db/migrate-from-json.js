@@ -56,7 +56,9 @@ function importCredentials(userId) {
 
 function importSettings(userId) {
   const settings = readJson(path.join(DATA_DIR, 'users', userId, 'settings.json'), null);
-  db.prepare('INSERT OR IGNORE INTO user_settings (user_id, auto_process) VALUES (?, 1)').run(userId);
+  // Seeded OFF; the UPDATE below applies whatever the JSON actually said. A
+  // file with no autoProcess key must not inherit auto-submit.
+  db.prepare('INSERT OR IGNORE INTO user_settings (user_id, auto_process) VALUES (?, 0)').run(userId);
   if (settings && 'autoProcess' in settings) {
     db.prepare('UPDATE user_settings SET auto_process = ? WHERE user_id = ?')
       .run(settings.autoProcess ? 1 : 0, userId);
