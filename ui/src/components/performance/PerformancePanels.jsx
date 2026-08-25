@@ -22,6 +22,10 @@ function sliceSum(series, from, to) { return sum(slice(series, from, to)); }
 // offering arbitrary days would imply a precision the data doesn't have.
 // The 12-month windows a single pair of Xero calls can cover. Anything wider
 // would need several calls stitched together, so it isn't offered here.
+// Fixed windows. "Calendar year" and "Custom" are not listed here because both
+// resolve to a YYYY-MM anchor computed at render time — the backend treats
+// "12 months ending YYYY-MM" as a first-class window, so Jan–Dec is just the
+// anchor December, and a custom pick is any other month.
 export const WINDOWS = [
   { key: 'fy',      label: 'This financial year' },
   { key: 'rolling', label: 'Last 12 months' },
@@ -29,22 +33,51 @@ export const WINDOWS = [
   { key: 'next-fy', label: 'Next financial year' },
 ];
 
+const MONTH_OPTS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const isCustomKey = k => /^\d{4}-\d{2}$/.test(k || '');
+
 export function MonthRange({ months, from, to, onChange, label, window: win, onWindow }) {
   if (!months?.length) return null;
   const opt = (m, i) => <option key={m.key} value={i}>{m.label}</option>;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-      {onWindow && (
-        <>
-          <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
-            Period
-          </span>
-          <select className="form-input" style={{ width: 'auto', fontSize: 12, padding: '5px 8px' }}
-                  value={win} onChange={e => onWindow(e.target.value)}>
-            {WINDOWS.map(w => <option key={w.key} value={w.key}>{w.label}</option>)}
-          </select>
-        </>
-      )}
+      {onWindow && (() => {
+        const thisYear = new Date().getFullYear();
+        const custom   = isCustomKey(win);
+        // A custom window is stored as its end month, so the pickers read
+        // straight off the key rather than needing their own state.
+        const cy = custom ? Number(win.slice(0, 4)) : thisYear;
+        const cm = custom ? Number(win.slice(5, 7)) : 12;
+        const years = Array.from({ length: 9 }, (_, i) => thisYear - 5 + i);
+        const sel = { width: 'auto', fontSize: 12, padding: '5px 8px' };
+        return (
+          <>
+            <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
+              Period
+            </span>
+            <select className="form-input" style={sel}
+                    value={custom ? 'custom' : win}
+                    onChange={e => onWindow(e.target.value === 'custom' ? `${thisYear}-12` : e.target.value)}>
+              {WINDOWS.map(w => <option key={w.key} value={w.key}>{w.label}</option>)}
+              <option value={`${thisYear}-12`}>Calendar year {thisYear} (Jan–Dec)</option>
+              <option value="custom">Custom 12 months…</option>
+            </select>
+            {custom && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>ending</span>
+                <select className="form-input" style={sel} value={cm}
+                        onChange={e => onWindow(`${cy}-${String(e.target.value).padStart(2, '0')}`)}>
+                  {MONTH_OPTS.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+                </select>
+                <select className="form-input" style={sel} value={cy}
+                        onChange={e => onWindow(`${e.target.value}-${String(cm).padStart(2, '0')}`)}>
+                  {years.map(y => <option key={y} value={y}>{y}</option>)}
+                </select>
+              </span>
+            )}
+          </>
+        );
+      })()}
       <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
         Month range
       </span>
@@ -536,15 +569,16 @@ export function OverviewPanel({ data, from, to, insights, summary }) {
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
         <Surface title="Revenue trend" right={<ChartModeToggle mode={trendMode} onChange={setTrendMode} />} flex={7} minWidth={380}>
-          {/* Deliberately spans the whole window, not the selected range — a
-              single-month selection would otherwise render one bar, which is
-              not a trend. The KPIs above still follow the range. */}
+          {/* Follows the month range, same as every other figure on this panel —
+              a chart showing a different period from the numbers beside it is
+              worse than a short chart. */}
           <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginBottom: 8 }}>
-            Full period · {data.months[0].label} – {data.months[data.months.length - 1].label}
+            {rangeLabel(data.months, from, to)}
+            {from === to && ' · widen the range to see a trend'}
           </div>
-          <TrendChart mode={trendMode} months={data.months} currency={cur}
-                      actual={data.totals.revenue.actual}
-                      budget={data.totals.revenue.budget} />
+          <TrendChart mode={trendMode} months={months} currency={cur}
+                      actual={slice(data.totals.revenue.actual, from, to)}
+                      budget={slice(data.totals.revenue.budget, from, to)} />
           <Legend items={[{ label: 'Actual', color: 'var(--accent)' }, { label: 'Budget', color: 'var(--text-muted)', opacity: 0.32 }]} />
         </Surface>
         <Surface title="Variance reasons"

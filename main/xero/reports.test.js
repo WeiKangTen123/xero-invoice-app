@@ -1341,3 +1341,29 @@ describe('xero/reports — window resolution (pure)', () => {
     expect(feb.endISO).toBe('2028-02-29'); // leap year
   });
 });
+
+// A calendar year and a custom pick are not special window types — both are just
+// a YYYY-MM anchor, so the backend needs no new cases for either.
+describe('xero/reports — calendar year and custom windows ride on the anchor', () => {
+  const { _resolveWindow } = require('./reports');
+  const TODAY = { year: 2026, month: 8, day: 17 };
+  const FYE   = { month: 3, day: 31 };
+  const span  = w => `${w.months[0].label} .. ${w.months[11].label}`;
+
+  test('anchoring on December gives a Jan–Dec calendar year', () => {
+    expect(span(_resolveWindow('2026-12', TODAY, FYE))).toBe('Jan 2026 .. Dec 2026');
+    expect(span(_resolveWindow('2024-12', TODAY, FYE))).toBe('Jan 2024 .. Dec 2024');
+  });
+
+  test('any other anchor gives that 12-month span, including across a year end', () => {
+    expect(span(_resolveWindow('2026-06', TODAY, FYE))).toBe('Jul 2025 .. Jun 2026');
+    expect(span(_resolveWindow('2027-01', TODAY, FYE))).toBe('Feb 2026 .. Jan 2027');
+  });
+
+  test('a calendar year is independent of the org fiscal year end', () => {
+    // Same anchor, three different fiscal year ends — the window must not move.
+    for (const fye of [{ month: 3, day: 31 }, { month: 12, day: 31 }, { month: 6, day: 30 }]) {
+      expect(span(_resolveWindow('2026-12', TODAY, fye))).toBe('Jan 2026 .. Dec 2026');
+    }
+  });
+});
