@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { fmtMoney, fmtMoneyShort, fmtPct } from '../../utils/format';
 
 // Dashboard → Overview and Revenue.
@@ -173,6 +173,103 @@ function MonthlyBars({ months, actual, budget, currency, height = 190, showBudge
   );
 }
 
+// Same data as MonthlyBars, drawn as lines. A bar reads best for "how big was
+// each month"; a line reads best for direction and for spotting where actual
+// crosses budget — hence the toggle rather than picking one.
+function MonthlyLine({ months, actual, budget, currency, height = 190, showBudget = true }) {
+  const n = months.length;
+  if (!n) return <Empty>Pick a wider month range.</Empty>;
+  const vals = [...actual, ...(showBudget ? budget : [])];
+  if (!vals.some(v => v !== 0)) return <Empty>Nothing recorded in this range.</Empty>;
+
+  const W = 720, H = height, padB = 26, padT = 12, padL = 4;
+  const plot = H - padB - padT;
+  const minV = Math.min(0, ...vals);
+  const range = Math.max(...vals, 0) - minV || 1;
+  const y = v => padT + plot * (1 - (v - minV) / range);
+  const x = i => (n === 1 ? W / 2 : padL + (W - padL * 2) * (i / (n - 1)));
+  const path = arr => arr.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v || 0).toFixed(1)}`).join(' ');
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', minWidth: n > 6 ? 520 : 0, display: 'block' }} role="img" aria-label="monthly trend">
+        <line x1="0" x2={W} y1={y(0)} y2={y(0)} stroke="var(--border)" strokeWidth="1" />
+        {showBudget && budget.some(v => v !== 0) && (
+          <path d={path(budget)} fill="none" stroke="var(--text-muted)" strokeWidth="1.6" strokeDasharray="5 4" opacity="0.7" />
+        )}
+        <path d={path(actual)} fill="none" stroke="var(--accent)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round" />
+        {months.map((m, i) => (
+          <g key={m.key}>
+            {(actual[i] || 0) !== 0 && (
+              <circle cx={x(i)} cy={y(actual[i])} r="3.2" fill="var(--accent)">
+                <title>{`${m.label} actual: ${fmtMoney(actual[i], currency)}`}</title>
+              </circle>
+            )}
+            <text x={x(i)} y={H - 8} textAnchor="middle" fontSize="10" fill="var(--text-muted)">
+              {m.label.replace(' 20', " '")}
+            </text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+// Bar or line, user's choice, sharing one dataset and one legend.
+function TrendChart({ mode, ...rest }) {
+  return mode === 'line' ? <MonthlyLine {...rest} /> : <MonthlyBars {...rest} />;
+}
+
+function ChartModeToggle({ mode, onChange }) {
+  return (
+    <div style={{ display: 'flex', gap: 2, background: 'var(--bg-secondary)', borderRadius: 7, padding: 2 }}>
+      {[{ k: 'bar', l: 'Bar' }, { k: 'line', l: 'Line' }].map(o => (
+        <button key={o.k} type="button" onClick={() => onChange(o.k)} style={{
+          padding: '3px 10px', fontSize: 11, fontWeight: 600, borderRadius: 5, cursor: 'pointer', border: 'none',
+          background: mode === o.k ? 'var(--accent-gradient)' : 'transparent',
+          color: mode === o.k ? '#fff' : 'var(--text-muted)',
+        }}>{o.l}</button>
+      ))}
+    </div>
+  );
+}
+
+// Real variance figures, each with the model's suggested cause where one was
+// generated. The figures are always shown; the prose is additive and clearly
+// marked, so an LLM outage degrades this card rather than emptying it.
+function VarianceReasons({ items, insights, currency }) {
+  if (!items.length) return <Empty>Nothing differs from budget in this range.</Empty>;
+  const reasonFor = new Map((insights?.lines || []).map(l => [l.account, l.reason]).filter(([, r]) => r));
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
+      {items.map(it => {
+        const reason = reasonFor.get(it.label);
+        const neg = it.v < 0;
+        return (
+          <div key={it.label}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12.5 }}>
+              <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.label}</span>
+              <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 700, flexShrink: 0,
+                             color: neg ? 'var(--danger)' : 'var(--success)' }}>
+                {neg ? '' : '+'}{fmtMoney(it.v, currency)}
+              </span>
+            </div>
+            {reason && (
+              <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.5 }}>{reason}</div>
+            )}
+          </div>
+        );
+      })}
+      <div style={{ fontSize: 10, color: 'var(--text-muted)', borderTop: '1px solid var(--border)', paddingTop: 9, lineHeight: 1.5 }}>
+        {insights?.source === 'gemini'
+          ? 'Figures are computed from Xero. The explanations are AI-suggested causes to verify, not statements of fact.'
+          : (insights?.reason || 'Figures are computed from Xero.')}
+      </div>
+    </div>
+  );
+}
+
 function Legend({ items }) {
   return (
     <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 10.5, color: 'var(--text-muted)', marginTop: 8 }}>
@@ -260,7 +357,8 @@ function closedInRange(d, from, to) {
 }
 
 // ── Overview ─────────────────────────────────────────────────────────────────
-export function OverviewPanel({ data, from, to }) {
+export function OverviewPanel({ data, from, to, insights }) {
+  const [trendMode, setTrendMode] = useState('bar');
   const cur = data.organisation?.currency || '';
   const T   = useRangeTotals(data, from, to);
   const months = data.months.slice(from, to + 1);
@@ -363,16 +461,18 @@ export function OverviewPanel({ data, from, to }) {
       </div>
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-        <Surface title="Revenue trend" right={rangeLabel(data.months, from, to)} flex={7} minWidth={380}>
-          <MonthlyBars months={months} currency={cur}
-                       actual={slice(data.totals.revenue.actual, from, to)}
-                       budget={slice(data.totals.revenue.budget, from, to)} />
+        <Surface title="Revenue trend" right={<ChartModeToggle mode={trendMode} onChange={setTrendMode} />} flex={7} minWidth={380}>
+          <TrendChart mode={trendMode} months={months} currency={cur}
+                      actual={slice(data.totals.revenue.actual, from, to)}
+                      budget={slice(data.totals.revenue.budget, from, to)} />
           <Legend items={[{ label: 'Actual', color: 'var(--accent)' }, { label: 'Budget', color: 'var(--text-muted)', opacity: 0.32 }]} />
         </Surface>
-        <Surface title="Biggest budget gaps" right="Actual − budget" flex={5} minWidth={300}>
-          {varianceItems.length === 0
-            ? <Empty>Nothing differs from budget in this range.</Empty>
-            : <BarList currency={cur} items={varianceItems.map(v => ({ label: v.label, value: v.v }))} />}
+        <Surface title="Variance reasons"
+                 right={insights?.source === 'gemini'
+                   ? <span style={{ fontSize: 10, color: 'var(--accent)' }}>AI-suggested</span>
+                   : 'Actual − budget'}
+                 flex={5} minWidth={300}>
+          <VarianceReasons items={varianceItems} insights={insights} currency={cur} />
         </Surface>
       </div>
     </>

@@ -516,6 +516,9 @@ export default function XeroInsights() {
   const [monthFrom, setMonthFrom] = useState(0);
   const [monthTo,   setMonthTo]   = useState(11);
   const [revenueLine, setRevenueLine] = useState('overall');
+  // Fetched separately from the figures so an LLM outage or a missing API key
+  // can never delay or blank the dashboard itself.
+  const [insights, setInsights] = useState(null);
   // Which month the Budget Variance tab compares — a month key, or 'ytd'. Defaults
   // to the current month on load (see fetchBudget), matching Xero's own report,
   // which is titled "For the month ended <current month>".
@@ -647,6 +650,14 @@ export default function XeroInsights() {
         setMonthTo(t => (t === 11 || t > last ? last : t));
       })
       .catch(err => setPerf({ status: 'done', data: null, error: err.message }));
+
+    // Commentary arrives after the numbers, never blocking them.
+    const ip = new URLSearchParams();
+    if (activeTenantId) ip.set('tenantId', activeTenantId);
+    if (opts.force) ip.set('force', 'true');
+    api.get(`/xero-reports/variance-insights?${ip.toString()}`)
+      .then(d => setInsights(d))
+      .catch(() => setInsights(null));
   }
 
   function fetchBudget(opts = {}) {
@@ -859,43 +870,7 @@ export default function XeroInsights() {
             <div className="alert alert-error" style={{ marginBottom: 16 }}><span className="alert-icon">✕</span>{perf.error}</div>
           )}
           {perf.data && !perf.error && (
-            <OverviewPanel data={perf.data} from={monthFrom} to={monthTo} />
-          )}
-
-          {/* The operational view that predates this dashboard — kept below the
-              financial summary rather than discarded, since AR/AP aging answers
-              a different question from margin. */}
-          <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
-                        color: 'var(--text-muted)', margin: '26px 0 12px' }}>
-            Working capital · right now
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16, marginBottom: 16 }}>
-            <div className="card">
-              <div className="card-title" style={{ marginBottom: 2 }}>Receivables vs. Payables</div>
-              <div className="card-subtitle" style={{ marginBottom: 2 }}>Hover a bar for the exact amount · right now</div>
-              <SourceNote>Xero Invoices API (AUTHORISED, unpaid)</SourceNote>
-              <TwoBarChart leftLabel="Receivables" leftValue={kpis.totalReceivables} rightLabel="Payables" rightValue={kpis.totalPayables} currency={currency} />
-            </div>
-            <div className="card">
-              <div className="card-title" style={{ marginBottom: 2 }}>Invoice Status</div>
-              <div className="card-subtitle">Sales &amp; bills combined</div>
-              <StatusDonut breakdown={kpis.statusBreakdown} />
-            </div>
-          </div>
-
-          {data.aging && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-              <div className="card">
-                <div className="card-title" style={{ marginBottom: 2 }}>Invoices Owed to You</div>
-                <div className="card-subtitle" style={{ marginBottom: 10 }}>Outstanding sales invoices, by how soon they're due · right now</div>
-                <AgingChart aging={data.aging.receivables} color="var(--success)" currency={currency} />
-              </div>
-              <div className="card">
-                <div className="card-title" style={{ marginBottom: 2 }}>Bills to Pay</div>
-                <div className="card-subtitle" style={{ marginBottom: 10 }}>Outstanding bills, by how soon they're due · right now</div>
-                <AgingChart aging={data.aging.payables} color="var(--danger)" currency={currency} />
-              </div>
-            </div>
+            <OverviewPanel data={perf.data} from={monthFrom} to={monthTo} insights={insights} />
           )}
 
           <div className="card">
@@ -1003,6 +978,44 @@ export default function XeroInsights() {
       )}
 
       {tab === 'invoices' && (
+        <>
+          {/* Moved here from Overview: aging and invoice status answer "who owes
+              me money", which is this tab's question, not the performance
+              dashboard's. */}
+          <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
+                        color: 'var(--text-muted)', margin: '26px 0 12px' }}>
+            Outstanding · right now
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16, marginBottom: 16 }}>
+            <div className="card">
+              <div className="card-title" style={{ marginBottom: 2 }}>Receivables vs. Payables</div>
+              <div className="card-subtitle" style={{ marginBottom: 2 }}>Hover a bar for the exact amount · right now</div>
+              <SourceNote>Xero Invoices API (AUTHORISED, unpaid)</SourceNote>
+              <TwoBarChart leftLabel="Receivables" leftValue={kpis.totalReceivables} rightLabel="Payables" rightValue={kpis.totalPayables} currency={currency} />
+            </div>
+            <div className="card">
+              <div className="card-title" style={{ marginBottom: 2 }}>Invoice Status</div>
+              <div className="card-subtitle">Sales &amp; bills combined</div>
+              <StatusDonut breakdown={kpis.statusBreakdown} />
+            </div>
+          </div>
+
+          {data.aging && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+              <div className="card">
+                <div className="card-title" style={{ marginBottom: 2 }}>Invoices Owed to You</div>
+                <div className="card-subtitle" style={{ marginBottom: 10 }}>Outstanding sales invoices, by how soon they're due · right now</div>
+                <AgingChart aging={data.aging.receivables} color="var(--success)" currency={currency} />
+              </div>
+              <div className="card">
+                <div className="card-title" style={{ marginBottom: 2 }}>Bills to Pay</div>
+                <div className="card-subtitle" style={{ marginBottom: 10 }}>Outstanding bills, by how soon they're due · right now</div>
+                <AgingChart aging={data.aging.payables} color="var(--danger)" currency={currency} />
+              </div>
+            </div>
+          )}
+
+
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
             <div className="card-title" style={{ marginBottom: 0 }}>Invoices &amp; Bills</div>
@@ -1058,6 +1071,7 @@ export default function XeroInsights() {
             </div>
           )}
         </div>
+        </>
       )}
 
       {tab === 'banking' && (

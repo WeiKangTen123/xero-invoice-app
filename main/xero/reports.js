@@ -16,13 +16,16 @@ const _cache = new Map(); // arbitrary string key -> { data, fetchedAt }
 
 function _cacheGet(key, force) {
   const cached = _cache.get(key);
-  if (!force && cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+  // Per-entry TTL, defaulting to the short one. Report data is cheap to refetch
+  // and should stay near-live; generated commentary costs an LLM call, so it
+  // opts into a much longer life via _cacheSet's third argument.
+  if (!force && cached && Date.now() - cached.fetchedAt < (cached.ttl || CACHE_TTL_MS)) {
     return { ...cached.data, cached: true, fetchedAt: cached.fetchedAt };
   }
   return null;
 }
-function _cacheSet(key, data) {
-  _cache.set(key, { data, fetchedAt: Date.now() });
+function _cacheSet(key, data, ttl) {
+  _cache.set(key, { data, fetchedAt: Date.now(), ttl });
   return { ...data, cached: false, fetchedAt: Date.now() };
 }
 
@@ -998,6 +1001,136 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
   };
 }
 
+// ── Variance reasons (Gemini-explained, Xero-computed) ──────────────────────
+// The FIGURES are computed here from Xero and never leave that path. Gemini is
+// given those already-final numbers and asked only to suggest WHY — it is never
+// asked to calculate, recall or estimate anything.
+//
+// Guardrail: any generated sentence containing a large number that wasn't in the
+// input is dropped. An LLM inventing a plausible-looking amount inside financial
+// commentary is the failure mode that matters, and it's cheap to detect.
+
+const INSIGHT_CACHE_TTL_MS = 30 * 60 * 1000; // reasons only change when the figures do
+const MIN_VARIANCE_TO_EXPLAIN = 1;           // ignore rounding dust
+
+// Numbers big enough to be a money amount rather than a percentage or a count.
+function _largeNumbersIn(text) {
+  return (String(text).match(/-?[\d][\d,]*(?:\.\d+)?/g) || [])
+    .map(t => Math.abs(Number(t.replace(/,/g, ''))))
+    .filter(n => Number.isFinite(n) && n >= 1000);
+}
+
+// Pure. True if every large number in `text` was one we supplied.
+function _insightIsGrounded(text, allowed) {
+  return _largeNumbersIn(text).every(n => allowed.has(Math.round(n)));
+}
+
+// Pure. The variance lines worth explaining, biggest absolute gap first.
+function _varianceCandidates(perf, limit = 6) {
+  const all = [...perf.serviceLines, ...perf.expenseLines].map(l => {
+    const actual = l.actual.reduce((s, v) => s + v, 0);
+    const budget = l.budget.reduce((s, v) => s + v, 0);
+    return { account: l.label, actual, budget, variance: actual - budget };
+  });
+  return all
+    .filter(l => Math.abs(l.variance) >= MIN_VARIANCE_TO_EXPLAIN)
+    .sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance))
+    .slice(0, limit);
+}
+
+function _insightPrompt(org, fyLabel, closedMonths, candidates) {
+  return [
+    {
+      role: 'system',
+      content: [
+        'You are a finance analyst writing one-line variance commentary for a management dashboard.',
+        'You will receive REAL figures already computed from the Xero accounting system.',
+        'Rules you must follow exactly:',
+        '1. NEVER invent, recalculate, estimate or infer any monetary figure. Use only the numbers given to you.',
+        '2. Prefer not to repeat the numbers at all — they are already displayed next to your text.',
+        '3. Explain the LIKELY OPERATIONAL REASON and what the reader should check. Phrase it as something to verify, not as established fact.',
+        '4. If actual is zero against a non-zero budget, the most likely reason is simply that nothing has been recorded against that account yet. Say that plainly.',
+        '5. One sentence per account. Max 22 words. No preamble, no markdown, no bullet characters.',
+        'Reply with JSON only: {"reasons":[{"account":"<exact account name>","reason":"<one sentence>"}]}',
+      ].join('\n'),
+    },
+    {
+      role: 'user',
+      content: JSON.stringify({
+        organisation: org,
+        financialYear: fyLabel,
+        monthsClosed: closedMonths,
+        note: 'variance = actual - budget. Negative means under budget.',
+        lines: candidates.map(c => ({
+          account: c.account,
+          actual: Math.round(c.actual),
+          budget: Math.round(c.budget),
+          variance: Math.round(c.variance),
+        })),
+      }),
+    },
+  ];
+}
+
+// Pure. Parses the model reply and keeps only grounded, matchable lines.
+function _parseInsights(raw, candidates) {
+  let payload;
+  try {
+    // Models sometimes wrap JSON in a code fence despite being told not to.
+    const cleaned = String(raw).replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+    payload = JSON.parse(cleaned.slice(cleaned.indexOf('{'), cleaned.lastIndexOf('}') + 1));
+  } catch {
+    return [];
+  }
+  const allowed = new Set();
+  for (const c of candidates) {
+    for (const v of [c.actual, c.budget, c.variance]) allowed.add(Math.round(Math.abs(v)));
+  }
+  const byName = new Map(candidates.map(c => [c.account, c]));
+
+  return (payload.reasons || [])
+    .map(r => ({ account: String(r.account || '').trim(), reason: String(r.reason || '').trim() }))
+    // Only accounts we actually asked about — a name we didn't send is a fabrication.
+    .filter(r => byName.has(r.account) && r.reason)
+    .filter(r => _insightIsGrounded(r.reason, allowed))
+    .map(r => ({ ...byName.get(r.account), reason: r.reason }));
+}
+
+async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force = false } = {}) {
+  const perf = await getPerformance(userId, tenantId, { timezone, force });
+  const candidates = _varianceCandidates(perf);
+  const closed = perf.actualThroughIdx + 1;
+
+  if (!candidates.length) {
+    return { generated: false, reason: 'Nothing differs from budget yet.', lines: [], source: 'none' };
+  }
+
+  // Keyed on the figures themselves, so the model is re-asked only when the
+  // numbers actually move — not once per page view.
+  const sig = candidates.map(c => `${c.account}:${Math.round(c.variance)}`).join('|');
+  const key = `insights:${userId}:${tenantId}:${sig}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached;
+
+  const { callGemini } = require('../utils/gemini-client');
+  try {
+    const messages = _insightPrompt(perf.organisation.name, perf.fiscalYear.label, closed, candidates);
+    const res = await callGemini(userId, messages, { temperature: 0.2, maxTokens: 700 });
+    const lines = _parseInsights(res?.message?.content ?? res?.content ?? res, candidates);
+    if (!lines.length) {
+      logger.warn('Variance insights: model reply unusable, falling back to figures only', { userId, tenantId });
+      return { generated: false, reason: 'Could not generate commentary — showing the figures alone.', lines: candidates, source: 'figures' };
+    }
+    logger.info('Variance insights generated', { userId, tenantId, lines: lines.length, dropped: candidates.length - lines.length });
+    return _cacheSet(key, { generated: true, lines, source: 'gemini' }, INSIGHT_CACHE_TTL_MS);
+  } catch (err) {
+    // No API key, exhausted quota, or a bad response — the dashboard still shows
+    // every real figure, just without the commentary.
+    logger.warn('Variance insights unavailable', { userId, tenantId, error: err.message });
+    return { generated: false, reason: 'AI commentary unavailable — showing the figures alone.', lines: candidates, source: 'figures' };
+  }
+}
+
 // Called on disconnect so nothing here can outlive the connection it came from.
 function clearCache(userId) {
   for (const key of _cache.keys()) {
@@ -1007,10 +1140,11 @@ function clearCache(userId) {
 
 module.exports = {
   getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
-  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, clearCache,
+  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, getVarianceInsights, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
   _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
+  _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
 };
