@@ -1163,7 +1163,36 @@ function _buildWatchList({ months, totals, actualThroughIdx }) {
   return out;
 }
 
-async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period, cashFlow = false } = {}) {
+// Pure. Groups sales invoices by customer, biggest first.
+//
+// Deliberately called "invoiced", not "revenue": these are invoice TOTALS, which
+// include tax, whereas the P&L figures elsewhere on this page are net. For an
+// org whose sales accounts are zero-rated the two agree, but they will not in
+// general — so the UI must not present this as the same number.
+function _buildCustomerRevenue(invoices) {
+  const byContact = new Map();
+  for (const inv of invoices || []) {
+    const name  = inv.contact?.name || 'Unknown';
+    const total = Number(inv.total || 0);
+    if (!byContact.has(name)) byContact.set(name, { name, invoiced: 0, invoices: 0 });
+    const c = byContact.get(name);
+    c.invoiced += total;
+    c.invoices += 1;
+  }
+  const customers = [...byContact.values()].sort((a, b) => b.invoiced - a.invoiced);
+  const total = customers.reduce((s, c) => s + c.invoiced, 0);
+  return {
+    customers,
+    total,
+    count: customers.length,
+    // Undefined rather than zero when nobody was invoiced — an average of no
+    // customers is not 0, it is meaningless.
+    average: customers.length ? total / customers.length : null,
+    available: true,
+  };
+}
+
+async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period, cashFlow = false, customers = false } = {}) {
   // Reuses the budget-variance fetch and its cache — on a warm cache this whole
   // endpoint costs one Xero call (the bank summary) rather than three.
   const bv = await getBudgetVariance(userId, tenantId, { timezone, force, window, period });
@@ -1197,6 +1226,26 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
     else logger.info('Performance: bank summary skipped — scope not granted', { userId, tenantId });
   }
 
+  // Only the Revenue tab shows this, so Overview never pays for the extra call.
+  let customerRevenue = { customers: [], total: 0, count: 0, average: null, available: false };
+  if (customers) {
+    try {
+      const tokenCache = require('../utils/token-cache').forUser(userId);
+      const api = _apiFor(await tokenCache.getValidToken(tenantId));
+      const start = _parseISODate(bv.fiscalYear.fromISO);
+      const endEx = _addDays(_parseISODate(bv.fiscalYear.toISO), 1); // Xero's upper bound is exclusive
+      const where = `Type=="ACCREC" && Date >= ${_fmtXeroDate(start)} && Date < ${_fmtXeroDate(endEx)}`;
+      const res = await withRetry(() => api.getInvoices(
+        tenantId, undefined, where, 'Date DESC', undefined, undefined, undefined,
+        ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true, // summaryOnly
+      ));
+      customerRevenue = _buildCustomerRevenue(res.body.invoices || []);
+    } catch (err) {
+      // One card out of many — a failure here must not blank the tab.
+      logger.warn('Performance: customer revenue unavailable', { userId, tenantId, error: err.message });
+    }
+  }
+
   const actualThroughIdx = bv.months.filter(m => m.source === 'actual').length - 1;
   const built = _buildPerformance({ months: bv.months, rows: bv.rows, cash });
   const watchList = _buildWatchList({ months: bv.months, totals: built.totals, actualThroughIdx });
@@ -1210,6 +1259,7 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
     months:           bv.months,
     actualThroughIdx,
     ...built,
+    customerRevenue,
     watchList,
     // Surfaced so the UI can show which accounts were treated as recurring —
     // a guess made from names should never be invisible.
@@ -1367,6 +1417,6 @@ module.exports = {
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _monthsFrom, _monthMeta, _monthsBetween, _chunkMonths,
   _resolveWindow, _resolvePeriod, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
-  _mergeChunks, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
+  _mergeChunks, _buildCustomerRevenue, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
 };
