@@ -270,6 +270,48 @@ function VarianceReasons({ items, insights, currency }) {
   );
 }
 
+// The reference dashboard's KPI scorecard. Its metrics — NRR, LTV/CAC, billable
+// mix, CAC payback — need a CRM and timesheets, neither of which Xero holds.
+// These four are the closest equivalents that are genuinely derivable, and a
+// metric that can't be computed shows an em dash with the reason rather than 0.
+function ScoreCard({ items }) {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
+      {items.map(it => (
+        <div key={it.label} style={{ background: 'var(--bg-secondary)', borderRadius: 9, padding: '11px 13px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
+            <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.05em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>{it.label}</span>
+            <span style={{ fontSize: 9.5, color: 'var(--text-muted)' }}>{it.target}</span>
+          </div>
+          <div style={{ fontSize: 18, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: it.tone }}>{it.value}</div>
+          {it.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3 }}>{it.note}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Compact data-trust band. Sits directly under the health strip because it says
+// whether the figures below can be believed — that belongs before them, not
+// buried three rows down.
+function WatchBand({ items }) {
+  if (!items?.length) return null;
+  return (
+    <div className="card" style={{ marginBottom: 16, padding: '11px 16px', borderLeft: '3px solid var(--warning)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {items.map((w, i) => (
+          <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 11.5, lineHeight: 1.5 }}>
+            <span style={{ flexShrink: 0, color: w.severity === 'warn' ? 'var(--warning)' : 'var(--text-muted)' }}>
+              {w.severity === 'warn' ? '▲' : '•'}
+            </span>
+            <span style={{ color: 'var(--text-secondary)' }}>{w.text}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Legend({ items }) {
   return (
     <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 10.5, color: 'var(--text-muted)', marginTop: 8 }}>
@@ -296,22 +338,6 @@ function Rows({ items, currency }) {
           <span style={{ fontVariantNumeric: 'tabular-nums', color: r.value < 0 ? 'var(--danger)' : undefined }}>
             {r.value === 0 ? <span style={{ color: 'var(--text-muted)' }}>—</span> : fmtMoney(r.value, currency)}
           </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function WatchList({ items }) {
-  if (!items?.length) return <Empty>Nothing to flag — the figures look internally consistent.</Empty>;
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {items.map((w, i) => (
-        <div key={i} style={{ display: 'flex', gap: 9, alignItems: 'flex-start', fontSize: 12, lineHeight: 1.5 }}>
-          <span style={{ flexShrink: 0, marginTop: 1, color: w.severity === 'warn' ? 'var(--warning)' : 'var(--text-muted)' }}>
-            {w.severity === 'warn' ? '▲' : '•'}
-          </span>
-          <span style={{ color: 'var(--text-secondary)' }}>{w.text}</span>
         </div>
       ))}
     </div>
@@ -357,7 +383,7 @@ function closedInRange(d, from, to) {
 }
 
 // ── Overview ─────────────────────────────────────────────────────────────────
-export function OverviewPanel({ data, from, to, insights }) {
+export function OverviewPanel({ data, from, to, insights, summary }) {
   const [trendMode, setTrendMode] = useState('bar');
   const cur = data.organisation?.currency || '';
   const T   = useRangeTotals(data, from, to);
@@ -372,6 +398,32 @@ export function OverviewPanel({ data, from, to, insights }) {
     .filter(l => !l.otherIncome)
     .map(l => ({ label: l.label, value: sliceSum(l.actual, from, to), tag: l.recurring ? 'recurring' : null }))
     .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+
+  // Days Sales Outstanding: how long invoiced revenue takes to become cash.
+  // Receivables come from the invoice summary, revenue from the P&L — both
+  // already on the page, so this costs no extra call. Undefined without revenue.
+  const days = months.length * 30.44;
+  const receivables = summary?.kpis?.totalReceivables ?? null;
+  const dso = (receivables !== null && T.revenue > 0) ? (receivables / T.revenue) * days : null;
+  const overdue = summary?.kpis?.overdueAmount ?? null;
+
+  const scorecard = [
+    { label: 'Recurring mix', target: 'Higher is steadier',
+      value: T.recurringMix === null ? '—' : fmtPct(T.recurringMix, 0),
+      note: T.recurringMix === null ? 'No revenue yet' : `${fmtMoney(T.recurring, cur)} recurring` },
+    { label: 'Budget attainment', target: 'Target 100%',
+      value: T.revenueBudget > 0 ? fmtPct(T.revenue / T.revenueBudget, 0) : '—',
+      tone: T.revenueBudget > 0 && T.revenue < T.revenueBudget ? 'var(--danger)' : 'var(--success)',
+      note: T.revenueBudget > 0 ? `vs ${fmtMoney(T.revenueBudget, cur)}` : 'Nothing budgeted' },
+    { label: 'Expense ratio', target: 'Lower is better',
+      value: T.revenue > 0 ? fmtPct((T.cogs + T.opex) / T.revenue, 0) : '—',
+      note: T.revenue > 0 ? `${fmtMoney(T.cogs + T.opex, cur)} of costs` : 'No revenue yet' },
+    { label: 'Debtor days', target: 'Lower is better',
+      value: dso === null ? '—' : `${Math.round(dso)} days`,
+      tone: dso !== null && dso > 60 ? 'var(--warning)' : undefined,
+      note: receivables === null ? 'Needs invoice data'
+            : overdue > 0 ? `${fmtMoney(overdue, cur)} overdue` : `${fmtMoney(receivables, cur)} outstanding` },
+  ];
 
   const varianceItems = [...data.serviceLines, ...data.expenseLines]
     .map(l => ({ label: l.label, a: sliceSum(l.actual, from, to), b: sliceSum(l.budget, from, to) }))
@@ -401,6 +453,8 @@ export function OverviewPanel({ data, from, to, insights }) {
           {fmtMoney(T.revenue, cur)} revenue · {T.netMargin === null ? '—' : fmtPct(T.netMargin)} net margin
         </div>
       </div>
+
+      <WatchBand items={data.watchList} />
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Metric label="Total revenue" value={fmtMoney(T.revenue, cur)}
@@ -455,8 +509,8 @@ export function OverviewPanel({ data, from, to, insights }) {
             { label: 'Net profit',         value: T.netProfit,   color: T.netProfit < 0 ? 'var(--danger)' : 'var(--success)' },
           ]} />
         </Surface>
-        <Surface title="Watch list" right="Derived from the figures" flex={6} minWidth={340}>
-          <WatchList items={data.watchList} />
+        <Surface title="KPI scorecard" right={rangeLabel(data.months, from, to)} flex={6} minWidth={340}>
+          <ScoreCard items={scorecard} />
         </Surface>
       </div>
 

@@ -965,12 +965,17 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
 
   const first = bv.fiscalYear.fromISO;
   const today = _fmtISODate(_todayPartsInTz(timezone));
-  let cash = { total: 0, accounts: [], available: false };
+  let cash = { total: 0, cashIn: 0, cashOut: 0, net: 0, accounts: [], available: false };
   try {
     const bank = await getBankSummary(userId, tenantId, { from: first, to: today, force });
     cash = {
       total:     bank.accounts.reduce((s, a) => s + a.closingBalance, 0),
-      accounts:  bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance })),
+      // Cash movement, not just the closing position — the Banking tab renders
+      // this, which is why the old standalone Cash In/Out fetch could go.
+      cashIn:    bank.cashIn,
+      cashOut:   bank.cashOut,
+      net:       bank.net,
+      accounts:  bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance, cashIn: a.cashReceived, cashOut: a.cashSpent })),
       available: true,
     };
   } catch (err) {
