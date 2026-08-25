@@ -458,6 +458,10 @@ export default function XeroInsights() {
     if (range) { params.set('from', range.from); params.set('to', range.to); }
     else       { params.set('preset', preset); }
     if (opts.force) params.set('force', 'true');
+    // Only Banking renders cash in/out. Asking for it elsewhere would make
+    // getBankSummary split a long period into 365-day windows for a number
+    // nothing displays.
+    if (tab === 'banking') params.set('cashFlow', 'true');
     api.get(`/xero-reports/performance?${params.toString()}`)
       .then(d => {
         setPerf({ status: 'done', data: d, error: '' });
@@ -469,10 +473,10 @@ export default function XeroInsights() {
       })
       .catch(err => setPerf({ status: 'done', data: null, error: err.message }));
 
-    // Commentary arrives after the numbers, never blocking them.
-    const ip = new URLSearchParams();
-    if (activeTenantId) ip.set('tenantId', activeTenantId);
-    if (opts.force) ip.set('force', 'true');
+    // Commentary arrives after the numbers, never blocking them — but it must
+    // describe the SAME period, so it takes the identical params.
+    const ip = new URLSearchParams(params);
+    setInsights(null); // clear stale commentary while the new period loads
     api.get(`/xero-reports/variance-insights?${ip.toString()}`)
       .then(d => setInsights(d))
       .catch(() => setInsights(null));

@@ -648,6 +648,45 @@ async function getBankSummary(userId, tenantId, { from, to, force = false } = {}
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+// How long a fetched period stays cached. A period that has already closed is
+// effectively immutable — re-fetching Apr 2025 every 90 seconds is pure waste —
+// but "closed" is not the same as "settled": late invoices and adjustments land
+// during month-end, so a recently-ended period gets a short life rather than a
+// long one. Anything still in progress keeps the original short TTL.
+//
+// Nothing here is ever a substitute for correctness: the Refresh button always
+// forces, and the key includes the exact month span.
+const TTL_OPEN_MS   = CACHE_TTL_MS;          // period includes the current month
+const TTL_RECENT_MS = 10 * 60 * 1000;        // closed, but within the back-dating window
+const TTL_CLOSED_MS = 6 * 60 * 60 * 1000;    // closed long enough to be settled
+const BACKDATE_WINDOW_DAYS = 35;             // one month-end close, plus slack
+
+function _periodCacheTtl(months, today) {
+  if (!months?.length) return TTL_OPEN_MS;
+  const end = _parseISODate(months[months.length - 1].endISO);
+  if (!end) return TTL_OPEN_MS;
+  const days = (_dateFromParts(today) - _dateFromParts(end)) / 86400000;
+  if (days <= 0) return TTL_OPEN_MS;                       // still running, or in the future
+  return days < BACKDATE_WINDOW_DAYS ? TTL_RECENT_MS : TTL_CLOSED_MS;
+}
+
+// Runs `fn` over `items` with at most `limit` in flight, preserving input order.
+// Used for report chunks: strictly sequential wastes latency, unbounded parallel
+// would burst against a 60/min budget shared with real invoice submission.
+async function _mapWithConcurrency(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+const REPORT_CHUNK_CONCURRENCY = 2;
+
 // Pure. `n` consecutive months starting at `start`, oldest first.
 //
 // Twelve months is a per-CALL limit, not a fiscal-year limit: ProfitAndLoss caps
@@ -965,8 +1004,7 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
   // is fetched as several. Sequentially, not in parallel: Xero's 60/min budget
   // is shared with real invoice submission, and a long range shouldn't burst.
   const chunks = _chunkMonths(months, 12);
-  const parts  = [];
-  for (const chunk of chunks) {
+  const parts = await _mapWithConcurrency(chunks, REPORT_CHUNK_CONCURRENCY, async (chunk) => {
     const first = chunk[0], last = chunk[chunk.length - 1];
     const n = chunk.length;
     const [pnlRes, budRes] = await Promise.all([
@@ -979,12 +1017,12 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
       // Anchored on the FIRST month — periods counts forwards from here. timeframe 1 = month.
       withRetry(() => api.getReportBudgetSummary(tenantId, first.endISO, n, 1)),
     ]);
-    parts.push({
+    return {
       months: chunk,
       budgetRows: budRes.body.reports?.[0]?.rows || [],
       pnlRows:    pnlRes.body.reports?.[0]?.rows || [],
-    });
-  }
+    };
+  });
 
   const built = _buildBudgetVariance({
     months, actualThroughIdx,
@@ -1011,7 +1049,7 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
                     fromKey: months[0].key, toKey: months[months.length - 1].key },
     months:       months.map((m, i) => ({ key: m.key, label: m.label, source: i <= actualThroughIdx ? 'actual' : 'budget' })),
     ...built,
-  });
+  }, _periodCacheTtl(months, today));
 }
 
 // ── Performance overview (Dashboard → Overview + Revenue) ───────────────────
@@ -1125,16 +1163,22 @@ function _buildWatchList({ months, totals, actualThroughIdx }) {
   return out;
 }
 
-async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period } = {}) {
+async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period, cashFlow = false } = {}) {
   // Reuses the budget-variance fetch and its cache — on a warm cache this whole
   // endpoint costs one Xero call (the bank summary) rather than three.
   const bv = await getBudgetVariance(userId, tenantId, { timezone, force, window, period });
 
-  const first = bv.fiscalYear.fromISO;
   const today = _fmtISODate(_todayPartsInTz(timezone));
-  let cash = { total: 0, cashIn: 0, cashOut: 0, net: 0, accounts: [], available: false };
+  // Overview needs only the CLOSING BALANCE, which is "as of today" whatever
+  // window you ask for — so it reads a short recent window (one Xero call).
+  // Cash in/out genuinely is period-scoped, but only Banking shows it, and over
+  // a long range getBankSummary splits into 365-day windows: a 32-month period
+  // cost three calls to produce one number. Banking opts in explicitly.
+  const balanceFrom = _fmtISODate(_addDays(_todayPartsInTz(timezone), -31));
+  const from = cashFlow ? bv.fiscalYear.fromISO : balanceFrom;
+  let cash = { total: 0, cashIn: 0, cashOut: 0, net: 0, accounts: [], available: false, flowScope: cashFlow ? 'period' : 'last31d' };
   try {
-    const bank = await getBankSummary(userId, tenantId, { from: first, to: today, force });
+    const bank = await getBankSummary(userId, tenantId, { from, to: today, force });
     cash = {
       total:     bank.accounts.reduce((s, a) => s + a.closingBalance, 0),
       // Cash movement, not just the closing position — the Banking tab renders
@@ -1144,6 +1188,7 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
       net:       bank.net,
       accounts:  bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance, cashIn: a.cashReceived, cashOut: a.cashSpent })),
       available: true,
+      flowScope: cashFlow ? 'period' : 'last31d',
     };
   } catch (err) {
     // Cash is one card out of many — a bank-scope problem shouldn't blank the
@@ -1269,8 +1314,11 @@ function _parseInsights(raw, candidates) {
     .map(r => ({ ...byName.get(r.account), reason: r.reason }));
 }
 
-async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force = false } = {}) {
-  const perf = await getPerformance(userId, tenantId, { timezone, force });
+async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
+  // The period MUST be passed through. Without it the commentary was generated
+  // for the default period while the figures on screen showed another — the two
+  // boxes silently described different months, which reads as correct.
+  const perf = await getPerformance(userId, tenantId, { timezone, force, period });
   const candidates = _varianceCandidates(perf);
   const closed = perf.actualThroughIdx + 1;
 
@@ -1281,7 +1329,7 @@ async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force =
   // Keyed on the figures themselves, so the model is re-asked only when the
   // numbers actually move — not once per page view.
   const sig = candidates.map(c => `${c.account}:${Math.round(c.variance)}`).join('|');
-  const key = `insights:${userId}:${tenantId}:${sig}`;
+  const key = `insights:${userId}:${tenantId}:${perf.period?.fromKey}:${perf.period?.toKey}:${sig}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
@@ -1319,6 +1367,6 @@ module.exports = {
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _monthsFrom, _monthMeta, _monthsBetween, _chunkMonths,
   _resolveWindow, _resolvePeriod, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
-  _mergeChunks, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
+  _mergeChunks, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
 };
