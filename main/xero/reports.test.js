@@ -1536,3 +1536,40 @@ describe('xero/reports — bounded concurrency (pure)', () => {
     })).rejects.toThrow('chunk failed');
   });
 });
+
+// ── Customer revenue ────────────────────────────────────────────────────────
+describe('xero/reports — customer revenue (pure)', () => {
+  const { _buildCustomerRevenue } = require('./reports');
+
+  test('groups by contact, biggest first, counting invoices', () => {
+    const out = _buildCustomerRevenue([
+      { contact: { name: 'Acme' }, total: 1000 },
+      { contact: { name: 'Beta' }, total: 2000 },
+      { contact: { name: 'Acme' }, total: 500 },
+    ]);
+    expect(out.customers.map(c => [c.name, c.invoiced, c.invoices]))
+      .toEqual([['Beta', 2000, 1], ['Acme', 1500, 2]]);
+    expect(out.total).toBe(3500);
+  });
+
+  test('a missing contact becomes "Unknown" rather than being dropped', () => {
+    const out = _buildCustomerRevenue([{ total: 50 }, { contact: {}, total: 25 }]);
+    expect(out.customers).toEqual([{ name: 'Unknown', invoiced: 75, invoices: 2 }]);
+  });
+
+  test('no invoices yields a NULL average, not zero', () => {
+    // An average across no customers is meaningless, and 0 would read as a real
+    // figure on the card.
+    const out = _buildCustomerRevenue([]);
+    expect(out.average).toBeNull();
+    expect(out.count).toBe(0);
+  });
+
+  test('credit notes reduce a customer rather than creating a phantom one', () => {
+    const out = _buildCustomerRevenue([
+      { contact: { name: 'Acme' }, total: 1000 },
+      { contact: { name: 'Acme' }, total: -300 },
+    ]);
+    expect(out.customers).toEqual([{ name: 'Acme', invoiced: 700, invoices: 2 }]);
+  });
+});

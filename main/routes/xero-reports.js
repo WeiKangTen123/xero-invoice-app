@@ -172,6 +172,7 @@ router.get('/performance', requireAuth, async (req, res) => {
     const data = await reports.getPerformance(req.user.id, tenantId, {
       timezone, period: _periodFromQuery(req),
       cashFlow: req.query.cashFlow === 'true',
+      customers: req.query.customers === 'true',
       force: req.query.force === 'true',
     });
     res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });

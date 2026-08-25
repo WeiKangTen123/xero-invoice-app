@@ -462,6 +462,8 @@ export default function XeroInsights() {
     // getBankSummary split a long period into 365-day windows for a number
     // nothing displays.
     if (tab === 'banking') params.set('cashFlow', 'true');
+    // Top customers needs an invoice fetch, so only the Revenue tab asks for it.
+    if (tab === 'revenue') params.set('customers', 'true');
     api.get(`/xero-reports/performance?${params.toString()}`)
       .then(d => {
         setPerf({ status: 'done', data: d, error: '' });

@@ -364,6 +364,55 @@ function WatchBand({ items }) {
   );
 }
 
+// Two series in ONE plot. The recurring/project split was previously drawn as
+// two separate charts stacked vertically, which makes the mix impossible to read
+// — comparing bar heights across two independently-scaled plots is exactly the
+// comparison the card exists to make. Shared scale, side-by-side bars.
+function GroupedMonthlyBars({ months, series, currency, height = 200 }) {
+  const n = months.length;
+  if (!n) return <Empty>Pick a wider period.</Empty>;
+  const all = series.flatMap(s => s.values);
+  if (!all.some(v => v !== 0)) return <Empty>Nothing recorded in this period.</Empty>;
+
+  const W = 720, H = height, padB = 26, padT = 10;
+  const plot = H - padB - padT;
+  const minV = Math.min(0, ...all);
+  const range = Math.max(...all, 0) - minV || 1;
+  const y = v => padT + plot * (1 - (v - minV) / range);
+  const slot = W / n;
+  const bw = Math.min(18, (slot * 0.62) / series.length);
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', minWidth: n > 6 ? 520 : 0, display: 'block' }} role="img" aria-label="monthly series comparison">
+        <line x1="0" x2={W} y1={y(0)} y2={y(0)} stroke="var(--border)" strokeWidth="1" />
+        {months.map((m, i) => {
+          const cx = slot * i + slot / 2;
+          const groupW = bw * series.length + 2 * (series.length - 1);
+          return (
+            <g key={m.key}>
+              {series.map((s, k) => {
+                const v = s.values[i] || 0;
+                if (v === 0) return null;
+                const x = cx - groupW / 2 + k * (bw + 2);
+                return (
+                  <rect key={s.label} x={x} width={bw} y={Math.min(y(v), y(0))} height={Math.abs(y(v) - y(0))}
+                        fill={v < 0 ? 'var(--danger)' : s.color} rx="2">
+                    <title>{`${m.label} · ${s.label}: ${fmtMoney(v, currency)}`}</title>
+                  </rect>
+                );
+              })}
+              <text x={cx} y={H - 8} textAnchor="middle" fontSize="10" fill="var(--text-muted)">
+                {m.label.replace(' 20', " '")}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 function Legend({ items }) {
   return (
     <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 10.5, color: 'var(--text-muted)', marginTop: 8 }}>
@@ -594,6 +643,7 @@ export function OverviewPanel({ data, from, to, insights, summary }) {
 
 // ── Revenue ──────────────────────────────────────────────────────────────────
 export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
+  const [view, setView] = useState('actual');   // 'actual' | 'budget' — Xero has no forecast
   const cur = data.organisation?.currency || '';
   const T   = useRangeTotals(data, from, to);
   const months = data.months.slice(from, to + 1);
@@ -605,6 +655,22 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
   const budget = active ? slice(active.budget, from, to) : slice(data.totals.revenue.budget, from, to);
   const total  = sum(actual);
   const totalB = sum(budget);
+
+  // A netted "vs budget" is close to useless on a revenue tab: this org's
+  // implementation revenue is 75,000 UNDER budget while maintenance is 75,000
+  // OVER, so the total reads 0 and the card claims "on budget" while the mix has
+  // changed completely. Report the biggest single mover instead.
+  const lineVariances = lines
+    .map(l => ({ label: l.label, v: sliceSum(l.actual, from, to) - sliceSum(l.budget, from, to) }))
+    .filter(l => l.v !== 0)
+    .sort((a, b) => Math.abs(b.v) - Math.abs(a.v));
+  const biggest = lineVariances[0] || null;
+  const offsetting = lineVariances.length > 1 && Math.abs(total - totalB) < Math.abs(biggest?.v ?? 0);
+
+  // Annualised run-rate from the recurring lines. Derived, not a Xero figure —
+  // labelled as such, and meaningless with no closed months to annualise from.
+  const monthsInPeriod = Math.max(1, to - from + 1);
+  const runRate = T.recurring !== 0 ? (T.recurring / monthsInPeriod) * 12 : null;
 
   const waterfall = [
     ...lines.map(l => ({ label: l.label, value: sliceSum(l.actual, from, to), tag: l.recurring ? 'recurring' : null })),
@@ -634,19 +700,33 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
                 meter={T.recurringMix === null ? null : T.recurringMix * 100}
                 footLeft={T.recurringMix === null ? 'No revenue yet' : `${fmtPct(T.recurringMix, 0)} of revenue`}
                 footRight="Name-inferred" />
-        <Metric label="Project revenue" value={fmtMoney(T.project, cur)}
-                meter={T.recurringMix === null ? null : (1 - T.recurringMix) * 100}
-                tone={T.project < 0 ? 'var(--danger)' : undefined}
-                footLeft="Non-recurring lines" footRight="One-off work" />
-        <Metric label="Vs budget" value={totalB === 0 ? '—' : fmtMoney(total - totalB, cur)}
+        <Metric label="Recurring run-rate" value={runRate === null ? '—' : fmtMoney(runRate, cur)}
                 meter={null}
-                tone={total - totalB < 0 ? 'var(--danger)' : 'var(--success)'}
-                footLeft={totalB === 0 ? 'Nothing budgeted' : `${fmtMoney(totalB, cur)} budgeted`}
-                footRight="Higher is favourable" />
+                footLeft={runRate === null ? 'No recurring revenue' : `${fmtMoney(T.recurring, cur)} over ${monthsInPeriod}mo`}
+                footRight="Annualised · derived" />
+        <Metric label="Largest variance"
+                value={biggest ? `${biggest.v > 0 ? '+' : ''}${fmtMoney(biggest.v, cur)}` : '—'}
+                meter={null}
+                tone={!biggest ? undefined : biggest.v > 0 ? 'var(--success)' : 'var(--danger)'}
+                footLeft={biggest ? biggest.label : 'Nothing differs from budget'}
+                footRight={offsetting ? 'offsetting movements' : (totalB === 0 ? 'Nothing budgeted' : `net ${fmtMoney(total - totalB, cur)}`)} />
       </div>
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
-        <Surface title={active ? `${active.label} — monthly` : 'Recurring vs project revenue'} flex={7} minWidth={380}>
+        <Surface flex={7} minWidth={380}
+                 title={active ? `${active.label} — monthly`
+                               : (view === 'budget' ? 'Revenue — actual vs budget' : 'Recurring vs project revenue')}
+                 right={!active && (
+                   <div style={{ display: 'flex', gap: 2, background: 'var(--bg-secondary)', borderRadius: 7, padding: 2 }}>
+                     {[{ k: 'actual', l: 'Actual' }, { k: 'budget', l: 'vs Budget' }].map(o => (
+                       <button key={o.k} type="button" onClick={() => setView(o.k)} style={{
+                         padding: '3px 10px', fontSize: 11, fontWeight: 600, borderRadius: 5, cursor: 'pointer', border: 'none',
+                         background: view === o.k ? 'var(--accent-gradient)' : 'transparent',
+                         color: view === o.k ? '#fff' : 'var(--text-muted)',
+                       }}>{o.l}</button>
+                     ))}
+                   </div>
+                 )}>
           {active ? (
             <>
               <MonthlyBars months={months} actual={actual} budget={budget} currency={cur} />
@@ -654,12 +734,16 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
             </>
           ) : (
             <>
-              <MonthlyBars months={months} currency={cur} showBudget={false}
-                           actual={slice(data.split.recurring.actual, from, to)} budget={[]} />
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', margin: '4px 0 10px' }}>Recurring</div>
-              <MonthlyBars months={months} currency={cur} showBudget={false} height={150}
-                           actual={slice(data.split.project.actual, from, to)} budget={[]} />
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Project</div>
+              <GroupedMonthlyBars months={months} currency={cur} series={
+                view === 'budget'
+                  ? [{ label: 'Actual', color: 'var(--accent)',      values: slice(data.totals.revenue.actual, from, to) },
+                     { label: 'Budget', color: 'var(--text-muted)',  values: slice(data.totals.revenue.budget, from, to) }]
+                  : [{ label: 'Recurring', color: 'var(--accent)',   values: slice(data.split.recurring.actual, from, to) },
+                     { label: 'Project',   color: 'var(--success)',  values: slice(data.split.project.actual, from, to) }]
+              } />
+              <Legend items={view === 'budget'
+                ? [{ label: 'Actual', color: 'var(--accent)' }, { label: 'Budget', color: 'var(--text-muted)' }]
+                : [{ label: 'Recurring', color: 'var(--accent)' }, { label: 'Project', color: 'var(--success)' }]} />
             </>
           )}
         </Surface>
@@ -670,6 +754,47 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
           </div>
         </Surface>
       </div>
+
+      {data.customerRevenue?.available && (
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
+          <Surface title="Top customers" right={`${data.customerRevenue.count} invoiced`} flex={7} minWidth={380}>
+            {data.customerRevenue.customers.length === 0
+              ? <Empty>No sales invoices in this period.</Empty>
+              : <BarList currency={cur} showPctOfTotal
+                         items={data.customerRevenue.customers.slice(0, 8)
+                           .map(c => ({ label: c.name, value: c.invoiced,
+                                        tag: c.invoices > 1 ? `${c.invoices} invoices` : null }))} />}
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 12, lineHeight: 1.5 }}>
+              Invoice totals from Xero, which include tax — so this will not tie exactly to the
+              net revenue figures above unless your sales accounts are zero-rated.
+            </div>
+          </Surface>
+          <Surface title="Per customer" right={rangeLabel(data.months, from, to)} flex={5} minWidth={280}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>Average invoiced</div>
+                <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                  {data.customerRevenue.average === null ? '—' : fmtMoney(data.customerRevenue.average, cur)}
+                </div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                  across {data.customerRevenue.count} customer{data.customerRevenue.count === 1 ? '' : 's'}
+                </div>
+              </div>
+              <div style={{ borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>Largest customer share</div>
+                <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                  {data.customerRevenue.total > 0
+                    ? fmtPct(data.customerRevenue.customers[0].invoiced / data.customerRevenue.total, 0)
+                    : '—'}
+                </div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                  {data.customerRevenue.customers[0]?.name || 'no customers'} · concentration risk
+                </div>
+              </div>
+            </div>
+          </Surface>
+        </div>
+      )}
 
       <Surface title="Service lines — actual vs budget" right={rangeLabel(data.months, from, to)}>
         <div style={{ overflowX: 'auto' }}>
