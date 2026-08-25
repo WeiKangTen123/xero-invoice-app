@@ -654,20 +654,42 @@ const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
 // `periods` at 11 (12 columns) and BudgetSummary at 12, but both anchor on an
 // arbitrary date. So any 12 consecutive months cost exactly one pair of calls —
 // which is what lets the window slide off the fiscal year entirely.
+function _monthMeta(year, month) {
+  const d = new Date(Date.UTC(year, month - 1, 1));
+  const y = d.getUTCFullYear(), m = d.getUTCMonth() + 1;
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate(); // computed, so February is right in leap years
+  return {
+    key:      `${y}-${String(m).padStart(2, '0')}`,
+    label:    `${MONTH_NAMES[m - 1]} ${y}`,
+    startISO: _fmtISODate({ year: y, month: m, day: 1 }),
+    endISO:   _fmtISODate({ year: y, month: m, day: lastDay }),
+  };
+}
+
 function _monthsFrom(start, n = 12) {
-  const months = [];
-  for (let i = 0; i < n; i++) {
-    const d = new Date(Date.UTC(start.year, start.month - 1 + i, 1));
-    const year = d.getUTCFullYear(), month = d.getUTCMonth() + 1;
-    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    months.push({
-      key:      `${year}-${String(month).padStart(2, '0')}`,
-      label:    `${MONTH_NAMES[month - 1]} ${year}`,
-      startISO: _fmtISODate({ year, month, day: 1 }),
-      endISO:   _fmtISODate({ year, month, day: lastDay }),
-    });
-  }
-  return months;
+  return Array.from({ length: n }, (_, i) => _monthMeta(start.year, start.month + i));
+}
+
+// Pure. Every month from `fromKey` to `toKey` inclusive, any span. Reversed
+// inputs are swapped rather than rejected — a from/to the user dragged backwards
+// is an obvious intent, not an error worth blocking on.
+function _monthsBetween(fromKey, toKey) {
+  const parse = k => { const m = /^(\d{4})-(\d{1,2})$/.exec(String(k || '')); return m ? { year: +m[1], month: +m[2] } : null; };
+  let a = parse(fromKey), b = parse(toKey);
+  if (!a || !b) return null;
+  const idx = p => p.year * 12 + (p.month - 1);
+  if (idx(a) > idx(b)) [a, b] = [b, a];
+  const n = idx(b) - idx(a) + 1;
+  return Array.from({ length: n }, (_, i) => _monthMeta(a.year, a.month + i));
+}
+
+// Pure. Splits a month list into consecutive chunks of at most `size`.
+// Twelve is the ceiling of a single Xero call pair, so a longer period simply
+// becomes several pairs rather than being refused.
+function _chunkMonths(months, size = 12) {
+  const out = [];
+  for (let i = 0; i < months.length; i += size) out.push(months.slice(i, i + size));
+  return out;
 }
 
 // Pure. The 12 months of the fiscal year containing `today`.
@@ -675,32 +697,72 @@ function _fiscalYearMonths(today, fiscalYearEnd) {
   return _monthsFrom(_fiscalYearStart(today, fiscalYearEnd));
 }
 
-// Pure. Resolves a window key into its 12 months plus a human label.
-//   fy | prev-fy | next-fy   fiscal years relative to today
-//   rolling                  the 12 months ending with the current month
-//   YYYY-MM                  the 12 months ending with that month
-// Anything unrecognised falls back to the current fiscal year rather than
-// throwing — a bad query string shouldn't blank the dashboard.
-function _resolveWindow(key, today, fiscalYearEnd) {
-  const shiftFY = years => {
-    const s = _fiscalYearStart(today, fiscalYearEnd);
-    return _monthsFrom({ ...s, year: s.year + years });
-  };
-  const endingAt = (year, month) => _monthsFrom(_partsFromDate(new Date(Date.UTC(year, month - 1 - 11, 1))));
+// Pure. Resolves what the user asked for into an explicit month list.
+//
+// Presets are computed from the ORG's own fiscal year end, never a hardcoded
+// one: "financial year to date" is Apr-to-now for a March year end and
+// Jan-to-now for a December one, without either org configuring anything. That
+// matters because different organisations connect to this app.
+//
+// Any span is allowed. Twelve months is the ceiling of a single Xero call pair,
+// not of a period — a longer one is fetched as several pairs (see _chunkMonths).
+function _resolvePeriod(spec, today, fiscalYearEnd) {
+  const s = typeof spec === 'string' ? { preset: spec } : (spec || {});
+  const fyStart = _fiscalYearStart(today, fiscalYearEnd);
+  const nowKey  = `${today.year}-${String(today.month).padStart(2, '0')}`;
+  const shift   = (parts, n) => _partsFromDate(new Date(Date.UTC(parts.year, parts.month - 1 + n, 1)));
+  const key     = p => `${p.year}-${String(p.month).padStart(2, '0')}`;
+  const span    = (a, b, label, k) => ({ key: k, label, months: _monthsBetween(key(a), key(b)) });
+  const quarterStart = m => m - ((m - 1) % 3);
 
-  if (key === 'prev-fy') return { key, months: shiftFY(-1), label: 'Previous financial year' };
-  if (key === 'next-fy') return { key, months: shiftFY(1),  label: 'Next financial year' };
-  if (key === 'rolling') return { key, months: endingAt(today.year, today.month), label: 'Last 12 months' };
-
-  const m = /^(\d{4})-(\d{2})$/.exec(key || '');
-  if (m) {
-    const year = Number(m[1]), month = Number(m[2]);
-    if (month >= 1 && month <= 12) {
-      const months = endingAt(year, month);
-      return { key, months, label: `12 months to ${months[11].label}` };
-    }
+  // An explicit range always wins — it is the most specific thing the user can say.
+  if (s.from && s.to) {
+    const months = _monthsBetween(s.from, s.to);
+    if (months) return { key: 'custom', label: `${months[0].label} – ${months[months.length - 1].label}`, months };
   }
-  return { key: 'fy', months: _fiscalYearMonths(today, fiscalYearEnd), label: 'This financial year' };
+
+  const P = String(s.preset || 'fy-ytd');
+  switch (P) {
+    case 'this-month':   return span(today, today, 'This month', P);
+    case 'last-month':   { const m = shift(today, -1); return span(m, m, 'Last month', P); }
+    case 'this-quarter': { const q = { ...today, month: quarterStart(today.month) }; return span(q, shift(q, 2), 'This quarter', P); }
+    case 'last-quarter': { const q = shift({ ...today, month: quarterStart(today.month) }, -3); return span(q, shift(q, 2), 'Last quarter', P); }
+    case 'fy-ytd':       return span(fyStart, today, 'Financial year to date', P);
+    case 'cy-ytd':       return span({ year: today.year, month: 1 }, today, 'Calendar year to date', P);
+    case 'fy':           return span(fyStart, shift(fyStart, 11), 'This financial year', P);
+    case 'prev-fy':      { const f = shift(fyStart, -12); return span(f, shift(f, 11), 'Previous financial year', P); }
+    case 'next-fy':      { const f = shift(fyStart, 12);  return span(f, shift(f, 11), 'Next financial year', P); }
+    case 'cy':           return span({ year: today.year, month: 1 }, { year: today.year, month: 12 }, `Calendar year ${today.year}`, P);
+    case 'rolling':
+    case 'last-12':      return span(shift(today, -11), today, 'Last 12 months', P);
+    case 'last-6':       return span(shift(today, -5),  today, 'Last 6 months', P);
+    case 'last-3':       return span(shift(today, -2),  today, 'Last 3 months', P);
+    default: break;
+  }
+
+  // Legacy YYYY-MM window: the 12 months ENDING at that month.
+  const m = /^(\d{4})-(\d{2})$/.exec(P);
+  if (m && +m[2] >= 1 && +m[2] <= 12) {
+    const end = { year: +m[1], month: +m[2] };
+    const months = _monthsBetween(key(shift(end, -11)), key(end));
+    return { key: P, label: `12 months to ${months[11].label}`, months };
+  }
+
+  // Unrecognised input must not blank the dashboard.
+  return span(fyStart, today, 'Financial year to date', 'fy-ytd');
+}
+
+// Back-compat shim. The older window keys always meant a 12-month span, and the
+// Budget tabs still use them — so an unrecognised value must fall back to the
+// full fiscal year here, NOT to the new year-to-date default. A budget report
+// silently switching from 12 months to 5 would be a real reporting error.
+function _resolveWindow(key, today, fiscalYearEnd) {
+  const k = String(key || '');
+  if (k === 'rolling') return _resolvePeriod('last-12', today, fiscalYearEnd);
+  if (['fy', 'prev-fy', 'next-fy'].includes(k)) return _resolvePeriod(k, today, fiscalYearEnd);
+  const m = /^(\d{4})-(\d{2})$/.exec(k);
+  if (m && +m[2] >= 1 && +m[2] <= 12) return _resolvePeriod(k, today, fiscalYearEnd);
+  return _resolvePeriod('fy', today, fiscalYearEnd);
 }
 
 // Pure. Index of the last FULLY elapsed month, or -1 if none has completed.
@@ -776,16 +838,52 @@ function _variancePct(variance, budget) {
   return budget !== 0 ? variance / Math.abs(budget) : null;
 }
 
+// Pure. Stitches per-chunk report rows into one series spanning every month.
+//
+// Each chunk is an independent Xero response, so an account can be present in
+// one and absent from another (the P&L omits accounts with no transactions in
+// that span). Missing chunks are zero-filled at the right offset rather than
+// shortening the series, otherwise months would silently slide.
+function _mergeChunks(parts, totalMonths) {
+  const budget = new Map(), actual = new Map(), skeleton = [];
+  const seenRow = new Set(), seenSection = new Set();
+  const put = (map, label, values, offset, n) => {
+    if (!map.has(label)) map.set(label, Array(totalMonths).fill(0));
+    const arr = map.get(label);
+    for (let i = 0; i < n; i++) arr[offset + i] = values[i] || 0;
+  };
+
+  let offset = 0;
+  for (const part of parts) {
+    const n = part.months.length;
+    for (const [label, vals] of _rowValuesByLabel(part.budgetRows))                  put(budget, label, vals, offset, n);
+    for (const [label, vals] of _rowValuesByLabel(part.pnlRows, { reverse: true }))  put(actual, label, vals, offset, n);
+
+    // Row order comes from the first chunk that contains each line, so the
+    // report reads in Xero's own order rather than the order chunks happened to
+    // introduce accounts.
+    for (const row of _skeletonFromBudget(part.budgetRows)) {
+      if (row.kind === 'section') {
+        if (!seenSection.has(row.label)) { seenSection.add(row.label); skeleton.push(row); }
+      } else if (!seenRow.has(row.label)) { seenRow.add(row.label); skeleton.push(row); }
+    }
+    offset += n;
+  }
+  return { budget, actual, skeleton };
+}
+
 // Pure. Merges the two reports into one flat, ordered row list.
 //
 // Each cell is actual OR budget depending on whether its month has fully
 // elapsed — never both, and never a sum of the two. Subtotals are taken from
 // whichever report supplied that column rather than recomputed, so they stay
 // internally consistent with the figures above them.
-function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx }) {
-  const budget   = _rowValuesByLabel(budgetRows);
-  const actual   = _rowValuesByLabel(pnlRows, { reverse: true });
-  const skeleton = _skeletonFromBudget(budgetRows);
+function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx, merged }) {
+  // `merged` is the multi-chunk path; the single-report path is unchanged so a
+  // period that fits one Xero call pair behaves exactly as it always did.
+  const budget   = merged ? merged.budget   : _rowValuesByLabel(budgetRows);
+  const actual   = merged ? merged.actual   : _rowValuesByLabel(pnlRows, { reverse: true });
+  const skeleton = merged ? merged.skeleton : _skeletonFromBudget(budgetRows);
 
   // An account with actuals but no budget appears only in the P&L. Rare (this
   // org has none), but dropping it would silently understate the report, so it
@@ -844,17 +942,18 @@ function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx })
   };
 }
 
-async function getBudgetVariance(userId, tenantId, { force = false, timezone = 'UTC', window = 'fy' } = {}) {
+async function getBudgetVariance(userId, tenantId, { force = false, timezone = 'UTC', window = 'fy', period } = {}) {
   const org           = await _getOrganisation(userId, tenantId, force);
   const fiscalYearEnd = { month: org.financialYearEndMonth || 12, day: org.financialYearEndDay || 31 };
   const today         = _todayPartsInTz(timezone);
-  const win           = _resolveWindow(window, today, fiscalYearEnd);
+  const win           = period ? _resolvePeriod(period, today, fiscalYearEnd)
+                               : _resolveWindow(window, today, fiscalYearEnd);
   const months        = win.months;
   const actualThroughIdx = _actualThroughIndex(months, today);
 
-  // The window is part of the key — two windows are two different reports, and
-  // serving one for the other would silently show the wrong year.
-  const key    = `budgetvar:${userId}:${tenantId}:${win.key}:${months[0].key}:${actualThroughIdx}`;
+  // The exact span is part of the key — two periods are two different reports,
+  // and serving one for the other would silently show the wrong months.
+  const key    = `budgetvar:${userId}:${tenantId}:${months[0].key}:${months[months.length - 1].key}:${actualThroughIdx}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
@@ -862,18 +961,34 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
   const token      = await tokenCache.getValidToken(tenantId);
   const api        = _apiFor(token);
 
-  const first = months[0], last = months[months.length - 1];
-  const [pnlRes, budRes] = await Promise.all([
-    // Anchored on the LAST month — periods counts backwards from here.
-    withRetry(() => api.getReportProfitAndLoss(tenantId, last.startISO, last.endISO, 11, 'MONTH')),
-    // Anchored on the FIRST month — periods counts forwards from here. timeframe 1 = month.
-    withRetry(() => api.getReportBudgetSummary(tenantId, first.endISO, 12, 1)),
-  ]);
+  // A period longer than 12 months exceeds what one call pair can return, so it
+  // is fetched as several. Sequentially, not in parallel: Xero's 60/min budget
+  // is shared with real invoice submission, and a long range shouldn't burst.
+  const chunks = _chunkMonths(months, 12);
+  const parts  = [];
+  for (const chunk of chunks) {
+    const first = chunk[0], last = chunk[chunk.length - 1];
+    const n = chunk.length;
+    const [pnlRes, budRes] = await Promise.all([
+      // Anchored on the LAST month — periods counts backwards from here. A
+      // single month has no comparison periods at all, so `periods` is omitted
+      // rather than passed as 0, which the endpoint rejects.
+      withRetry(() => (n === 1
+        ? api.getReportProfitAndLoss(tenantId, first.startISO, last.endISO)
+        : api.getReportProfitAndLoss(tenantId, last.startISO, last.endISO, n - 1, 'MONTH'))),
+      // Anchored on the FIRST month — periods counts forwards from here. timeframe 1 = month.
+      withRetry(() => api.getReportBudgetSummary(tenantId, first.endISO, n, 1)),
+    ]);
+    parts.push({
+      months: chunk,
+      budgetRows: budRes.body.reports?.[0]?.rows || [],
+      pnlRows:    pnlRes.body.reports?.[0]?.rows || [],
+    });
+  }
 
   const built = _buildBudgetVariance({
-    budgetRows: budRes.body.reports?.[0]?.rows || [],
-    pnlRows:    pnlRes.body.reports?.[0]?.rows || [],
     months, actualThroughIdx,
+    merged: _mergeChunks(parts, months.length),
   });
 
   const end = _parseISODate(last.endISO);
@@ -882,12 +997,16 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
   const periodLabel = win.key === 'fy'
     ? `For the year ended ${end.day} ${MONTHS_LONG[end.month - 1]} ${end.year}`
     : `${win.label} · ${months[0].label} – ${last.label}`;
-  logger.info('Budget vs Actual fetched', { userId, tenantId, window: win.key, range: `${first.key}..${last.key}`, actualMonths: actualThroughIdx + 1 });
+  logger.info('Budget vs Actual fetched', {
+    userId, tenantId, period: win.key, range: `${first.key}..${last.key}`,
+    months: months.length, chunks: chunks.length, actualMonths: actualThroughIdx + 1,
+  });
 
   return _cacheSet(key, {
     organisation: { name: org.name || org.legalName || 'Organisation', currency: org.baseCurrency || '' },
     fiscalYear:   { label: periodLabel, fromISO: first.startISO, toISO: last.endISO },
-    window:       { key: win.key, label: win.label },
+    period:       { key: win.key, label: win.label, months: months.length, chunks: chunks.length,
+                    fromKey: months[0].key, toKey: months[months.length - 1].key },
     months:       months.map((m, i) => ({ key: m.key, label: m.label, source: i <= actualThroughIdx ? 'actual' : 'budget' })),
     ...built,
   });
@@ -1004,10 +1123,10 @@ function _buildWatchList({ months, totals, actualThroughIdx }) {
   return out;
 }
 
-async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy' } = {}) {
+async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period } = {}) {
   // Reuses the budget-variance fetch and its cache — on a warm cache this whole
   // endpoint costs one Xero call (the bank summary) rather than three.
-  const bv = await getBudgetVariance(userId, tenantId, { timezone, force, window });
+  const bv = await getBudgetVariance(userId, tenantId, { timezone, force, window, period });
 
   const first = bv.fiscalYear.fromISO;
   const today = _fmtISODate(_todayPartsInTz(timezone));
@@ -1040,7 +1159,7 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
   return {
     organisation:     bv.organisation,
     fiscalYear:       bv.fiscalYear,
-    window:           bv.window,
+    period:           bv.period,
     months:           bv.months,
     actualThroughIdx,
     ...built,
@@ -1196,7 +1315,8 @@ module.exports = {
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
-  _fiscalYearMonths, _monthsFrom, _resolveWindow, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
-  _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
+  _fiscalYearMonths, _monthsFrom, _monthMeta, _monthsBetween, _chunkMonths,
+  _resolveWindow, _resolvePeriod, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
+  _mergeChunks, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
 };

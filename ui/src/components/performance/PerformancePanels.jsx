@@ -22,77 +22,76 @@ function sliceSum(series, from, to) { return sum(slice(series, from, to)); }
 // offering arbitrary days would imply a precision the data doesn't have.
 // The 12-month windows a single pair of Xero calls can cover. Anything wider
 // would need several calls stitched together, so it isn't offered here.
-// Fixed windows. "Calendar year" and "Custom" are not listed here because both
-// resolve to a YYYY-MM anchor computed at render time — the backend treats
-// "12 months ending YYYY-MM" as a first-class window, so Jan–Dec is just the
-// anchor December, and a custom pick is any other month.
-export const WINDOWS = [
-  { key: 'fy',      label: 'This financial year' },
-  { key: 'rolling', label: 'Last 12 months' },
-  { key: 'prev-fy', label: 'Previous financial year' },
-  { key: 'next-fy', label: 'Next financial year' },
+// Quick picks. Each resolves server-side from the ORG's own fiscal year end, so
+// "financial year to date" means Apr-to-now for a March year end and Jan-to-now
+// for a December one — no per-company configuration.
+export const PRESETS = [
+  { key: 'this-month',   label: 'This month' },
+  { key: 'last-month',   label: 'Last month' },
+  { key: 'this-quarter', label: 'This quarter' },
+  { key: 'last-quarter', label: 'Last quarter' },
+  { key: 'fy-ytd',       label: 'Financial year to date' },
+  { key: 'cy-ytd',       label: 'Calendar year to date' },
+  { key: 'fy',           label: 'This financial year' },
+  { key: 'prev-fy',      label: 'Previous financial year' },
+  { key: 'next-fy',      label: 'Next financial year' },
+  { key: 'cy',           label: 'Calendar year' },
+  { key: 'last-3',       label: 'Last 3 months' },
+  { key: 'last-6',       label: 'Last 6 months' },
+  { key: 'last-12',      label: 'Last 12 months' },
 ];
 
-const MONTH_OPTS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-const isCustomKey = k => /^\d{4}-\d{2}$/.test(k || '');
+const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-export function MonthRange({ months, from, to, onChange, label, window: win, onWindow }) {
-  if (!months?.length) return null;
-  const opt = (m, i) => <option key={m.key} value={i}>{m.label}</option>;
+// Two independent controls. The preset is a shortcut that SETS the range; the
+// range itself spans years and is never limited to whatever the preset chose —
+// constraining one by the other was what made the old control unusable.
+export function MonthRange({ months, from, to, onChange, label, preset, onPreset, onRange, chunks }) {
+  const thisYear = new Date().getFullYear();
+  const years = Array.from({ length: 11 }, (_, i) => thisYear - 7 + i);
+  const sel = { width: 'auto', fontSize: 12, padding: '5px 8px' };
+
+  // The range pickers work in absolute year+month, independent of the months the
+  // current period happens to contain.
+  const parse = k => ({ y: Number(String(k).slice(0, 4)), m: Number(String(k).slice(5, 7)) });
+  const fromKey = months?.[from]?.key || months?.[0]?.key;
+  const toKey   = months?.[to]?.key   || months?.[months.length - 1]?.key;
+  if (!fromKey || !toKey) return null;
+  const F = parse(fromKey), T = parse(toKey);
+  const emit = (f, t) => onRange(`${f.y}-${String(f.m).padStart(2, '0')}`, `${t.y}-${String(t.m).padStart(2, '0')}`);
+
+  const picker = (v, onY, onM) => (
+    <span style={{ display: 'inline-flex', gap: 4 }}>
+      <select className="form-input" style={sel} value={v.m} onChange={e => onM(Number(e.target.value))}>
+        {MONTH_ABBR.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+      </select>
+      <select className="form-input" style={sel} value={v.y} onChange={e => onY(Number(e.target.value))}>
+        {years.map(y => <option key={y} value={y}>{y}</option>)}
+      </select>
+    </span>
+  );
+
+  const span = months.length;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-      {onWindow && (() => {
-        const thisYear = new Date().getFullYear();
-        const custom   = isCustomKey(win);
-        // A custom window is stored as its end month, so the pickers read
-        // straight off the key rather than needing their own state.
-        const cy = custom ? Number(win.slice(0, 4)) : thisYear;
-        const cm = custom ? Number(win.slice(5, 7)) : 12;
-        const years = Array.from({ length: 9 }, (_, i) => thisYear - 5 + i);
-        const sel = { width: 'auto', fontSize: 12, padding: '5px 8px' };
-        return (
-          <>
-            <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
-              Period
-            </span>
-            <select className="form-input" style={sel}
-                    value={custom ? 'custom' : win}
-                    onChange={e => onWindow(e.target.value === 'custom' ? `${thisYear}-12` : e.target.value)}>
-              {WINDOWS.map(w => <option key={w.key} value={w.key}>{w.label}</option>)}
-              <option value={`${thisYear}-12`}>Calendar year {thisYear} (Jan–Dec)</option>
-              <option value="custom">Custom 12 months…</option>
-            </select>
-            {custom && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>ending</span>
-                <select className="form-input" style={sel} value={cm}
-                        onChange={e => onWindow(`${cy}-${String(e.target.value).padStart(2, '0')}`)}>
-                  {MONTH_OPTS.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
-                </select>
-                <select className="form-input" style={sel} value={cy}
-                        onChange={e => onWindow(`${e.target.value}-${String(cm).padStart(2, '0')}`)}>
-                  {years.map(y => <option key={y} value={y}>{y}</option>)}
-                </select>
-              </span>
-            )}
-          </>
-        );
-      })()}
       <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
-        Month range
+        Period
       </span>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <select className="form-input" style={{ width: 'auto', fontSize: 12, padding: '5px 8px' }}
-                value={from} onChange={e => onChange(Math.min(Number(e.target.value), to), to)}>
-          {months.map(opt)}
-        </select>
-        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>→</span>
-        <select className="form-input" style={{ width: 'auto', fontSize: 12, padding: '5px 8px' }}
-                value={to} onChange={e => onChange(from, Math.max(Number(e.target.value), from))}>
-          {months.map(opt)}
-        </select>
-      </div>
-      {label && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{label}</span>}
+      <select className="form-input" style={sel} value={preset} onChange={e => onPreset(e.target.value)}>
+        {PRESETS.map(p => <option key={p.key} value={p.key}>{p.label}</option>)}
+        <option value="custom">Custom range…</option>
+      </select>
+
+      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>·</span>
+      {picker(F, y => emit({ ...F, y }, T), m => emit({ ...F, m }, T))}
+      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>→</span>
+      {picker(T, y => emit(F, { ...T, y }), m => emit(F, { ...T, m }))}
+
+      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        {span} month{span === 1 ? '' : 's'}
+        {chunks > 1 && ` · ${chunks} Xero fetches`}
+        {label ? ` · ${label}` : ''}
+      </span>
     </div>
   );
 }
