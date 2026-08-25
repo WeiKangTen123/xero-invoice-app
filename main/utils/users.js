@@ -129,7 +129,11 @@ async function createUser(email, password, role = 'user') {
     // cannot both claim admin — SQLite serialises writes, only one can go first.
     const actualRole = role === 'auto' ? (hasUsers() ? 'user' : 'admin') : role;
     const user = {
-      id:        `${Date.now()}`,
+      // Timestamp alone is not unique: two registrations inside the same
+      // millisecond produce the same id and the INSERT fails on the primary key.
+      // Keeping the timestamp prefix preserves creation order; the suffix makes
+      // a collision effectively impossible.
+      id:        `${Date.now()}${require('crypto').randomBytes(4).toString('hex')}`,
       email:     email.toLowerCase().trim(),
       password:  hash,
       role:      actualRole,
@@ -144,7 +148,10 @@ async function createUser(email, password, role = 'user') {
     // Pre-create the user's credentials row so every account has one from day one
     // (mirrors the old behaviour of always creating config.json on user creation).
     db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(user.id);
-    db.prepare('INSERT OR IGNORE INTO user_settings (user_id, auto_process) VALUES (?, 1)').run(user.id);
+    // Auto-submit OFF for a new account. This line previously hardcoded 1, which
+    // silently overrode the column default and opted every new user into posting
+    // invoices to a live accounting system before they had configured anything.
+    db.prepare('INSERT OR IGNORE INTO user_settings (user_id, auto_process) VALUES (?, 0)').run(user.id);
 
     return sanitize(user);
   });
@@ -245,7 +252,9 @@ function removeGeminiKey(userId, keyId) {
 function ensureUserDirectories() {
   for (const u of readUsers()) {
     db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(u.id);
-    db.prepare('INSERT OR IGNORE INTO user_settings (user_id, auto_process) VALUES (?, 1)').run(u.id);
+    // OFF, not ON: this runs on every boot, so provisioning a missing row must
+    // never be the thing that starts posting someone's invoices to Xero.
+    db.prepare('INSERT OR IGNORE INTO user_settings (user_id, auto_process) VALUES (?, 0)').run(u.id);
   }
 }
 

@@ -28,6 +28,7 @@ function _newState(userId) {
     fetchPending:     false,
     debounceTimer:    null,
     pollId:           null,
+    reconnectTimer:   null,
     // s.imap is set as soon as `new Imap()` is constructed — well before the
     // connection handshake finishes and the inbox is actually selected. A
     // manual rescan that lands in that window calls .search() on a mailbox
@@ -134,6 +135,76 @@ function _fetchUnseen(s) {
 
 // ── Connection ────────────────────────────────────────────────────────────────
 
+// Every disconnect funnels through here, and it is deliberately the ONLY place
+// that increments the attempt counter or schedules a retry.
+//
+// The old code incremented and scheduled independently in BOTH the 'error' and
+// 'end' handlers. A dropped socket makes node-imap emit both, so one disconnect
+// cost two attempts and started two reconnects — each of which built a fresh
+// Imap instance while the previous one stayed alive with its listeners attached.
+// The next drop then fired four events, then eight. Gmail routinely closes idle
+// IDLE connections, so a healthy mailbox burned the 20-attempt budget in about
+// ten normal drops and stopped for good with "stop and reconfigure", while the
+// credentials were perfectly valid.
+//
+// Three guards make that impossible:
+//   * `imap !== s.imap` ignores events from an instance we have already replaced
+//   * `s.reconnectTimer` ignores a second event for the same disconnect
+//   * the timer is held on state, so stop() can cancel a pending retry
+function _scheduleReconnect(s, imap, reason, err) {
+  const { userId } = s;
+  if (s.intentionalStop) return;
+  if (imap && s.imap && imap !== s.imap) return;  // stale instance, already superseded
+  if (s.reconnectTimer) return;                   // this disconnect is already handled
+
+  s.mailboxReady = false;
+  if (s.pollId) { clearInterval(s.pollId); s.pollId = null; }
+
+  s.reconnectAttempt++;
+  if (s.reconnectAttempt > RECONNECT_MAX_TRIES) {
+    logger.error(`[user:${userId}] IMAP: max reconnect attempts reached — stop and reconfigure`);
+    _teardown(s.imap);
+    s.imap = null;
+    return;
+  }
+
+  const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, s.reconnectAttempt - 1), RECONNECT_MAX_MS);
+  logger.warn(
+    `[user:${userId}] IMAP ${reason} (attempt ${s.reconnectAttempt}/${RECONNECT_MAX_TRIES}), ` +
+    `reconnecting in ${Math.round(delay / 1000)}s`,
+    err ? { error: err.message } : undefined
+  );
+
+  // Drop the dead instance before building a new one, so its listeners can't
+  // fire against the state we are about to reuse.
+  _teardown(s.imap);
+  s.imap = null;
+
+  s.reconnectTimer = setTimeout(() => {
+    s.reconnectTimer = null;
+    if (s.intentionalStop) return;
+    try { _connect(s); } catch (e) {
+      logger.error(`[user:${userId}] Reconnect failed`, { error: e.message });
+    }
+  }, delay);
+}
+
+// Detaches listeners and closes an Imap instance we are finished with. Without
+// removeAllListeners an orphan keeps emitting into the live state.
+function _teardown(imap) {
+  if (!imap) return;
+  try {
+    imap.removeAllListeners();
+    // A bare EventEmitter THROWS on an 'error' event with no listener, and
+    // node-imap can still emit one while the socket finishes closing. Without
+    // this sink that becomes an uncaughtException, which index.js turns into a
+    // process exit — so tearing down a dead connection would take the server
+    // with it.
+    imap.on('error', () => {});
+  } catch (_) {}
+  try { imap.end(); } catch (_) {}
+}
+
 function _connect(s) {
   const { userId, credentials, onInvoice } = s;
 
@@ -197,45 +268,16 @@ function _connect(s) {
     });
   });
 
-  imap.on('error', (err) => {
-    s.mailboxReady = false;
-    if (s.intentionalStop) return;
-    s.reconnectAttempt++;
-    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, s.reconnectAttempt - 1), RECONNECT_MAX_MS);
-    logger.error(
-      `[user:${userId}] IMAP error (attempt ${s.reconnectAttempt}/${RECONNECT_MAX_TRIES}), ` +
-      `reconnecting in ${Math.round(delay / 1000)}s`,
-      { error: err.message }
-    );
-    setTimeout(() => {
-      if (!s.intentionalStop) {
-        try { _connect(s); } catch (e) {
-          logger.error(`[user:${userId}] Reconnect failed`, { error: e.message });
-        }
-      }
-    }, delay);
-  });
+  // Both of these fire for a single dropped socket. Neither decides anything;
+  // _scheduleReconnect de-duplicates them.
+  imap.on('error', (err) => _scheduleReconnect(s, imap, 'error', err));
 
   imap.once('end', () => {
-    s.mailboxReady = false;
-    if (s.pollId) { clearInterval(s.pollId); s.pollId = null; }
     if (s.intentionalStop) {
-      logger.info(`[user:${userId}] IMAP connection closed (intentional stop)`);
+      logger.info(`[user:${s.userId}] IMAP connection closed (intentional stop)`);
       return;
     }
-    s.reconnectAttempt++;
-    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, s.reconnectAttempt - 1), RECONNECT_MAX_MS);
-    logger.warn(
-      `[user:${userId}] IMAP ended unexpectedly (attempt ${s.reconnectAttempt}/${RECONNECT_MAX_TRIES}), ` +
-      `reconnecting in ${Math.round(delay / 1000)}s`
-    );
-    setTimeout(() => {
-      if (!s.intentionalStop) {
-        try { _connect(s); } catch (e) {
-          logger.error(`[user:${userId}] Reconnect after end failed`, { error: e.message });
-        }
-      }
-    }, delay);
+    _scheduleReconnect(s, imap, 'ended unexpectedly');
   });
 
   imap.connect();
@@ -260,6 +302,9 @@ function stop(userId) {
   if (!s) return;
   s.intentionalStop  = true;
   s.reconnectAttempt = 0;
+  // A retry scheduled before the stop would otherwise reconnect a watcher the
+  // user just switched off.
+  if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
   if (s.debounceTimer) { clearTimeout(s.debounceTimer); s.debounceTimer = null; }
   if (s.pollId)        { clearInterval(s.pollId);       s.pollId        = null; }
   if (s.imap) {

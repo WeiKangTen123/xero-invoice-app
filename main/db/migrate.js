@@ -23,6 +23,16 @@ function run() {
   _ensureColumn('user_credentials', 'xero_oauth_connected_at',  'xero_oauth_connected_at TEXT');
   _ensureColumn('user_credentials', 'timezone', 'timezone TEXT');
   _ensureColumn('users', 'last_seen_at', 'last_seen_at TEXT');
+
+  // Rebuilds user_settings so a NEW account starts with auto-submit off.
+  // Idempotent and value-preserving — see the migration for why.
+  try {
+    require('./migrate-autoprocess-default').run();
+  } catch (err) {
+    // A failed default flip must not stop the server booting; existing rows are
+    // untouched either way.
+    require('../utils/logger').warn('auto_process default migration skipped', { error: err.message });
+  }
 }
 
 module.exports = { run };

@@ -44,37 +44,51 @@ function typeLabel(type) { return TYPE_LABEL[type] || (type || 'Other'); }
 // Module-level cache: the chart of accounts is the same for every field on the
 // page, and InvoiceReview renders this alongside a Setup default. Without it,
 // mounting two of these fires two identical requests against Xero's rate limit.
-let _cache = null; // { accounts, fetchedAt }
+// Keyed BY ORGANISATION, not global. Each Xero org has its own chart of
+// accounts, so a single shared cache would hand org A's account list to org B —
+// and the request itself carries no tenantId, so the server would fall back to
+// whichever org happens to be first. Harmless with one org connected, wrong the
+// moment there are two.
+const _cache = new Map(); // tenantId|'default' -> { accounts, fetchedAt }
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const _cacheKey = tenantId => tenantId || 'default';
 
 // Resolves a code to its account name for read-only display, sharing the same
 // module cache as the picker so it costs no extra request. Returns null until the
 // chart of accounts is available, and for a code this org doesn't have — callers
 // fall back to showing the bare code.
-export function useAccountName(code) {
-  const [accounts, setAccounts] = useState(_cache?.accounts || null);
+// Shared fetch so the picker and the read-only label can never disagree about
+// which org's chart they are showing.
+function _fetchAccounts(tenantId) {
+  const key = _cacheKey(tenantId);
+  const hit = _cache.get(key);
+  if (hit && Date.now() - hit.fetchedAt < CACHE_TTL_MS) return Promise.resolve(hit.accounts);
+  const qs = tenantId ? `?tenantId=${encodeURIComponent(tenantId)}` : '';
+  return api.get(`/xero-reports/accounts${qs}`).then(d => {
+    const list = (d.accounts || []).filter(a => a.code && a.type !== 'BANK'
+                                             && (!a.status || a.status === 'ACTIVE'));
+    _cache.set(key, { accounts: list, fetchedAt: Date.now() });
+    return list;
+  });
+}
+
+export function useAccountName(code, tenantId) {
+  const [accounts, setAccounts] = useState(() => _cache.get(_cacheKey(tenantId))?.accounts || null);
 
   useEffect(() => {
-    if (accounts) return;
-    if (_cache && Date.now() - _cache.fetchedAt < CACHE_TTL_MS) { setAccounts(_cache.accounts); return; }
     let alive = true;
-    api.get('/xero-reports/accounts')
-      .then(d => {
-        const list = (d.accounts || []).filter(a => a.code && a.type !== 'BANK'
-                                                 && (!a.status || a.status === 'ACTIVE'));
-        _cache = { accounts: list, fetchedAt: Date.now() };
-        if (alive) setAccounts(list);
-      })
+    _fetchAccounts(tenantId)
+      .then(list => { if (alive) setAccounts(list); })
       .catch(() => { /* read-only display falls back to the code alone */ });
     return () => { alive = false; };
-  }, [accounts]);
+  }, [tenantId]);
 
   if (!code || !accounts) return null;
   return accounts.find(a => String(a.code) === String(code).trim())?.name || null;
 }
 
-export default function AccountCodeSelect({ value, onChange, invoiceType, disabled, autoFocus }) {
-  const [accounts, setAccounts] = useState(_cache?.accounts || null);
+export default function AccountCodeSelect({ value, onChange, invoiceType, disabled, autoFocus, tenantId }) {
+  const [accounts, setAccounts] = useState(() => _cache.get(_cacheKey(tenantId))?.accounts || null);
   const [failed,   setFailed]   = useState(false);
   const [open,     setOpen]     = useState(false);
   const [query,    setQuery]    = useState('');
@@ -82,22 +96,16 @@ export default function AccountCodeSelect({ value, onChange, invoiceType, disabl
   const inputRef = useRef(null);
 
   useEffect(() => {
-    if (_cache && Date.now() - _cache.fetchedAt < CACHE_TTL_MS) { setAccounts(_cache.accounts); return; }
     let alive = true;
-    api.get('/xero-reports/accounts')
-      .then(d => {
-        // Bank accounts can't take a line item, and archived ones shouldn't be
-        // offered for new coding.
-        const list = (d.accounts || []).filter(a => a.code && a.type !== 'BANK'
-                                                 && (!a.status || a.status === 'ACTIVE'));
-        _cache = { accounts: list, fetchedAt: Date.now() };
-        if (alive) setAccounts(list);
-      })
+    // Bank accounts can't take a line item and archived ones shouldn't be
+    // offered for new coding — both filtered in _fetchAccounts.
+    _fetchAccounts(tenantId)
+      .then(list => { if (alive) setAccounts(list); })
       // Not connected to Xero, or a missing scope — fall back to a plain text
       // box rather than trapping the user behind an empty dropdown.
       .catch(() => { if (alive) setFailed(true); });
     return () => { alive = false; };
-  }, []);
+  }, [tenantId]);
 
   // Close on outside click / Escape.
   useEffect(() => {
