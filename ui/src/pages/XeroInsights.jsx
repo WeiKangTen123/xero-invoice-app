@@ -13,7 +13,6 @@ const TABS = [
   { key: 'banking',  label: 'Banking' },
   { key: 'accounts', label: 'Chart of Accounts' },
   { key: 'contacts', label: 'Contacts' },
-  { key: 'pnl',      label: 'P&L' },
   { key: 'budget',   label: 'Budget vs Actual' },
   { key: 'variance', label: 'Budget Variance' },
 ];
@@ -21,14 +20,6 @@ const TABS = [
 // since it's the natural place to list whatever needs the next scope widening.
 const PHASE2_TABS = [];
 
-const RANGE_PRESETS = [
-  { key: 'day',   label: 'Today' },
-  { key: 'week',  label: 'This Week' },
-  { key: 'month', label: 'This Month' },
-  { key: 'year',  label: 'This Year' },
-  { key: 'all',   label: 'All Time' },
-  { key: 'custom',label: 'Custom' },
-];
 
 
 // P&L/Cash Flow are Xero Report-API-backed, and Xero rejects >365-day report
@@ -36,12 +27,6 @@ const RANGE_PRESETS = [
 // "All Time") to the most recent ~10 years instead. Showing the range the
 // API actually used (echoed back on the response) rather than the raw
 // preset's own range keeps "All Time" from implying more than it delivers.
-function reportRangeLabel(applied, periodRange) {
-  if (!applied) return periodRange ? `${periodRange.fromISO} → ${periodRange.toISO}` : 'Same date range as above';
-  const label = `${applied.from} → ${applied.to}`;
-  const clamped = periodRange && applied.from !== periodRange.fromISO;
-  return clamped ? `${label} · Xero's reports cap out at ~10 years of history per view` : label;
-}
 
 // Small provenance caption under a card title — which live Xero API/report the
 // numbers below it came from, so "where did this come from" never needs asking.
@@ -49,13 +34,6 @@ function SourceNote({ children }) {
   return <div style={{ fontSize: 10.5, color: 'var(--text-muted)', opacity: 0.75, marginBottom: 10 }}>Source: {children}</div>;
 }
 
-function fmtBucketLabel(bucket, granularity) {
-  if (granularity === 'month') {
-    const [y, m] = bucket.split('-');
-    return new Date(Date.UTC(Number(y), Number(m) - 1, 1)).toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
-  }
-  return bucket.slice(5); // MM-DD
-}
 
 // ── Bar chart: any two values compared — interactive hover ──────────────────
 // Generic enough to serve Receivables/Payables (Overview), Income/Expenses
@@ -196,115 +174,7 @@ function StatusDonut({ breakdown }) {
   );
 }
 
-// ── Trend chart: Sales vs Bills over the selected date range ────────────────
-// Same crosshair+tooltip interaction as the Admin monitoring chart — a chart is
-// interactive by default, not an optional extra.
-function PeriodTrendChart({ trend, granularity, currency }) {
-  const [hoverIdx, setHoverIdx] = useState(null);
-  const svgRef = useRef(null);
 
-  if (!trend || trend.length === 0) {
-    return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '30px 0', textAlign: 'center' }}>No invoices dated in this range yet.</div>;
-  }
-
-  const W = 760, H = 210, PAD_L = 56, PAD_R = 12, PAD_T = 12, PAD_B = 26;
-  const innerW = W - PAD_L - PAD_R, innerH = H - PAD_T - PAD_B;
-  const maxY = Math.max(1, ...trend.flatMap(d => [d.sales, d.bills]));
-  const x = i => PAD_L + (trend.length === 1 ? innerW / 2 : (i / (trend.length - 1)) * innerW);
-  const y = v => PAD_T + innerH - (v / maxY) * innerH;
-  const line = key => trend.map((d, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(d[key]).toFixed(1)}`).join(' ');
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => Math.round(maxY * f));
-
-  function onMove(e) {
-    const rect = svgRef.current.getBoundingClientRect();
-    const relX = ((e.clientX - rect.left) / rect.width) * W;
-    const frac = Math.min(1, Math.max(0, (relX - PAD_L) / innerW));
-    setHoverIdx(Math.round(frac * (trend.length - 1)));
-  }
-  const hover = hoverIdx != null ? trend[hoverIdx] : null;
-  const tooltipRight = hoverIdx != null && x(hoverIdx) > W * 0.65;
-  const step = Math.max(1, Math.ceil(trend.length / 8)); // thin out x-axis labels so they don't collide
-
-  return (
-    <div>
-      <div style={{ display: 'flex', gap: 16, marginBottom: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
-          <span style={{ width: 10, height: 10, borderRadius: 3, background: 'var(--success)' }} />Sales
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
-          <span style={{ width: 10, height: 10, borderRadius: 3, background: 'var(--danger)' }} />Bills
-        </div>
-      </div>
-      <div style={{ position: 'relative', overflowX: 'auto' }}>
-        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', minWidth: 480, height: 'auto', display: 'block', cursor: 'crosshair' }}
-             onMouseMove={onMove} onMouseLeave={() => setHoverIdx(null)}>
-          {yTicks.map((t, i) => (
-            <g key={i}>
-              <line x1={PAD_L} x2={W - PAD_R} y1={y(t)} y2={y(t)} stroke="var(--border)" strokeWidth="1" />
-              <text x={PAD_L - 8} y={y(t)} textAnchor="end" dominantBaseline="middle" fontSize="10" fill="var(--text-muted)">
-                {t.toLocaleString(undefined, { notation: t > 9999 ? 'compact' : 'standard' })}
-              </text>
-            </g>
-          ))}
-          {trend.map((d, i) => (i % step === 0 || i === trend.length - 1) && (
-            <text key={i} x={x(i)} y={H - 8} textAnchor="middle" fontSize="10" fill="var(--text-muted)">
-              {fmtBucketLabel(d.bucket, granularity)}
-            </text>
-          ))}
-          <path d={line('sales')} fill="none" stroke="var(--success)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          <path d={line('bills')} fill="none" stroke="var(--danger)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          {hover && (
-            <g>
-              <line x1={x(hoverIdx)} x2={x(hoverIdx)} y1={PAD_T} y2={PAD_T + innerH} stroke="var(--text-muted)" strokeWidth="1" strokeDasharray="3,3" />
-              <circle cx={x(hoverIdx)} cy={y(hover.sales)} r="4" fill="var(--success)" stroke="var(--bg-card)" strokeWidth="2" />
-              <circle cx={x(hoverIdx)} cy={y(hover.bills)} r="4" fill="var(--danger)" stroke="var(--bg-card)" strokeWidth="2" />
-            </g>
-          )}
-        </svg>
-        {hover && (
-          <div style={{
-            position: 'absolute', top: 4, [tooltipRight ? 'right' : 'left']: `${(x(hoverIdx) / W) * 100}%`,
-            transform: tooltipRight ? 'translateX(8px)' : 'translateX(-108%)',
-            background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8,
-            padding: '8px 10px', fontSize: 11.5, boxShadow: 'var(--shadow-sm)', pointerEvents: 'none', minWidth: 120,
-          }}>
-            <div style={{ fontWeight: 700, marginBottom: 4 }}>{fmtBucketLabel(hover.bucket, granularity)}</div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-              <span style={{ color: 'var(--text-muted)' }}>Sales</span>
-              <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(hover.sales, currency)}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-              <span style={{ color: 'var(--text-muted)' }}>Bills</span>
-              <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(hover.bills, currency)}</span>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Date range control: presets + a custom from/to picker ───────────────────
-function DateRangeControl({ preset, setPreset, from, to, setFrom, setTo, onApplyCustom }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-      {RANGE_PRESETS.map(p => (
-        <button key={p.key} type="button" onClick={() => setPreset(p.key)} className="btn btn-sm" style={{
-          background: preset === p.key ? 'var(--accent-gradient)' : 'var(--bg-secondary)',
-          color: preset === p.key ? '#fff' : 'var(--text-muted)', border: 'none',
-        }}>{p.label}</button>
-      ))}
-      {preset === 'custom' && (
-        <form onSubmit={e => { e.preventDefault(); onApplyCustom(); }} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <input type="date" className="form-input" style={{ width: 145 }} value={from} onChange={e => setFrom(e.target.value)} required />
-          <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>to</span>
-          <input type="date" className="form-input" style={{ width: 145 }} value={to} onChange={e => setTo(e.target.value)} required />
-          <button type="submit" className="btn btn-primary btn-sm">Apply</button>
-        </form>
-      )}
-    </div>
-  );
-}
 
 const STATUS_BADGE = {
   paid:     { cls: 'badge-green',  label: 'Paid' },
@@ -474,21 +344,6 @@ export default function XeroInsights() {
   const [, forceTick] = useState(0); // re-render every 15s so "synced Xs ago" stays live
   const tickRef = useRef(null);
 
-  // Date-range period (Overview trend) — independent fetch from the always-current summary.
-  const today = new Date().toISOString().slice(0, 10);
-  const [rangePreset, setRangePreset] = useState('month');
-  const [rangeFrom, setRangeFrom]     = useState(today);
-  const [rangeTo, setRangeTo]         = useState(today);
-  const [period, setPeriod]           = useState(null);
-  const [periodError, setPeriodError] = useState('');
-  // Cash Flow and P&L both need real bank-transaction/report scopes, and both
-  // ride on the exact same resolved date range as the trend chart above — they
-  // fetch off `period.range`, the server-resolved dates, rather than
-  // recomputing preset math a second time on the frontend.
-  const [cashFlow, setCashFlow]           = useState(null);
-  const [cashFlowError, setCashFlowError] = useState('');
-  const [pnl, setPnl]                     = useState(null);
-  const [pnlError, setPnlError]           = useState('');
 
   // Lazily-loaded directory tabs — fetched once, the first time each is opened.
   // data starts as [] (not null) so the very first render after switching to
@@ -541,68 +396,22 @@ export default function XeroInsights() {
     }
   }
 
-  async function fetchPeriod(opts = {}) {
-    try {
-      const params = new URLSearchParams({ preset: rangePreset });
-      if (rangePreset === 'custom') { params.set('from', rangeFrom); params.set('to', rangeTo); }
-      if (activeTenantId) params.set('tenantId', activeTenantId);
-      if (opts.force) params.set('force', 'true');
-      const d = await api.get(`/xero-reports/period?${params.toString()}`);
-      setPeriod(d);
-      setPeriodError('');
-    } catch (err) {
-      setPeriodError(err.message || 'Could not load this date range');
-    }
-  }
 
-  async function fetchCashFlow(fromISO, toISO, opts = {}) {
-    try {
-      const params = new URLSearchParams({ from: fromISO, to: toISO });
-      if (activeTenantId) params.set('tenantId', activeTenantId);
-      if (opts.force) params.set('force', 'true');
-      const d = await api.get(`/xero-reports/bank-summary?${params.toString()}`);
-      setCashFlow(d);
-      setCashFlowError('');
-    } catch (err) {
-      setCashFlowError(err.message || 'Could not load cash flow');
-    }
-  }
 
-  async function fetchPnl(fromISO, toISO, opts = {}) {
-    try {
-      const params = new URLSearchParams({ from: fromISO, to: toISO });
-      if (activeTenantId) params.set('tenantId', activeTenantId);
-      if (opts.force) params.set('force', 'true');
-      const d = await api.get(`/xero-reports/profit-loss?${params.toString()}`);
-      setPnl(d);
-      setPnlError('');
-    } catch (err) {
-      setPnlError(err.message || 'Could not load profit & loss');
-    }
-  }
+
+
+
 
   useEffect(() => { fetchSummary(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (activeTenantId) { fetchSummary(); fetchPeriod(); }
+    if (activeTenantId) fetchSummary();
     // Budget vs Actual is per-organisation, so a tenant switch invalidates it —
     // refetch if it's on screen, otherwise let the lazy loader pick it up.
     if (tab === 'budget' || tab === 'variance') fetchBudget();
     else setBudget({ status: 'idle', data: null, error: '' });
-    if (tab === 'overview' || tab === 'revenue') fetchPerf();
+    if (tab === 'overview' || tab === 'revenue' || tab === 'banking') fetchPerf();
     else setPerf({ status: 'idle', data: null, error: '' });
   }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (rangePreset !== 'custom') fetchPeriod();
-  }, [rangePreset]); // eslint-disable-line react-hooks/exhaustive-deps
-  // Fires off the server-RESOLVED range (not preset math redone client-side) —
-  // covers both preset changes and a custom range's Apply click, since either
-  // way `period.range` is what actually changes.
-  useEffect(() => {
-    if (period?.range?.fromISO && period?.range?.toISO) {
-      fetchCashFlow(period.range.fromISO, period.range.toISO);
-      fetchPnl(period.range.fromISO, period.range.toISO);
-    }
-  }, [period?.range?.fromISO, period?.range?.toISO]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     tickRef.current = setInterval(() => forceTick(t => t + 1), 15000);
@@ -632,7 +441,7 @@ export default function XeroInsights() {
     // Both budget tabs share one fetch and one cache entry — the Budget Variance
     // view is a different presentation of the same merged data, not a second call.
     if ((tab === 'budget' || tab === 'variance') && budget.status === 'idle') fetchBudget();
-    if ((tab === 'overview' || tab === 'revenue') && perf.status === 'idle') fetchPerf();
+    if ((tab === 'overview' || tab === 'revenue' || tab === 'banking') && perf.status === 'idle') fetchPerf();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function fetchPerf(opts = {}) {
@@ -773,8 +582,8 @@ export default function XeroInsights() {
             {data.cached === false && <span style={{ color: 'var(--accent)', fontWeight: 600 }}>· fresh</span>}
           </div>
           <button className="btn btn-outline btn-sm" disabled={refreshing} onClick={() => {
-            fetchSummary({ force: true }); fetchPeriod({ force: true });
-            if (period?.range) { fetchCashFlow(period.range.fromISO, period.range.toISO, { force: true }); fetchPnl(period.range.fromISO, period.range.toISO, { force: true }); }
+            fetchSummary({ force: true });
+            if (tab === 'overview' || tab === 'revenue' || tab === 'banking') fetchPerf({ force: true });
           }}>
             {refreshing ? <span className="btn-spinner" /> : '↻'} Refresh
           </button>
@@ -870,95 +679,9 @@ export default function XeroInsights() {
             <div className="alert alert-error" style={{ marginBottom: 16 }}><span className="alert-icon">✕</span>{perf.error}</div>
           )}
           {perf.data && !perf.error && (
-            <OverviewPanel data={perf.data} from={monthFrom} to={monthTo} insights={insights} />
+            <OverviewPanel data={perf.data} from={monthFrom} to={monthTo}
+                           insights={insights} summary={data} />
           )}
-
-          <div className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 4 }}>
-              <div className="card-title" style={{ marginBottom: 0 }}>Invoiced Over Time</div>
-            </div>
-            <div className="card-subtitle" style={{ marginBottom: 2 }}>Review daily, weekly, monthly, yearly, all time, or a custom range</div>
-            <SourceNote>Xero Invoices API</SourceNote>
-            <DateRangeControl
-              preset={rangePreset} setPreset={setRangePreset}
-              from={rangeFrom} to={rangeTo} setFrom={setRangeFrom} setTo={setRangeTo}
-              onApplyCustom={() => fetchPeriod()}
-            />
-
-            {periodError && <div className="alert alert-error" style={{ marginTop: 14 }}><span className="alert-icon">✕</span>{periodError}</div>}
-
-            {period && !periodError && (
-              <>
-                <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', margin: '18px 0', fontSize: 12.5 }}>
-                  <div>
-                    <div style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{period.range.fromISO} → {period.range.toISO}</div>
-                  </div>
-                  <div>
-                    <span style={{ color: 'var(--text-muted)' }}>Invoiced (Sales) </span>
-                    <b style={{ color: 'var(--success)' }}>{fmtMoney(period.totals.salesTotal, currency)}</b>
-                    <span style={{ color: 'var(--text-muted)' }}> · {period.totals.salesCount}</span>
-                  </div>
-                  <div>
-                    <span style={{ color: 'var(--text-muted)' }}>Billed </span>
-                    <b style={{ color: 'var(--danger)' }}>{fmtMoney(period.totals.billsTotal, currency)}</b>
-                    <span style={{ color: 'var(--text-muted)' }}> · {period.totals.billsCount}</span>
-                  </div>
-                  <div>
-                    <span style={{ color: 'var(--text-muted)' }}>Net </span>
-                    <b style={{ color: period.totals.net >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtMoney(period.totals.net, currency)}</b>
-                  </div>
-                </div>
-                <PeriodTrendChart trend={period.trend} granularity={period.granularity} currency={currency} />
-              </>
-            )}
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
-            <div className="card">
-              <div className="card-title" style={{ marginBottom: 2 }}>Cash In and Out</div>
-              <div className="card-subtitle" style={{ marginBottom: 2 }}>{reportRangeLabel(cashFlow, period?.range)}</div>
-              <SourceNote>Xero Bank Summary report</SourceNote>
-              {cashFlowError ? (
-                <div className="alert alert-error"><span className="alert-icon">✕</span>{cashFlowError}</div>
-              ) : !cashFlow ? (
-                <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
-              ) : (
-                <>
-                  <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: 14, fontSize: 12.5 }}>
-                    <div><span style={{ color: 'var(--text-muted)' }}>Cash in </span><b style={{ color: 'var(--success)' }}>{fmtMoney(cashFlow.cashIn, currency)}</b></div>
-                    <div><span style={{ color: 'var(--text-muted)' }}>Cash out </span><b style={{ color: 'var(--danger)' }}>{fmtMoney(cashFlow.cashOut, currency)}</b></div>
-                    <div><span style={{ color: 'var(--text-muted)' }}>Difference </span><b style={{ color: cashFlow.net >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtMoney(cashFlow.net, currency)}</b></div>
-                  </div>
-                  <TwoBarChart leftLabel="Cash In" leftValue={cashFlow.cashIn} rightLabel="Cash Out" rightValue={cashFlow.cashOut} currency={currency} />
-                </>
-              )}
-            </div>
-
-            <div className="card">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
-                <div className="card-title" style={{ marginBottom: 0 }}>Net Profit or Loss</div>
-                <button type="button" className="btn btn-sm" style={{ background: 'none', color: 'var(--accent)', border: 'none' }} onClick={() => setTab('pnl')}>Full P&amp;L →</button>
-              </div>
-              <div className="card-subtitle" style={{ marginBottom: 2 }}>{reportRangeLabel(pnl, period?.range)}</div>
-              <SourceNote>Xero Profit &amp; Loss report</SourceNote>
-              {pnlError ? (
-                <div className="alert alert-error"><span className="alert-icon">✕</span>{pnlError}</div>
-              ) : !pnl ? (
-                <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
-              ) : (
-                <div>
-                  <div style={{ fontSize: 26, fontWeight: 800, color: pnl.netProfit >= 0 ? 'var(--success)' : 'var(--danger)', marginBottom: 4 }}>
-                    {fmtMoney(pnl.netProfit, currency)}
-                  </div>
-                  <div style={{ display: 'flex', gap: 16, fontSize: 12.5, color: 'var(--text-muted)' }}>
-                    <span>Income <b style={{ color: 'var(--text-primary)' }}>{fmtMoney(pnl.income, currency)}</b></span>
-                    <span>Expenses <b style={{ color: 'var(--text-primary)' }}>{fmtMoney(pnl.expenses, currency)}</b></span>
-                    <span>Net margin <b style={{ color: 'var(--text-primary)' }}>{fmtPct(pnl.netMargin)}</b></span>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
         </>
       )}
 
@@ -1076,9 +799,29 @@ export default function XeroInsights() {
 
       {tab === 'banking' && (
         <>
+          {/* Moved from Overview: cash movement belongs with the accounts it
+              moved through. Reads the cached performance payload, so it costs no
+              extra Xero call. */}
+          {perf.data?.cash?.available && (
+            <div className="card" style={{ display: 'flex', gap: 26, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.07em', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 3 }}>Cash at bank</div>
+                <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(perf.data.cash.total, currency)}</div>
+              </div>
+              <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap', fontSize: 12.5 }}>
+                <div><span style={{ color: 'var(--text-muted)' }}>Cash in </span><b style={{ color: 'var(--success)' }}>{fmtMoney(perf.data.cash.cashIn, currency)}</b></div>
+                <div><span style={{ color: 'var(--text-muted)' }}>Cash out </span><b style={{ color: 'var(--danger)' }}>{fmtMoney(perf.data.cash.cashOut, currency)}</b></div>
+                <div><span style={{ color: 'var(--text-muted)' }}>Net </span><b style={{ color: perf.data.cash.net >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtMoney(perf.data.cash.net, currency)}</b></div>
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                {perf.data.fiscalYear?.label} · Xero Bank Summary
+              </div>
+            </div>
+          )}
+
           <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-title" style={{ marginBottom: 2 }}>Bank &amp; Cash Accounts</div>
-            <div className="card-subtitle" style={{ marginBottom: 2 }}>Live balances aren't in Xero's read API for this — see Cash In/Out on Overview for period movement instead. Click an account for its transaction statement.</div>
+            <div className="card-subtitle" style={{ marginBottom: 2 }}>Click an account for its transaction statement.</div>
             <SourceNote>Xero Accounts API (Type=BANK)</SourceNote>
             {banking.status !== 'done' ? (
               <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
@@ -1227,48 +970,6 @@ export default function XeroInsights() {
         </div>
       )}
 
-      {tab === 'pnl' && (
-        <div className="card">
-          <div className="card-title" style={{ marginBottom: 2 }}>Profit &amp; Loss</div>
-          <div className="card-subtitle" style={{ marginBottom: 2 }}>Same date range as Overview's Invoiced Over Time</div>
-          <SourceNote>Xero Profit &amp; Loss report</SourceNote>
-          <DateRangeControl
-            preset={rangePreset} setPreset={setRangePreset}
-            from={rangeFrom} to={rangeTo} setFrom={setRangeFrom} setTo={setRangeTo}
-            onApplyCustom={() => fetchPeriod()}
-          />
-
-          {pnl && !pnlError && (
-            <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 10 }}>{reportRangeLabel(pnl, period?.range)}</div>
-          )}
-
-          {pnlError && <div className="alert alert-error" style={{ marginTop: 14 }}><span className="alert-icon">✕</span>{pnlError}</div>}
-
-          {pnl && !pnlError && (
-            <>
-              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', margin: '20px 0' }}>
-                <div className="card" style={{ flex: 1, minWidth: 160, background: 'var(--bg-secondary)' }}>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Total Income</div>
-                  <div style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(pnl.income, currency)}</div>
-                </div>
-                <div className="card" style={{ flex: 1, minWidth: 160, background: 'var(--bg-secondary)' }}>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Total Expenses</div>
-                  <div style={{ fontSize: 22, fontWeight: 800 }}>{fmtMoney(pnl.expenses, currency)}</div>
-                </div>
-                <div className="card" style={{ flex: 1, minWidth: 160, background: 'var(--bg-secondary)' }}>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Net {pnl.netProfit >= 0 ? 'Profit' : 'Loss'}</div>
-                  <div style={{ fontSize: 22, fontWeight: 800, color: pnl.netProfit >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtMoney(pnl.netProfit, currency)}</div>
-                </div>
-                <div className="card" style={{ flex: 1, minWidth: 160, background: 'var(--bg-secondary)' }}>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Net Margin</div>
-                  <div style={{ fontSize: 22, fontWeight: 800, color: pnl.netMargin >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtPct(pnl.netMargin)}</div>
-                </div>
-              </div>
-              <TwoBarChart leftLabel="Income" leftValue={pnl.income} rightLabel="Expenses" rightValue={pnl.expenses} currency={currency} />
-            </>
-          )}
-        </div>
-      )}
 
       {tab === 'budget' && (
         <div className="card">
