@@ -1208,3 +1208,85 @@ describe('xero/reports — performance overview (pure)', () => {
     expect(list.some(w => /No month of this financial year has closed/.test(w.text))).toBe(true);
   });
 });
+
+// ── Gemini variance commentary: the hallucination guard ──────────────────────
+// The figures are computed from Xero and passed IN. The model only writes prose.
+// These tests pin the boundary — a model that emits a number we never gave it is
+// the failure that matters in financial commentary, so it must be dropped.
+describe('xero/reports — variance insight grounding (pure)', () => {
+  const { _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights } = require('./reports');
+
+  test('only money-sized numbers are policed — percentages and counts pass through', () => {
+    expect(_largeNumbersIn('Down 12% across 4 accounts')).toEqual([]);
+    expect(_largeNumbersIn('Budget of 24,603 was not spent')).toEqual([24603]);
+    expect(_largeNumbersIn('a 999 variance')).toEqual([]);      // below the money threshold
+    expect(_largeNumbersIn('1,030 and 7,330')).toEqual([1030, 7330]);
+  });
+
+  test('a sentence quoting a figure we never supplied is rejected', () => {
+    const allowed = new Set([24603, 7330]);
+    expect(_insightIsGrounded('Wages of 24,603 have not been posted yet.', allowed)).toBe(true);
+    expect(_insightIsGrounded('No figures cited at all.', allowed)).toBe(true);
+    expect(_insightIsGrounded('Spend reached 88,412 this quarter.', allowed)).toBe(false); // invented
+    expect(_insightIsGrounded('Down 15% on 7,330 budgeted.', allowed)).toBe(true);
+  });
+
+  const perf = {
+    serviceLines: [
+      { label: 'Sales - Implementation', actual: [100, 0], budget: [50, 0] },
+      { label: 'Tiny Rounding',          actual: [0.4, 0], budget: [0, 0] },
+    ],
+    expenseLines: [
+      { label: 'Wages and Salaries', actual: [0, 0], budget: [24603, 0] },
+    ],
+  };
+
+  test('candidates are the biggest gaps, and rounding dust is ignored', () => {
+    const c = _varianceCandidates(perf);
+    expect(c.map(x => x.account)).toEqual(['Wages and Salaries', 'Sales - Implementation']);
+    expect(c[0].variance).toBe(-24603);
+    expect(c.find(x => x.account === 'Tiny Rounding')).toBeUndefined();
+  });
+
+  test('parses a clean reply and reattaches the real figures', () => {
+    const c = _varianceCandidates(perf);
+    const reply = JSON.stringify({ reasons: [
+      { account: 'Wages and Salaries', reason: 'Payroll for the period has probably not been posted yet — check the pay run.' },
+    ] });
+    const out = _parseInsights(reply, c);
+    expect(out).toHaveLength(1);
+    // The figure comes from OUR computation, never from the model's text.
+    expect(out[0]).toMatchObject({ account: 'Wages and Salaries', variance: -24603, budget: 24603, actual: 0 });
+  });
+
+  test('survives a code-fenced reply, which models emit despite being told not to', () => {
+    const c = _varianceCandidates(perf);
+    const reply = '```json\n{"reasons":[{"account":"Wages and Salaries","reason":"Nothing posted against this account yet."}]}\n```';
+    expect(_parseInsights(reply, c)).toHaveLength(1);
+  });
+
+  test('drops an account we never asked about — a name we did not send is fabricated', () => {
+    const c = _varianceCandidates(perf);
+    const reply = JSON.stringify({ reasons: [
+      { account: 'Marketing Spend', reason: 'Overspent on campaigns.' },
+      { account: 'Wages and Salaries', reason: 'Not yet posted.' },
+    ] });
+    const out = _parseInsights(reply, c);
+    expect(out.map(o => o.account)).toEqual(['Wages and Salaries']);
+  });
+
+  test('drops a grounded-looking sentence that cites an invented amount', () => {
+    const c = _varianceCandidates(perf);
+    const reply = JSON.stringify({ reasons: [
+      { account: 'Wages and Salaries', reason: 'Payroll of 31,500 was deferred to next month.' }, // 31,500 never supplied
+    ] });
+    expect(_parseInsights(reply, c)).toEqual([]);
+  });
+
+  test('malformed or empty replies yield nothing rather than throwing', () => {
+    const c = _varianceCandidates(perf);
+    expect(_parseInsights('not json at all', c)).toEqual([]);
+    expect(_parseInsights('', c)).toEqual([]);
+    expect(_parseInsights(JSON.stringify({ reasons: [] }), c)).toEqual([]);
+  });
+});

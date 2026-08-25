@@ -177,6 +177,25 @@ router.get('/performance', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/xero-reports/variance-insights?force=
+// Gemini-written commentary on variances the server computed from Xero. Split
+// from /performance deliberately: the dashboard paints from real figures first,
+// and this arrives after, so an LLM outage or a missing API key can never delay
+// or blank the numbers.
+router.get('/variance-insights', requireAuth, async (req, res) => {
+  try {
+    const { tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false });
+
+    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
+    const data = await reports.getVarianceInsights(req.user.id, tenantId, { timezone, force: req.query.force === 'true' });
+    res.json({ connected: true, ...data });
+  } catch (err) {
+    logger.error('Variance insights failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
+  }
+});
+
 // A call outside the token's granted scopes — the situation for anyone who
 // connected before these report/bank-transaction/payments scopes existed.
 // Surface it as a clear reconnect prompt instead of a generic failure.
