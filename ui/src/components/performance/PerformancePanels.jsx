@@ -580,12 +580,15 @@ export function OverviewPanel({ data, from, to, insights, summary }) {
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Surface title="Revenue by service line" right={T.recurringMix === null ? null : `${fmtPct(T.recurringMix, 0)} recurring`} flex={7} minWidth={380}>
           <BarList items={serviceItems} currency={cur} showPctOfTotal />
-          {data.recurringAccounts.length > 0 && (
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 12, lineHeight: 1.5 }}>
-              Recurring inferred from account names — Xero records no such flag. Treated as recurring:{' '}
-              {data.recurringAccounts.join(', ')}.
-            </div>
-          )}
+          <div style={{ marginTop: 12, padding: '8px 10px', borderRadius: 8, background: 'var(--bg-secondary)',
+                        fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.55 }}>
+            <strong style={{ color: 'var(--warning)' }}>Inferred, not reported.</strong>{' '}
+            Xero has no "this account is recurring" flag, so this split is guessed from account names.
+            {data.recurringAccounts.length > 0
+              ? ` Treated as recurring: ${data.recurringAccounts.join(', ')}.`
+              : ' No account name matched, so everything counts as project revenue.'}
+            {' '}Setting up Repeating Invoices in Xero would make this a reported figure instead of a guess.
+          </div>
         </Surface>
         <Surface title="Executive snapshot" right={rangeLabel(data.months, from, to)} flex={5} minWidth={300}>
           <Rows currency={cur} items={[
@@ -755,8 +758,21 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
         </Surface>
       </div>
 
+      {data.quotePipeline?.available && data.quotePipeline.total > 0 && (
+        <Surface title="Quoted, not yet invoiced" right="sales pipeline">
+          <BarList currency={cur} items={[
+            { label: `Accepted (${data.quotePipeline.counts.accepted})`, value: data.quotePipeline.accepted, color: 'var(--success)' },
+            { label: `Sent, awaiting decision (${data.quotePipeline.counts.sent})`, value: data.quotePipeline.sent, color: 'var(--accent)' },
+          ].filter(i => i.value !== 0)} />
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 12, lineHeight: 1.5 }}>
+            Work quoted in Xero that has not become an invoice, so it appears in no revenue or cash figure
+            on this dashboard. Quotes already marked INVOICED are excluded — they would double-count.
+          </div>
+        </Surface>
+      )}
+
       {data.customerRevenue?.available && (
-        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 16, marginBottom: 16 }}>
           <Surface title="Top customers" right={`${data.customerRevenue.count} invoiced`} flex={7} minWidth={380}>
             {data.customerRevenue.customers.length === 0
               ? <Empty>No sales invoices in this period.</Empty>
@@ -952,6 +968,26 @@ export function CashFlowPanel({ data }) {
           )}
         </Surface>
       </div>
+
+      {data.hygiene?.issues?.length > 0 && (
+        <div className="card" style={{ marginBottom: 16, borderLeft: '3px solid var(--warning)' }}>
+          <div className="card-title" style={{ marginBottom: 8 }}>Invoice data quality</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {data.hygiene.issues.map((i, k) => (
+              <div key={k} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 11.5, lineHeight: 1.5 }}>
+                <span style={{ flexShrink: 0, color: i.severity === 'warn' ? 'var(--warning)' : 'var(--text-muted)' }}>
+                  {i.severity === 'warn' ? '▲' : '•'}
+                </span>
+                <span style={{ color: 'var(--text-secondary)' }}>{i.text}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
+            Faults in the underlying records rather than in the business. Every figure above is built on
+            these invoices, so they are worth resolving in Xero.
+          </div>
+        </div>
+      )}
 
       <Surface title="13-week cash forecast" right="from invoice due dates">
         {(fc.overdueReceipts > 0 || fc.overduePayments > 0) && (
