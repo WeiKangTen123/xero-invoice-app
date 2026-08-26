@@ -10,7 +10,8 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:ui\"",
     "build:ui": "npm --prefix ui run build",
     "test": "jest --runInBand --forceExit",
-    "backup": "node main/db/backup.js"
+    "backup": "node main/db/backup.js",
+    "smoke": "node main/scripts/smoke-xero.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
