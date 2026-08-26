@@ -4,12 +4,13 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney, fmtPct, fmtCell } from '../utils/format';
-import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel } from '../components/performance/PerformancePanels';
+import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPanel } from '../components/performance/PerformancePanels';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'revenue',  label: 'Revenue' },
   { key: 'cashflow', label: 'Cash Flow' },
+  { key: 'profit',   label: 'Profitability' },
   { key: 'invoices', label: 'Invoices & Bills' },
   { key: 'banking',  label: 'Banking' },
   { key: 'accounts', label: 'Chart of Accounts' },
@@ -418,7 +419,7 @@ export default function XeroInsights() {
     // refetch if it's on screen, otherwise let the lazy loader pick it up.
     if (tab === 'budget' || tab === 'variance') fetchBudget();
     else setBudget({ status: 'idle', data: null, error: '' });
-    if (tab === 'overview' || tab === 'revenue' || tab === 'banking') fetchPerf();
+    if (tab === 'overview' || tab === 'revenue' || tab === 'banking' || tab === 'profit') fetchPerf();
     else setPerf({ status: 'idle', data: null, error: '' });
   }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -450,7 +451,7 @@ export default function XeroInsights() {
     // Both budget tabs share one fetch and one cache entry — the Budget Variance
     // view is a different presentation of the same merged data, not a second call.
     if ((tab === 'budget' || tab === 'variance') && budget.status === 'idle') fetchBudget();
-    if ((tab === 'overview' || tab === 'revenue' || tab === 'banking') && perf.status === 'idle') fetchPerf();
+    if ((tab === 'overview' || tab === 'revenue' || tab === 'banking' || tab === 'profit') && perf.status === 'idle') fetchPerf();
     if (tab === 'cashflow' && cashflow.status === 'idle') fetchCashflow();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -616,7 +617,7 @@ export default function XeroInsights() {
           </div>
           <button className="btn btn-outline btn-sm" disabled={refreshing} onClick={() => {
             fetchSummary({ force: true });
-            if (tab === 'overview' || tab === 'revenue' || tab === 'banking') fetchPerf({ force: true });
+            if (tab === 'overview' || tab === 'revenue' || tab === 'banking' || tab === 'profit') fetchPerf({ force: true });
           }}>
             {refreshing ? <span className="btn-spinner" /> : '↻'} Refresh
           </button>
@@ -686,7 +687,7 @@ export default function XeroInsights() {
         ))}
       </div>
 
-      {(tab === 'overview' || tab === 'revenue' || tab === 'cashflow') && perf.data && !perf.error && (
+      {(tab === 'overview' || tab === 'revenue' || tab === 'cashflow' || tab === 'profit') && perf.data && !perf.error && (
         <div className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                                        gap: 14, flexWrap: 'wrap', marginBottom: 16, padding: '12px 16px' }}>
           <MonthRange months={perf.data.months} from={monthFrom} to={monthTo}
@@ -741,6 +742,20 @@ export default function XeroInsights() {
           {perf.data && !perf.error && (
             <RevenuePanel data={perf.data} from={monthFrom} to={monthTo}
                           selectedLine={revenueLine} onSelectLine={setRevenueLine} />
+          )}
+        </>
+      )}
+
+      {tab === 'profit' && (
+        <>
+          {perf.status === 'loading' && !perf.data && (
+            <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading profitability data…</div>
+          )}
+          {perf.error && (
+            <div className="alert alert-error"><span className="alert-icon">✕</span>{perf.error}</div>
+          )}
+          {perf.data && !perf.error && (
+            <ProfitabilityPanel data={perf.data} from={monthFrom} to={monthTo} />
           )}
         </>
       )}
