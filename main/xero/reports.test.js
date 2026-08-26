@@ -2057,3 +2057,133 @@ describe('_buildRunway — operating cash', () => {
     expect(r.propped).toBe(false);
   });
 });
+
+// ── Threshold alerts ────────────────────────────────────────────────────────
+// The governing constraint: this dashboard runs for organisations we will never
+// see. Every threshold must therefore be relative — months, days, or a share of
+// the org's own figures — because an absolute money threshold that is urgent for
+// one business is noise for the next.
+describe('_buildAlerts', () => {
+  const { _buildAlerts, ALERT_THRESHOLDS } = require('./reports');
+  const codes = r => r.alerts.map(a => a.code);
+
+  test('no inputs produces no alerts rather than a clean bill of health', () => {
+    const r = _buildAlerts();
+    expect(r.alerts).toEqual([]);
+    expect(r.counts).toEqual({ critical: 0, warn: 0, info: 0 });
+  });
+
+  test('every threshold is relative — none is an absolute amount of money', () => {
+    // Guards the multi-org property directly: the same business scaled 1000x
+    // must raise exactly the same alerts.
+    const scale = (wc, k) => ({ ...wc, receivable: wc.receivable * k, overdue: wc.overdue * k, invoiced: wc.invoiced * k, payable: wc.payable * k });
+    const base = { receivable: 1000, overdue: 600, invoiced: 2000, payable: 0, collectionRate: 0.4, dso: 75 };
+    const small = _buildAlerts({ workingCapital: base });
+    const huge  = _buildAlerts({ workingCapital: scale(base, 1000) });
+    expect(codes(small)).toEqual(codes(huge));
+    expect(codes(small).length).toBeGreaterThan(0);
+  });
+
+  test('a projected negative balance names the week to work back from', () => {
+    const r = _buildAlerts({ forecast: { weeks: [
+      { week: 1, startISO: '2026-09-01', balance: 500 },
+      { week: 2, startISO: '2026-09-08', balance: -1200 },
+      { week: 3, startISO: '2026-09-15', balance: -3000 },
+    ] } });
+    const a = r.alerts.find(x => x.code === 'cash-negative');
+    expect(a.severity).toBe('critical');
+    expect(a.detail).toMatch(/week 2/);
+    expect(a.detail).toMatch(/2026-09-08/);
+    expect(a.amount).toBe(-1200);       // the FIRST crossing, not the worst
+  });
+
+  test('runway escalates from warn to critical at the three-month mark', () => {
+    const at = months => _buildAlerts({ runway: { available: true, burning: true, runwayMonths: months, netBurn: 1000 } });
+    expect(codes(at(2))).toContain('runway-critical');
+    expect(codes(at(5))).toContain('runway-low');
+    expect(codes(at(9))).toEqual([]);
+  });
+
+  test('a cash-positive business raises no runway alert at all', () => {
+    const r = _buildAlerts({ runway: { available: true, burning: false, runwayMonths: null, netBurn: 0 } });
+    expect(codes(r)).toEqual([]);
+  });
+
+  test('an operating burn hidden by an injection is raised on its own', () => {
+    const r = _buildAlerts({ runway: { available: true, burning: false, propped: true, operatingNet: -1892 } });
+    const a = r.alerts.find(x => x.code === 'operating-burn');
+    expect(a.severity).toBe('warn');
+    expect(a.amount).toBe(1892);        // reported as a positive consumption
+  });
+
+  test('overdue receivables escalate on SHARE, not amount', () => {
+    const at = (overdue, receivable) => codes(_buildAlerts({ workingCapital: { overdue, receivable } }));
+    expect(at(600, 1000)).toContain('overdue-major');    // 60%
+    expect(at(300, 1000)).toContain('overdue');          // 30%
+    expect(at(100, 1000)).toEqual([]);                   // 10%
+    // A far larger absolute overdue at a small share stays quiet.
+    expect(at(100000, 10000000)).toEqual([]);
+  });
+
+  test('debtor days escalate at 60 and 90 days', () => {
+    const at = dso => codes(_buildAlerts({ workingCapital: { dso } }));
+    expect(at(100)).toContain('dso-critical');
+    expect(at(75)).toContain('dso');
+    expect(at(30)).toEqual([]);
+  });
+
+  test('a null or non-finite figure stays silent instead of firing', () => {
+    expect(codes(_buildAlerts({ workingCapital: { dso: null, collectionRate: null } }))).toEqual([]);
+    expect(codes(_buildAlerts({ workingCapital: { dso: Infinity } }))).toEqual([]);
+    expect(codes(_buildAlerts({ runway: { available: false } }))).toEqual([]);
+  });
+
+  test('the cover rule needs a real bank figure, or it would fire for everyone', () => {
+    const wc = { payable: 5000, receivable: 1000 };
+    // No bank summary — cash would read as zero and every org would look insolvent.
+    expect(codes(_buildAlerts({ workingCapital: wc, cash: { available: false, closing: 0 } }))).not.toContain('cannot-cover');
+    expect(codes(_buildAlerts({ workingCapital: wc, cash: { available: true, closing: 500 } }))).toContain('cannot-cover');
+    expect(codes(_buildAlerts({ workingCapital: wc, cash: { available: true, closing: 9000 } }))).not.toContain('cannot-cover');
+  });
+
+  test('the shortfall reported is the gap, not the whole payable', () => {
+    const r = _buildAlerts({ workingCapital: { payable: 5000, receivable: 1000 }, cash: { available: true, closing: 500 } });
+    expect(r.alerts.find(a => a.code === 'cannot-cover').amount).toBe(3500);
+  });
+
+  test('critical alerts sort ahead of warnings and info', () => {
+    const r = _buildAlerts({
+      unreconciled: { material: true },
+      workingCapital: { dso: 75, receivable: 1000, overdue: 600, payable: 0 },
+      runway: { available: true, burning: true, runwayMonths: 1, netBurn: 500 },
+    });
+    const sev = r.alerts.map(a => a.severity);
+    expect(sev).toEqual([...sev].sort((a, b) => ({ critical: 0, warn: 1, info: 2 })[a] - ({ critical: 0, warn: 1, info: 2 })[b]));
+    expect(sev[0]).toBe('critical');
+    expect(r.counts.critical).toBeGreaterThan(0);
+    expect(r.counts.info).toBe(1);
+  });
+
+  test('the amount placeholder is present exactly where an amount is supplied', () => {
+    // The UI substitutes {amount} using the org's currency. A placeholder with
+    // no amount would render literally; an amount with no placeholder is lost.
+    const r = _buildAlerts({
+      forecast: { weeks: [{ week: 1, startISO: '2026-09-01', balance: -10 }] },
+      workingCapital: { dso: 100, receivable: 1000, overdue: 900 },
+      runway: { available: true, burning: true, runwayMonths: 1, netBurn: 5 },
+      unreconciled: { material: true },
+    });
+    for (const a of r.alerts) {
+      if (a.amount === null) expect(a.detail).not.toMatch(/\{amount\}/);
+      else expect(a.detail).toMatch(/\{amount\}/);
+    }
+  });
+
+  test('thresholds are injectable, so they can be tuned without editing rules', () => {
+    const r = _buildAlerts(
+      { workingCapital: { dso: 40 } },
+      { ...ALERT_THRESHOLDS, dsoWarnDays: 30 },
+    );
+    expect(codes(r)).toContain('dso');
+  });
+});

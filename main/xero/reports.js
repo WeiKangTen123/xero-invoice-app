@@ -1879,6 +1879,131 @@ function _buildCashWaterfall({ opening = 0, closing = 0, movement = {} } = {}) {
   return { steps, opening, closing: run, bankClosing: closing, gap, reconciles };
 }
 
+// ── Threshold alerts ────────────────────────────────────────────────────────
+// Every threshold is expressed in months, days or a share of the organisation's
+// OWN figures — never an absolute amount of money. A rule that fires at "cash
+// below 10,000" is meaningful for one business and noise for the next, and this
+// dashboard has to work for organisations we will never see.
+//
+// A rule whose input is null produces NO alert. Staying silent because a figure
+// is unavailable is correct; showing a green light we did not earn is not.
+const ALERT_THRESHOLDS = {
+  runwayCriticalMonths: 3,
+  runwayWarnMonths:     6,
+  dsoWarnDays:          60,
+  dsoCriticalDays:      90,
+  overdueWarnShare:     0.20,
+  overdueCriticalShare: 0.50,
+  collectionWarnRate:   0.50,
+};
+
+const _SEVERITY_ORDER = { critical: 0, warn: 1, info: 2 };
+
+function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unreconciled = {}, cash = {} } = {}, thresholds = ALERT_THRESHOLDS) {
+  const alerts = [];
+  // `detail` may carry a single {amount} placeholder. The figure stays a number
+  // so the UI can format it in the org's own currency — the server never guesses
+  // at a currency symbol.
+  const add = (severity, code, title, detail, amount = null) => alerts.push({ severity, code, title, detail, amount });
+
+  const wc = workingCapital;
+  const receivable = Number(wc.receivable || 0);
+  const payable    = Number(wc.payable || 0);
+
+  // 1. The forecast crosses zero. The most actionable thing on the page: it
+  //    names the week, so there is a date to work back from.
+  const negative = (forecast.weeks || []).find(w => w.balance < 0);
+  if (negative) {
+    add('critical', 'cash-negative', 'Projected cash goes negative',
+      `On current invoice due dates the balance falls below zero in week ${negative.week}, beginning ${negative.startISO}, reaching {amount}.`,
+      negative.balance);
+  }
+
+  // 2. Runway. Only when actually burning — a cash-positive business has no
+  //    runway to run out of.
+  if (runway.available && runway.burning && runway.runwayMonths !== null && runway.runwayMonths !== undefined) {
+    const m = runway.runwayMonths;
+    if (m < thresholds.runwayCriticalMonths) {
+      add('critical', 'runway-critical', 'Under three months of cash',
+        `At the current net burn the balance runs out in about ${m.toFixed(1)} months, spending {amount} a month more than comes in.`,
+        runway.netBurn);
+    } else if (m < thresholds.runwayWarnMonths) {
+      add('warn', 'runway-low', 'Under six months of cash',
+        `About ${m.toFixed(1)} months at the current net burn of {amount} a month.`, runway.netBurn);
+    }
+  }
+
+  // 3. The headline is positive only because of money that did not come from
+  //    customers. Cash-positive and self-funding are not the same claim.
+  if (runway.propped) {
+    add('warn', 'operating-burn', 'Cash is positive but operations are not',
+      'The balance grew, but the trading side of the business consumed {amount} a month once non-customer receipts are excluded.',
+      runway.operatingNet === null || runway.operatingNet === undefined ? null : -runway.operatingNet);
+  }
+
+  // 4. Overdue as a SHARE of what is owed — size-independent by construction.
+  if (receivable > 0 && Number(wc.overdue || 0) > 0) {
+    const share = wc.overdue / receivable;
+    const pct = Math.round(share * 100);
+    if (share >= thresholds.overdueCriticalShare) {
+      add('critical', 'overdue-major', 'Most receivables are overdue',
+        `${pct}% of what customers owe you is past its due date — {amount}.`, wc.overdue);
+    } else if (share >= thresholds.overdueWarnShare) {
+      add('warn', 'overdue', 'Receivables are slipping',
+        `${pct}% of what customers owe you is past its due date — {amount}.`, wc.overdue);
+    }
+  }
+
+  // 5. Debtor days. Days are comparable across organisations; the underlying
+  //    amounts are not.
+  const dso = wc.dso;
+  if (dso !== null && dso !== undefined && Number.isFinite(dso)) {
+    if (dso > thresholds.dsoCriticalDays) {
+      add('critical', 'dso-critical', 'Customers are taking a very long time to pay',
+        `Invoiced revenue is taking about ${Math.round(dso)} days to become cash.`);
+    } else if (dso > thresholds.dsoWarnDays) {
+      add('warn', 'dso', 'Customers are paying slowly',
+        `Invoiced revenue is taking about ${Math.round(dso)} days to become cash.`);
+    }
+  }
+
+  // 6. Cannot cover what is owed even if every customer paid. Requires a real
+  //    bank figure — without one, cover would read as zero and fire falsely.
+  if (cash.available && payable > 0) {
+    const cover = Number(cash.closing || 0) + receivable;
+    if (cover < payable) {
+      add('critical', 'cannot-cover', 'Bills exceed cash plus receivables',
+        'Even if every customer paid in full you would still be {amount} short of what you owe suppliers.',
+        payable - cover);
+    }
+  }
+
+  // 7. Collections stalling.
+  if (wc.collectionRate !== null && wc.collectionRate !== undefined
+      && Number(wc.invoiced || 0) > 0 && wc.collectionRate < thresholds.collectionWarnRate) {
+    add('warn', 'collection-rate', 'Less than half of invoiced work has been collected',
+      `${Math.round(wc.collectionRate * 100)}% of {amount} invoiced has turned into cash.`, wc.invoiced);
+  }
+
+  // 8. The records disagree with the bank. Not a business problem — a
+  //    bookkeeping one — but it undermines every figure above it.
+  if (unreconciled.material) {
+    add('info', 'unreconciled', 'Payment records do not tie to the bank',
+      'Some payments recorded in Xero are not reflected in the bank statement, usually posted to a non-bank account or not yet reconciled.');
+  }
+
+  alerts.sort((a, b) => _SEVERITY_ORDER[a.severity] - _SEVERITY_ORDER[b.severity]);
+  return {
+    alerts,
+    counts: {
+      critical: alerts.filter(a => a.severity === 'critical').length,
+      warn:     alerts.filter(a => a.severity === 'warn').length,
+      info:     alerts.filter(a => a.severity === 'info').length,
+    },
+    thresholds,
+  };
+}
+
 async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
   // Reuses the cached performance fetch for the P&L side, so the accrual-vs-cash
   // reconciliation compares like with like over the same months.
@@ -1962,6 +2087,11 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
   };
   unreconciled.material = Math.abs(unreconciled.inGap) > 1 || Math.abs(unreconciled.outGap) > 1;
 
+  const alerts = _buildAlerts({
+    runway, workingCapital, forecast, unreconciled,
+    cash: { available: !!bank, closing },
+  });
+
   logger.info('Cash flow built', {
     userId, tenantId, months: months.length,
     customerReceipts: Math.round(movement.customerReceipts), otherReceipts: Math.round(movement.otherReceipts),
@@ -1981,6 +2111,7 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
     movement,
     waterfall,
     runway,
+    alerts,
     unreconciled,
     hygiene,
     workingCapital,
@@ -2012,6 +2143,7 @@ module.exports = {
   _resolveWindow, _resolvePeriod, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
   _mergeChunks, _buildCustomerRevenue, _buildInvoiceHygiene, _buildQuotePipeline, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
   _toBase, _foreignCurrency, _closedCount, _growthPct, _buildGrowth, _buildRunway, _buildCashWaterfall,
+  _buildAlerts, ALERT_THRESHOLDS,
   _isTransfer, _isReceiptPayment, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
 };

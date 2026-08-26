@@ -1135,6 +1135,68 @@ function varianceBridgeSteps(T) {
   return steps;
 }
 
+// Threshold alerts from the server. Ordered critical first, and deliberately
+// quiet when there is nothing to say — an empty band renders as a single line of
+// reassurance rather than an empty box, and a missing figure produces no alert
+// at all rather than a false all-clear.
+function AlertBand({ alerts, counts, currency }) {
+  if (!alerts) return null;
+
+  const style = {
+    critical: { color: 'var(--danger)',  mark: '\u25CF', label: 'Critical' },
+    warn:     { color: 'var(--warning)', mark: '\u25B2', label: 'Warning' },
+    info:     { color: 'var(--text-muted)', mark: '\u25CB', label: 'Note' },
+  };
+
+  if (!alerts.length) {
+    return (
+      <div className="card" style={{ marginBottom: 16, borderLeft: '3px solid var(--success)' }}>
+        <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+          <span style={{ color: 'var(--success)', fontWeight: 700 }}>✓</span>{' '}
+          Nothing above the alert thresholds for this period. Rules that need a figure Xero
+          hasn&apos;t provided stay silent rather than reporting all-clear.
+        </div>
+      </div>
+    );
+  }
+
+  const worst = alerts[0].severity;
+  return (
+    <div className="card" style={{ marginBottom: 16, borderLeft: `3px solid ${style[worst].color}` }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
+        <div className="card-title" style={{ marginBottom: 0 }}>Alerts</div>
+        <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+          {[
+            counts?.critical ? `${counts.critical} critical` : null,
+            counts?.warn ? `${counts.warn} warning${counts.warn === 1 ? '' : 's'}` : null,
+            counts?.info ? `${counts.info} note${counts.info === 1 ? '' : 's'}` : null,
+          ].filter(Boolean).join(' · ')}
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
+        {alerts.map(a => {
+          const st = style[a.severity] || style.info;
+          // The server leaves money as a number and marks the slot, so it can be
+          // rendered in the organisation's own currency.
+          const detail = a.amount === null || a.amount === undefined
+            ? a.detail
+            : a.detail.replace('{amount}', fmtMoney(Math.abs(a.amount), currency));
+          return (
+            <div key={a.code} style={{ display: 'flex', gap: 9, alignItems: 'flex-start' }}>
+              <span style={{ flexShrink: 0, color: st.color, fontSize: 10, lineHeight: '17px' }} title={st.label}>{st.mark}</span>
+              <div style={{ lineHeight: 1.5 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: st.color }}>{a.title}</div>
+                <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{detail}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function ProfitabilityPanel({ data, from, to }) {
   const cur = data.organisation?.currency || '';
   const T = useRangeTotals(data, from, to);
@@ -1300,6 +1362,8 @@ export function CashFlowPanel({ data }) {
 
   return (
     <>
+      <AlertBand alerts={data.alerts?.alerts} counts={data.alerts?.counts} currency={cur} />
+
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Metric label="Cash at bank" value={data.cash.available ? fmtMoney(data.cash.closing, cur) : '—'}
                 meter={null}
