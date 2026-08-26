@@ -205,6 +205,25 @@ router.get('/variance-insights', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/xero-reports/cash-flow?preset=|from=&to=
+// Xero has no cash-flow-statement endpoint, so this is built from Bank Summary,
+// Payments, Bank Transactions and Invoices. Every one of those is a read.
+router.get('/cash-flow', requireAuth, async (req, res) => {
+  try {
+    const { tenants, tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false, tenants: [] });
+
+    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
+    const data = await reports.getCashFlow(req.user.id, tenantId, {
+      timezone, period: _periodFromQuery(req), force: req.query.force === 'true',
+    });
+    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
+  } catch (err) {
+    logger.error('Cash flow failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
+  }
+});
+
 // Either a named preset, or an explicit from/to span of any length.
 function _periodFromQuery(req) {
   return (req.query.from && req.query.to)

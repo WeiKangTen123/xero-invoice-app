@@ -4,11 +4,12 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney, fmtPct, fmtCell } from '../utils/format';
-import { MonthRange, OverviewPanel, RevenuePanel } from '../components/performance/PerformancePanels';
+import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel } from '../components/performance/PerformancePanels';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'revenue',  label: 'Revenue' },
+  { key: 'cashflow', label: 'Cash Flow' },
   { key: 'invoices', label: 'Invoices & Bills' },
   { key: 'banking',  label: 'Banking' },
   { key: 'accounts', label: 'Chart of Accounts' },
@@ -379,6 +380,9 @@ export default function XeroInsights() {
   // Fetched separately from the figures so an LLM outage or a missing API key
   // can never delay or blank the dashboard itself.
   const [insights, setInsights] = useState(null);
+  // Its own fetch: cash flow needs Payments, Bank Transactions and Invoices that
+  // no other tab requires, so nothing else pays for them.
+  const [cashflow, setCashflow] = useState({ status: 'idle', data: null, error: '' });
   // Which month the Budget Variance tab compares — a month key, or 'ytd'. Defaults
   // to the current month on load (see fetchBudget), matching Xero's own report,
   // which is titled "For the month ended <current month>".
@@ -447,7 +451,21 @@ export default function XeroInsights() {
     // view is a different presentation of the same merged data, not a second call.
     if ((tab === 'budget' || tab === 'variance') && budget.status === 'idle') fetchBudget();
     if ((tab === 'overview' || tab === 'revenue' || tab === 'banking') && perf.status === 'idle') fetchPerf();
+    if (tab === 'cashflow' && cashflow.status === 'idle') fetchCashflow();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function fetchCashflow(opts = {}) {
+    setCashflow(s => ({ ...s, status: 'loading', error: '' }));
+    const params = new URLSearchParams();
+    if (activeTenantId) params.set('tenantId', activeTenantId);
+    const range = opts.range !== undefined ? opts.range : perfRange;
+    if (range) { params.set('from', range.from); params.set('to', range.to); }
+    else       { params.set('preset', opts.preset || perfPreset); }
+    if (opts.force) params.set('force', 'true');
+    api.get(`/xero-reports/cash-flow?${params.toString()}`)
+      .then(d => setCashflow({ status: 'done', data: d, error: '' }))
+      .catch(err => setCashflow({ status: 'done', data: null, error: err.message }));
+  }
 
   function fetchPerf(opts = {}) {
     setPerf(s => ({ ...s, status: 'loading', error: '' }));
@@ -668,7 +686,7 @@ export default function XeroInsights() {
         ))}
       </div>
 
-      {(tab === 'overview' || tab === 'revenue') && perf.data && !perf.error && (
+      {(tab === 'overview' || tab === 'revenue' || tab === 'cashflow') && perf.data && !perf.error && (
         <div className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                                        gap: 14, flexWrap: 'wrap', marginBottom: 16, padding: '12px 16px' }}>
           <MonthRange months={perf.data.months} from={monthFrom} to={monthTo}
@@ -677,11 +695,14 @@ export default function XeroInsights() {
                       preset={perfRange ? 'custom' : perfPreset}
                       onPreset={p => {
                         if (p === 'custom') return;      // range pickers drive that
-                        setPerfPreset(p); setPerfRange(null); fetchPerf({ preset: p, range: null });
+                        setPerfPreset(p); setPerfRange(null);
+                        fetchPerf({ preset: p, range: null });
+                        setCashflow({ status: 'idle', data: null, error: '' });
                       }}
                       onRange={(from, to) => {
                         const r = { from, to };
                         setPerfRange(r); fetchPerf({ range: r });
+                        setCashflow({ status: 'idle', data: null, error: '' });
                       }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
@@ -721,6 +742,18 @@ export default function XeroInsights() {
             <RevenuePanel data={perf.data} from={monthFrom} to={monthTo}
                           selectedLine={revenueLine} onSelectLine={setRevenueLine} />
           )}
+        </>
+      )}
+
+      {tab === 'cashflow' && (
+        <>
+          {cashflow.status === 'loading' && !cashflow.data && (
+            <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading cash flow…</div>
+          )}
+          {cashflow.error && (
+            <div className="alert alert-error"><span className="alert-icon">✕</span>{cashflow.error}</div>
+          )}
+          {cashflow.data && !cashflow.error && <CashFlowPanel data={cashflow.data} />}
         </>
       )}
 
