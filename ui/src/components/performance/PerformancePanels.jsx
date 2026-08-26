@@ -853,11 +853,11 @@ export function CashFlowPanel({ data }) {
                 meter={null}
                 footLeft={data.cash.available ? `${data.cash.accounts.length} account${data.cash.accounts.length === 1 ? '' : 's'}` : 'Bank summary unavailable'}
                 footRight="Closing balance" />
-        <Metric label="Cash in" value={fmtMoney(m.cashIn, cur)} meter={null}
+        <Metric label="Cash in" value={fmtMoney(data.cash.available ? data.cash.cashIn : m.cashIn, cur)} meter={null}
                 tone="var(--success)"
                 footLeft={`${fmtMoney(m.customerReceipts, cur)} from customers`}
                 footRight={`${fmtMoney(m.otherReceipts, cur)} other`} />
-        <Metric label="Cash out" value={fmtMoney(m.cashOut, cur)} meter={null}
+        <Metric label="Cash out" value={fmtMoney(data.cash.available ? data.cash.cashOut : m.cashOut, cur)} meter={null}
                 tone="var(--danger)"
                 footLeft={`${fmtMoney(m.supplierPayments, cur)} to suppliers`}
                 footRight={`${fmtMoney(m.otherPayments, cur)} other`} />
@@ -896,9 +896,17 @@ export function CashFlowPanel({ data }) {
           <div style={{ borderTop: '1px solid var(--border)', marginTop: 12, paddingTop: 10 }}>
             <Rows currency={cur} items={[
               { label: 'Opening balance', value: data.cash.opening },
-              { label: 'Net movement',    value: m.net },
+              { label: 'Net movement',    value: data.cash.net },
               { label: 'Closing balance', value: data.cash.closing, strong: true },
             ]} />
+            {data.unreconciled?.material && (
+              <div style={{ fontSize: 11, color: 'var(--warning)', marginTop: 10, lineHeight: 1.5 }}>
+                ▲ The payment records don&apos;t tie to the bank statement
+                {data.unreconciled.inGap !== 0 && ` — ${fmtMoney(Math.abs(data.unreconciled.inGap), cur)} of receipts`}
+                {data.unreconciled.outGap !== 0 && `${data.unreconciled.inGap !== 0 ? ' and' : ' — '} ${fmtMoney(Math.abs(data.unreconciled.outGap), cur)} of payments`}
+                {' '}recorded in Xero but not seen in the bank. Usually means posted to a non-bank account, or not yet reconciled.
+              </div>
+            )}
           </div>
         </Surface>
 

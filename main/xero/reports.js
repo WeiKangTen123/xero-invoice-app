@@ -515,6 +515,7 @@ function _buildBankSummary(reportRows) {
   const receivedIdx = columns.findIndex(c => c.includes('cash received'));
   const spentIdx     = columns.findIndex(c => c.includes('cash spent'));
   const closingIdx   = columns.findIndex(c => c.includes('closing balance'));
+  const openingIdx   = columns.findIndex(c => c.includes('opening balance'));
   if (receivedIdx < 0 || spentIdx < 0) return { accounts: [], cashIn: 0, cashOut: 0, net: 0 };
 
   const accounts = [];
@@ -529,6 +530,7 @@ function _buildBankSummary(reportRows) {
           cashReceived:   _parseReportNumber(row.cells[receivedIdx]?.value),
           cashSpent:      Math.abs(_parseReportNumber(row.cells[spentIdx]?.value)),
           closingBalance: closingIdx >= 0 ? _parseReportNumber(row.cells[closingIdx]?.value) : 0,
+          openingBalance: openingIdx >= 0 ? _parseReportNumber(row.cells[openingIdx]?.value) : 0,
         });
       }
       if (row.rows?.length) walk(row.rows);
@@ -616,7 +618,7 @@ async function getBankSummary(userId, tenantId, { from, to, force = false } = {}
     const res  = await withRetry(() => api.getReportBankSummary(tenantId, w.from, w.to));
     const part = _buildBankSummary(res.body.reports?.[0]?.rows || []);
     for (const acc of part.accounts) {
-      const existing = byAccount.get(acc.name) || { name: acc.name, cashReceived: 0, cashSpent: 0, closingBalance: 0 };
+      const existing = byAccount.get(acc.name) || { name: acc.name, cashReceived: 0, cashSpent: 0, closingBalance: 0, openingBalance: acc.openingBalance };
       existing.cashReceived += acc.cashReceived;
       existing.cashSpent    += acc.cashSpent;
       existing.closingBalance = acc.closingBalance; // a running balance, not additive — windows are processed oldest-first, so the last write wins and holds the most recent balance
@@ -1600,7 +1602,21 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
 
   const workingCapital = _buildWorkingCapital({ invoices, revenue, expenses, days, today });
   const closing  = bank ? bank.accounts.reduce((s, a) => s + a.closingBalance, 0) : 0;
+  const opening  = bank ? bank.accounts.reduce((s, a) => s + (a.openingBalance || 0), 0) : 0;
+  const bankIn   = bank ? bank.cashIn  : 0;
+  const bankOut  = bank ? bank.cashOut : 0;
   const forecast = _buildCashForecast({ invoices, openingBalance: closing, today });
+
+  // The bank statement is what actually happened. Payments and bank transactions
+  // explain WHERE it came from — but they are separate records, and they can
+  // disagree with the bank if something was recorded against a non-bank account
+  // or never reconciled. Deriving the opening balance by subtraction hid that;
+  // reading Xero's own opening balance exposes it instead.
+  const unreconciled = {
+    inGap:  Math.round((movement.cashIn  - bankIn)  * 100) / 100,
+    outGap: Math.round((movement.cashOut - bankOut) * 100) / 100,
+  };
+  unreconciled.material = Math.abs(unreconciled.inGap) > 1 || Math.abs(unreconciled.outGap) > 1;
 
   logger.info('Cash flow built', {
     userId, tenantId, months: months.length,
@@ -1613,11 +1629,13 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
     months,
     cash: {
       available: !!bank,
-      closing,
-      opening:   closing - movement.net,
-      accounts:  bank ? bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance })) : [],
+      closing, opening,
+      // From the bank statement, not inferred from the payment records.
+      cashIn: bankIn, cashOut: bankOut, net: bankIn - bankOut,
+      accounts: bank ? bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance })) : [],
     },
     movement,
+    unreconciled,
     workingCapital,
     forecast,
     // The two figures tell opposite stories here, so the gap is stated rather
