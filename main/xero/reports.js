@@ -1005,6 +1005,17 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
   // A period longer than 12 months exceeds what one call pair can return, so it
   // is fetched as several. Sequentially, not in parallel: Xero's 60/min budget
   // is shared with real invoice submission, and a long range shouldn't burst.
+  // BudgetSummary only ever reports the OVERALL budget. Listing the budgets
+  // makes that explicit rather than leaving the reader to assume the figures
+  // cover a tracking-category budget they may also have.
+  let budgets = [];
+  try {
+    const bRes = await withRetry(() => api.getBudgets(tenantId));
+    budgets = (bRes.body.budgets || []).map(b => ({ id: b.budgetID, type: b.type, description: b.description }));
+  } catch (err) {
+    logger.info('Budget list unavailable — reporting the Overall budget only', { userId, tenantId });
+  }
+
   const chunks = _chunkMonths(months, 12);
   const parts = await _mapWithConcurrency(chunks, REPORT_CHUNK_CONCURRENCY, async (chunk) => {
     const first = chunk[0], last = chunk[chunk.length - 1];
@@ -1047,6 +1058,7 @@ async function getBudgetVariance(userId, tenantId, { force = false, timezone = '
   return _cacheSet(key, {
     organisation: { name: org.name || org.legalName || 'Organisation', currency: org.baseCurrency || '' },
     fiscalYear:   { label: periodLabel, fromISO: first.startISO, toISO: last.endISO },
+    budgets,
     period:       { key: win.key, label: win.label, months: months.length, chunks: chunks.length,
                     fromKey: months[0].key, toKey: months[months.length - 1].key },
     months:       months.map((m, i) => ({ key: m.key, label: m.label, source: i <= actualThroughIdx ? 'actual' : 'budget' })),
@@ -1194,6 +1206,67 @@ function _buildCustomerRevenue(invoices) {
   };
 }
 
+// Pure. Problems in the invoice data itself, as opposed to problems in the
+// business. A duplicate invoice number or a dated-nothing record is a
+// bookkeeping fault, and a dashboard that reports figures built on them without
+// saying so is quietly lending them credibility.
+function _buildInvoiceHygiene(invoices = []) {
+  const issues = [];
+  const byNumber = new Map();
+  let undated = 0, negativeLines = 0;
+
+  for (const inv of invoices) {
+    const num = (inv.invoiceNumber || '').trim();
+    if (num) {
+      if (!byNumber.has(num)) byNumber.set(num, []);
+      byNumber.get(num).push(inv);
+    }
+    // A live invoice with no date cannot be placed in any period, so it silently
+    // drops out of every monthly figure on the dashboard.
+    if (!inv.date && inv.status !== 'DELETED' && inv.status !== 'VOIDED') undated++;
+    if (Number(inv.total || 0) < 0) negativeLines++;
+  }
+
+  for (const [num, list] of byNumber) {
+    // Deleted/voided duplicates still matter: the number is reused, so anyone
+    // reconciling by invoice number sees two different documents.
+    if (list.length > 1) {
+      const live = list.filter(i => i.status !== 'DELETED' && i.status !== 'VOIDED');
+      issues.push({
+        severity: live.length > 1 ? 'warn' : 'info',
+        text: `Invoice number ${num} is used ${list.length} times (${list.map(i => i.status).join(', ')})`
+            + (live.length > 1 ? ' — more than one is live, so figures may double-count.'
+                               : ' — the duplicates are deleted or voided, but the number is reused.'),
+      });
+    }
+  }
+  if (undated) issues.push({ severity: 'warn', text: `${undated} live invoice${undated === 1 ? '' : 's'} ha${undated === 1 ? 's' : 've'} no date, so ${undated === 1 ? 'it is' : 'they are'} excluded from every monthly figure.` });
+  if (negativeLines) issues.push({ severity: 'info', text: `${negativeLines} invoice${negativeLines === 1 ? ' has a' : 's have'} negative total${negativeLines === 1 ? '' : 's'} — usually a discount or reallocation rather than a credit note.` });
+
+  return { issues, duplicateNumbers: [...byNumber].filter(([, l]) => l.length > 1).length, undated };
+}
+
+// Pure. Work quoted but not yet invoiced — revenue that exists commercially and
+// nowhere in the accounts. SENT and ACCEPTED are the live pipeline; INVOICED has
+// already become an invoice and would be double-counted, and DRAFT was never
+// put in front of the customer.
+function _buildQuotePipeline(quotes = []) {
+  const live = { sent: 0, accepted: 0 };
+  const counts = { sent: 0, accepted: 0 };
+  for (const q of quotes) {
+    const status = String(q.status || '').toUpperCase();
+    const total  = Number(q.total || 0);
+    if (status === 'SENT')     { live.sent += total; counts.sent++; }
+    if (status === 'ACCEPTED') { live.accepted += total; counts.accepted++; }
+  }
+  return {
+    sent: live.sent, accepted: live.accepted,
+    total: live.sent + live.accepted,
+    counts,
+    available: true,
+  };
+}
+
 async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period, cashFlow = false, customers = false } = {}) {
   // Reuses the budget-variance fetch and its cache — on a warm cache this whole
   // endpoint costs one Xero call (the bank summary) rather than three.
@@ -1230,6 +1303,7 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
 
   // Only the Revenue tab shows this, so Overview never pays for the extra call.
   let customerRevenue = { customers: [], total: 0, count: 0, average: null, available: false };
+  let quotePipeline   = { sent: 0, accepted: 0, total: 0, counts: { sent: 0, accepted: 0 }, available: false };
   if (customers) {
     try {
       const tokenCache = require('../utils/token-cache').forUser(userId);
@@ -1242,6 +1316,15 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
         ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true, // summaryOnly
       ));
       customerRevenue = _buildCustomerRevenue(res.body.invoices || []);
+
+      // Quoted-but-not-invoiced work exists commercially and nowhere in the
+      // accounts, so the forward view otherwise stops at issued invoices.
+      try {
+        const qRes = await withRetry(() => api.getQuotes(tenantId));
+        quotePipeline = _buildQuotePipeline(qRes.body.quotes || []);
+      } catch (qErr) {
+        logger.warn('Performance: quotes unavailable', { userId, tenantId, error: qErr.message });
+      }
     } catch (err) {
       // One card out of many — a failure here must not blank the tab.
       logger.warn('Performance: customer revenue unavailable', { userId, tenantId, error: err.message });
@@ -1262,6 +1345,7 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
     actualThroughIdx,
     ...built,
     customerRevenue,
+    quotePipeline,
     watchList,
     // Surfaced so the UI can show which accounts were treated as recurring —
     // a guess made from names should never be invisible.
@@ -1601,6 +1685,7 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
   const days     = Math.max(1, Math.round((_dateFromParts(_parseISODate(last)) - _dateFromParts(fromP)) / 86400000) + 1);
 
   const workingCapital = _buildWorkingCapital({ invoices, revenue, expenses, days, today });
+  const hygiene = _buildInvoiceHygiene(invoices);
   const closing  = bank ? bank.accounts.reduce((s, a) => s + a.closingBalance, 0) : 0;
   const opening  = bank ? bank.accounts.reduce((s, a) => s + (a.openingBalance || 0), 0) : 0;
   const bankIn   = bank ? bank.cashIn  : 0;
@@ -1636,6 +1721,7 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
     },
     movement,
     unreconciled,
+    hygiene,
     workingCapital,
     forecast,
     // The two figures tell opposite stories here, so the gap is stated rather
@@ -1663,7 +1749,7 @@ module.exports = {
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _monthsFrom, _monthMeta, _monthsBetween, _chunkMonths,
   _resolveWindow, _resolvePeriod, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
-  _mergeChunks, _buildCustomerRevenue, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
+  _mergeChunks, _buildCustomerRevenue, _buildInvoiceHygiene, _buildQuotePipeline, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
   _isTransfer, _isReceiptPayment, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
 };

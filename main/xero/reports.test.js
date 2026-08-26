@@ -1163,7 +1163,10 @@ describe('xero/reports — performance overview (pure)', () => {
   test('recurring/project split sums the classified revenue accounts, excluding other income', () => {
     const { split } = build();
     expect(split.recurring.actual[3]).toBe(75000); // Maintenance, Jul
-    expect(split.project.actual[3]).toBe(-17670);  // Implementation, Jul (a credit note)
+    // Negative because ONE invoice splits across two revenue accounts with a
+    // negative line on this one — a discount or reallocation, NOT a credit note.
+    // The org has no credit notes at all.
+    expect(split.project.actual[3]).toBe(-17670);
     expect(split.recurring.actual[4]).toBe(15000);
     expect(split.project.actual[4]).toBe(37000);
     // Other Income is real income but not a service line — it must not inflate either side.
@@ -1710,5 +1713,70 @@ describe('xero/reports — 13-week cash forecast (pure)', () => {
     ]});
     expect(f.weeks.every(w => w.receipts === 0)).toBe(true);
     expect(f.weeks[12].balance).toBe(100);
+  });
+});
+
+// ── Invoice hygiene and quote pipeline ──────────────────────────────────────
+describe('xero/reports — invoice hygiene (pure)', () => {
+  const { _buildInvoiceHygiene } = require('./reports');
+
+  test('a reused invoice number is reported, with severity by how many are live', () => {
+    // The real case: I-260002 exists twice, one DELETED and one AUTHORISED.
+    const one = _buildInvoiceHygiene([
+      { invoiceNumber: 'I-260002', status: 'DELETED',    total: 10000, date: null },
+      { invoiceNumber: 'I-260002', status: 'AUTHORISED', total: 57330, date: '2026-07-27' },
+    ]);
+    expect(one.duplicateNumbers).toBe(1);
+    expect(one.issues[0].severity).toBe('info');       // only one is live
+    expect(one.issues[0].text).toMatch(/used 2 times/);
+
+    const two = _buildInvoiceHygiene([
+      { invoiceNumber: 'X', status: 'AUTHORISED', total: 1, date: '2026-01-01' },
+      { invoiceNumber: 'X', status: 'PAID',       total: 2, date: '2026-01-02' },
+    ]);
+    expect(two.issues[0].severity).toBe('warn');       // both live — may double-count
+    expect(two.issues[0].text).toMatch(/double-count/);
+  });
+
+  test('a live invoice with no date is flagged — it falls out of every monthly figure', () => {
+    const h = _buildInvoiceHygiene([{ invoiceNumber: 'A', status: 'AUTHORISED', total: 5, date: null }]);
+    expect(h.undated).toBe(1);
+    expect(h.issues.some(i => /no date/.test(i.text))).toBe(true);
+  });
+
+  test('a DELETED invoice with no date is not counted as undated', () => {
+    // Deleted records are already excluded from the figures, so flagging them
+    // would be noise.
+    const h = _buildInvoiceHygiene([{ invoiceNumber: 'A', status: 'DELETED', total: 5, date: null }]);
+    expect(h.undated).toBe(0);
+  });
+
+  test('clean invoices produce no issues at all', () => {
+    const h = _buildInvoiceHygiene([
+      { invoiceNumber: 'A', status: 'AUTHORISED', total: 1, date: '2026-01-01' },
+      { invoiceNumber: 'B', status: 'PAID',       total: 2, date: '2026-01-02' },
+    ]);
+    expect(h.issues).toEqual([]);
+  });
+});
+
+describe('xero/reports — quote pipeline (pure)', () => {
+  const { _buildQuotePipeline } = require('./reports');
+
+  test('only SENT and ACCEPTED count as live pipeline', () => {
+    const q = _buildQuotePipeline([
+      { status: 'SENT', total: 5000 }, { status: 'ACCEPTED', total: 3000 },
+      // INVOICED has already become an invoice — counting it would double-count
+      // revenue that is already in the P&L.
+      { status: 'INVOICED', total: 9999 },
+      { status: 'DRAFT', total: 100 }, { status: 'DECLINED', total: 7000 },
+    ]);
+    expect(q).toMatchObject({ sent: 5000, accepted: 3000, total: 8000 });
+    expect(q.counts).toEqual({ sent: 1, accepted: 1 });
+  });
+
+  test('status matching is case-insensitive, and no quotes totals zero', () => {
+    expect(_buildQuotePipeline([{ status: 'sent', total: 10 }]).total).toBe(10);
+    expect(_buildQuotePipeline([]).total).toBe(0);
   });
 });
