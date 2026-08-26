@@ -123,6 +123,34 @@ describe('Xero call contract — getInvoices', () => {
     expect(api.getInvoices).toHaveBeenCalled();
   });
 
+  test('the cash-flow invoice fetch is bounded by date, not unfiltered', async () => {
+    // Xero bills on data egress since March 2026, so an unfiltered getInvoices
+    // is a standing cost that grows with the customer's invoice count. It must
+    // still reach back BEFORE the period (open invoices are older than it), so
+    // this asserts a lower bound exists and that it precedes the period start.
+    await reports.getCashFlow(U, T, { period: { from: '2026-04', to: '2027-03' }, force: true });
+
+    const summaryCalls = api.getInvoices.mock.calls.filter(c => c[12] === true);
+    expect(summaryCalls.length).toBeGreaterThan(0);
+    for (const call of summaryCalls) {
+      const where = call[2];
+      expect(typeof where).toBe('string');
+      expect(where).toMatch(/Date\s*>=\s*DateTime\(/);
+      // Must predate the period, or invoices raised earlier and still unpaid
+      // vanish from the forecast.
+      const [, y] = where.match(/DateTime\((\d{4})/) || [];
+      expect(Number(y)).toBeLessThan(2026);
+    }
+  });
+
+  test('a Xero where-clause never interpolates an undefined into the query', async () => {
+    // `Date >= DateTime(undefined,...)` is a 400 that only shows up live.
+    await reports.getCashFlow(U, T, { period: { preset: 'fy-ytd' }, force: true });
+    for (const call of [...api.getInvoices.mock.calls, ...api.getPayments.mock.calls, ...api.getBankTransactions.mock.calls]) {
+      if (typeof call[2] === 'string') expect(call[2]).not.toMatch(/undefined|NaN|null/);
+    }
+  });
+
   test('invoice status filters are real Xero enum values', async () => {
     await reports.getCashFlow(U, T, { period: { preset: 'fy-ytd' }, force: true });
     const VALID = ['DRAFT', 'SUBMITTED', 'DELETED', 'AUTHORISED', 'PAID', 'VOIDED'];

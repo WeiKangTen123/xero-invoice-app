@@ -63,6 +63,48 @@ function _emptyAging() {
   return { overdue: { count: 0, amount: 0 }, within7: { count: 0, amount: 0 }, within30: { count: 0, amount: 0 }, later: { count: 0, amount: 0 } };
 }
 
+// ── Currency ────────────────────────────────────────────────────────────────
+// Xero returns invoice, quote, payment and bank-transaction amounts in the
+// DOCUMENT's own currency, while every report endpoint (P&L, Budget Summary,
+// Bank Summary) returns the organisation's BASE currency. Summing the two
+// without converting silently adds USD to SGD and reports the result as though
+// it meant something.
+//
+// currencyRate is the rate Xero stamped on the document when it was raised, so
+// converting with it reproduces exactly what Xero's own reports show. It is set
+// only on non-base-currency documents. Payments carry a rate but no code — for
+// those the rate alone decides.
+function _toBase(doc, amount, baseCurrency = '') {
+  const v = Number(amount || 0);
+  if (!v || !doc) return v;
+  const code = doc.currencyCode ? String(doc.currencyCode) : '';
+  if (code && baseCurrency && code === baseCurrency) return v;   // already base
+  const rate = Number(doc.currencyRate || 0);
+  if (rate > 0 && rate !== 1) return v * rate;
+  return v;
+}
+
+// Which foreign currencies are present, and how many documents we could NOT
+// convert. A single-currency org gets { mixed: false } and nothing changes; a
+// multi-currency one gets a figure it can trust plus an honest note about any
+// document Xero gave us no rate for.
+function _foreignCurrency(docs = [], baseCurrency = '') {
+  const currencies = new Set();
+  let unconvertible = 0;
+  for (const d of docs || []) {
+    const code = d && d.currencyCode ? String(d.currencyCode) : '';
+    if (!code || (baseCurrency && code === baseCurrency)) continue;
+    currencies.add(code);
+    if (!(Number(d.currencyRate) > 0)) unconvertible++;
+  }
+  return {
+    currencies: [...currencies].sort(),
+    mixed: currencies.size > 0,
+    unconvertible,
+    baseCurrency: baseCurrency || null,
+  };
+}
+
 function _buildSummary(org, invoices) {
   let totalReceivables = 0, totalPayables = 0, overdueAmount = 0;
   let receivablesCount = 0, payablesCount = 0;
@@ -1148,6 +1190,72 @@ function _buildPerformance({ months, rows, cash }) {
 // Pure. Data-quality flags, computed from the figures rather than asserted.
 // Deliberately rule-based: every line is traceable to a number on screen, so
 // nothing here can say something the data doesn't support.
+// Pure. How many months of a series are FULLY elapsed. The current month is
+// partial, and comparing a partial month against a complete one is the single
+// most common way a dashboard invents a collapse that never happened — so every
+// rate, growth figure and run rate below is computed on closed months only.
+function _closedCount(months, today) {
+  if (!months || !months.length) return 0;
+  if (!today) return months.length;
+  const key = `${today.year}-${String(today.month).padStart(2, '0')}`;
+  const i = months.findIndex(m => m.key === key);
+  if (i >= 0) return i;                              // months strictly before this one
+  return months[0].key > key ? 0 : months.length;    // wholly future / wholly past
+}
+
+// Pure. Null — not Infinity, not 100% — when the base is zero or negative.
+// Growth from nothing is undefined, and any number invented here is one someone
+// will later quote in a meeting as though it were measured.
+function _growthPct(curr, prev) {
+  const c = Number(curr), p = Number(prev);
+  if (prev === null || prev === undefined) return null;
+  if (!Number.isFinite(c) || !Number.isFinite(p) || p <= 0) return null;
+  return (c - p) / p;
+}
+
+// Pure. Revenue momentum: month-on-month, year-on-year, and the trailing trend.
+// Every comparison is closed-month to closed-month.
+function _buildGrowth({ series = [], months = [], today } = {}) {
+  const n = Math.min(_closedCount(months, today), series.length);
+  if (n < 1) return { available: false, closedMonths: 0 };
+
+  const closed = series.slice(0, n);
+  const at = i => (i >= 0 && i < n ? closed[i] : null);
+  const labelAt = i => (i >= 0 && i < months.length ? months[i].label : null);
+
+  const steps = [];
+  for (let i = 1; i < n; i++) {
+    const g = _growthPct(closed[i], closed[i - 1]);
+    if (g !== null) steps.push(g);
+  }
+  const mean = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+
+  // Three-month means rather than a fitted line: with twelve points at most, a
+  // regression is false precision, and a mean survives one freak month.
+  let trend = null;
+  if (n >= 6) {
+    const recent = mean(closed.slice(n - 3));
+    const prior  = mean(closed.slice(n - 6, n - 3));
+    trend = _growthPct(recent, prior);
+  }
+
+  return {
+    available: true,
+    closedMonths: n,
+    latest: at(n - 1),          latestLabel:   labelAt(n - 1),
+    previous: at(n - 2),        previousLabel: labelAt(n - 2),
+    yoyBase: n >= 13 ? at(n - 13) : null,
+    yoyLabel: n >= 13 ? labelAt(n - 13) : null,
+    mom: _growthPct(at(n - 1), at(n - 2)),
+    // Needs 13 closed months to compare like month with like month. Below that
+    // it is absent rather than approximated from a shorter span.
+    yoy: n >= 13 ? _growthPct(at(n - 1), at(n - 13)) : null,
+    avgMoM: mean(steps),
+    trend,
+    series: closed,
+  };
+}
+
 function _buildWatchList({ months, totals, actualThroughIdx }) {
   const out = [];
   const rev = totals.revenue.actual, cogs = totals.cogs.actual, opex = totals.opex.actual;
@@ -1183,11 +1291,13 @@ function _buildWatchList({ months, totals, actualThroughIdx }) {
 // include tax, whereas the P&L figures elsewhere on this page are net. For an
 // org whose sales accounts are zero-rated the two agree, but they will not in
 // general — so the UI must not present this as the same number.
-function _buildCustomerRevenue(invoices) {
+function _buildCustomerRevenue(invoices, baseCurrency = '') {
   const byContact = new Map();
   for (const inv of invoices || []) {
     const name  = inv.contact?.name || 'Unknown';
-    const total = Number(inv.total || 0);
+    // Base currency, not the invoice's own — otherwise a USD customer and an
+    // SGD customer are ranked against each other on unlike numbers.
+    const total = _toBase(inv, inv.total, baseCurrency);
     if (!byContact.has(name)) byContact.set(name, { name, invoiced: 0, invoices: 0 });
     const c = byContact.get(name);
     c.invoiced += total;
@@ -1199,6 +1309,7 @@ function _buildCustomerRevenue(invoices) {
     customers,
     total,
     count: customers.length,
+    currency: _foreignCurrency(invoices, baseCurrency),
     // Undefined rather than zero when nobody was invoiced — an average of no
     // customers is not 0, it is meaningless.
     average: customers.length ? total / customers.length : null,
@@ -1210,7 +1321,7 @@ function _buildCustomerRevenue(invoices) {
 // business. A duplicate invoice number or a dated-nothing record is a
 // bookkeeping fault, and a dashboard that reports figures built on them without
 // saying so is quietly lending them credibility.
-function _buildInvoiceHygiene(invoices = []) {
+function _buildInvoiceHygiene(invoices = [], baseCurrency = '') {
   const issues = [];
   const byNumber = new Map();
   let undated = 0, negativeLines = 0;
@@ -1243,19 +1354,33 @@ function _buildInvoiceHygiene(invoices = []) {
   if (undated) issues.push({ severity: 'warn', text: `${undated} live invoice${undated === 1 ? '' : 's'} ha${undated === 1 ? 's' : 've'} no date, so ${undated === 1 ? 'it is' : 'they are'} excluded from every monthly figure.` });
   if (negativeLines) issues.push({ severity: 'info', text: `${negativeLines} invoice${negativeLines === 1 ? ' has a' : 's have'} negative total${negativeLines === 1 ? '' : 's'} — usually a discount or reallocation rather than a credit note.` });
 
-  return { issues, duplicateNumbers: [...byNumber].filter(([, l]) => l.length > 1).length, undated };
+  // A foreign-currency invoice with no exchange rate cannot be converted to the
+  // org's base currency, so it is being counted at face value in a total that is
+  // otherwise base. Small, but it is exactly the kind of error that is invisible
+  // until someone reconciles by hand.
+  const currency = _foreignCurrency(invoices, baseCurrency);
+  if (currency.unconvertible) {
+    issues.push({
+      severity: 'warn',
+      text: `${currency.unconvertible} invoice${currency.unconvertible === 1 ? '' : 's'} in ${currency.currencies.join(', ') || 'a foreign currency'} `
+          + `ha${currency.unconvertible === 1 ? 's' : 've'} no exchange rate, so ${currency.unconvertible === 1 ? 'it is' : 'they are'} counted at face value `
+          + `in ${baseCurrency || 'base currency'} totals.`,
+    });
+  }
+
+  return { issues, duplicateNumbers: [...byNumber].filter(([, l]) => l.length > 1).length, undated, currency };
 }
 
 // Pure. Work quoted but not yet invoiced — revenue that exists commercially and
 // nowhere in the accounts. SENT and ACCEPTED are the live pipeline; INVOICED has
 // already become an invoice and would be double-counted, and DRAFT was never
 // put in front of the customer.
-function _buildQuotePipeline(quotes = []) {
+function _buildQuotePipeline(quotes = [], baseCurrency = '') {
   const live = { sent: 0, accepted: 0 };
   const counts = { sent: 0, accepted: 0 };
   for (const q of quotes) {
     const status = String(q.status || '').toUpperCase();
-    const total  = Number(q.total || 0);
+    const total  = _toBase(q, q.total, baseCurrency);
     if (status === 'SENT')     { live.sent += total; counts.sent++; }
     if (status === 'ACCEPTED') { live.accepted += total; counts.accepted++; }
   }
@@ -1263,6 +1388,7 @@ function _buildQuotePipeline(quotes = []) {
     sent: live.sent, accepted: live.accepted,
     total: live.sent + live.accepted,
     counts,
+    currency: _foreignCurrency(quotes, baseCurrency),
     available: true,
   };
 }
@@ -1272,7 +1398,11 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
   // endpoint costs one Xero call (the bank summary) rather than three.
   const bv = await getBudgetVariance(userId, tenantId, { timezone, force, window, period });
 
-  const today = _fmtISODate(_todayPartsInTz(timezone));
+  const todayParts = _todayPartsInTz(timezone);
+  const today = _fmtISODate(todayParts);
+  // Every invoice/quote figure below is converted to this before being summed or
+  // compared with a report figure. See _toBase.
+  const baseCurrency = bv.organisation?.currency || '';
   // Overview needs only the CLOSING BALANCE, which is "as of today" whatever
   // window you ask for — so it reads a short recent window (one Xero call).
   // Cash in/out genuinely is period-scoped, but only Banking shows it, and over
@@ -1315,13 +1445,13 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
         tenantId, undefined, where, 'Date DESC', undefined, undefined, undefined,
         ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true, // summaryOnly
       ));
-      customerRevenue = _buildCustomerRevenue(res.body.invoices || []);
+      customerRevenue = _buildCustomerRevenue(res.body.invoices || [], baseCurrency);
 
       // Quoted-but-not-invoiced work exists commercially and nowhere in the
       // accounts, so the forward view otherwise stops at issued invoices.
       try {
         const qRes = await withRetry(() => api.getQuotes(tenantId));
-        quotePipeline = _buildQuotePipeline(qRes.body.quotes || []);
+        quotePipeline = _buildQuotePipeline(qRes.body.quotes || [], baseCurrency);
       } catch (qErr) {
         logger.warn('Performance: quotes unavailable', { userId, tenantId, error: qErr.message });
       }
@@ -1334,6 +1464,9 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
   const actualThroughIdx = bv.months.filter(m => m.source === 'actual').length - 1;
   const built = _buildPerformance({ months: bv.months, rows: bv.rows, cash });
   const watchList = _buildWatchList({ months: bv.months, totals: built.totals, actualThroughIdx });
+  // Momentum, not just level — a dashboard that shows revenue but never whether
+  // it is rising makes the reader do the differencing in their head.
+  const growth = _buildGrowth({ series: built.totals.revenue.actual, months: bv.months, today: todayParts });
 
   logger.info('Performance overview built', { userId, tenantId, serviceLines: built.serviceLines.length, actualMonths: actualThroughIdx + 1 });
 
@@ -1343,7 +1476,12 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
     period:           bv.period,
     months:           bv.months,
     actualThroughIdx,
+    // Last FULLY elapsed month. actualThroughIdx includes the current one, which
+    // is partial — anything comparing month against month needs this instead, or
+    // it reports a collapse that is only the calendar.
+    closedThroughIdx: _closedCount(bv.months, todayParts) - 1,
     ...built,
+    growth,
     customerRevenue,
     quotePipeline,
     watchList,
@@ -1363,6 +1501,10 @@ async function getPerformance(userId, tenantId, { timezone = 'UTC', force = fals
 // Guardrail: any generated sentence containing a large number that wasn't in the
 // input is dropped. An LLM inventing a plausible-looking amount inside financial
 // commentary is the failure mode that matters, and it's cheap to detect.
+
+// How far before the reporting period we will look for still-open invoices.
+// Trades forecast completeness against Xero's per-GB egress billing.
+const INVOICE_LOOKBACK_MONTHS = 24;
 
 const INSIGHT_CACHE_TTL_MS = 30 * 60 * 1000; // reasons only change when the figures do
 const MIN_VARIANCE_TO_EXPLAIN = 1;           // ignore rounding dust
@@ -1519,7 +1661,7 @@ function _monthKeyOfDate(d) {
 // Customer receipts are kept apart from other receipts deliberately: a business
 // living on injected capital and one collecting from customers look identical
 // on a single "cash in" line, and they are not remotely the same business.
-function _buildCashMovement({ payments = [], bankTransactions = [], months = [] }) {
+function _buildCashMovement({ payments = [], bankTransactions = [], months = [], baseCurrency = '' }) {
   const idx = new Map(months.map((m, i) => [m.key, i]));
   const zero = () => Array(months.length).fill(0);
   const monthly = { customerReceipts: zero(), otherReceipts: zero(), supplierPayments: zero(), otherPayments: zero() };
@@ -1533,10 +1675,12 @@ function _buildCashMovement({ payments = [], bankTransactions = [], months = [] 
     if (i !== undefined) monthly[bucket][i] += v;
   };
 
-  for (const p of payments) add(_isReceiptPayment(p) ? 'customerReceipts' : 'supplierPayments', p.date, p.amount);
+  // Converted to base currency so these tie to the bank summary and the P&L,
+  // both of which Xero reports in base.
+  for (const p of payments) add(_isReceiptPayment(p) ? 'customerReceipts' : 'supplierPayments', p.date, _toBase(p, p.amount, baseCurrency));
   for (const t of bankTransactions) {
     if (_isTransfer(t)) continue;                       // own-account movement, not cash flow
-    add(/^RECEIVE/i.test(t.type || '') ? 'otherReceipts' : 'otherPayments', t.date, t.total);
+    add(/^RECEIVE/i.test(t.type || '') ? 'otherReceipts' : 'otherPayments', t.date, _toBase(t, t.total, baseCurrency));
   }
 
   const cashIn  = totals.customerReceipts + totals.otherReceipts;
@@ -1553,7 +1697,7 @@ function _buildCashMovement({ payments = [], bankTransactions = [], months = [] 
 
 // Pure. What is owed in each direction, and how much of what was invoiced has
 // actually turned into money.
-function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days = 0, today }) {
+function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days = 0, today, baseCurrency = '' }) {
   const ar = { raised: 0, due: 0, count: 0 }, ap = { raised: 0, due: 0, count: 0 };
   const buckets = { current: 0, d1_30: 0, d31_60: 0, d60plus: 0 };
   const now = today ? _dateFromParts(today) : new Date();
@@ -1561,13 +1705,16 @@ function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days =
   for (const inv of invoices) {
     const g = inv.type === 'ACCREC' ? ar : inv.type === 'ACCPAY' ? ap : null;
     if (!g) continue;
-    g.raised += Number(inv.total || 0);
-    g.due    += Number(inv.amountDue || 0);
+    // Base currency: revenue and expenses below come from the P&L, which Xero
+    // reports in base, so DSO/DPO would otherwise divide unlike units.
+    const dueBase = _toBase(inv, inv.amountDue, baseCurrency);
+    g.raised += _toBase(inv, inv.total, baseCurrency);
+    g.due    += dueBase;
     g.count  += 1;
 
-    if (inv.type === 'ACCREC' && Number(inv.amountDue || 0) > 0) {
+    if (inv.type === 'ACCREC' && dueBase > 0) {
       const overdueDays = inv.dueDate ? Math.floor((now - new Date(inv.dueDate)) / 86400000) : 0;
-      const amt = Number(inv.amountDue);
+      const amt = dueBase;
       if (overdueDays <= 0)      buckets.current += amt;
       else if (overdueDays <= 30) buckets.d1_30  += amt;
       else if (overdueDays <= 60) buckets.d31_60 += amt;
@@ -1586,6 +1733,7 @@ function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days =
     dso: revenue  > 0 && days > 0 ? (ar.due / revenue)  * days : null,
     dpo: expenses > 0 && days > 0 ? (ap.due / expenses) * days : null,
     counts: { receivable: ar.count, payable: ap.count },
+    currency: _foreignCurrency(invoices, baseCurrency),
   };
 }
 
@@ -1595,13 +1743,13 @@ function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days =
 // It assumes every invoice is paid on its due date, which is optimistic; already
 // overdue amounts are therefore reported separately rather than folded into
 // week 1 as though they were about to arrive.
-function _buildCashForecast({ invoices = [], openingBalance = 0, today, weeks = 13 }) {
+function _buildCashForecast({ invoices = [], openingBalance = 0, today, weeks = 13, baseCurrency = '' }) {
   const start = today ? _dateFromParts(today) : new Date();
   const out = [];
   let overdueReceipts = 0, overduePayments = 0;
 
   for (const inv of invoices) {
-    const due = Number(inv.amountDue || 0);
+    const due = _toBase(inv, inv.amountDue, baseCurrency);
     if (due <= 0 || !inv.dueDate) continue;
     if (new Date(inv.dueDate) < start) {
       if (inv.type === 'ACCREC') overdueReceipts += due; else if (inv.type === 'ACCPAY') overduePayments += due;
@@ -1614,7 +1762,7 @@ function _buildCashForecast({ invoices = [], openingBalance = 0, today, weeks = 
     const to   = new Date(start.getTime() + (w + 1) * 7 * 86400000);
     let receipts = 0, payments = 0;
     for (const inv of invoices) {
-      const due = Number(inv.amountDue || 0);
+      const due = _toBase(inv, inv.amountDue, baseCurrency);
       if (due <= 0 || !inv.dueDate) continue;
       const d = new Date(inv.dueDate);
       if (d < from || d >= to) continue;
@@ -1629,6 +1777,83 @@ function _buildCashForecast({ invoices = [], openingBalance = 0, today, weeks = 
     });
   }
   return { weeks: out, openingBalance, overdueReceipts, overduePayments };
+}
+
+// Pure. Burn rate and runway — the metric small businesses fail for the lack of.
+// Gross burn is what leaves each month; net burn is what leaves after receipts.
+// Both are averaged over CLOSED months, so a half-finished month cannot flatter
+// or panic the figure.
+function _buildRunway({ months = [], monthly = {}, closing = 0, today } = {}) {
+  const ins = monthly.in || [], outs = monthly.out || [];
+  if (!months.length || !ins.length) return { available: false };
+
+  // Fall back to the partial current month only when there is no closed one —
+  // a first-month org should see a rough figure, flagged, rather than nothing.
+  let n = _closedCount(months, today);
+  const partial = n === 0;
+  if (partial) n = 1;
+  n = Math.min(n, ins.length, outs.length);
+  if (n < 1) return { available: false };
+
+  const sum = a => a.reduce((x, y) => x + y, 0);
+  const cin = ins.slice(0, n), cout = outs.slice(0, n);
+  const avgIn = sum(cin) / n, avgOut = sum(cout) / n;
+  const avgNet = avgIn - avgOut;
+  const burning = avgNet < 0;
+  const runwayMonths = burning ? Math.max(0, closing / -avgNet) : null;
+
+  return {
+    available: true,
+    months: n,
+    partial,
+    avgCashIn: avgIn,
+    avgCashOut: avgOut,
+    avgNet,
+    grossBurn: avgOut,
+    netBurn: burning ? -avgNet : 0,
+    burning,
+    closing,
+    // Null rather than Infinity when cash-positive. A business taking in more
+    // than it spends does not have a long runway, it has no runway *question* —
+    // and "∞ months" invites the reader to treat a non-measurement as a
+    // measurement.
+    runwayMonths,
+    runwayDate: (runwayMonths !== null && today)
+      ? _fmtISODate(_addDays(today, Math.round(runwayMonths * 30.44)))
+      : null,
+    netByMonth: cin.map((v, i) => v - cout[i]),
+  };
+}
+
+// Pure. Opening → each driver → closing, as cumulative steps: every bar starts
+// where the previous one ended, so the reader sees how the closing balance was
+// ARRIVED AT rather than just what its parts were.
+//
+// The drivers come from Payments and Bank Transactions while opening/closing
+// come from the bank statement, and those two can legitimately disagree. Rather
+// than let the bars quietly fail to reach the closing balance, any difference is
+// shown as its own labelled step.
+function _buildCashWaterfall({ opening = 0, closing = 0, movement = {} } = {}) {
+  const steps = [{ label: 'Opening balance', delta: opening, kind: 'total', start: 0, end: opening }];
+  let run = opening;
+  const push = (label, delta, kind) => {
+    if (!delta) return;
+    const start = run;
+    run += delta;
+    steps.push({ label, delta, kind, start, end: run });
+  };
+
+  push('Customer receipts', Number(movement.customerReceipts || 0), 'in');
+  push('Other receipts',    Number(movement.otherReceipts || 0),    'in');
+  push('Supplier payments', -Number(movement.supplierPayments || 0), 'out');
+  push('Other payments',    -Number(movement.otherPayments || 0),    'out');
+
+  const gap = Math.round((closing - run) * 100) / 100;
+  const reconciles = Math.abs(gap) <= 1;
+  if (!reconciles) push('Unreconciled', gap, 'gap');
+
+  steps.push({ label: 'Closing balance', delta: run, kind: 'total', start: 0, end: run });
+  return { steps, opening, closing: run, bankClosing: closing, gap, reconciles };
 }
 
 async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
@@ -1649,6 +1874,9 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
   const fromP = _parseISODate(first);
   const toEx  = _addDays(_parseISODate(last), 1);      // Xero's upper bound is exclusive
   const dateWhere = `Date >= ${_fmtXeroDate(fromP)} && Date < ${_fmtXeroDate(toEx)}`;
+  // Open invoices predate the period; bound how far back we will pay to read.
+  const lookbackFrom = { year: fromP.year - Math.floor(INVOICE_LOOKBACK_MONTHS / 12), month: fromP.month, day: 1 };
+  const invoiceWhere = `Date >= ${_fmtXeroDate(lookbackFrom)}`;
 
   // Every call here is a GET. Nothing in this path writes to Xero.
   const [bank, payRes, btRes, invRes] = await Promise.all([
@@ -1660,23 +1888,29 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
       .catch(err => { logger.warn('Cash flow: payments unavailable', { userId, error: err.message }); return { body: {} }; }),
     withRetry(() => api.getBankTransactions(tenantId, undefined, dateWhere, 'Date DESC'))
       .catch(err => { logger.warn('Cash flow: bank transactions unavailable', { userId, error: err.message }); return { body: {} }; }),
-    // Unfiltered by date on purpose: the forecast needs every OPEN invoice,
-    // including ones raised before this period that are still unpaid.
+    // Deliberately reaches back BEFORE the period: the forecast needs every OPEN
+    // invoice, including ones raised earlier that are still unpaid. Bounded at
+    // INVOICE_LOOKBACK_MONTHS rather than left unfiltered, because Xero now
+    // bills on data egress — an unbounded invoice fetch costs nothing at six
+    // invoices and real money at sixty thousand. An invoice still open beyond
+    // that horizon is a write-off decision, not a cash-flow forecast item.
     //
     // NOT ordered by DueDate — Xero rejects that with a 400 when summaryOnly is
     // set ("Ordering by DueDate is unavailable on this endpoint when using the
     // summaryOnly flag"). Order is irrelevant here anyway: the forecast buckets
     // by due date rather than reading them in sequence, and summaryOnly keeps
     // the response small.
-    withRetry(() => api.getInvoices(tenantId, undefined, undefined, 'Date DESC', undefined, undefined, undefined,
+    withRetry(() => api.getInvoices(tenantId, undefined, invoiceWhere, 'Date DESC', undefined, undefined, undefined,
       ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true)),
   ]);
 
   const invoices = invRes.body.invoices || [];
+  const baseCurrency = perf.organisation?.currency || '';
   const movement = _buildCashMovement({
     payments:         payRes.body.payments || [],
     bankTransactions: btRes.body.bankTransactions || [],
     months,
+    baseCurrency,
   });
 
   const S = a => a.reduce((x, y) => x + y, 0);
@@ -1684,13 +1918,15 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
   const expenses = S(perf.totals.cogs.actual) + S(perf.totals.opex.actual);
   const days     = Math.max(1, Math.round((_dateFromParts(_parseISODate(last)) - _dateFromParts(fromP)) / 86400000) + 1);
 
-  const workingCapital = _buildWorkingCapital({ invoices, revenue, expenses, days, today });
-  const hygiene = _buildInvoiceHygiene(invoices);
+  const workingCapital = _buildWorkingCapital({ invoices, revenue, expenses, days, today, baseCurrency });
+  const hygiene = _buildInvoiceHygiene(invoices, baseCurrency);
   const closing  = bank ? bank.accounts.reduce((s, a) => s + a.closingBalance, 0) : 0;
   const opening  = bank ? bank.accounts.reduce((s, a) => s + (a.openingBalance || 0), 0) : 0;
   const bankIn   = bank ? bank.cashIn  : 0;
   const bankOut  = bank ? bank.cashOut : 0;
-  const forecast = _buildCashForecast({ invoices, openingBalance: closing, today });
+  const forecast = _buildCashForecast({ invoices, openingBalance: closing, today, baseCurrency });
+  const runway   = _buildRunway({ months, monthly: movement.monthly, closing, today });
+  const waterfall = _buildCashWaterfall({ opening, closing, movement });
 
   // The bank statement is what actually happened. Payments and bank transactions
   // explain WHERE it came from — but they are separate records, and they can
@@ -1720,6 +1956,8 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
       accounts: bank ? bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance })) : [],
     },
     movement,
+    waterfall,
+    runway,
     unreconciled,
     hygiene,
     workingCapital,
@@ -1750,6 +1988,7 @@ module.exports = {
   _fiscalYearMonths, _monthsFrom, _monthMeta, _monthsBetween, _chunkMonths,
   _resolveWindow, _resolvePeriod, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
   _mergeChunks, _buildCustomerRevenue, _buildInvoiceHygiene, _buildQuotePipeline, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
+  _toBase, _foreignCurrency, _closedCount, _growthPct, _buildGrowth, _buildRunway, _buildCashWaterfall,
   _isTransfer, _isReceiptPayment, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
 };

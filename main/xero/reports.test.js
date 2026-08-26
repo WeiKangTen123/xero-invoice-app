@@ -1780,3 +1780,234 @@ describe('xero/reports — quote pipeline (pure)', () => {
     expect(_buildQuotePipeline([]).total).toBe(0);
   });
 });
+
+// ── Multi-currency ──────────────────────────────────────────────────────────
+// Xero reports (P&L, Budget Summary, Bank Summary) come back in the org's BASE
+// currency; invoices, quotes, payments and bank transactions come back in their
+// OWN. Mixing them produces no error and no warning — just a wrong total. These
+// tests exist because that is invisible in a single-currency org, which is every
+// org until it isn't.
+describe('_toBase / _foreignCurrency', () => {
+  const { _toBase, _foreignCurrency } = require('./reports');
+
+  test('a base-currency document is returned untouched', () => {
+    expect(_toBase({ currencyCode: 'SGD', currencyRate: 1 }, 100, 'SGD')).toBe(100);
+    expect(_toBase({ currencyCode: 'SGD' }, 100, 'SGD')).toBe(100);
+  });
+
+  test('a foreign-currency document is converted at its own stamped rate', () => {
+    expect(_toBase({ currencyCode: 'USD', currencyRate: 1.35 }, 100, 'SGD')).toBeCloseTo(135);
+  });
+
+  test('payments carry a rate but no currency code, so the rate alone decides', () => {
+    expect(_toBase({ currencyRate: 1.35 }, 100, 'SGD')).toBeCloseTo(135);
+    expect(_toBase({ currencyRate: 1 }, 100, 'SGD')).toBe(100);
+    expect(_toBase({}, 100, 'SGD')).toBe(100);
+  });
+
+  test('a foreign document with no rate is passed through, not silently zeroed', () => {
+    // Dropping it would understate the total with no trace. Passing it through
+    // overstates it slightly — but _foreignCurrency reports the count so the UI
+    // can say so out loud.
+    expect(_toBase({ currencyCode: 'USD' }, 100, 'SGD')).toBe(100);
+    expect(_foreignCurrency([{ currencyCode: 'USD' }], 'SGD').unconvertible).toBe(1);
+  });
+
+  test('a single-currency org reports mixed:false and nothing to warn about', () => {
+    const r = _foreignCurrency([{ currencyCode: 'SGD', currencyRate: 1 }, { currencyCode: 'SGD' }], 'SGD');
+    expect(r.mixed).toBe(false);
+    expect(r.currencies).toEqual([]);
+    expect(r.unconvertible).toBe(0);
+  });
+
+  test('foreign currencies are listed, deduplicated and sorted', () => {
+    const r = _foreignCurrency(
+      [{ currencyCode: 'USD', currencyRate: 1.3 }, { currencyCode: 'EUR', currencyRate: 1.5 }, { currencyCode: 'USD', currencyRate: 1.3 }],
+      'SGD',
+    );
+    expect(r.currencies).toEqual(['EUR', 'USD']);
+    expect(r.mixed).toBe(true);
+    expect(r.unconvertible).toBe(0);
+  });
+
+  test('customer revenue ranks customers on converted amounts, not face value', () => {
+    const { _buildCustomerRevenue } = require('./reports');
+    const r = _buildCustomerRevenue([
+      { contact: { name: 'US Corp' },  total: 1000, currencyCode: 'USD', currencyRate: 1.35 },
+      { contact: { name: 'SG Pte' },   total: 1200, currencyCode: 'SGD', currencyRate: 1 },
+    ], 'SGD');
+    // 1000 USD = 1350 SGD, so the US customer outranks the 1200 SGD one.
+    expect(r.customers[0].name).toBe('US Corp');
+    expect(r.customers[0].invoiced).toBeCloseTo(1350);
+    expect(r.total).toBeCloseTo(2550);
+    expect(r.currency.currencies).toEqual(['USD']);
+  });
+
+  test('working capital converts both the total and the amount due', () => {
+    const { _buildWorkingCapital } = require('./reports');
+    const r = _buildWorkingCapital({
+      invoices: [{ type: 'ACCREC', total: 1000, amountDue: 1000, currencyCode: 'USD', currencyRate: 1.35, dueDate: '2099-01-01' }],
+      baseCurrency: 'SGD',
+    });
+    expect(r.receivable).toBeCloseTo(1350);
+    expect(r.invoiced).toBeCloseTo(1350);
+  });
+
+  test('hygiene warns when a foreign invoice has no rate to convert with', () => {
+    const { _buildInvoiceHygiene } = require('./reports');
+    const r = _buildInvoiceHygiene([{ invoiceNumber: 'I-1', date: '2026-01-01', total: 100, currencyCode: 'USD' }], 'SGD');
+    expect(r.currency.unconvertible).toBe(1);
+    expect(r.issues.some(i => /no exchange rate/.test(i.text))).toBe(true);
+  });
+});
+
+// ── Closed months, growth ───────────────────────────────────────────────────
+describe('_closedCount / _growthPct / _buildGrowth', () => {
+  const { _closedCount, _growthPct, _buildGrowth } = require('./reports');
+  const months = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08']
+    .map((key, i) => ({ key, label: ['Apr', 'May', 'Jun', 'Jul', 'Aug'][i] }));
+  const today = { year: 2026, month: 8, day: 26 };
+
+  test('the current month is not counted as closed', () => {
+    expect(_closedCount(months, today)).toBe(4);   // Apr–Jul
+  });
+
+  test('a wholly past period is entirely closed, a wholly future one entirely open', () => {
+    expect(_closedCount(months, { year: 2027, month: 3, day: 1 })).toBe(5);
+    expect(_closedCount(months, { year: 2026, month: 1, day: 1 })).toBe(0);
+  });
+
+  test('growth from a zero or negative base is null, not infinity', () => {
+    expect(_growthPct(50, 0)).toBeNull();
+    expect(_growthPct(50, -10)).toBeNull();
+    expect(_growthPct(50, null)).toBeNull();
+    expect(_growthPct(150, 100)).toBeCloseTo(0.5);
+  });
+
+  test('month-on-month ignores the partial current month', () => {
+    // Aug is a fifth of the way through and shows 5. Comparing it with Jul's 150
+    // would report a 97% collapse that has not happened.
+    const g = _buildGrowth({ series: [100, 120, 90, 150, 5], months, today });
+    expect(g.closedMonths).toBe(4);
+    expect(g.latestLabel).toBe('Jul');
+    expect(g.previousLabel).toBe('Jun');
+    expect(g.mom).toBeCloseTo((150 - 90) / 90);
+  });
+
+  test('year-on-year is absent below 13 closed months rather than approximated', () => {
+    expect(_buildGrowth({ series: [100, 120, 90, 150, 5], months, today }).yoy).toBeNull();
+  });
+
+  test('year-on-year compares like month with like month once 13 exist', () => {
+    const many = Array.from({ length: 14 }, (_, i) => ({ key: `2025-${String(i + 1).padStart(2, '0')}`, label: `M${i + 1}` }));
+    const g = _buildGrowth({ series: Array.from({ length: 14 }, (_, i) => 100 + i * 10), months: many, today: { year: 2027, month: 1, day: 1 } });
+    expect(g.closedMonths).toBe(14);
+    // Latest is index 13; twelve months earlier is index 1 (110), not index 0.
+    expect(g.yoy).toBeCloseTo((230 - 110) / 110);
+    expect(g.yoyLabel).toBe('M2');
+  });
+
+  test('no closed months yields available:false rather than a fabricated figure', () => {
+    expect(_buildGrowth({ series: [5], months: [{ key: '2026-08', label: 'Aug' }], today }).available).toBe(false);
+  });
+});
+
+// ── Burn rate and runway ────────────────────────────────────────────────────
+describe('_buildRunway', () => {
+  const { _buildRunway } = require('./reports');
+  const months = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08'].map(key => ({ key }));
+  const today = { year: 2026, month: 8, day: 26 };
+
+  test('averages closed months only, so a part-month cannot flatter the run rate', () => {
+    const r = _buildRunway({
+      months,
+      monthly: { in: [10000, 12000, 9000, 11000, 500], out: [15000, 16000, 14000, 15000, 900] },
+      closing: 50000, today,
+    });
+    expect(r.months).toBe(4);
+    expect(r.avgCashOut).toBe(15000);   // not dragged down by August's partial 900
+    expect(r.netBurn).toBe(4500);
+    expect(r.runwayMonths).toBeCloseTo(50000 / 4500);
+  });
+
+  test('a cash-positive business has a null runway, not an infinite one', () => {
+    const r = _buildRunway({
+      months,
+      monthly: { in: [20000, 22000, 19000, 21000, 0], out: [15000, 16000, 14000, 15000, 0] },
+      closing: 50000, today,
+    });
+    expect(r.burning).toBe(false);
+    expect(r.runwayMonths).toBeNull();
+    expect(r.runwayDate).toBeNull();
+    expect(r.netBurn).toBe(0);
+  });
+
+  test('gross burn is what leaves regardless of what comes in', () => {
+    const r = _buildRunway({
+      months, monthly: { in: [20000, 20000, 20000, 20000, 0], out: [15000, 15000, 15000, 15000, 0] },
+      closing: 1000, today,
+    });
+    expect(r.grossBurn).toBe(15000);
+    expect(r.burning).toBe(false);
+  });
+
+  test('a first-month org gets a flagged partial figure rather than nothing', () => {
+    const r = _buildRunway({
+      months: [{ key: '2026-08' }], monthly: { in: [1000], out: [3000] },
+      closing: 6000, today,
+    });
+    expect(r.available).toBe(true);
+    expect(r.partial).toBe(true);
+    expect(r.runwayMonths).toBeCloseTo(3);
+  });
+
+  test('runway is zero, not negative, when the balance is already gone', () => {
+    const r = _buildRunway({ months, monthly: { in: [0, 0, 0, 0, 0], out: [1000, 1000, 1000, 1000, 0] }, closing: -500, today });
+    expect(r.runwayMonths).toBe(0);
+  });
+
+  test('no months yields available:false', () => {
+    expect(_buildRunway({ months: [], monthly: { in: [], out: [] }, closing: 0, today }).available).toBe(false);
+  });
+});
+
+// ── Cash waterfall ──────────────────────────────────────────────────────────
+describe('_buildCashWaterfall', () => {
+  const { _buildCashWaterfall } = require('./reports');
+
+  test('each step starts where the previous ended and lands on the closing balance', () => {
+    const w = _buildCashWaterfall({
+      opening: 1000, closing: 26000,
+      movement: { customerReceipts: 40000, otherReceipts: 0, supplierPayments: 12000, otherPayments: 3000 },
+    });
+    expect(w.reconciles).toBe(true);
+    const mid = w.steps.filter(s => s.kind !== 'total');
+    mid.forEach((s, i) => { if (i > 0) expect(s.start).toBeCloseTo(mid[i - 1].end); });
+    expect(w.steps[w.steps.length - 1].end).toBeCloseTo(26000);
+  });
+
+  test('a gap between the drivers and the bank becomes its own labelled step', () => {
+    // Payments and bank transactions are separate records from the statement and
+    // can legitimately disagree. The bars must still reach the real balance.
+    const w = _buildCashWaterfall({
+      opening: 0, closing: 5000,
+      movement: { customerReceipts: 10000, otherReceipts: 0, supplierPayments: 2000, otherPayments: 0 },
+    });
+    expect(w.reconciles).toBe(false);
+    expect(w.gap).toBeCloseTo(-3000);
+    const gapStep = w.steps.find(s => s.kind === 'gap');
+    expect(gapStep).toBeDefined();
+    expect(w.steps[w.steps.length - 1].end).toBeCloseTo(5000);
+  });
+
+  test('zero-value drivers are omitted so the chart is not padded with empty bars', () => {
+    const w = _buildCashWaterfall({ opening: 100, closing: 100, movement: {} });
+    expect(w.steps.map(s => s.label)).toEqual(['Opening balance', 'Closing balance']);
+  });
+
+  test('sub-dollar rounding differences are not reported as unreconciled', () => {
+    const w = _buildCashWaterfall({ opening: 0, closing: 1000.4, movement: { customerReceipts: 1000 } });
+    expect(w.reconciles).toBe(true);
+    expect(w.steps.some(s => s.kind === 'gap')).toBe(false);
+  });
+});
