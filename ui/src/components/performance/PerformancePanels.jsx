@@ -326,6 +326,100 @@ function VarianceReasons({ items, insights, currency }) {
 // mix, CAC payback — need a CRM and timesheets, neither of which Xero holds.
 // These four are the closest equivalents that are genuinely derivable, and a
 // metric that can't be computed shows an em dash with the reason rather than 0.
+// A true waterfall: every bar starts where the previous one ended, so the reader
+// sees how the closing balance was ARRIVED AT rather than just what its parts
+// were. Research on financial dashboards puts this at the centre of the cash
+// view for exactly that reason — a stacked list shows the same numbers without
+// showing that they connect.
+function Waterfall({ steps, currency, height = 240 }) {
+  if (!steps || steps.length < 3) return <Empty>No cash moved in this period.</Empty>;
+
+  const lo = Math.min(0, ...steps.map(s => Math.min(s.start, s.end)));
+  const hi = Math.max(0, ...steps.map(s => Math.max(s.start, s.end)));
+  const span = (hi - lo) || 1;
+  const pct = v => ((v - lo) / span) * 100;
+  const colorOf = k => k === 'total' ? 'var(--accent)'
+                     : k === 'in'    ? 'var(--success)'
+                     : k === 'gap'   ? 'var(--warning)'
+                     :                 'var(--danger)';
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'stretch', gap: 6, height, borderBottom: '1px solid var(--border)' }}>
+        {steps.map((s, i) => {
+          const top = Math.max(s.start, s.end), bot = Math.min(s.start, s.end);
+          const barH = Math.max(pct(top) - pct(bot), 0.5);
+          return (
+            <div key={`${s.label}-${i}`} style={{ flex: 1, minWidth: 38, position: 'relative' }}
+                 title={`${s.label}: ${fmtMoney(s.delta, currency)}`}>
+              <div style={{
+                position: 'absolute', left: '12%', right: '12%',
+                bottom: `${pct(bot)}%`, height: `${barH}%`,
+                background: colorOf(s.kind), borderRadius: 3,
+                opacity: s.kind === 'total' ? 1 : 0.85,
+              }} />
+              <div style={{
+                position: 'absolute', left: -4, right: -4, bottom: `calc(${pct(top)}% + 5px)`,
+                textAlign: 'center', fontSize: 9.5, fontWeight: 700,
+                fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)', whiteSpace: 'nowrap',
+              }}>{fmtMoneyShort(s.delta, currency)}</div>
+              {/* Connector to the next bar — what makes it a waterfall rather
+                  than a row of unrelated columns. */}
+              {i < steps.length - 1 && steps[i + 1].kind !== 'total' && (
+                <div style={{
+                  position: 'absolute', left: '88%', right: '-12%',
+                  bottom: `${pct(s.end)}%`, borderTop: '1px dashed var(--border)',
+                }} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        {steps.map((s, i) => (
+          <div key={`${s.label}-lbl-${i}`} style={{
+            flex: 1, minWidth: 38, textAlign: 'center', fontSize: 9.5,
+            color: 'var(--text-muted)', lineHeight: 1.3,
+            fontWeight: s.kind === 'total' ? 700 : 400,
+          }}>{s.label}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// A signed delta. Null renders as an em dash with the reason — growth measured
+// from a zero or negative base is undefined, and showing it as 0% or ∞ would
+// invite the reader to quote a number nobody computed.
+function GrowthPill({ value, title }) {
+  if (value === null || value === undefined) {
+    return <span title={title || 'No comparable prior period'} style={{ fontSize: 11, color: 'var(--text-muted)' }}>—</span>;
+  }
+  const up = value >= 0;
+  return (
+    <span title={title} style={{ fontSize: 11, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: up ? 'var(--success)' : 'var(--danger)' }}>
+      {up ? '\u25B2' : '\u25BC'} {fmtPct(Math.abs(value), 1)}
+    </span>
+  );
+}
+
+// Multi-currency organisations only. Xero reports in base currency and returns
+// documents in their own, so the conversion is stated rather than left to be
+// assumed. Single-currency orgs render nothing.
+function CurrencyNote({ currency, style }) {
+  if (!currency?.mixed) return null;
+  return (
+    <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5, ...style }}>
+      Includes {currency.currencies.join(', ')} converted to {currency.baseCurrency || 'base currency'} at the rate Xero stamped on each document.
+      {currency.unconvertible > 0 && (
+        <span style={{ color: 'var(--warning)' }}>
+          {' '}{currency.unconvertible} had no rate and {currency.unconvertible === 1 ? 'is' : 'are'} counted at face value.
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ScoreCard({ items }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10 }}>
@@ -483,6 +577,37 @@ function closedInRange(d, from, to) {
   return Math.max(0, Math.min(d.actualThroughIdx, to) - from + 1);
 }
 
+// Revenue momentum for the SELECTED range, recomputed as the range moves — the
+// server's figure covers the whole period, and a control the reader just dragged
+// should move the numbers underneath it.
+//
+// Uses closedThroughIdx, not actualThroughIdx: the latter includes the current
+// month, which is partial, and comparing a half-finished month against a
+// complete one manufactures a collapse that is only the calendar.
+function rangeGrowth(d, from, to) {
+  const series = d?.totals?.revenue?.actual || [];
+  const closedIdx = d?.closedThroughIdx ?? -1;
+  const lastClosed = Math.min(closedIdx, to);
+  if (lastClosed < from || lastClosed < 0) return { available: false, closedMonths: 0 };
+
+  const n = lastClosed - from + 1;
+  const pct = (c, p) => (Number.isFinite(c) && Number.isFinite(p) && p > 0) ? (c - p) / p : null;
+  const label = i => (i >= 0 && i < d.months.length ? d.months[i].label : null);
+  const yoyIdx = lastClosed - 12;
+
+  return {
+    available: true,
+    closedMonths: n,
+    latest: series[lastClosed], latestLabel: label(lastClosed),
+    mom: n >= 2 ? pct(series[lastClosed], series[lastClosed - 1]) : null,
+    momLabel: n >= 2 ? label(lastClosed - 1) : null,
+    // Deliberately reaches outside the selected range: the year-ago comparator
+    // is fixed by the calendar, not by what the reader happens to have selected.
+    yoy: yoyIdx >= 0 ? pct(series[lastClosed], series[yoyIdx]) : null,
+    yoyLabel: yoyIdx >= 0 ? label(yoyIdx) : null,
+  };
+}
+
 // ── Overview ─────────────────────────────────────────────────────────────────
 export function OverviewPanel({ data, from, to, insights, summary }) {
   const [trendMode, setTrendMode] = useState('bar');
@@ -494,6 +619,7 @@ export function OverviewPanel({ data, from, to, insights, summary }) {
 
   const healthy = T.netProfit > 0 && (T.grossMargin === null || T.grossMargin > 0);
   const cash = data.cash?.available ? data.cash.total : null;
+  const g = rangeGrowth(data, from, to);
 
   const serviceItems = data.serviceLines
     .filter(l => !l.otherIncome)
@@ -524,6 +650,13 @@ export function OverviewPanel({ data, from, to, insights, summary }) {
       tone: dso !== null && dso > 60 ? 'var(--warning)' : undefined,
       note: receivables === null ? 'Needs invoice data'
             : overdue > 0 ? `${fmtMoney(overdue, cur)} overdue` : `${fmtMoney(receivables, cur)} outstanding` },
+    // Level without direction makes the reader do the differencing themselves.
+    { label: 'Revenue growth', target: 'Month on month',
+      value: g.mom === null ? '—' : `${g.mom >= 0 ? '+' : ''}${fmtPct(g.mom, 1)}`,
+      tone: g.mom === null ? undefined : g.mom >= 0 ? 'var(--success)' : 'var(--danger)',
+      note: g.mom === null
+        ? (g.available ? 'Needs two closed months' : 'No closed month in range')
+        : `${g.latestLabel} vs ${g.momLabel}` },
   ];
 
   const varianceItems = [...data.serviceLines, ...data.expenseLines]
@@ -631,6 +764,22 @@ export function OverviewPanel({ data, from, to, insights, summary }) {
                       actual={slice(data.totals.revenue.actual, from, to)}
                       budget={slice(data.totals.revenue.budget, from, to)} />
           <Legend items={[{ label: 'Actual', color: 'var(--accent)' }, { label: 'Budget', color: 'var(--text-muted)', opacity: 0.32 }]} />
+          {/* Direction alongside level. Closed months only — the current month
+              is partial and would read as a crash every time. */}
+          {g.available && (
+            <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                Month on month{' '}
+                <GrowthPill value={g.mom} title={g.momLabel ? `${g.latestLabel} vs ${g.momLabel}` : 'Needs two closed months'} />
+                {g.momLabel && <span> · {g.latestLabel} vs {g.momLabel}</span>}
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                Year on year{' '}
+                <GrowthPill value={g.yoy} title={g.yoyLabel ? `${g.latestLabel} vs ${g.yoyLabel}` : 'Needs 13 months of history'} />
+                {g.yoyLabel ? <span> · {g.latestLabel} vs {g.yoyLabel}</span> : <span> · needs a full prior year</span>}
+              </div>
+            </div>
+          )}
         </Surface>
         <Surface title="Variance reasons"
                  right={insights?.source === 'gemini'
@@ -784,6 +933,7 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
               Invoice totals from Xero, which include tax — so this will not tie exactly to the
               net revenue figures above unless your sales accounts are zero-rated.
             </div>
+            <CurrencyNote currency={data.customerRevenue.currency} style={{ marginTop: 6 }} />
           </Surface>
           <Surface title="Per customer" right={rangeLabel(data.months, from, to)} flex={5} minWidth={280}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -857,7 +1007,14 @@ export function CashFlowPanel({ data }) {
   const wc  = data.workingCapital;
   const fc  = data.forecast;
   const rec = data.reconciliation;
+  const rw  = data.runway  || { available: false };
+  const wf  = data.waterfall;
   const months = data.months;
+
+  const runwayTone = !rw.available ? undefined
+    : !rw.burning ? 'var(--success)'
+    : rw.runwayMonths < 3 ? 'var(--danger)'
+    : rw.runwayMonths < 6 ? 'var(--warning)' : undefined;
 
   const collectionTone = wc.collectionRate === null ? undefined
     : wc.collectionRate < 0.5 ? 'var(--danger)' : wc.collectionRate < 0.9 ? 'var(--warning)' : 'var(--success)';
@@ -883,6 +1040,21 @@ export function CashFlowPanel({ data }) {
                 tone={collectionTone}
                 footLeft={`${fmtMoney(wc.collected, cur)} collected`}
                 footRight={`of ${fmtMoney(wc.invoiced, cur)} invoiced`} />
+        {/* Running out of cash is what actually closes small businesses, so the
+            runway sits alongside the balance rather than buried below it. A
+            cash-positive month has no runway to report — it says so instead of
+            rendering an infinity. */}
+        <Metric label={rw.available && !rw.burning ? 'Net cash flow' : 'Cash runway'}
+                value={!rw.available ? '—'
+                     : !rw.burning ? `${fmtMoney(rw.avgNet, cur)}/mo`
+                     : rw.runwayMonths >= 24 ? '24+ months'
+                     : `${rw.runwayMonths.toFixed(1)} months`}
+                meter={rw.available && rw.burning ? Math.min(100, (rw.runwayMonths / 12) * 100) : null}
+                tone={runwayTone}
+                footLeft={!rw.available ? 'No closed month yet'
+                        : rw.burning ? `Burning ${fmtMoney(rw.netBurn, cur)}/mo net`
+                        : 'Taking in more than it spends'}
+                footRight={rw.available ? `${rw.months}-mo avg${rw.partial ? ', partial' : ''}` : ''} />
       </div>
 
       {/* Revenue and cash tell opposite stories when nothing has been collected,
@@ -902,14 +1074,16 @@ export function CashFlowPanel({ data }) {
       )}
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
-        <Surface title="Where the cash came from and went" flex={6} minWidth={340}>
-          <BarList currency={cur} items={[
-            { label: 'Customer receipts', value: m.customerReceipts, color: 'var(--success)' },
-            { label: 'Other receipts',    value: m.otherReceipts,    color: 'var(--accent)' },
-            { label: 'Supplier payments', value: -m.supplierPayments },
-            { label: 'Other payments',    value: -m.otherPayments },
-          ].filter(i => i.value !== 0)} />
-          <div style={{ borderTop: '1px solid var(--border)', marginTop: 12, paddingTop: 10 }}>
+        <Surface title="How the cash balance moved" right={wf?.reconciles === false ? 'does not tie to bank' : undefined} flex={6} minWidth={340}>
+          {wf ? <Waterfall steps={wf.steps} currency={cur} /> : (
+            <BarList currency={cur} items={[
+              { label: 'Customer receipts', value: m.customerReceipts, color: 'var(--success)' },
+              { label: 'Other receipts',    value: m.otherReceipts,    color: 'var(--accent)' },
+              { label: 'Supplier payments', value: -m.supplierPayments },
+              { label: 'Other payments',    value: -m.otherPayments },
+            ].filter(i => i.value !== 0)} />
+          )}
+          <div style={{ borderTop: '1px solid var(--border)', marginTop: 14, paddingTop: 10 }}>
             <Rows currency={cur} items={[
               { label: 'Opening balance', value: data.cash.opening },
               { label: 'Net movement',    value: data.cash.net },
@@ -942,6 +1116,7 @@ export function CashFlowPanel({ data }) {
               </div>
             ))}
           </div>
+          <CurrencyNote currency={wc.currency} />
         </Surface>
       </div>
 
@@ -952,6 +1127,14 @@ export function CashFlowPanel({ data }) {
             { label: 'Cash out', color: 'var(--danger)',  values: m.monthly.out },
           ]} />
           <Legend items={[{ label: 'Cash in', color: 'var(--success)' }, { label: 'Cash out', color: 'var(--danger)' }]} />
+          {rw.available && (
+            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
+              Averaging {fmtMoney(rw.avgCashIn, cur)} in and {fmtMoney(rw.avgCashOut, cur)} out per month
+              across {rw.months} closed month{rw.months === 1 ? '' : 's'}
+              {rw.partial && ' (this month only, still in progress)'}.
+              {rw.burning && rw.runwayDate && ` At that rate the current balance lasts until ${rw.runwayDate}.`}
+            </div>
+          )}
         </Surface>
 
         <Surface title="Receivables ageing" right={fmtMoney(wc.receivable, cur)} flex={5} minWidth={300}>
