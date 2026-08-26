@@ -1576,7 +1576,13 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
       .catch(err => { logger.warn('Cash flow: bank transactions unavailable', { userId, error: err.message }); return { body: {} }; }),
     // Unfiltered by date on purpose: the forecast needs every OPEN invoice,
     // including ones raised before this period that are still unpaid.
-    withRetry(() => api.getInvoices(tenantId, undefined, undefined, 'DueDate ASC', undefined, undefined, undefined,
+    //
+    // NOT ordered by DueDate — Xero rejects that with a 400 when summaryOnly is
+    // set ("Ordering by DueDate is unavailable on this endpoint when using the
+    // summaryOnly flag"). Order is irrelevant here anyway: the forecast buckets
+    // by due date rather than reading them in sequence, and summaryOnly keeps
+    // the response small.
+    withRetry(() => api.getInvoices(tenantId, undefined, undefined, 'Date DESC', undefined, undefined, undefined,
       ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true)),
   ]);
 
