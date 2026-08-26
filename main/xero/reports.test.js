@@ -430,9 +430,11 @@ describe('xero/reports — _buildBankSummary (pure)', () => {
       ]),
     ];
     const result = _buildBankSummary(tree);
+    // openingBalance is read off the header too — the cash-flow view needs the
+    // real opening figure rather than deriving one by subtraction.
     expect(result.accounts).toEqual([
-      { name: 'Business Bank Account', cashReceived: 5000, cashSpent: 2000, closingBalance: 4000 },
-      { name: 'Savings Account', cashReceived: 100, cashSpent: 50, closingBalance: 550 },
+      { name: 'Business Bank Account', cashReceived: 5000, cashSpent: 2000, closingBalance: 4000, openingBalance: 1000 },
+      { name: 'Savings Account', cashReceived: 100, cashSpent: 50, closingBalance: 550, openingBalance: 500 },
     ]);
     expect(result).toMatchObject({ cashIn: 5100, cashOut: 2050, net: 3050 });
   });
@@ -777,7 +779,9 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
 
     expect(getReportBankSummary.mock.calls.length).toBeGreaterThan(1);
     expect(result.accounts).toEqual([
-      { name: 'Aspire SGD account', cashReceived: 1500, cashSpent: 500, closingBalance: 1000 }, // 1000 (2nd/latest window), not 800+1000
+      // openingBalance comes from the FIRST window — that is where the period
+      // actually starts; later windows open where the previous one closed.
+      { name: 'Aspire SGD account', cashReceived: 1500, cashSpent: 500, closingBalance: 1000, openingBalance: 0 }, // 1000 (2nd/latest window), not 800+1000
     ]);
     expect(result).toMatchObject({ cashIn: 1500, cashOut: 500, net: 1000 });
   });
