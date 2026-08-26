@@ -2011,3 +2011,49 @@ describe('_buildCashWaterfall', () => {
     expect(w.steps.some(s => s.kind === 'gap')).toBe(false);
   });
 });
+
+// ── Operating runway ────────────────────────────────────────────────────────
+// The live org that prompted this: 100k of non-customer receipts against 26k
+// collected from customers. The headline reads cash-positive; operationally the
+// business is consuming cash every month. Both are true and they answer
+// different questions, so both are reported.
+describe('_buildRunway — operating cash', () => {
+  const { _buildRunway } = require('./reports');
+  const months = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08'].map(key => ({ key }));
+  const today = { year: 2026, month: 8, day: 26 };
+
+  test('flags a business kept afloat by money that did not come from customers', () => {
+    const r = _buildRunway({
+      months,
+      monthly: {
+        in:  [31500, 31500, 31500, 31500, 0],
+        out: [8400, 8400, 8400, 8400, 0],
+        customerReceipts: [6500, 6500, 6500, 6500, 0],   // the rest is an injection
+      },
+      closing: 75397, today,
+    });
+    expect(r.burning).toBe(false);            // headline: taking in more than it spends
+    expect(r.operatingBurning).toBe(true);    // operations: still consuming cash
+    expect(r.propped).toBe(true);
+    expect(r.operatingNet).toBeCloseTo(6500 - 8400);
+    expect(r.operatingRunwayMonths).toBeCloseTo(75397 / 1900);
+  });
+
+  test('a genuinely self-funding business is not flagged', () => {
+    const r = _buildRunway({
+      months,
+      monthly: { in: [20000, 20000, 20000, 20000, 0], out: [8000, 8000, 8000, 8000, 0], customerReceipts: [20000, 20000, 20000, 20000, 0] },
+      closing: 50000, today,
+    });
+    expect(r.propped).toBe(false);
+    expect(r.operatingBurning).toBe(false);
+    expect(r.operatingRunwayMonths).toBeNull();
+  });
+
+  test('without a receipts breakdown the operating figure is null, not guessed', () => {
+    const r = _buildRunway({ months, monthly: { in: [10, 10, 10, 10, 0], out: [5, 5, 5, 5, 0] }, closing: 100, today });
+    expect(r.operatingNet).toBeNull();
+    expect(r.avgOperatingIn).toBeNull();
+    expect(r.propped).toBe(false);
+  });
+});

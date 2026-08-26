@@ -1055,7 +1055,37 @@ export function CashFlowPanel({ data }) {
                         : rw.burning ? `Burning ${fmtMoney(rw.netBurn, cur)}/mo net`
                         : 'Taking in more than it spends'}
                 footRight={rw.available ? `${rw.months}-mo avg${rw.partial ? ', partial' : ''}` : ''} />
+        {/* Operations on their own. Shown whenever the split is available, and
+            coloured only when the headline is flattering the operating picture. */}
+        {rw.available && rw.operatingNet !== null && (
+          <Metric label="Operating cash flow"
+                  value={`${fmtMoney(rw.operatingNet, cur)}/mo`}
+                  meter={null}
+                  tone={rw.operatingBurning ? 'var(--danger)' : 'var(--success)'}
+                  footLeft={`${fmtMoney(rw.avgOperatingIn, cur)} from customers`}
+                  footRight={rw.operatingBurning && rw.operatingRunwayMonths !== null
+                    ? `${rw.operatingRunwayMonths >= 24 ? '24+' : rw.operatingRunwayMonths.toFixed(1)} months at this rate`
+                    : 'Self-funding'} />
+        )}
       </div>
+
+      {/* The distinction that a single "cash in" line hides completely. */}
+      {rw.propped && (
+        <div className="card" style={{ marginBottom: 16, borderLeft: '3px solid var(--warning)' }}>
+          <div className="card-title" style={{ marginBottom: 8 }}>Cash is positive, operations are not</div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+            The balance grew by {fmtMoney(rw.avgNet, cur)} a month, but only {fmtMoney(rw.avgOperatingIn, cur)} of the
+            {' '}{fmtMoney(rw.avgCashIn, cur)} coming in each month came from customers. Against
+            {' '}{fmtMoney(rw.avgCashOut, cur)} of payments, the trading side of the business is consuming
+            {' '}{fmtMoney(-rw.operatingNet, cur)} a month
+            {rw.operatingRunwayMonths !== null && ` — about ${rw.operatingRunwayMonths >= 24 ? '24+' : rw.operatingRunwayMonths.toFixed(1)} months of the current balance`}.
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 }}>
+            Customer receipts are Xero payments against sales invoices. Everything else — capital introduced,
+            loans, refunds — is counted as other receipts.
+          </div>
+        </div>
+      )}
 
       {/* Revenue and cash tell opposite stories when nothing has been collected,
           so the gap is stated rather than left for the reader to spot. */}

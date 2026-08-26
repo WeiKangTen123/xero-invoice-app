@@ -1802,6 +1802,19 @@ function _buildRunway({ months = [], monthly = {}, closing = 0, today } = {}) {
   const burning = avgNet < 0;
   const runwayMonths = burning ? Math.max(0, closing / -avgNet) : null;
 
+  // Operating cash: customer receipts against everything paid out, ignoring
+  // money that came from anywhere else. A capital injection, a loan drawdown or
+  // a tax refund makes the headline figure cash-positive while the business
+  // itself is still consuming cash every month, and those are not remotely the
+  // same situation to be in. Reported alongside the headline rather than instead
+  // of it — both are true, and they answer different questions.
+  const recs = (monthly.customerReceipts || []).slice(0, n);
+  const hasSplit = recs.length === n;
+  const avgOperatingIn = hasSplit ? sum(recs) / n : null;
+  const operatingNet = hasSplit ? avgOperatingIn - avgOut : null;
+  const operatingBurning = operatingNet !== null && operatingNet < 0;
+  const operatingRunwayMonths = operatingBurning ? Math.max(0, closing / -operatingNet) : null;
+
   return {
     available: true,
     months: n,
@@ -1822,6 +1835,16 @@ function _buildRunway({ months = [], monthly = {}, closing = 0, today } = {}) {
       ? _fmtISODate(_addDays(today, Math.round(runwayMonths * 30.44)))
       : null,
     netByMonth: cin.map((v, i) => v - cout[i]),
+
+    // Null when the receipts breakdown wasn't supplied, so a caller that only
+    // has in/out totals gets no operating figure rather than a wrong one.
+    avgOperatingIn,
+    operatingNet,
+    operatingBurning,
+    operatingRunwayMonths,
+    // True when the headline says cash-positive only because of money that did
+    // not come from customers — the case worth saying out loud.
+    propped: burning === false && operatingBurning === true,
   };
 }
 
