@@ -1573,3 +1573,138 @@ describe('xero/reports — customer revenue (pure)', () => {
     expect(out.customers).toEqual([{ name: 'Acme', invoiced: 700, invoices: 2 }]);
   });
 });
+
+// ── Cash flow ───────────────────────────────────────────────────────────────
+// Invoices and bills are ACCRUAL — raising one moves no cash. These pin the
+// distinction, because reporting revenue as though it were cash is exactly the
+// error this feature exists to prevent.
+describe('xero/reports — cash movement (pure)', () => {
+  const { _buildCashMovement, _isTransfer, _isReceiptPayment } = require('./reports');
+  const MONTHS = [{ key: '2026-07' }, { key: '2026-08' }];
+
+  test('a bank transfer is not cash flow — it is the org moving its own money', () => {
+    expect(_isTransfer({ type: 'RECEIVE-TRANSFER' })).toBe(true);
+    expect(_isTransfer({ type: 'SPEND-TRANSFER' })).toBe(true);
+    expect(_isTransfer({ type: 'RECEIVE' })).toBe(false);
+
+    const m = _buildCashMovement({
+      bankTransactions: [{ type: 'RECEIVE', date: '2026-07-05', total: 100 },
+                         { type: 'RECEIVE-TRANSFER', date: '2026-07-06', total: 99999 }],
+      months: MONTHS,
+    });
+    expect(m.otherReceipts).toBe(100);   // the transfer must not inflate cash in
+    expect(m.cashIn).toBe(100);
+  });
+
+  test('customer receipts are kept SEPARATE from other money in', () => {
+    // A business collecting from customers and one living on injected capital
+    // look identical on a single "cash in" line. They are not the same business.
+    const m = _buildCashMovement({
+      payments: [{ paymentType: 'ACCRECPAYMENT', date: '2026-07-01', amount: 500 }],
+      bankTransactions: [{ type: 'RECEIVE', date: '2026-07-20', total: 100000 }],
+      months: MONTHS,
+    });
+    expect(m.customerReceipts).toBe(500);
+    expect(m.otherReceipts).toBe(100000);
+    expect(m.cashIn).toBe(100500);
+  });
+
+  test('Xero payment types are not uniformly prefixed, so both rules apply', () => {
+    expect(_isReceiptPayment({ paymentType: 'ACCRECPAYMENT' })).toBe(true);
+    expect(_isReceiptPayment({ paymentType: 'ARCREDITPAYMENT' })).toBe(true);
+    expect(_isReceiptPayment({ paymentType: 'ACCPAYPAYMENT' })).toBe(false);
+    expect(_isReceiptPayment({ paymentType: 'APCREDITPAYMENT' })).toBe(false);
+  });
+
+  test('amounts land in the month they occurred, and outside months are ignored', () => {
+    const m = _buildCashMovement({
+      payments: [{ paymentType: 'ACCRECPAYMENT', date: '2026-08-15', amount: 10 },
+                 { paymentType: 'ACCRECPAYMENT', date: '2025-01-01', amount: 999 }],
+      months: MONTHS,
+    });
+    expect(m.monthly.customerReceipts).toEqual([0, 10]);
+    expect(m.customerReceipts).toBe(1009);   // total still counts it
+  });
+});
+
+describe('xero/reports — working capital (pure)', () => {
+  const { _buildWorkingCapital } = require('./reports');
+  const TODAY = { year: 2026, month: 8, day: 26 };
+
+  test('collection rate is NULL when nothing was invoiced, not 0%', () => {
+    const wc = _buildWorkingCapital({ invoices: [], today: TODAY });
+    expect(wc.collectionRate).toBeNull();
+  });
+
+  test('nothing collected reads as 0% — the real state of this org', () => {
+    const wc = _buildWorkingCapital({
+      invoices: [{ type: 'ACCREC', total: 109330, amountDue: 109330, dueDate: '2026-09-30' }],
+      revenue: 109330, days: 148, today: TODAY,
+    });
+    expect(wc.invoiced).toBe(109330);
+    expect(wc.collected).toBe(0);
+    expect(wc.collectionRate).toBe(0);
+    expect(wc.receivable).toBe(109330);
+  });
+
+  test('receivables age into buckets by how overdue they are', () => {
+    const wc = _buildWorkingCapital({ today: TODAY, invoices: [
+      { type: 'ACCREC', total: 100, amountDue: 100, dueDate: '2026-09-30' }, // not yet due
+      { type: 'ACCREC', total: 200, amountDue: 200, dueDate: '2026-08-10' }, // 16 days over
+      { type: 'ACCREC', total: 300, amountDue: 300, dueDate: '2026-07-01' }, // 56 days
+      { type: 'ACCREC', total: 400, amountDue: 400, dueDate: '2026-05-01' }, // 117 days
+    ]});
+    expect(wc.arAgeing).toEqual({ current: 100, d1_30: 200, d31_60: 300, d60plus: 400 });
+    expect(wc.overdue).toBe(900);
+  });
+
+  test('a fully paid bill leaves no payable', () => {
+    const wc = _buildWorkingCapital({ today: TODAY, invoices: [
+      { type: 'ACCPAY', total: 24603, amountDue: 0, dueDate: '2026-07-31' },
+    ]});
+    expect(wc.payable).toBe(0);
+    expect(wc.counts.payable).toBe(1);
+  });
+
+  test('DSO/DPO are null without a denominator rather than Infinity', () => {
+    const wc = _buildWorkingCapital({ invoices: [], revenue: 0, expenses: 0, days: 0, today: TODAY });
+    expect(wc.dso).toBeNull();
+    expect(wc.dpo).toBeNull();
+  });
+});
+
+describe('xero/reports — 13-week cash forecast (pure)', () => {
+  const { _buildCashForecast } = require('./reports');
+  const TODAY = { year: 2026, month: 8, day: 26 };
+
+  test('projects a running balance from invoice due dates', () => {
+    const f = _buildCashForecast({ openingBalance: 75397, today: TODAY, invoices: [
+      { type: 'ACCREC', amountDue: 10000, dueDate: '2026-08-28' },  // week 1
+      { type: 'ACCPAY', amountDue: 4000,  dueDate: '2026-09-05' },  // week 2
+    ]});
+    expect(f.weeks).toHaveLength(13);
+    expect(f.weeks[0]).toMatchObject({ receipts: 10000, payments: 0, balance: 85397 });
+    expect(f.weeks[1]).toMatchObject({ receipts: 0, payments: 4000, balance: 81397 });
+    expect(f.weeks[12].balance).toBe(81397);  // nothing further scheduled
+  });
+
+  test('already-overdue amounts are reported separately, not assumed imminent', () => {
+    // Folding them into week 1 would forecast money arriving that is already late.
+    const f = _buildCashForecast({ openingBalance: 0, today: TODAY, invoices: [
+      { type: 'ACCREC', amountDue: 5000, dueDate: '2026-06-01' },
+      { type: 'ACCPAY', amountDue: 900,  dueDate: '2026-07-01' },
+    ]});
+    expect(f.overdueReceipts).toBe(5000);
+    expect(f.overduePayments).toBe(900);
+    expect(f.weeks.every(w => w.receipts === 0 && w.payments === 0)).toBe(true);
+  });
+
+  test('paid invoices and ones with no due date never enter the forecast', () => {
+    const f = _buildCashForecast({ openingBalance: 100, today: TODAY, invoices: [
+      { type: 'ACCREC', amountDue: 0,    dueDate: '2026-08-28' },
+      { type: 'ACCREC', amountDue: 5000, dueDate: null },
+    ]});
+    expect(f.weeks.every(w => w.receipts === 0)).toBe(true);
+    expect(f.weeks[12].balance).toBe(100);
+  });
+});

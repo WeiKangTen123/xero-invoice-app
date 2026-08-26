@@ -1402,6 +1402,228 @@ async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force =
   }
 }
 
+// ── Cash flow ───────────────────────────────────────────────────────────────
+// Xero has NO cash-flow-statement endpoint — the full report list is Aged
+// Payables/Receivables, BalanceSheet, BankSummary, BudgetSummary,
+// ExecutiveSummary, ProfitAndLoss, TrialBalance. So this is constructed.
+//
+// The distinction everything here rests on: invoices and bills are ACCRUAL.
+// A sales invoice (ACCREC) hits the P&L the moment it is raised and moves no
+// cash; cash moves only when a Payment settles it, or when a Bank Transaction
+// happens with no invoice behind it at all. Building this from the P&L would
+// report revenue as though it were cash, which for an org that has collected
+// none of its invoices is the opposite of the truth.
+
+// A bank transfer moves money between the org's OWN accounts. It appears as a
+// bank transaction, but counting it would inflate both sides of the statement.
+const _isTransfer = t => /TRANSFER/i.test(t?.type || '');
+
+// Xero's payment types are not uniformly prefixed. The receivable side is
+// ACCRECPAYMENT plus the AR* credit-note/overpayment/prepayment variants; the
+// rest are payable. Same rule as the Banking statement view already uses.
+const _isReceiptPayment = p => /REC/.test(p?.paymentType || '') || (p?.paymentType || '').startsWith('AR');
+
+function _monthKeyOfDate(d) {
+  if (!d) return null;
+  const dt = new Date(d);
+  return Number.isNaN(dt.getTime()) ? null : `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+// Pure. Splits real cash movement into where it came from and where it went.
+// Customer receipts are kept apart from other receipts deliberately: a business
+// living on injected capital and one collecting from customers look identical
+// on a single "cash in" line, and they are not remotely the same business.
+function _buildCashMovement({ payments = [], bankTransactions = [], months = [] }) {
+  const idx = new Map(months.map((m, i) => [m.key, i]));
+  const zero = () => Array(months.length).fill(0);
+  const monthly = { customerReceipts: zero(), otherReceipts: zero(), supplierPayments: zero(), otherPayments: zero() };
+  const totals  = { customerReceipts: 0, otherReceipts: 0, supplierPayments: 0, otherPayments: 0 };
+
+  const add = (bucket, when, amount) => {
+    const v = Math.abs(Number(amount || 0));
+    if (!v) return;
+    totals[bucket] += v;
+    const i = idx.get(_monthKeyOfDate(when));
+    if (i !== undefined) monthly[bucket][i] += v;
+  };
+
+  for (const p of payments) add(_isReceiptPayment(p) ? 'customerReceipts' : 'supplierPayments', p.date, p.amount);
+  for (const t of bankTransactions) {
+    if (_isTransfer(t)) continue;                       // own-account movement, not cash flow
+    add(/^RECEIVE/i.test(t.type || '') ? 'otherReceipts' : 'otherPayments', t.date, t.total);
+  }
+
+  const cashIn  = totals.customerReceipts + totals.otherReceipts;
+  const cashOut = totals.supplierPayments + totals.otherPayments;
+  return {
+    ...totals, cashIn, cashOut, net: cashIn - cashOut,
+    monthly: {
+      ...monthly,
+      in:  months.map((_, i) => monthly.customerReceipts[i] + monthly.otherReceipts[i]),
+      out: months.map((_, i) => monthly.supplierPayments[i] + monthly.otherPayments[i]),
+    },
+  };
+}
+
+// Pure. What is owed in each direction, and how much of what was invoiced has
+// actually turned into money.
+function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days = 0, today }) {
+  const ar = { raised: 0, due: 0, count: 0 }, ap = { raised: 0, due: 0, count: 0 };
+  const buckets = { current: 0, d1_30: 0, d31_60: 0, d60plus: 0 };
+  const now = today ? _dateFromParts(today) : new Date();
+
+  for (const inv of invoices) {
+    const g = inv.type === 'ACCREC' ? ar : inv.type === 'ACCPAY' ? ap : null;
+    if (!g) continue;
+    g.raised += Number(inv.total || 0);
+    g.due    += Number(inv.amountDue || 0);
+    g.count  += 1;
+
+    if (inv.type === 'ACCREC' && Number(inv.amountDue || 0) > 0) {
+      const overdueDays = inv.dueDate ? Math.floor((now - new Date(inv.dueDate)) / 86400000) : 0;
+      const amt = Number(inv.amountDue);
+      if (overdueDays <= 0)      buckets.current += amt;
+      else if (overdueDays <= 30) buckets.d1_30  += amt;
+      else if (overdueDays <= 60) buckets.d31_60 += amt;
+      else                        buckets.d60plus += amt;
+    }
+  }
+
+  const collected = ar.raised - ar.due;
+  return {
+    receivable: ar.due, payable: ap.due, net: ap.due - ar.due,
+    invoiced: ar.raised, collected,
+    // Null, not 0, when nothing was invoiced — "0% collected" would be a lie.
+    collectionRate: ar.raised > 0 ? collected / ar.raised : null,
+    arAgeing: buckets,
+    overdue: buckets.d1_30 + buckets.d31_60 + buckets.d60plus,
+    dso: revenue  > 0 && days > 0 ? (ar.due / revenue)  * days : null,
+    dpo: expenses > 0 && days > 0 ? (ap.due / expenses) * days : null,
+    counts: { receivable: ar.count, payable: ap.count },
+  };
+}
+
+// Pure. A 13-week projection from invoice DUE DATES — the forward view the
+// reference dashboard cannot produce, because its spreadsheet has no due dates.
+//
+// It assumes every invoice is paid on its due date, which is optimistic; already
+// overdue amounts are therefore reported separately rather than folded into
+// week 1 as though they were about to arrive.
+function _buildCashForecast({ invoices = [], openingBalance = 0, today, weeks = 13 }) {
+  const start = today ? _dateFromParts(today) : new Date();
+  const out = [];
+  let overdueReceipts = 0, overduePayments = 0;
+
+  for (const inv of invoices) {
+    const due = Number(inv.amountDue || 0);
+    if (due <= 0 || !inv.dueDate) continue;
+    if (new Date(inv.dueDate) < start) {
+      if (inv.type === 'ACCREC') overdueReceipts += due; else if (inv.type === 'ACCPAY') overduePayments += due;
+    }
+  }
+
+  let balance = openingBalance;
+  for (let w = 0; w < weeks; w++) {
+    const from = new Date(start.getTime() + w * 7 * 86400000);
+    const to   = new Date(start.getTime() + (w + 1) * 7 * 86400000);
+    let receipts = 0, payments = 0;
+    for (const inv of invoices) {
+      const due = Number(inv.amountDue || 0);
+      if (due <= 0 || !inv.dueDate) continue;
+      const d = new Date(inv.dueDate);
+      if (d < from || d >= to) continue;
+      if (inv.type === 'ACCREC') receipts += due; else if (inv.type === 'ACCPAY') payments += due;
+    }
+    balance += receipts - payments;
+    out.push({
+      week: w + 1,
+      startISO: from.toISOString().slice(0, 10),
+      label: `W${w + 1}`,
+      receipts, payments, net: receipts - payments, balance,
+    });
+  }
+  return { weeks: out, openingBalance, overdueReceipts, overduePayments };
+}
+
+async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
+  // Reuses the cached performance fetch for the P&L side, so the accrual-vs-cash
+  // reconciliation compares like with like over the same months.
+  const perf = await getPerformance(userId, tenantId, { timezone, force, period });
+  const months = perf.months;
+  const first  = perf.fiscalYear.fromISO, last = perf.fiscalYear.toISO;
+  const today  = _todayPartsInTz(timezone);
+
+  const key    = `cashflow:${userId}:${tenantId}:${months[0].key}:${months[months.length - 1].key}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached;
+
+  const tokenCache = require('../utils/token-cache').forUser(userId);
+  const api = _apiFor(await tokenCache.getValidToken(tenantId));
+
+  const fromP = _parseISODate(first);
+  const toEx  = _addDays(_parseISODate(last), 1);      // Xero's upper bound is exclusive
+  const dateWhere = `Date >= ${_fmtXeroDate(fromP)} && Date < ${_fmtXeroDate(toEx)}`;
+
+  // Every call here is a GET. Nothing in this path writes to Xero.
+  const [bank, payRes, btRes, invRes] = await Promise.all([
+    getBankSummary(userId, tenantId, { from: first, to: last, force }).catch(err => {
+      logger.warn('Cash flow: bank summary unavailable', { userId, error: err.message });
+      return null;
+    }),
+    withRetry(() => api.getPayments(tenantId, undefined, dateWhere, 'Date DESC'))
+      .catch(err => { logger.warn('Cash flow: payments unavailable', { userId, error: err.message }); return { body: {} }; }),
+    withRetry(() => api.getBankTransactions(tenantId, undefined, dateWhere, 'Date DESC'))
+      .catch(err => { logger.warn('Cash flow: bank transactions unavailable', { userId, error: err.message }); return { body: {} }; }),
+    // Unfiltered by date on purpose: the forecast needs every OPEN invoice,
+    // including ones raised before this period that are still unpaid.
+    withRetry(() => api.getInvoices(tenantId, undefined, undefined, 'DueDate ASC', undefined, undefined, undefined,
+      ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true)),
+  ]);
+
+  const invoices = invRes.body.invoices || [];
+  const movement = _buildCashMovement({
+    payments:         payRes.body.payments || [],
+    bankTransactions: btRes.body.bankTransactions || [],
+    months,
+  });
+
+  const S = a => a.reduce((x, y) => x + y, 0);
+  const revenue  = S(perf.totals.revenue.actual);
+  const expenses = S(perf.totals.cogs.actual) + S(perf.totals.opex.actual);
+  const days     = Math.max(1, Math.round((_dateFromParts(_parseISODate(last)) - _dateFromParts(fromP)) / 86400000) + 1);
+
+  const workingCapital = _buildWorkingCapital({ invoices, revenue, expenses, days, today });
+  const closing  = bank ? bank.accounts.reduce((s, a) => s + a.closingBalance, 0) : 0;
+  const forecast = _buildCashForecast({ invoices, openingBalance: closing, today });
+
+  logger.info('Cash flow built', {
+    userId, tenantId, months: months.length,
+    customerReceipts: Math.round(movement.customerReceipts), otherReceipts: Math.round(movement.otherReceipts),
+  });
+
+  return _cacheSet(key, {
+    organisation: perf.organisation,
+    period:       perf.period,
+    months,
+    cash: {
+      available: !!bank,
+      closing,
+      opening:   closing - movement.net,
+      accounts:  bank ? bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance })) : [],
+    },
+    movement,
+    workingCapital,
+    forecast,
+    // The two figures tell opposite stories here, so the gap is stated rather
+    // than left for the reader to notice.
+    reconciliation: {
+      revenueAccrual:   revenue,
+      customerReceipts: movement.customerReceipts,
+      notCollected:     revenue - movement.customerReceipts,
+    },
+  }, _periodCacheTtl(months, today));
+}
+
 // Called on disconnect so nothing here can outlive the connection it came from.
 function clearCache(userId) {
   for (const key of _cache.keys()) {
@@ -1411,12 +1633,13 @@ function clearCache(userId) {
 
 module.exports = {
   getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
-  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, getVarianceInsights, clearCache,
+  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, getCashFlow, getVarianceInsights, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _monthsFrom, _monthMeta, _monthsBetween, _chunkMonths,
   _resolveWindow, _resolvePeriod, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
-  _mergeChunks, _buildCustomerRevenue, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
+  _mergeChunks, _buildCustomerRevenue, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
+  _isTransfer, _isReceiptPayment, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
 };
