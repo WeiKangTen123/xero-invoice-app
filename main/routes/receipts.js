@@ -144,7 +144,7 @@ router.post('/pair', requireAuth, async (req, res) => {
     const url   = captureUrl(req, token);
     // SVG rather than a data URL: it scales to any panel size without going
     // blurry, and it keeps the qrcode dependency out of the UI bundle.
-    const qrSvg = await QRCode.toString(url, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
+    const qrSvg = await QRCode.toString(url, { type: 'svg', margin: 1, width: 220, errorCorrectionLevel: 'M' });
     logger.info('Receipt pairing created', { userId: req.user.id });
     res.status(201).json({ token, url, qrSvg, expiresInMs: pairing.TTL_MS, maxUploads: pairing.MAX_USES });
   } catch (err) {
