@@ -82,6 +82,11 @@ ALTER TABLE invoices ADD COLUMN receipt_mime TEXT;   -- image/jpeg | image/png |
 
 `source` distinguishes intake: `'upload'` or `'phone'`.
 
+**PDFs are accepted on upload.** Some receipts arrive as emailed PDFs rather
+than photographs, and Xero accepts PDF attachments. A PDF upload takes the
+existing `pdf-parse` text path; only camera and image uploads need the vision
+path. The phone capture route accepts images only.
+
 Reusing the table means the AR & AP list, status badges, counts, filters, dedup
 and review screen work unchanged.
 
@@ -101,9 +106,13 @@ AR & AP                                        [+ Add receipt ▾]
 ┌────┬────────────┬──────────┬───────────┬──────────┐
 │ ▪  │ Grab       │ 08-24    │  18.40    │ ●Ready   │
 │ ▪  │ FairPrice  │ 08-23    │  62.10    │ ⚠Review  │
-│ 📄 │ Payroll    │ 07-31    │  9371.00  │ ✓Posted  │
+│ ▪  │ Shell      │ 08-22    │  45.00    │ ✓Posted  │
 └────┴────────────┴──────────┴───────────┴──────────┘
 ```
+
+With the **Receipts** chip selected only receipts are listed, as above. Under
+**All**, receipts interleave with bills and invoices and the first column
+distinguishes them: a thumbnail for a receipt, a document glyph for a bill.
 
 ### Review screen
 
