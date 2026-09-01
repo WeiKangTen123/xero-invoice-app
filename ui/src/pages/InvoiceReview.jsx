@@ -223,7 +223,7 @@ export default function InvoiceReview() {
 
     async function refresh() {
       try {
-        const d = await api.get(`/api/receipts/${id}/token`);
+        const d = await api.get(`/receipts/${id}/token`);
         if (active) setReceiptUrl(`/api/receipts/${id}/image?token=${encodeURIComponent(d.token)}`);
       } catch {
         if (active) setReceiptUrl(null);

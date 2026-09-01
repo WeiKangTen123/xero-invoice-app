@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+// api/client prepends BASE = '/api', so paths here start at the route AFTER it.
+// Writing '/api/receipts' would request '/api/api/receipts' and 404.
 import { api } from '../../api/client';
 import { prepareReceipt, blobToBase64, humanSize, ACCEPT_ATTR } from './receipt-upload';
 
@@ -25,7 +27,7 @@ export default function ReceiptUpload({ onUploaded }) {
     let stop = false;
     const timer = setInterval(async () => {
       try {
-        const s = await api.get(`/api/receipts/pair/${pair.token}`);
+        const s = await api.get(`/receipts/pair/${pair.token}`);
         if (stop) return;
         if (!s.alive) { setPair(null); return; }
         setSecs(Math.max(0, Math.round(s.expiresInMs / 1000)));
@@ -44,13 +46,13 @@ export default function ReceiptUpload({ onUploaded }) {
     const token = pair?.token;
     setPair(null);
     setArrived(0);
-    if (token) { try { await api.delete(`/api/receipts/pair/${token}`); } catch { /* it expires anyway */ } }
+    if (token) { try { await api.delete(`/receipts/pair/${token}`); } catch { /* it expires anyway */ } }
   }
 
   async function startPairing() {
     setError('');
     try {
-      const res = await api.post('/api/receipts/pair', {});
+      const res = await api.post('/receipts/pair', {});
       setPair(res);
       setArrived(0);
       setSecs(Math.round(res.expiresInMs / 1000));
@@ -73,7 +75,7 @@ export default function ReceiptUpload({ onUploaded }) {
       try {
         const { blob, mime, originalBytes, bytes } = await prepareReceipt(file);
         const data = await blobToBase64(blob);
-        await api.post('/api/receipts', { mime, data, filename: file.name, source: 'upload' });
+        await api.post('/receipts', { mime, data, filename: file.name, source: 'upload' });
         ok++;
         // Worth saying out loud: a 9MB photo becoming 700KB is the difference
         // between Xero accepting the attachment and rejecting it.
