@@ -39,6 +39,10 @@ const FIELD_TO_COLUMN = {
   xeroInvoiceId: 'xero_invoice_id', errorMsg: 'error_msg', duplicateOf: 'duplicate_of',
   resolvedBy: 'resolved_by', resolvedAt: 'resolved_at', submittedAt: 'submitted_at',
   processedAt: 'processed_at', updatedAt: 'updated_at',
+  // Expense claims. Kept separate from pdfFilename rather than overloading it:
+  // a bill's PDF and a claim's receipt are attached to Xero by different paths
+  // and a single field would hide which one a row actually has.
+  receiptFile: 'receipt_file', receiptMime: 'receipt_mime',
 };
 
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
@@ -89,6 +93,8 @@ function _rowToRecord(row, reports, lineItems) {
     resolvedAt:        row.resolved_at,
     submittedAt:       row.submitted_at,
     processedAt:       row.processed_at,
+    receiptFile:       row.receipt_file,
+    receiptMime:       row.receipt_mime,
     reports:           reports || [],
   };
 }
