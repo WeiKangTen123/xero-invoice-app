@@ -1,5 +1,10 @@
 const request = require('supertest');
 const express = require('express');
+
+// Parsing is mocked everywhere in this file. Left real it would make a live
+// Gemini call from the test suite, and the routes' job is to store the receipt
+// correctly whatever the parser does.
+jest.mock('../utils/receipt-parser', () => ({ parseReceiptImage: jest.fn().mockResolvedValue(null) }));
 const jwt     = require('jsonwebtoken');
 const fs      = require('fs');
 const path    = require('path');
@@ -296,5 +301,120 @@ describe('routes/receipts — phone pairing', () => {
       expect(res.body.alive).toBe(true);
       expect(res.body.uploads).toBe(1);
     });
+  });
+});
+
+// ── Reading the receipt ─────────────────────────────────────────────────────
+// The rule the whole feature rests on: the image is stored first, and parsing
+// only fills it in. A parse failure must leave a usable receipt behind.
+describe('routes/receipts — parsing fills in a stored receipt', () => {
+  let app, users, jwtSecret, testUser, invoiceStore, parser;
+  const created = [];
+  const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+
+  // The parse runs in setImmediate so the upload response is not held open;
+  // let the queue drain before asserting on the row.
+  const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users = require('../utils/users');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    invoiceStore = require('../utils/invoice-store');
+    parser = require('../utils/receipt-parser');
+    parser.parseReceiptImage.mockReset();
+    parser.parseReceiptImage.mockResolvedValue(null);
+    require('../utils/pairing')._reset();
+    const receiptRoutes = require('./receipts');
+
+    testUser = await users.createUser(`x${Date.now()}@test.com`, 'password123', 'user');
+    created.push(testUser.id);
+
+    app = express();
+    app.use(express.json({ limit: '10mb' }));
+    app.use('/api/receipts', receiptRoutes);
+  });
+
+  afterAll(() => {
+    for (const id of created) {
+      try { fs.rmSync(path.join(__dirname, '../data/users', String(id)), { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
+  const upload = () => request(app).post('/api/receipts').set('Authorization', auth()).send({ mime: 'image/jpeg', data: JPEG_B64 });
+
+  test('a successful read populates the row the user reviews', async () => {
+    parser.parseReceiptImage.mockResolvedValue({
+      merchant: 'Grab', date: '2026-08-24', currency: 'SGD',
+      total: 18.4, tax: 1.51, subTotal: 16.89, description: 'Airport ride', confidence: 'high',
+    });
+    const { body } = await upload().expect(201);
+    await settle();
+
+    const row = invoiceStore.forUser(testUser.id).getById(body.receipt.id);
+    expect(row.vendorName).toBe('Grab');
+    expect(row.invoiceDate).toBe('2026-08-24');
+    expect(row.currency).toBe('SGD');
+    expect(row.totalAmount).toBe(18.4);
+    expect(row.taxAmount).toBe(1.51);
+  });
+
+  test('the response does not wait for the parse — the row appears immediately', async () => {
+    // A phone on mobile data must not hold a request open for a vision call.
+    let resolveParse;
+    parser.parseReceiptImage.mockReturnValue(new Promise(r => { resolveParse = r; }));
+    const { body } = await upload().expect(201);
+    expect(body.receipt.id).toBeTruthy();       // returned while the parse is still pending
+    resolveParse(null);
+  });
+
+  test('a parse failure leaves the receipt intact for manual entry', async () => {
+    parser.parseReceiptImage.mockRejectedValue(new Error('quota exceeded'));
+    const { body } = await upload().expect(201);
+    await settle();
+
+    const row = invoiceStore.forUser(testUser.id).getById(body.receipt.id);
+    expect(row).toBeTruthy();                   // the receipt survived
+    expect(row.status).toBe('review-needed');
+    expect(row.receiptFile).toBeTruthy();
+  });
+
+  test('an unreadable receipt stays at review-needed with nothing invented', async () => {
+    parser.parseReceiptImage.mockResolvedValue(null);
+    const { body } = await upload().expect(201);
+    await settle();
+
+    const row = invoiceStore.forUser(testUser.id).getById(body.receipt.id);
+    expect(row.status).toBe('review-needed');
+    expect(row.vendorName).toBeFalsy();
+    expect(row.totalAmount).toBeFalsy();
+  });
+
+  test('fields the parser could not read are left blank, not overwritten with null', async () => {
+    parser.parseReceiptImage.mockResolvedValue({
+      merchant: 'Cafe', date: null, currency: null, total: 12.5,
+      tax: null, subTotal: null, description: null, confidence: 'low',
+    });
+    const { body } = await upload().expect(201);
+    await settle();
+
+    const row = invoiceStore.forUser(testUser.id).getById(body.receipt.id);
+    expect(row.vendorName).toBe('Cafe');
+    expect(row.totalAmount).toBe(12.5);
+    expect(row.invoiceDate).toBeFalsy();
+  });
+
+  test('a read receipt still requires review — it never jumps to ready-to-post', async () => {
+    // High confidence is not the user's sign-off, and nothing may look ready to
+    // go to Xero without a person having looked at it.
+    parser.parseReceiptImage.mockResolvedValue({
+      merchant: 'Grab', date: '2026-08-24', currency: 'SGD',
+      total: 18.4, tax: 1.51, subTotal: 16.89, description: 'Ride', confidence: 'high',
+    });
+    const { body } = await upload().expect(201);
+    await settle();
+    expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id).status).toBe('review-needed');
   });
 });
