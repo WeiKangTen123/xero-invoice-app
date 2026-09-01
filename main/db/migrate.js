@@ -23,6 +23,10 @@ function run() {
   _ensureColumn('user_credentials', 'xero_oauth_connected_at',  'xero_oauth_connected_at TEXT');
   _ensureColumn('user_credentials', 'timezone', 'timezone TEXT');
   _ensureColumn('users', 'last_seen_at', 'last_seen_at TEXT');
+  // Expense claims: a receipt is an attached FILE the way a bill has a PDF, but
+  // it is usually an image and Xero needs the mime type to attach it.
+  _ensureColumn('invoices', 'receipt_file', 'receipt_file TEXT');
+  _ensureColumn('invoices', 'receipt_mime', 'receipt_mime TEXT');
 
   // Rebuilds user_settings so a NEW account starts with auto-submit off.
   // Idempotent and value-preserving — see the migration for why.

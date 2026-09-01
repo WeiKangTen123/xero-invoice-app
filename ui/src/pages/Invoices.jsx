@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import ReceiptUpload from '../components/receipts/ReceiptUpload';
 
 // reviewed is blue (not yet in Xero), posted is green (done).
 // Keeping them visually distinct prevents the "I clicked Reviewed and it looked
@@ -18,6 +19,7 @@ const STATUS_MAP = {
 function TypeBadge({ type }) {
   if (type === 'ACCPAY') return <span className="badge badge-blue">Bill</span>;
   if (type === 'ACCREC') return <span className="badge badge-purple">Invoice</span>;
+  if (type === 'EXPENSE') return <span className="badge badge-yellow">Receipt</span>;
   return <span className="badge badge-gray">{type || '—'}</span>;
 }
 
@@ -151,6 +153,7 @@ export default function Invoices() {
 
   const bills       = invoices.filter(i => i.invoiceType === 'ACCPAY').length;
   const invCount    = invoices.filter(i => i.invoiceType === 'ACCREC').length;
+  const receipts    = invoices.filter(i => i.invoiceType === 'EXPENSE').length;
   const pending     = invoices.filter(i => i.status === 'pending').length;
   const posted      = invoices.filter(i => i.status === 'posted').length;
   const reviewed    = invoices.filter(i => i.status === 'reviewed').length;
@@ -226,6 +229,7 @@ export default function Invoices() {
           { key: 'all',    label: 'All',      count: invoices.length },
           { key: 'ACCPAY', label: 'Bills',    count: bills },
           { key: 'ACCREC', label: 'Invoices', count: invCount },
+          { key: 'EXPENSE', label: 'Receipts', count: receipts },
         ].map(t => (
           <FilterPill key={t.key} active={typeFilter === t.key} onClick={() => setTypeFilter(t.key)} label={t.label} count={t.count} />
         ))}
@@ -241,6 +245,12 @@ export default function Invoices() {
         ].map(t => (
           <FilterPill key={t.key} active={statusFilter === t.key} onClick={() => setStatusFilter(t.key)} label={t.label} count={t.count} />
         ))}
+
+        {/* Expense claims are the only type the user creates by hand — bills and
+            invoices arrive by email — so the input lives with the filters. */}
+        <div style={{ marginLeft: 'auto' }}>
+          <ReceiptUpload onUploaded={fetchInvoices} />
+        </div>
       </div>
 
       <div className="card" style={{ marginTop: 12 }}>

@@ -267,3 +267,49 @@ describe('invoice-store (SQLite)', () => {
     });
   });
 });
+
+// The write path is driven by FIELD_TO_COLUMN; the read path (_rowToRecord) is
+// hand-written. Adding a field to the map alone therefore SAVES but does not
+// READ BACK — it half-works, silently, and the value looks like it was never
+// stored. That is exactly how receiptFile shipped broken. This closes the gap.
+describe('utils/invoice-store — every mapped field survives a round trip', () => {
+  // Fields the store owns or derives rather than storing verbatim.
+  const DERIVED = new Set(['id', 'userId', 'updatedAt', 'processedAt']);
+  const MONEY   = new Set(['totalAmount', 'taxAmount', 'subTotal']);
+
+  test('a value written for each field comes back on the record', async () => {
+    // Required INSIDE the test, after migrate: a require at describe scope binds
+    // to whichever in-memory DB existed at collection time, which no migration
+    // has touched.
+    jest.resetModules();
+    require('../db/migrate').run();
+    const store = require('./invoice-store');
+    const { FIELD_TO_COLUMN } = store;
+    // invoices.user_id is a real foreign key, so the user must exist.
+    const u = await require('./users').createUser(`rt${Date.now()}@test.com`, 'password123', 'user');
+    const s = store.forUser(u.id);
+
+    const sample = {};
+    for (const field of Object.keys(FIELD_TO_COLUMN)) {
+      if (DERIVED.has(field)) continue;
+      if (field === 'status')      { sample[field] = 'pending'; continue; }
+      if (field === 'hasPdf')      { sample[field] = true; continue; }
+      if (field === 'duplicateOf') continue;   // FK to another invoice
+      sample[field] = MONEY.has(field) ? 12.34 : `v-${field}`;
+    }
+
+    const saved = s.add({ id: 'rt-1', ...sample, processedAt: new Date().toISOString() });
+    expect(saved).toBeTruthy();
+
+    const missing = [];
+    for (const [field, value] of Object.entries(sample)) {
+      const got = saved[field];
+      if (field === 'hasPdf') { if (got !== true) missing.push(field); continue; }
+      // Undefined means _rowToRecord forgot it. A differing value means the
+      // column mapping is wrong. Both are the same class of bug.
+      if (got === undefined || got === null || got !== value) missing.push(`${field} (got ${JSON.stringify(got)}, want ${JSON.stringify(value)})`);
+    }
+    expect(missing).toEqual([]);
+    s.clear();
+  });
+});
