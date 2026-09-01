@@ -150,6 +150,9 @@ export default function InvoiceReview() {
   const [pdfUrl,     setPdfUrl]     = useState(null);
   const [pdfErr,     setPdfErr]     = useState('');
   const [pdfRetry,   setPdfRetry]   = useState(0);
+  // Expense claims carry a photographed receipt rather than a PDF.
+  const [receiptUrl, setReceiptUrl] = useState(null);
+  const [receiptRot, setReceiptRot] = useState(0);
   const [reporting,  setReporting]  = useState(false);
   const [marking,    setMarking]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -209,6 +212,28 @@ export default function InvoiceReview() {
     const timer = setInterval(refresh, 4 * 60 * 1000);
     return () => { active = false; clearInterval(timer); };
   }, [inv?.hasPdf, id, pdfRetry]);
+
+  // ── Signed receipt URL ────────────────────────────────────────────────────
+  // Same constraint as the PDF above: an <img src> carries no Authorization
+  // header, so the image is reached through a short-lived scoped token that is
+  // refreshed before it expires.
+  useEffect(() => {
+    if (!inv?.receiptFile) return undefined;
+    let active = true;
+
+    async function refresh() {
+      try {
+        const d = await api.get(`/api/receipts/${id}/token`);
+        if (active) setReceiptUrl(`/api/receipts/${id}/image?token=${encodeURIComponent(d.token)}`);
+      } catch {
+        if (active) setReceiptUrl(null);
+      }
+    }
+
+    refresh();
+    const timer = setInterval(refresh, 4 * 60 * 1000);   // token lives 5 min
+    return () => { active = false; clearInterval(timer); };
+  }, [inv?.receiptFile, id]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
   async function markReviewed() {
@@ -491,12 +516,49 @@ export default function InvoiceReview() {
         )}
 
         {/* Main layout: PDF left, info panel right (sticky — stays in view while the PDF scrolls) */}
-        <div style={{ display: 'grid', gridTemplateColumns: inv.hasPdf ? '1fr 500px' : '1fr', gap: 20, alignItems: 'start' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: (inv.hasPdf || inv.receiptFile) ? '1fr 500px' : '1fr', gap: 20, alignItems: 'start' }}>
 
           {/* PDF Viewer — fills its full grid column; the #zoom=page-width fragment on
               the iframe src (below) tells the native PDF viewer to fit-scale itself,
               so it never letterboxes no matter how wide the column is */}
-          {inv.hasPdf ? (
+          {inv.receiptFile ? (
+            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 16 }}>🧾</span>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>
+                    Receipt{inv.source === 'phone' ? ' · from phone' : ''}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {/* A receipt is photographed one-handed and often lands sideways. */}
+                  <button className="btn btn-outline btn-sm" onClick={() => setReceiptRot(r => (r + 90) % 360)} title="Rotate">↻</button>
+                  {receiptUrl && (
+                    <a href={receiptUrl} target="_blank" rel="noopener noreferrer" className="btn btn-outline btn-sm">↗ Full size</a>
+                  )}
+                </div>
+              </div>
+              {receiptUrl ? (
+                <div style={{ background: '#1b1b1f', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14, minHeight: 420, maxHeight: 'calc(100vh - 240px)', overflow: 'auto' }}>
+                  <img
+                    src={receiptUrl}
+                    alt="Receipt"
+                    style={{ maxWidth: '100%', maxHeight: 'calc(100vh - 280px)', objectFit: 'contain',
+                             transform: `rotate(${receiptRot}deg)`, transition: 'transform .2s ease' }}
+                  />
+                </div>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 300, color: 'var(--text-muted)', gap: 10 }}>
+                  <span style={{ width: 16, height: 16, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.65s linear infinite', display: 'inline-block' }} />
+                  Loading receipt...
+                </div>
+              )}
+              <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border)', fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                Fields on the right were read from this photo automatically. Check them against the
+                image before saving — anything unreadable was left blank rather than guessed.
+              </div>
+            </div>
+          ) : inv.hasPdf ? (
             <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

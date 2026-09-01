@@ -5,6 +5,7 @@ const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
 const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
 const pairing      = require('../utils/pairing');
+const { parseReceiptImage } = require('../utils/receipt-parser');
 const QRCode       = require('qrcode');
 const logger       = require('../utils/logger');
 
@@ -84,6 +85,34 @@ function storeReceipt(userId, { mime, data, filename, source }) {
   });
 
   logger.info('Receipt stored', { userId, id, bytes: buffer.length, mime, source: source || 'upload' });
+
+  // Read the receipt AFTER it is safely stored, and off the response path.
+  //
+  // Two reasons it is not awaited. A phone on mobile data should not hold a
+  // request open for the several seconds a vision call takes, and a batch of
+  // five receipts would otherwise be five sequential waits. The row already
+  // exists and is already visible; parsing only fills it in.
+  //
+  // Parsing is an enhancement, never a gate: if it fails the receipt stays
+  // exactly where it is, at review-needed, for the user to type by hand.
+  setImmediate(() => {
+    parseReceiptImage(userId, buffer, mime)
+      .then(parsed => {
+        if (!parsed) return;
+        invoiceStore.forUser(userId).update(id, {
+          vendorName:  parsed.merchant    ?? undefined,
+          invoiceDate: parsed.date        ?? undefined,
+          currency:    parsed.currency    ?? undefined,
+          totalAmount: parsed.total       ?? undefined,
+          taxAmount:   parsed.tax         ?? undefined,
+          subTotal:    parsed.subTotal    ?? undefined,
+          description: parsed.description ?? undefined,
+        });
+        logger.info('Receipt parsed', { userId, id, confidence: parsed.confidence, readTotal: parsed.total !== null });
+      })
+      .catch(err => logger.warn('Receipt parse failed', { userId, id, error: err.message }));
+  });
+
   return { status: 201, body: { receipt: record, imageToken: issueImageToken(userId, id) } };
 }
 
