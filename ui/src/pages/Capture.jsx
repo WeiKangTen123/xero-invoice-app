@@ -13,7 +13,7 @@ export default function Capture() {
   const fileRef = useRef(null);
   const [state, setState]   = useState('checking'); // checking | ready | expired
   const [busy, setBusy]     = useState(false);
-  const [sent, setSent]     = useState([]);
+  const [sent, setSent]     = useState([]);   // { id, name, preview, vendorName, totalAmount, currency, parsed }
   const [error, setError]   = useState('');
   const [usesLeft, setUses] = useState(null);
 
@@ -33,6 +33,31 @@ export default function Capture() {
     return () => { cancelled = true; };
   }, [token]);
 
+  // Parsing happens after the upload responds, so the amounts arrive a moment
+  // later. Poll only while something is still unread, then stop.
+  useEffect(() => {
+    if (state !== 'ready' || !sent.length) return undefined;
+    if (sent.every(s => s.parsed)) return undefined;
+
+    let stop = false;
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/receipts/capture/${encodeURIComponent(token)}/status`);
+        if (!res.ok || stop) return;
+        const body = await res.json();
+        const byId = new Map((body.receipts || []).map(r => [r.id, r]));
+        setSent(list => list.map(item => {
+          const got = item.id ? byId.get(item.id) : null;
+          return got ? { ...item, ...got } : item;
+        }));
+      } catch { /* transient — try again next tick */ }
+    }, 2500);
+    return () => { stop = true; clearInterval(timer); };
+  }, [state, sent, token]);
+
+  // Object URLs hold the decoded image in memory until released.
+  useEffect(() => () => { sent.forEach(s => s.preview && URL.revokeObjectURL(s.preview)); }, [sent]);
+
   async function handleFiles(files) {
     const list = Array.from(files || []);
     if (!list.length) return;
@@ -50,7 +75,17 @@ export default function Capture() {
         });
         const body = await res.json();
         if (!res.ok) throw new Error(body.error || 'Upload failed');
-        setSent(s => [...s, { name: file.name, from: originalBytes, to: bytes }]);
+        /* body.receipt.id is what the status poll matches on. */
+        // The thumbnail comes from the file the phone already holds. Fetching
+        // the image back would mean granting this link the ability to READ
+        // receipts, and it has no need of that — it took the photo.
+        setSent(s => [...s, {
+          id: body.receipt?.id,
+          name: file.name,
+          preview: URL.createObjectURL(blob),
+          from: originalBytes, to: bytes,
+          vendorName: null, totalAmount: null, currency: null, parsed: false,
+        }]);
         setUses(n => (n === null ? null : Math.max(0, n - 1)));
       } catch (err) {
         setError(err.message);
@@ -120,16 +155,38 @@ export default function Capture() {
       )}
 
       {sent.length > 0 && (
-        <div style={{ marginTop: 6, width: '100%', maxWidth: 320 }}>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>
+        <div style={{ marginTop: 6, width: '100%', maxWidth: 340 }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 10, textAlign: 'left' }}>
             Sent ({sent.length})
           </div>
           {sent.map((s, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '7px 0', borderTop: '1px solid var(--border)' }}>
-              <span style={{ color: 'var(--success)' }}>✓ {s.name || `Photo ${i + 1}`}</span>
-              <span style={{ color: 'var(--text-muted)' }}>{humanSize(s.to)}</span>
+            <div key={s.id || i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 0', borderTop: '1px solid var(--border)', textAlign: 'left' }}>
+              <div style={{ width: 46, height: 46, flexShrink: 0, borderRadius: 8, overflow: 'hidden', background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
+                {s.preview && <img src={s.preview} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                {/* Confirms the RECEIPT was captured, not just that a file moved. */}
+                {s.parsed ? (
+                  <>
+                    <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <span style={{ color: 'var(--success)' }}>✓</span> {s.vendorName || 'Receipt'}
+                    </div>
+                    <div style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
+                      {s.totalAmount != null ? `${s.currency ? s.currency + ' ' : ''}${s.totalAmount}` : 'Amount not read'}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>◍ Reading…</div>
+                    <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>Sent · {humanSize(s.to)}</div>
+                  </>
+                )}
+              </div>
             </div>
           ))}
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, lineHeight: 1.55, textAlign: 'center' }}>
+            All of these are waiting on your computer for review.
+          </div>
         </div>
       )}
     </div>

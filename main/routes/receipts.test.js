@@ -418,3 +418,126 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
     expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id).status).toBe('review-needed');
   });
 });
+
+// ── What the phone may read back ────────────────────────────────────────────
+// The phone token was upload-only. Showing "Grab · SGD 18.40" instead of
+// "IMG_2841.jpg" widens it, so these tests pin exactly how far.
+describe('routes/receipts — phone read-back is narrowly scoped', () => {
+  let app, users, jwtSecret, testUser, otherUser, pairing, invoiceStore, parser;
+  const created = [];
+  const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+  const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users = require('../utils/users');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    pairing = require('../utils/pairing');
+    pairing._reset();
+    invoiceStore = require('../utils/invoice-store');
+    parser = require('../utils/receipt-parser');
+    parser.parseReceiptImage.mockReset();
+    parser.parseReceiptImage.mockResolvedValue(null);
+    const receiptRoutes = require('./receipts');
+
+    testUser  = await users.createUser(`s${Date.now()}a@test.com`, 'password123', 'user');
+    otherUser = await users.createUser(`s${Date.now()}b@test.com`, 'password123', 'user');
+    created.push(testUser.id, otherUser.id);
+
+    app = express();
+    app.use(express.json({ limit: '10mb' }));
+    app.use('/api/receipts', receiptRoutes);
+  });
+
+  afterAll(() => {
+    for (const id of created) {
+      try { fs.rmSync(path.join(__dirname, '../data/users', String(id)), { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  const tokenFor = u => `Bearer ${jwt.sign({ id: u.id, email: u.email, role: u.role }, jwtSecret())}`;
+  const pair = (u = testUser) => request(app).post('/api/receipts/pair').set('Authorization', tokenFor(u));
+  const send = tok => request(app).post(`/api/receipts/capture/${tok}`).send({ mime: 'image/jpeg', data: JPEG_B64 });
+
+  test('returns the parsed fields for what this token uploaded', async () => {
+    parser.parseReceiptImage.mockResolvedValue({
+      merchant: 'Grab', date: '2026-08-24', currency: 'SGD',
+      total: 18.4, tax: null, subTotal: null, description: 'Ride', confidence: 'high',
+    });
+    const { body } = await pair();
+    await send(body.token).expect(201);
+    await settle();
+
+    const res = await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    expect(res.body.receipts).toHaveLength(1);
+    expect(res.body.receipts[0]).toMatchObject({ vendorName: 'Grab', totalAmount: 18.4, currency: 'SGD', parsed: true });
+  });
+
+  test('an unread receipt reports parsed:false so the phone can stop spinning', async () => {
+    parser.parseReceiptImage.mockResolvedValue(null);
+    const { body } = await pair();
+    await send(body.token).expect(201);
+    await settle();
+
+    const res = await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    expect(res.body.receipts[0].parsed).toBe(false);
+    expect(res.body.receipts[0].vendorName).toBeNull();
+  });
+
+  test('NO image is served through the phone token — it has its own copy', async () => {
+    // The whole reason the widening stays small: the phone took the photo.
+    const { body } = await pair();
+    const up = await send(body.token).expect(201);
+    const res = await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+
+    expect(JSON.stringify(res.body)).not.toMatch(/imageToken/);
+    expect(JSON.stringify(res.body)).not.toMatch(/receiptFile/);
+    // And the image route still refuses the pairing token outright.
+    await request(app).get(`/api/receipts/${up.body.receipt.id}/image?token=${body.token}`).expect(401);
+  });
+
+  test('it cannot reach a receipt from a different pairing', async () => {
+    const a = (await pair()).body;
+    const b = (await pair()).body;
+    await send(a.token).expect(201);
+
+    // b uploaded nothing, so b sees nothing — even for the same owner.
+    const res = await request(app).get(`/api/receipts/capture/${b.token}/status`).expect(200);
+    expect(res.body.receipts).toEqual([]);
+  });
+
+  test('it cannot reach another user\'s receipts at all', async () => {
+    const mine = (await pair(testUser)).body;
+    await send(mine.token).expect(201);
+    // A pairing belonging to someone else lists only its own, which is nothing.
+    const theirs = (await pair(otherUser)).body;
+    const res = await request(app).get(`/api/receipts/capture/${theirs.token}/status`).expect(200);
+    expect(res.body.receipts).toEqual([]);
+  });
+
+  test('it reveals nothing identifying about the account', async () => {
+    const { body } = await pair();
+    await send(body.token).expect(201);
+    const res = await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    const dump = JSON.stringify(res.body);
+    expect(dump).not.toContain(testUser.email);
+    expect(dump).not.toContain(String(testUser.id));
+  });
+
+  test('an expired or revoked token reads nothing back', async () => {
+    const { body } = await pair();
+    await send(body.token).expect(201);
+    pairing.revoke(body.token);
+    await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(401);
+    await request(app).get('/api/receipts/capture/garbage/status').expect(401);
+  });
+
+  test('reading back does not spend an upload', async () => {
+    const { body } = await pair();
+    await send(body.token).expect(201);
+    for (let i = 0; i < 5; i++) await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    const st = await request(app).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
+    expect(st.body.uploads).toBe(1);
+  });
+});

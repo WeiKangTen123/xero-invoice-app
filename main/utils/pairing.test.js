@@ -150,3 +150,51 @@ describe('utils/pairing', () => {
     });
   });
 });
+
+// ── Sliding expiry ──────────────────────────────────────────────────────────
+describe('utils/pairing — the link follows the work', () => {
+  beforeEach(() => { pairing._reset(); jest.useRealTimers(); });
+  afterAll(() => { pairing._reset(); jest.useRealTimers(); });
+
+  test('each upload pushes expiry back out, so a long stack is not cut off', () => {
+    jest.useFakeTimers();
+    const t = pairing.create('u1');
+
+    // Nine minutes in, nearly dead — then a photo arrives.
+    jest.advanceTimersByTime(pairing.TTL_MS - 60_000);
+    expect(pairing.verify(t)).not.toBeNull();
+    pairing.consume(t, 'r1');
+
+    // Another nine minutes: without the extension this would be long gone.
+    jest.advanceTimersByTime(pairing.TTL_MS - 60_000);
+    expect(pairing.verify(t)).not.toBeNull();
+    expect(pairing.status(t).expiresInMs).toBeGreaterThan(0);
+  });
+
+  test('an abandoned code still dies on time — nothing extends it', () => {
+    // This is the case the short TTL exists for, and it must not regress.
+    jest.useFakeTimers();
+    const t = pairing.create('u1');
+    jest.advanceTimersByTime(pairing.TTL_MS + 1);
+    expect(pairing.verify(t)).toBeNull();
+  });
+
+  test('extending cannot outlive the upload cap', () => {
+    jest.useFakeTimers();
+    const t = pairing.create('u1');
+    for (let i = 0; i < pairing.MAX_USES; i++) {
+      jest.advanceTimersByTime(60_000);
+      pairing.consume(t, `r${i}`);
+    }
+    // Still inside the extended window, but the budget is spent.
+    expect(pairing.verify(t)).toBeNull();
+  });
+
+  test('revoking beats any amount of extending', () => {
+    const t = pairing.create('u1');
+    pairing.consume(t, 'r1');
+    pairing.revoke(t);
+    expect(pairing.verify(t)).toBeNull();
+    expect(pairing.status(t)).toBeNull();
+  });
+});
