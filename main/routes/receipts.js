@@ -210,6 +210,43 @@ router.get('/capture/:token', (req, res) => {
   res.json({ ok: true, usesLeft: state.usesLeft, expiresInMs: state.expiresInMs });
 });
 
+// GET /api/receipts/capture/:token/status — what the phone shows after a photo.
+//
+// A deliberately narrow widening of the phone's capability. It returns the
+// PARSED FIELDS of receipts uploaded through THIS token, and nothing else:
+//   * no image is served — the phone took the photo and already has it locally,
+//     so it renders its own file rather than fetching one back
+//   * no receipt outside this pairing is reachable, whoever owns it
+//   * no identity, no totals for the account, no list of anything else
+//
+// The point is confirmation that the RECEIPT was captured, not merely that a
+// file moved. "Grab · SGD 18.40" says that; "IMG_2841.jpg" does not.
+router.get('/capture/:token/status', (req, res) => {
+  const state = pairing.verify(req.params.token);
+  if (!state) return res.status(401).json({ error: 'This link has expired. Show a new QR code on your computer.' });
+
+  const store = invoiceStore.forUser(state.userId);
+  const receipts = state.receiptIds
+    .map(id => {
+      const r = store.getById(id);
+      if (!r) return null;
+      return {
+        id: r.id,
+        // Null until the vision parse finishes, which is why the phone shows
+        // "Reading…" for a moment and then the amount.
+        vendorName:  r.vendorName  || null,
+        totalAmount: r.totalAmount || null,
+        currency:    r.currency    || null,
+        // True once parsing has been attempted and produced nothing usable, so
+        // the phone can say "not read" rather than spinning forever.
+        parsed: !!(r.vendorName || r.totalAmount),
+      };
+    })
+    .filter(Boolean);
+
+  res.json({ ok: true, usesLeft: state.usesLeft, expiresInMs: state.expiresInMs, receipts });
+});
+
 // POST /api/receipts/capture/:token — the phone uploads. No auth by design.
 router.post('/capture/:token', (req, res) => {
   const state = pairing.verify(req.params.token);

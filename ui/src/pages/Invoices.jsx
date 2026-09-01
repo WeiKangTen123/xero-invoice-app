@@ -16,6 +16,39 @@ const STATUS_MAP = {
   'review-needed': { cls: 'badge-yellow', label: '⚠ Needs Review' },
 };
 
+// "Received" is when the document entered THIS system — the moment an email was
+// parsed or a receipt was photographed. Distinct from the date printed on the
+// document, which is what the Invoice date column shows. They answer different
+// questions, and a bookkeeping cutoff needs this one.
+//
+// Recent times read as an interval because "2 min ago" is easier to place than a
+// timestamp; anything older reads as a date, because "19 days ago" is not.
+function receivedLabel(iso) {
+  if (!iso) return '—';
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return '—';
+  const mins = Math.floor((Date.now() - then.getTime()) / 60000);
+  if (mins < 1)    return 'just now';
+  if (mins < 60)   return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)    return `${hrs} hour${hrs === 1 ? '' : 's'} ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7)    return `${days} day${days === 1 ? '' : 's'} ago`;
+  return then.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: then.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+}
+
+// Inclusive lower bound for a preset, or null for "all time".
+function receivedCutoff(preset) {
+  const now = new Date();
+  switch (preset) {
+    case 'today': { const d = new Date(now); d.setHours(0, 0, 0, 0); return d; }
+    case '7d':    return new Date(now.getTime() - 7  * 86400000);
+    case '30d':   return new Date(now.getTime() - 30 * 86400000);
+    case 'month': return new Date(now.getFullYear(), now.getMonth(), 1);
+    default:      return null;
+  }
+}
+
 function TypeBadge({ type }) {
   if (type === 'ACCPAY') return <span className="badge badge-blue">Bill</span>;
   if (type === 'ACCREC') return <span className="badge badge-purple">Invoice</span>;
@@ -35,6 +68,9 @@ export default function Invoices() {
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [filter,       setFilter]       = useState('');
   const [typeFilter,   setTypeFilter]   = useState('all');
+  const [receivedFilter, setReceivedFilter] = useState('all');
+  const [customFrom,   setCustomFrom]   = useState('');
+  const [customTo,     setCustomTo]     = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
   function fetchInvoices() {
@@ -131,6 +167,20 @@ export default function Invoices() {
       return false;
     }
     if (typeFilter !== 'all' && inv.invoiceType !== typeFilter) return false;
+
+    // Filters on WHEN IT ARRIVED, not the date on the document.
+    if (receivedFilter !== 'all') {
+      const at = inv.processedAt ? new Date(inv.processedAt) : null;
+      if (!at || Number.isNaN(at.getTime())) return false;
+      if (receivedFilter === 'custom') {
+        if (customFrom && at < new Date(`${customFrom}T00:00:00`)) return false;
+        if (customTo   && at > new Date(`${customTo}T23:59:59`))   return false;
+      } else {
+        const cutoff = receivedCutoff(receivedFilter);
+        if (cutoff && at < cutoff) return false;
+      }
+    }
+
     if (!filter) return true;
     const q = filter.toLowerCase();
     return (
@@ -253,6 +303,45 @@ export default function Invoices() {
         </div>
       </div>
 
+      {/* Received — WHEN IT ARRIVED here, not the date printed on the document.
+          Applies to all three types: "what came in this week" is the same
+          bookkeeping question for an emailed bill and a photographed receipt. */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 2 }}>Received:</span>
+        {[
+          { key: 'all',    label: 'All time' },
+          { key: 'today',  label: 'Today' },
+          { key: '7d',     label: 'Last 7 days' },
+          { key: '30d',    label: 'Last 30 days' },
+          { key: 'month',  label: 'This month' },
+          { key: 'custom', label: 'Custom' },
+        ].map(t => (
+          <FilterPill
+            key={t.key}
+            active={receivedFilter === t.key}
+            onClick={() => setReceivedFilter(t.key)}
+            label={t.label}
+            count={t.key === 'all' ? undefined : invoices.filter(i => {
+              const at = i.processedAt ? new Date(i.processedAt) : null;
+              if (!at || Number.isNaN(at.getTime())) return false;
+              if (t.key === 'custom') return false;
+              const c = receivedCutoff(t.key);
+              return !c || at >= c;
+            }).length}
+          />
+        ))}
+
+        {receivedFilter === 'custom' && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 4 }}>
+            <input type="date" className="form-input" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
+                   style={{ padding: '4px 8px', fontSize: 12, width: 140 }} aria-label="Received from" />
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>to</span>
+            <input type="date" className="form-input" value={customTo} onChange={e => setCustomTo(e.target.value)}
+                   style={{ padding: '4px 8px', fontSize: 12, width: 140 }} aria-label="Received to" />
+          </span>
+        )}
+      </div>
+
       <div className="card" style={{ marginTop: 12 }}>
         {/* Toolbar */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18, flexWrap: 'wrap' }}>
@@ -328,7 +417,8 @@ export default function Invoices() {
                   <th>Invoice #</th>
                   <th>Amount</th>
                   <th>Type</th>
-                  <th>Date</th>
+                  <th>Invoice date</th>
+                  <th>Received</th>
                   <th>PDF</th>
                   <th>Status</th>
                   <th></th>
@@ -389,6 +479,10 @@ export default function Invoices() {
                       <td><TypeBadge type={inv.invoiceType} /></td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                         {inv.invoiceDate || '—'}
+                      </td>
+                      <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
+                          title={inv.processedAt ? new Date(inv.processedAt).toLocaleString() : ''}>
+                        {receivedLabel(inv.processedAt)}
                       </td>
                       <td>
                         {inv.hasPdf

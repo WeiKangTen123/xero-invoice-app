@@ -65,6 +65,11 @@ function consume(token, receiptId = null) {
   entry.uses += 1;
   entry.lastUploadAt = Date.now();
   if (receiptId) entry.receiptIds.push(receiptId);
+  // Sliding expiry, the way a session timeout works. Someone photographing a
+  // stack of receipts should not be cut off mid-way, while a QR left abandoned
+  // on screen still dies in TTL_MS because nothing is extending it. The upload
+  // cap and revoke-on-close stop this from running forever.
+  entry.expiresAt = Date.now() + TTL_MS;
   const result = { uses: entry.uses, usesLeft: Math.max(0, MAX_USES - entry.uses), receiptIds: entry.receiptIds.slice() };
   // Hitting the cap ends the pairing, but the desktop still needs one last poll
   // to show what came through, so the entry is kept until it expires naturally.
