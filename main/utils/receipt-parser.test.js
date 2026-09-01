@@ -13,7 +13,7 @@ beforeEach(() => jest.clearAllMocks());
 describe('utils/receipt-parser', () => {
   describe('normalise — where a bad model response is made harmless', () => {
     test('passes a clean response through', () => {
-      expect(parser.normalise(good)).toEqual(good);
+      expect(parser.normalise(good)).toEqual({ ...good, box: null });
     });
 
     test('rejects a non-object outright', () => {
@@ -103,14 +103,24 @@ describe('utils/receipt-parser', () => {
       expect(image.image_url.url).toMatch(/^data:image\/jpeg;base64,/);
     });
 
-    test('returns the normalised record on a clean response', async () => {
+    test('returns one receipt in the list for a single-receipt photo', async () => {
+      callGemini.mockResolvedValue(JSON.stringify({ receipts: [good] }));
+      const r = await parser.parseReceiptImage('u1', JPEG, 'image/jpeg');
+      expect(r.receipts).toHaveLength(1);
+      expect(r.receipts[0]).toMatchObject({ merchant: 'Grab', total: 18.4 });
+      expect(r.split).toBe(false);   // one receipt is never a split
+    });
+
+    test('a bare object is accepted, not treated as a failure', async () => {
+      // A model asked for an array will still sometimes return one object.
       callGemini.mockResolvedValue(JSON.stringify(good));
-      expect(await parser.parseReceiptImage('u1', JPEG, 'image/jpeg')).toEqual(good);
+      const r = await parser.parseReceiptImage('u1', JPEG, 'image/jpeg');
+      expect(r.receipts).toHaveLength(1);
     });
 
     test('tolerates a fenced or thought-wrapped response', async () => {
-      callGemini.mockResolvedValue('<thought>reading…</thought>\n```json\n' + JSON.stringify(good) + '\n```');
-      expect((await parser.parseReceiptImage('u1', JPEG, 'image/jpeg')).merchant).toBe('Grab');
+      callGemini.mockResolvedValue('<thought>reading…</thought>\n```json\n' + JSON.stringify({ receipts: [good] }) + '\n```');
+      expect((await parser.parseReceiptImage('u1', JPEG, 'image/jpeg')).receipts[0].merchant).toBe('Grab');
     });
 
     test('returns null rather than throwing when Gemini fails — the receipt must survive', async () => {
@@ -124,8 +134,8 @@ describe('utils/receipt-parser', () => {
     });
 
     test('retries once before giving up, since one bad JSON reply is often transient', async () => {
-      callGemini.mockRejectedValueOnce(new Error('blip')).mockResolvedValueOnce(JSON.stringify(good));
-      expect(await parser.parseReceiptImage('u1', JPEG, 'image/jpeg')).toEqual(good);
+      callGemini.mockRejectedValueOnce(new Error('blip')).mockResolvedValueOnce(JSON.stringify({ receipts: [good] }));
+      expect((await parser.parseReceiptImage('u1', JPEG, 'image/jpeg')).receipts[0]).toMatchObject({ merchant: 'Grab' });
       expect(callGemini).toHaveBeenCalledTimes(2);
     });
 
@@ -139,6 +149,131 @@ describe('utils/receipt-parser', () => {
       // Both rules exist because a receipt photo invites exactly these errors.
       expect(parser.SYSTEM_PROMPT).toMatch(/Never invent/i);
       expect(parser.SYSTEM_PROMPT).toMatch(/never the cash tendered/i);
+    });
+  });
+});
+
+// ── Splitting one photo into several receipts ───────────────────────────────
+// splittable() is the entire safety argument for doing this WITHOUT asking the
+// user first. Auto-splitting a photo that held one receipt invents a second
+// record with made-up figures, which is worse than never splitting at all — so
+// every doubtful case must fall back to one record.
+describe('receipt-parser — when a photo may be split', () => {
+  const { splittable, normaliseMany, _box, _overlapFraction } = require('./receipt-parser');
+  const at = (box, over = {}) => ({ merchant: 'Shop', total: 10, box, ...over });
+
+  describe('_box', () => {
+    test('accepts a well-formed normalised box', () => {
+      expect(_box([100, 50, 900, 450])).toEqual([100, 50, 900, 450]);
+    });
+
+    test('rejects anything malformed, which then blocks a split', () => {
+      expect(_box(null)).toBeNull();
+      expect(_box([1, 2, 3])).toBeNull();               // wrong length
+      expect(_box([0, 0, 0, 0])).toBeNull();            // zero area
+      expect(_box([900, 50, 100, 450])).toBeNull();     // inverted
+      expect(_box([0, 0, 1200, 500])).toBeNull();       // out of range
+      expect(_box(['a', 'b', 'c', 'd'])).toBeNull();
+    });
+  });
+
+  test('two clearly separate receipts are split', () => {
+    const r = splittable([
+      at([100, 20, 900, 460], { merchant: 'Grab', total: 18.4 }),
+      at([100, 540, 900, 980], { merchant: 'FairPrice', total: 62.1 }),
+    ]);
+    expect(r.split).toBe(true);
+  });
+
+  test('a single receipt is never split', () => {
+    expect(splittable([at([0, 0, 1000, 1000])]).split).toBe(false);
+    expect(splittable([]).split).toBe(false);
+    expect(splittable(null).split).toBe(false);
+  });
+
+  test('a missing box blocks the split rather than guessing a region', () => {
+    const r = splittable([at([100, 20, 900, 460]), at(null)]);
+    expect(r.split).toBe(false);
+    expect(r.reason).toMatch(/box/i);
+  });
+
+  test('heavily overlapping boxes block the split — one receipt cut in half', () => {
+    const r = splittable([
+      at([100, 100, 900, 900]),
+      at([150, 150, 880, 880]),   // almost entirely inside the first
+    ]);
+    expect(r.split).toBe(false);
+    expect(r.reason).toMatch(/overlap/i);
+  });
+
+  test('slightly touching boxes still split — receipts often sit edge to edge', () => {
+    const r = splittable([
+      at([100, 20, 900, 500]),
+      at([100, 480, 900, 960]),   // ~4% overlap
+    ]);
+    expect(r.split).toBe(true);
+  });
+
+  test('a sliver of a box blocks the split', () => {
+    const r = splittable([at([100, 20, 900, 460]), at([0, 0, 10, 10])]);
+    expect(r.split).toBe(false);
+    expect(r.reason).toMatch(/too small/i);
+  });
+
+  test('a detected receipt with neither merchant nor total blocks the split', () => {
+    // Probably a phone case or a napkin, not a receipt.
+    const r = splittable([
+      at([100, 20, 900, 460], { merchant: 'Grab', total: 18.4 }),
+      at([100, 540, 900, 980], { merchant: null, total: null }),
+    ]);
+    expect(r.split).toBe(false);
+    expect(r.reason).toMatch(/merchant|total/i);
+  });
+
+  test('one identifiable field is enough — a merchant with no readable total', () => {
+    const r = splittable([
+      at([100, 20, 900, 460], { merchant: 'Grab', total: null }),
+      at([100, 540, 900, 980], { merchant: 'FairPrice', total: 62.1 }),
+    ]);
+    expect(r.split).toBe(true);
+  });
+
+  test('three receipts split when all are clean', () => {
+    const r = splittable([
+      at([50, 20, 480, 480]), at([50, 520, 480, 980]), at([520, 20, 950, 480]),
+    ]);
+    expect(r.split).toBe(true);
+  });
+
+  test('one bad box among three blocks the whole split', () => {
+    // Partial splitting would silently drop a receipt, which is worse.
+    const r = splittable([
+      at([50, 20, 480, 480]), at([50, 520, 480, 980]), at(null),
+    ]);
+    expect(r.split).toBe(false);
+  });
+
+  test('_overlapFraction measures against the SMALLER box', () => {
+    // A small box entirely inside a large one is fully overlapping, even though
+    // it covers little of the larger one.
+    expect(_overlapFraction([0, 0, 1000, 1000], [400, 400, 600, 600])).toBeCloseTo(1);
+    expect(_overlapFraction([0, 0, 100, 100], [900, 900, 1000, 1000])).toBe(0);
+  });
+
+  describe('normaliseMany', () => {
+    test('carries the split decision alongside the receipts', () => {
+      const r = normaliseMany({ receipts: [
+        { merchant: 'Grab', total: 18.4, box_2d: [100, 20, 900, 460] },
+        { merchant: 'FairPrice', total: 62.1, box_2d: [100, 540, 900, 980] },
+      ] });
+      expect(r.receipts).toHaveLength(2);
+      expect(r.split).toBe(true);
+    });
+
+    test('an empty or unusable response is null, not an empty split', () => {
+      expect(normaliseMany({ receipts: [] })).toBeNull();
+      expect(normaliseMany(null)).toBeNull();
+      expect(normaliseMany('nope')).toBeNull();
     });
   });
 });
