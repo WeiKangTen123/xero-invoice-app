@@ -19,7 +19,7 @@ const TTL_MS = 10 * 60 * 1000;
 // desktop closes the dialog.
 const MAX_USES = 20;
 
-const _pairings = new Map(); // token -> { userId, expiresAt, uses, lastUploadAt }
+const _pairings = new Map(); // token -> { userId, expiresAt, uses, lastUploadAt, receiptIds }
 
 function _sweepExpired() {
   const now = Date.now();
@@ -33,7 +33,7 @@ function create(userId) {
   // 32 bytes: this is a bearer credential, not a nonce, so it is sized to resist
   // guessing rather than just collision.
   const token = crypto.randomBytes(32).toString('base64url');
-  _pairings.set(token, { userId: String(userId), expiresAt: Date.now() + TTL_MS, uses: 0, lastUploadAt: null });
+  _pairings.set(token, { userId: String(userId), expiresAt: Date.now() + TTL_MS, uses: 0, lastUploadAt: null, receiptIds: [] });
   return token;
 }
 
@@ -51,18 +51,43 @@ function verify(token) {
     userId: entry.userId,
     usesLeft: MAX_USES - entry.uses,
     expiresInMs: entry.expiresAt - Date.now(),
+    // What arrived through THIS pairing, so the desktop can show the photos
+    // rather than only a count.
+    receiptIds: entry.receiptIds.slice(),
   };
 }
 
 // Call after a successful upload. Returns the updated state, or null if the
 // token died between verify and here.
-function consume(token) {
+function consume(token, receiptId = null) {
   const entry = _pairings.get(token);
   if (!entry) return null;
   entry.uses += 1;
   entry.lastUploadAt = Date.now();
-  if (entry.uses >= MAX_USES) _pairings.delete(token);
-  return { uses: entry.uses, usesLeft: Math.max(0, MAX_USES - entry.uses) };
+  if (receiptId) entry.receiptIds.push(receiptId);
+  const result = { uses: entry.uses, usesLeft: Math.max(0, MAX_USES - entry.uses), receiptIds: entry.receiptIds.slice() };
+  // Hitting the cap ends the pairing, but the desktop still needs one last poll
+  // to show what came through, so the entry is kept until it expires naturally.
+  return result;
+}
+
+// Read-only view for the pairing's OWNER, used to render what arrived. Kept
+// separate from verify() on purpose: verify AUTHORISES an upload and must refuse
+// a spent token, while this only describes one and can still report a token that
+// has used its whole budget. Merging them once let uploads continue past the cap.
+function status(token) {
+  _sweepExpired();
+  const entry = _pairings.get(token);
+  if (!entry) return null;
+  const alive = entry.expiresAt > Date.now() && entry.uses < MAX_USES;
+  return {
+    alive,
+    spent: entry.uses >= MAX_USES,
+    uses: entry.uses,
+    usesLeft: Math.max(0, MAX_USES - entry.uses),
+    expiresInMs: Math.max(0, entry.expiresAt - Date.now()),
+    receiptIds: entry.receiptIds.slice(),
+  };
 }
 
 // The desktop revokes when the dialog closes, so a QR code that was on screen
@@ -79,4 +104,4 @@ function ownedBy(token, userId) {
 function activeCount() { _sweepExpired(); return _pairings.size; }
 function _reset() { _pairings.clear(); }
 
-module.exports = { create, verify, consume, revoke, ownedBy, activeCount, TTL_MS, MAX_USES, _reset };
+module.exports = { create, verify, status, consume, revoke, ownedBy, activeCount, TTL_MS, MAX_USES, _reset };

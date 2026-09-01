@@ -153,14 +153,43 @@ router.post('/pair', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/receipts/pair/:token — desktop polls its OWN pairing for arrivals
+// GET /api/receipts/pair/:token — desktop polls its OWN pairing for arrivals.
+// Returns the receipts themselves, each with a viewing token, so the dialog can
+// show the photo that just landed rather than only a counter. One poll carries
+// everything the panel needs.
 router.get('/pair/:token', requireAuth, (req, res) => {
   if (!pairing.ownedBy(req.params.token, req.user.id)) {
     return res.status(404).json({ error: 'Pairing not found' });
   }
-  const state = pairing.verify(req.params.token);
-  if (!state) return res.json({ alive: false, uploads: 0 });
-  res.json({ alive: true, uploads: pairing.MAX_USES - state.usesLeft, usesLeft: state.usesLeft, expiresInMs: state.expiresInMs });
+  // status(), not verify(): this only describes the pairing, and a pairing that
+  // has spent its whole budget still has photos worth showing.
+  const state = pairing.status(req.params.token);
+  if (!state) return res.json({ alive: false, spent: false, uploads: 0, receipts: [] });
+
+  const store = invoiceStore.forUser(req.user.id);
+  const receipts = state.receiptIds
+    .map(id => {
+      const r = store.getById(id);
+      if (!r) return null;   // deleted between arriving and this poll
+      return {
+        id: r.id,
+        // Parsing is asynchronous, so these fill in over successive polls.
+        vendorName:  r.vendorName,
+        totalAmount: r.totalAmount,
+        currency:    r.currency,
+        imageToken:  issueImageToken(req.user.id, r.id),
+      };
+    })
+    .filter(Boolean);
+
+  res.json({
+    alive: state.alive,
+    spent: state.spent,
+    uploads: state.uses,
+    usesLeft: state.usesLeft,
+    expiresInMs: state.expiresInMs,
+    receipts,
+  });
 });
 
 // DELETE /api/receipts/pair/:token — desktop revokes when the dialog closes, so
@@ -190,7 +219,7 @@ router.post('/capture/:token', (req, res) => {
     const { status, body } = storeReceipt(state.userId, { ...(req.body || {}), source: 'phone' });
     // Only a stored receipt spends an upload — a rejected file must not burn
     // one of the user's twenty.
-    if (status === 201) pairing.consume(req.params.token);
+    if (status === 201) pairing.consume(req.params.token, body.receipt?.id);
     // The phone has no business receiving a token that can read the image back.
     if (body.imageToken) delete body.imageToken;
     res.status(status).json(body);

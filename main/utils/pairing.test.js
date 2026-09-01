@@ -68,8 +68,16 @@ describe('utils/pairing', () => {
   describe('consume', () => {
     test('counts uploads down from the cap', () => {
       const t = pairing.create('u1');
-      expect(pairing.consume(t)).toEqual({ uses: 1, usesLeft: pairing.MAX_USES - 1 });
+      expect(pairing.consume(t)).toMatchObject({ uses: 1, usesLeft: pairing.MAX_USES - 1 });
       expect(pairing.verify(t).usesLeft).toBe(pairing.MAX_USES - 1);
+    });
+
+    test('records which receipts arrived, so the desktop can show the photos', () => {
+      const t = pairing.create('u1');
+      pairing.consume(t, 'r1');
+      pairing.consume(t, 'r2');
+      expect(pairing.status(t).receiptIds).toEqual(['r1', 'r2']);
+      expect(pairing.verify(t).receiptIds).toEqual(['r1', 'r2']);
     });
 
     test('multiple uploads are allowed — a stack of receipts needs one scan', () => {
@@ -80,11 +88,29 @@ describe('utils/pairing', () => {
       expect(pairing.verify(t)).not.toBeNull();
     });
 
-    test('the token dies once the cap is reached', () => {
+    test('the token stops AUTHORISING once the cap is reached', () => {
+      const t = pairing.create('u1');
+      for (let i = 0; i < pairing.MAX_USES; i++) pairing.consume(t, `r${i}`);
+      // verify() gates uploads, so it must refuse. This is the check that stops
+      // a spent pairing from accepting a twenty-first photo.
+      expect(pairing.verify(t)).toBeNull();
+    });
+
+    test('a spent token can still be DESCRIBED, so the desktop renders what arrived', () => {
+      const t = pairing.create('u1');
+      for (let i = 0; i < pairing.MAX_USES; i++) pairing.consume(t, `r${i}`);
+      const st = pairing.status(t);
+      expect(st.alive).toBe(false);
+      expect(st.spent).toBe(true);
+      expect(st.receiptIds).toHaveLength(pairing.MAX_USES);
+    });
+
+    test('status and verify disagree by design on a spent token', () => {
+      // Conflating them once allowed uploads past the cap.
       const t = pairing.create('u1');
       for (let i = 0; i < pairing.MAX_USES; i++) pairing.consume(t);
-      expect(pairing.verify(t)).toBeNull();
-      expect(pairing.consume(t)).toBeNull();
+      expect(pairing.verify(t)).toBeNull();      // authorisation: refused
+      expect(pairing.status(t)).not.toBeNull();  // description: still available
     });
 
     test('consuming an unknown token is null, not a throw', () => {
