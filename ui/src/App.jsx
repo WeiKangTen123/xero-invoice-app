@@ -4,6 +4,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { PipelineProvider } from './context/PipelineContext';
 import Layout from './components/layout/Layout';
 import Login from './pages/Login';
+import Capture from './pages/Capture';
 import Setup from './pages/Setup';
 import Invoices from './pages/Invoices';
 import InvoiceReview from './pages/InvoiceReview';
@@ -30,6 +31,9 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
+      {/* Outside the auth guard on purpose: the pairing token in the URL is the
+          phone's only credential, and it grants upload and nothing else. */}
+      <Route path="/capture/:token" element={<Capture />} />
       <Route
         path="/"
         element={

@@ -4,6 +4,8 @@ const jwt          = require('jsonwebtoken');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
 const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
+const pairing      = require('../utils/pairing');
+const QRCode       = require('qrcode');
 const logger       = require('../utils/logger');
 
 // Expense claims. A receipt arrives as a file rather than an email attachment,
@@ -45,47 +47,126 @@ function decodeBase64(data) {
   return buf.length ? buf : null;
 }
 
+// Shared by the authenticated desktop upload and the paired phone upload, so
+// the two cannot drift apart on validation, ordering or the state a new receipt
+// lands in. Returns { status, body }.
+function storeReceipt(userId, { mime, data, filename, source }) {
+  if (!receiptStore.isAcceptedMime(mime)) {
+    return { status: 400, body: {
+      error: `Unsupported file type${mime ? ` (${mime})` : ''}. Accepted: ${receiptStore.acceptedMimes().join(', ')}.`,
+    } };
+  }
+
+  const buffer = decodeBase64(data);
+  if (!buffer) return { status: 400, body: { error: 'File data is missing or not valid base64' } };
+
+  if (buffer.length > receiptStore.MAX_BYTES) {
+    const mb = n => `${(n / 1024 / 1024).toFixed(1)}MB`;
+    return { status: 413, body: {
+      error: `Receipt is ${mb(buffer.length)}; Xero accepts at most ${mb(receiptStore.MAX_BYTES)}. Try a lower-resolution photo.`,
+    } };
+  }
+
+  const id = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+  // Store the file BEFORE the row. A failed write must not leave a record
+  // pointing at an image that was never saved.
+  const storedName = receiptStore.forUser(userId).save(id, buffer, mime);
+
+  const record = invoiceStore.forUser(userId).add({
+    id,
+    status:      'review-needed',   // nothing is known until it is read or typed
+    invoiceType: 'EXPENSE',
+    source:      source === 'phone' ? 'phone' : 'upload',
+    receiptFile: storedName,
+    receiptMime: mime,
+    description: filename ? String(filename).slice(0, 200) : null,
+    processedAt: new Date().toISOString(),
+  });
+
+  logger.info('Receipt stored', { userId, id, bytes: buffer.length, mime, source: source || 'upload' });
+  return { status: 201, body: { receipt: record, imageToken: issueImageToken(userId, id) } };
+}
+
 // POST /api/receipts  { mime, data, filename?, source? }
 router.post('/', requireAuth, (req, res) => {
   try {
-    const { mime, data, filename, source } = req.body || {};
-
-    if (!receiptStore.isAcceptedMime(mime)) {
-      return res.status(400).json({
-        error: `Unsupported file type${mime ? ` (${mime})` : ''}. Accepted: ${receiptStore.acceptedMimes().join(', ')}.`,
-      });
-    }
-
-    const buffer = decodeBase64(data);
-    if (!buffer) return res.status(400).json({ error: 'File data is missing or not valid base64' });
-
-    if (buffer.length > receiptStore.MAX_BYTES) {
-      const mb = n => `${(n / 1024 / 1024).toFixed(1)}MB`;
-      return res.status(413).json({
-        error: `Receipt is ${mb(buffer.length)}; Xero accepts at most ${mb(receiptStore.MAX_BYTES)}. Try a lower-resolution photo.`,
-      });
-    }
-
-    const id = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
-    // Store the file BEFORE the row. A failed write must not leave a record
-    // pointing at an image that was never saved.
-    const storedName = receiptStore.forUser(req.user.id).save(id, buffer, mime);
-
-    const record = invoiceStore.forUser(req.user.id).add({
-      id,
-      status:      'review-needed',   // nothing is known until it is read or typed
-      invoiceType: 'EXPENSE',
-      source:      source === 'phone' ? 'phone' : 'upload',
-      receiptFile: storedName,
-      receiptMime: mime,
-      description: filename ? String(filename).slice(0, 200) : null,
-      processedAt: new Date().toISOString(),
-    });
-
-    logger.info('Receipt uploaded', { userId: req.user.id, id, bytes: buffer.length, mime, source: source || 'upload' });
-    res.status(201).json({ receipt: record, imageToken: issueImageToken(req.user.id, id) });
+    const { status, body } = storeReceipt(req.user.id, req.body || {});
+    res.status(status).json(body);
   } catch (err) {
     logger.error('Receipt upload failed', { userId: req.user.id, error: err.message });
+    res.status(500).json({ error: err.message || 'Upload failed' });
+  }
+});
+
+// ── Phone pairing ───────────────────────────────────────────────────────────
+// The desktop mints a token, renders it as a QR code, and the phone opens the
+// link. The token in that URL is the only credential the phone has, so it grants
+// upload and nothing else. See utils/pairing.js.
+
+function captureUrl(req, token) {
+  // Behind nginx with trust proxy set, these reflect the public origin.
+  return `${req.protocol}://${req.get('host')}/capture/${token}`;
+}
+
+// POST /api/receipts/pair — desktop asks for a QR
+router.post('/pair', requireAuth, async (req, res) => {
+  try {
+    const token = pairing.create(req.user.id);
+    const url   = captureUrl(req, token);
+    // SVG rather than a data URL: it scales to any panel size without going
+    // blurry, and it keeps the qrcode dependency out of the UI bundle.
+    const qrSvg = await QRCode.toString(url, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
+    logger.info('Receipt pairing created', { userId: req.user.id });
+    res.status(201).json({ token, url, qrSvg, expiresInMs: pairing.TTL_MS, maxUploads: pairing.MAX_USES });
+  } catch (err) {
+    logger.error('Pairing failed', { userId: req.user.id, error: err.message });
+    res.status(500).json({ error: 'Could not create a pairing code' });
+  }
+});
+
+// GET /api/receipts/pair/:token — desktop polls its OWN pairing for arrivals
+router.get('/pair/:token', requireAuth, (req, res) => {
+  if (!pairing.ownedBy(req.params.token, req.user.id)) {
+    return res.status(404).json({ error: 'Pairing not found' });
+  }
+  const state = pairing.verify(req.params.token);
+  if (!state) return res.json({ alive: false, uploads: 0 });
+  res.json({ alive: true, uploads: pairing.MAX_USES - state.usesLeft, usesLeft: state.usesLeft, expiresInMs: state.expiresInMs });
+});
+
+// DELETE /api/receipts/pair/:token — desktop revokes when the dialog closes, so
+// a QR that was on screen stops working the moment the user is done with it.
+router.delete('/pair/:token', requireAuth, (req, res) => {
+  if (!pairing.ownedBy(req.params.token, req.user.id)) {
+    return res.status(404).json({ error: 'Pairing not found' });
+  }
+  pairing.revoke(req.params.token);
+  res.json({ ok: true });
+});
+
+// GET /api/receipts/capture/:token — the phone checks the link before opening a
+// camera. No auth: the token is the credential. Returns nothing identifying.
+router.get('/capture/:token', (req, res) => {
+  const state = pairing.verify(req.params.token);
+  if (!state) return res.status(401).json({ ok: false, error: 'This link has expired. Show a new QR code on your computer.' });
+  res.json({ ok: true, usesLeft: state.usesLeft, expiresInMs: state.expiresInMs });
+});
+
+// POST /api/receipts/capture/:token — the phone uploads. No auth by design.
+router.post('/capture/:token', (req, res) => {
+  const state = pairing.verify(req.params.token);
+  if (!state) return res.status(401).json({ error: 'This link has expired. Show a new QR code on your computer.' });
+
+  try {
+    const { status, body } = storeReceipt(state.userId, { ...(req.body || {}), source: 'phone' });
+    // Only a stored receipt spends an upload — a rejected file must not burn
+    // one of the user's twenty.
+    if (status === 201) pairing.consume(req.params.token);
+    // The phone has no business receiving a token that can read the image back.
+    if (body.imageToken) delete body.imageToken;
+    res.status(status).json(body);
+  } catch (err) {
+    logger.error('Paired upload failed', { error: err.message });
     res.status(500).json({ error: err.message || 'Upload failed' });
   }
 });
