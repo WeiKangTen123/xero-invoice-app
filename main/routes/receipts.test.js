@@ -346,10 +346,10 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
   const upload = () => request(app).post('/api/receipts').set('Authorization', auth()).send({ mime: 'image/jpeg', data: JPEG_B64 });
 
   test('a successful read populates the row the user reviews', async () => {
-    parser.parseReceiptImage.mockResolvedValue({
+    parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [{
       merchant: 'Grab', date: '2026-08-24', currency: 'SGD',
-      total: 18.4, tax: 1.51, subTotal: 16.89, description: 'Airport ride', confidence: 'high',
-    });
+      total: 18.4, tax: 1.51, subTotal: 16.89, description: 'Airport ride', confidence: 'high', box: null,
+    }] });
     const { body } = await upload().expect(201);
     await settle();
 
@@ -393,10 +393,10 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
   });
 
   test('fields the parser could not read are left blank, not overwritten with null', async () => {
-    parser.parseReceiptImage.mockResolvedValue({
+    parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [{
       merchant: 'Cafe', date: null, currency: null, total: 12.5,
-      tax: null, subTotal: null, description: null, confidence: 'low',
-    });
+      tax: null, subTotal: null, description: null, confidence: 'low', box: null,
+    }] });
     const { body } = await upload().expect(201);
     await settle();
 
@@ -409,10 +409,10 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
   test('a read receipt still requires review — it never jumps to ready-to-post', async () => {
     // High confidence is not the user's sign-off, and nothing may look ready to
     // go to Xero without a person having looked at it.
-    parser.parseReceiptImage.mockResolvedValue({
+    parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [{
       merchant: 'Grab', date: '2026-08-24', currency: 'SGD',
-      total: 18.4, tax: 1.51, subTotal: 16.89, description: 'Ride', confidence: 'high',
-    });
+      total: 18.4, tax: 1.51, subTotal: 16.89, description: 'Ride', confidence: 'high', box: null,
+    }] });
     const { body } = await upload().expect(201);
     await settle();
     expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id).status).toBe('review-needed');
@@ -461,10 +461,10 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
   const send = tok => request(app).post(`/api/receipts/capture/${tok}`).send({ mime: 'image/jpeg', data: JPEG_B64 });
 
   test('returns the parsed fields for what this token uploaded', async () => {
-    parser.parseReceiptImage.mockResolvedValue({
+    parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [{
       merchant: 'Grab', date: '2026-08-24', currency: 'SGD',
-      total: 18.4, tax: null, subTotal: null, description: 'Ride', confidence: 'high',
-    });
+      total: 18.4, tax: null, subTotal: null, description: 'Ride', confidence: 'high', box: null,
+    }] });
     const { body } = await pair();
     await send(body.token).expect(201);
     await settle();
@@ -539,5 +539,188 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     for (let i = 0; i < 5; i++) await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
     const st = await request(app).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
     expect(st.body.uploads).toBe(1);
+  });
+});
+
+// ── Turning one upload into several receipts ────────────────────────────────
+// The design that makes auto-splitting safe: the FILE IS NEVER CUT UP. Siblings
+// share one stored file and carry the region they own, so the original is always
+// intact and merging back is just deleting rows.
+describe('routes/receipts — one upload, several records', () => {
+  let app, users, jwtSecret, testUser, invoiceStore, receiptStore, parser, pdfPages;
+  const created = [];
+  const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+  const PDF_B64  = Buffer.from('%PDF-1.4 fake').toString('base64');
+  const settle = () => new Promise(r => setImmediate(() => setImmediate(() => setImmediate(r))));
+
+  const TWO = [
+    { merchant: 'Grab',      date: '2026-08-24', currency: 'SGD', total: 18.4, tax: null, subTotal: null, description: 'Ride', confidence: 'high', box: [100, 20, 900, 460] },
+    { merchant: 'FairPrice', date: '2026-08-23', currency: 'SGD', total: 62.1, tax: null, subTotal: null, description: 'Groceries', confidence: 'high', box: [100, 540, 900, 980] },
+  ];
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users = require('../utils/users');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    invoiceStore = require('../utils/invoice-store');
+    receiptStore = require('../utils/receipt-store');
+    parser  = require('../utils/receipt-parser');
+    pdfPages = require('../utils/pdf-pages');
+    parser.parseReceiptImage.mockReset();
+    parser.parseReceiptImage.mockResolvedValue(null);
+    require('../utils/pairing')._reset();
+    const receiptRoutes = require('./receipts');
+
+    testUser = await users.createUser(`sp${Date.now()}@test.com`, 'password123', 'user');
+    created.push(testUser.id);
+
+    app = express();
+    app.use(express.json({ limit: '10mb' }));
+    app.use('/api/receipts', receiptRoutes);
+  });
+
+  afterAll(() => {
+    for (const id of created) {
+      try { fs.rmSync(path.join(__dirname, '../data/users', String(id)), { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
+  const upload = (data = JPEG_B64, mime = 'image/jpeg') =>
+    request(app).post('/api/receipts').set('Authorization', auth()).send({ mime, data });
+  const rows = () => invoiceStore.forUser(testUser.id).getAll();
+
+  describe('a photo of two receipts', () => {
+    test('becomes two records, each owning its own region of the same file', async () => {
+      parser.parseReceiptImage.mockResolvedValue({ split: true, receipts: TWO });
+      await upload().expect(201);
+      await settle();
+
+      const all = rows();
+      expect(all).toHaveLength(2);
+      expect(all.map(r => r.vendorName).sort()).toEqual(['FairPrice', 'Grab']);
+      // Same file, different boxes — nothing was cut up.
+      expect(new Set(all.map(r => r.receiptFile)).size).toBe(1);
+      expect(new Set(all.map(r => r.receiptBox)).size).toBe(2);
+      // And they are tied together so a merge knows what to collapse.
+      expect(new Set(all.map(r => r.receiptGroup)).size).toBe(1);
+    });
+
+    test('each record carries its OWN amount, not the combined total', async () => {
+      parser.parseReceiptImage.mockResolvedValue({ split: true, receipts: TWO });
+      await upload().expect(201);
+      await settle();
+      expect(rows().map(r => r.totalAmount).sort((a, b) => a - b)).toEqual([18.4, 62.1]);
+    });
+
+    test('both land at review-needed — a split is not a sign-off', async () => {
+      parser.parseReceiptImage.mockResolvedValue({ split: true, receipts: TWO });
+      await upload().expect(201);
+      await settle();
+      expect(rows().every(r => r.status === 'review-needed')).toBe(true);
+    });
+
+    test('a weak detection stays as ONE record holding the whole photo', async () => {
+      // The guard that stops a phantom second receipt being invented.
+      parser.parseReceiptImage.mockResolvedValue({ split: false, reason: 'boxes overlap', receipts: TWO });
+      await upload().expect(201);
+      await settle();
+
+      const all = rows();
+      expect(all).toHaveLength(1);
+      expect(all[0].receiptBox).toBeFalsy();
+      expect(all[0].vendorName).toBe('Grab');   // the first read is still applied
+    });
+
+    test('an unreadable photo leaves the single record intact', async () => {
+      parser.parseReceiptImage.mockResolvedValue(null);
+      await upload().expect(201);
+      await settle();
+      expect(rows()).toHaveLength(1);
+    });
+  });
+
+  describe('a PDF with a receipt on each page', () => {
+    test('becomes one record per page, sharing the file', async () => {
+      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['a'.repeat(80), 'b'.repeat(80), 'c'.repeat(80)], numPages: 3, hasText: true, textPageCount: 3 });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+
+      const all = rows();
+      expect(all).toHaveLength(3);
+      expect(all.map(r => r.receiptPage).sort()).toEqual([1, 2, 3]);
+      expect(new Set(all.map(r => r.receiptFile)).size).toBe(1);
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('a scanned PDF with no text layer stays as one record', async () => {
+      // Splitting it would need a PDF renderer, which is a deliberate non-goal.
+      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['', ''], numPages: 2, hasText: false, textPageCount: 0 });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      expect(rows()).toHaveLength(1);
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('a single-page PDF is an ordinary receipt', async () => {
+      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['a'.repeat(80)], numPages: 1, hasText: true, textPageCount: 1 });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      const all = rows();
+      expect(all).toHaveLength(1);
+      expect(all[0].receiptPage).toBeFalsy();
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('a PDF is never sent to the vision parser', async () => {
+      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['a'.repeat(80)], numPages: 1, hasText: true, textPageCount: 1 });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      expect(parser.parseReceiptImage).not.toHaveBeenCalled();
+      pdfPages.extractPages.mockRestore();
+    });
+  });
+
+  describe('undoing a split', () => {
+    test('merge removes the siblings and restores the whole image', async () => {
+      parser.parseReceiptImage.mockResolvedValue({ split: true, receipts: TWO });
+      await upload().expect(201);
+      await settle();
+      const keep = rows()[0];
+
+      const res = await request(app).post(`/api/receipts/${keep.id}/merge`).set('Authorization', auth()).expect(200);
+      expect(res.body.removed).toBe(1);
+
+      const all = rows();
+      expect(all).toHaveLength(1);
+      expect(all[0].receiptBox).toBeFalsy();
+      expect(all[0].receiptGroup).toBeFalsy();
+      // The file was never cut up, so the whole photo is still there.
+      expect(receiptStore.forUser(testUser.id).exists(all[0].receiptFile)).toBe(true);
+    });
+
+    test('merging a receipt that was never split is refused', async () => {
+      parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [TWO[0]] });
+      const { body } = await upload().expect(201);
+      await settle();
+      await request(app).post(`/api/receipts/${body.receipt.id}/merge`).set('Authorization', auth()).expect(400);
+    });
+  });
+
+  describe('deleting a split sibling', () => {
+    test('the shared file survives while another record still uses it', async () => {
+      parser.parseReceiptImage.mockResolvedValue({ split: true, receipts: TWO });
+      await upload().expect(201);
+      await settle();
+      const [a, b] = rows();
+
+      await request(app).delete(`/api/receipts/${a.id}`).set('Authorization', auth()).expect(200);
+      // Deleting the file here would leave the other record pointing at nothing.
+      expect(receiptStore.forUser(testUser.id).exists(b.receiptFile)).toBe(true);
+
+      await request(app).delete(`/api/receipts/${b.id}`).set('Authorization', auth()).expect(200);
+      expect(receiptStore.forUser(testUser.id).exists(b.receiptFile)).toBe(false);
+    });
   });
 });

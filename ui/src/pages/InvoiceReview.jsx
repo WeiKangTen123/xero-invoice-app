@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import CroppedImage from '../components/receipts/CroppedImage';
 import AccountCodeSelect, { useAccountName } from '../components/AccountCodeSelect';
 
 // Statuses that allow the user to trigger a Xero submission.
@@ -153,6 +154,8 @@ export default function InvoiceReview() {
   // Expense claims carry a photographed receipt rather than a PDF.
   const [receiptUrl, setReceiptUrl] = useState(null);
   const [receiptRot, setReceiptRot] = useState(0);
+  const [group,      setGroup]      = useState(null);   // { index, total, siblings }
+  const [merging,    setMerging]    = useState(false);
   const [reporting,  setReporting]  = useState(false);
   const [marking,    setMarking]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -234,6 +237,30 @@ export default function InvoiceReview() {
     const timer = setInterval(refresh, 4 * 60 * 1000);   // token lives 5 min
     return () => { active = false; clearInterval(timer); };
   }, [inv?.receiptFile, id]);
+
+  // Siblings from the same upload, so the header can say "1 of 2" and offer to
+  // step between them.
+  useEffect(() => {
+    if (!inv?.receiptFile) return;
+    let active = true;
+    api.get(`/receipts/${id}/group`)
+      .then(g => { if (active) setGroup(g); })
+      .catch(() => { if (active) setGroup(null); });
+    return () => { active = false; };
+  }, [inv?.receiptFile, inv?.receiptGroup, id]);
+
+  // Undo a split: removes the siblings and restores the whole original on this
+  // record. Only possible because the file was never cut apart.
+  async function mergeBack() {
+    setMerging(true);
+    try {
+      await api.post(`/receipts/${id}/merge`, {});
+      window.location.reload();
+    } catch (err) {
+      setMerging(false);
+      alert(err.message || 'Could not merge');
+    }
+  }
 
   // ── Actions ───────────────────────────────────────────────────────────────
   async function markReviewed() {
@@ -527,7 +554,10 @@ export default function InvoiceReview() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ fontSize: 16 }}>🧾</span>
                   <span style={{ fontWeight: 600, fontSize: 13 }}>
-                    Receipt{inv.source === 'phone' ? ' · from phone' : ''}
+                    Receipt
+                    {group?.split ? ` · ${group.index} of ${group.total}` : ''}
+                    {inv.source === 'phone' ? ' · from phone' : ''}
+                    {inv.receiptPage ? ` · page ${inv.receiptPage}` : ''}
                   </span>
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
@@ -540,12 +570,23 @@ export default function InvoiceReview() {
               </div>
               {receiptUrl ? (
                 <div style={{ background: '#1b1b1f', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14, minHeight: 420, maxHeight: 'calc(100vh - 240px)', overflow: 'auto' }}>
-                  <img
-                    src={receiptUrl}
-                    alt="Receipt"
-                    style={{ maxWidth: '100%', maxHeight: 'calc(100vh - 280px)', objectFit: 'contain',
-                             transform: `rotate(${receiptRot}deg)`, transition: 'transform .2s ease' }}
-                  />
+                  {/* A split record owns one region of a shared photo, so only
+                      that region is drawn. The file itself was never cut. */}
+                  {inv.receiptMime === 'application/pdf' ? (
+                    <iframe
+                      src={`${receiptUrl}#page=${inv.receiptPage || 1}&zoom=page-width`}
+                      title="Receipt PDF"
+                      style={{ width: '100%', height: 'calc(100vh - 300px)', minHeight: 420, border: 'none', background: '#525659' }}
+                    />
+                  ) : (
+                    <CroppedImage
+                      src={receiptUrl}
+                      box={(() => { try { return inv.receiptBox ? JSON.parse(inv.receiptBox) : null; } catch { return null; } })()}
+                      alt="Receipt"
+                      style={{ maxWidth: '100%', maxHeight: 'calc(100vh - 280px)', objectFit: 'contain',
+                               transform: `rotate(${receiptRot}deg)`, transition: 'transform .2s ease' }}
+                    />
+                  )}
                 </div>
               ) : (
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 300, color: 'var(--text-muted)', gap: 10 }}>
@@ -553,8 +594,33 @@ export default function InvoiceReview() {
                   Loading receipt...
                 </div>
               )}
+              {group?.split && (
+                <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 8 }}>
+                    {inv.receiptPage ? `Split from a ${group.total}-page PDF` : `Split from one photo of ${group.total} receipts`}
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                    {group.siblings.map((sib, i) => (
+                      <a key={sib.id} href={`/invoices/${sib.id}`}
+                         style={{ fontSize: 11, padding: '4px 9px', borderRadius: 6, textDecoration: 'none',
+                                  border: '1px solid var(--border)',
+                                  background: sib.id === id ? 'var(--accent)' : 'transparent',
+                                  color: sib.id === id ? '#fff' : 'var(--text-secondary)' }}>
+                        {i + 1}. {sib.vendorName || 'Unread'}{sib.totalAmount ? ` · ${sib.totalAmount}` : ''}
+                      </a>
+                    ))}
+                  </div>
+                  <button className="btn btn-outline btn-sm" onClick={mergeBack} disabled={merging}>
+                    {merging ? 'Merging…' : '⇤ Merge back into one'}
+                  </button>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 }}>
+                    The original upload is intact — merging deletes the other {group.total - 1} record
+                    {group.total - 1 === 1 ? '' : 's'} and restores the whole {inv.receiptPage ? 'PDF' : 'photo'} here.
+                  </div>
+                </div>
+              )}
               <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border)', fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                Fields on the right were read from this photo automatically. Check them against the
+                Fields on the right were read from this {inv.receiptMime === 'application/pdf' ? 'PDF' : 'photo'} automatically. Check them against the
                 image before saving — anything unreadable was left blank rather than guessed.
               </div>
             </div>

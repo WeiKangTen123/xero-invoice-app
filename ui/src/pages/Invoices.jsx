@@ -476,7 +476,16 @@ export default function Invoices() {
                           ? `${inv.currency || ''} ${Number(inv.totalAmount).toLocaleString('en', { minimumFractionDigits: 2 })}`
                           : '—'}
                       </td>
-                      <td><TypeBadge type={inv.invoiceType} /></td>
+                      <td>
+                        <TypeBadge type={inv.invoiceType} />
+                        {/* Two rows from one upload look identical otherwise. */}
+                        {inv.receiptGroup && (
+                          <span className="badge badge-gray" style={{ marginLeft: 4, fontSize: 9.5 }}
+                                title="One of several receipts found in a single upload">
+                            {inv.receiptPage ? `p${inv.receiptPage}` : 'split'}
+                          </span>
+                        )}
+                      </td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                         {inv.invoiceDate || '—'}
                       </td>

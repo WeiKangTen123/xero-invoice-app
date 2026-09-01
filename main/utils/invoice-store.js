@@ -43,6 +43,7 @@ const FIELD_TO_COLUMN = {
   // a bill's PDF and a claim's receipt are attached to Xero by different paths
   // and a single field would hide which one a row actually has.
   receiptFile: 'receipt_file', receiptMime: 'receipt_mime',
+  receiptBox: 'receipt_box', receiptPage: 'receipt_page', receiptGroup: 'receipt_group',
 };
 
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
@@ -95,6 +96,11 @@ function _rowToRecord(row, reports, lineItems) {
     processedAt:       row.processed_at,
     receiptFile:       row.receipt_file,
     receiptMime:       row.receipt_mime,
+    // Which part of the shared file this record owns. Null on an ordinary
+    // single-receipt upload.
+    receiptBox:        row.receipt_box,
+    receiptPage:       row.receipt_page,
+    receiptGroup:      row.receipt_group,
     reports:           reports || [],
   };
 }

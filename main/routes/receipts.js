@@ -6,6 +6,10 @@ const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
 const pairing      = require('../utils/pairing');
 const { parseReceiptImage } = require('../utils/receipt-parser');
+// Required as a module rather than destructured so the functions are looked up
+// at call time — a destructured import captures the original reference and can
+// never be substituted in a test.
+const pdfPages = require('../utils/pdf-pages');
 const QRCode       = require('qrcode');
 const logger       = require('../utils/logger');
 
@@ -96,24 +100,107 @@ function storeReceipt(userId, { mime, data, filename, source }) {
   // Parsing is an enhancement, never a gate: if it fails the receipt stays
   // exactly where it is, at review-needed, for the user to type by hand.
   setImmediate(() => {
-    parseReceiptImage(userId, buffer, mime)
-      .then(parsed => {
-        if (!parsed) return;
-        invoiceStore.forUser(userId).update(id, {
-          vendorName:  parsed.merchant    ?? undefined,
-          invoiceDate: parsed.date        ?? undefined,
-          currency:    parsed.currency    ?? undefined,
-          totalAmount: parsed.total       ?? undefined,
-          taxAmount:   parsed.tax         ?? undefined,
-          subTotal:    parsed.subTotal    ?? undefined,
-          description: parsed.description ?? undefined,
-        });
-        logger.info('Receipt parsed', { userId, id, confidence: parsed.confidence, readTotal: parsed.total !== null });
-      })
-      .catch(err => logger.warn('Receipt parse failed', { userId, id, error: err.message }));
+    readAndMaybeSplit(userId, id, buffer, mime, storedName)
+      .catch(err => logger.warn('Receipt read failed', { userId, id, error: err.message }));
   });
 
   return { status: 201, body: { receipt: record, imageToken: issueImageToken(userId, id) } };
+}
+
+// Applies one receipt's fields to a record.
+function _applyFields(userId, id, r, extra = {}) {
+  invoiceStore.forUser(userId).update(id, {
+    vendorName:  r.merchant    ?? undefined,
+    invoiceDate: r.date        ?? undefined,
+    currency:    r.currency    ?? undefined,
+    totalAmount: r.total       ?? undefined,
+    taxAmount:   r.tax         ?? undefined,
+    subTotal:    r.subTotal    ?? undefined,
+    description: r.description ?? undefined,
+    ...extra,
+  });
+}
+
+// Reads an upload and, when the evidence is unambiguous, turns one upload into
+// several records.
+//
+// Crucially the FILE IS NEVER CUT UP. Every sibling points at the same stored
+// file and carries the region it owns — a bounding box for a photo, a page
+// number for a PDF — and the UI crops on display. That means:
+//   * no server-side image library, and no PDF renderer
+//   * the original is always intact, so merging back is just deleting rows
+//   * a bad split costs one click to undo and loses nothing
+//
+// Splitting only happens when receipt-parser's splittable() or pdf-pages'
+// splittablePages() says the evidence is clean. Anything doubtful stays as one
+// record holding the whole upload, because inventing a second receipt is worse
+// than failing to split a real one.
+async function readAndMaybeSplit(userId, id, buffer, mime, storedName) {
+  const store = invoiceStore.forUser(userId);
+
+  // ── PDF: one record per page ──────────────────────────────────────────────
+  if (mime === 'application/pdf') {
+    const extracted = await pdfPages.extractPages(buffer);
+    const decision  = pdfPages.splittablePages(extracted);
+    if (!decision.split) {
+      logger.info('PDF kept as one receipt', { userId, id, reason: decision.reason });
+      return;
+    }
+
+    const group = id;
+    const [first, ...rest] = decision.pageNumbers;
+    store.update(id, { receiptPage: first, receiptGroup: group });
+    for (const page of rest) {
+      const sibId = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+      store.add({
+        id: sibId,
+        status: 'review-needed',
+        invoiceType: 'EXPENSE',
+        source: 'upload',
+        receiptFile: storedName,      // the SAME file
+        receiptMime: mime,
+        receiptPage: page,
+        receiptGroup: group,
+        processedAt: new Date().toISOString(),
+      });
+    }
+    logger.info('PDF split by page', { userId, id, pages: decision.pageNumbers.length });
+    return;
+  }
+
+  // ── Image: one record per detected receipt ────────────────────────────────
+  const parsed = await parseReceiptImage(userId, buffer, mime);
+  if (!parsed) return;                       // unreadable — the record survives as-is
+
+  const { receipts, split, reason } = parsed;
+
+  if (!split) {
+    // One receipt, or evidence too weak to split on. Either way the whole image
+    // stays on one record.
+    _applyFields(userId, id, receipts[0]);
+    logger.info('Receipt read', { userId, id, receipts: receipts.length, split: false, reason });
+    return;
+  }
+
+  const group = id;
+  const [first, ...rest] = receipts;
+  _applyFields(userId, id, first, { receiptBox: JSON.stringify(first.box), receiptGroup: group });
+  for (const r of rest) {
+    const sibId = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+    store.add({
+      id: sibId,
+      status: 'review-needed',
+      invoiceType: 'EXPENSE',
+      source: 'upload',
+      receiptFile: storedName,        // the SAME file
+      receiptMime: mime,
+      receiptBox: JSON.stringify(r.box),
+      receiptGroup: group,
+      processedAt: new Date().toISOString(),
+    });
+    _applyFields(userId, sibId, r);
+  }
+  logger.info('Photo split into separate receipts', { userId, id, count: receipts.length });
 }
 
 // POST /api/receipts  { mime, data, filename?, source? }
@@ -299,10 +386,58 @@ router.delete('/:id', requireAuth, (req, res) => {
   if (!record) return res.status(404).json({ error: 'Receipt not found' });
   if (record.invoiceType !== 'EXPENSE') return res.status(400).json({ error: 'Not an expense claim' });
 
-  if (record.receiptFile) receiptStore.forUser(req.user.id).remove(record.receiptFile);
   store.remove(req.params.id);
+
+  // Split siblings SHARE one stored file, so it may only be deleted once the
+  // last record referencing it is gone. Removing it with the first would leave
+  // the others pointing at nothing.
+  if (record.receiptFile) {
+    const stillUsed = store.getAll().some(r => r.receiptFile === record.receiptFile);
+    if (!stillUsed) receiptStore.forUser(req.user.id).remove(record.receiptFile);
+  }
+
   logger.info('Receipt deleted', { userId: req.user.id, id: req.params.id });
   res.json({ ok: true });
+});
+
+// GET /api/receipts/:id/group — the other records that came from the same
+// upload, so the review screen can say "1 of 2" and offer to step between them.
+router.get('/:id/group', requireAuth, (req, res) => {
+  const store  = invoiceStore.forUser(req.user.id);
+  const record = store.getById(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Receipt not found' });
+  if (!record.receiptGroup) return res.json({ split: false, index: 1, total: 1, siblings: [] });
+
+  const members = store.getAll()
+    .filter(r => r.receiptGroup === record.receiptGroup)
+    // Stable, human order: PDF pages by page, photo regions top-to-bottom.
+    .sort((a, b) => (a.receiptPage || 0) - (b.receiptPage || 0) || String(a.id).localeCompare(String(b.id)));
+
+  res.json({
+    split: true,
+    index: members.findIndex(r => r.id === record.id) + 1,
+    total: members.length,
+    siblings: members.map(r => ({ id: r.id, vendorName: r.vendorName, totalAmount: r.totalAmount, currency: r.currency, page: r.receiptPage })),
+  });
+});
+
+// POST /api/receipts/:id/merge — undo a split.
+//
+// Deletes every sibling from the same upload except this one, and clears the
+// region so the surviving record shows the whole original again. Possible only
+// because the file was never cut up.
+router.post('/:id/merge', requireAuth, (req, res) => {
+  const store  = invoiceStore.forUser(req.user.id);
+  const record = store.getById(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Receipt not found' });
+  if (!record.receiptGroup) return res.status(400).json({ error: 'This receipt was not split' });
+
+  const siblings = store.getAll().filter(r => r.receiptGroup === record.receiptGroup && r.id !== record.id);
+  for (const sib of siblings) store.remove(sib.id);
+
+  const merged = store.update(req.params.id, { receiptBox: null, receiptPage: null, receiptGroup: null });
+  logger.info('Split merged back', { userId: req.user.id, id: req.params.id, removed: siblings.length });
+  res.json({ receipt: merged, removed: siblings.length });
 });
 
 module.exports = router;
