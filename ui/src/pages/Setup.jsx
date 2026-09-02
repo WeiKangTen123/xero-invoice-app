@@ -225,7 +225,7 @@ function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, tes
 // and OAuth2 "Web app" (new — connect via Xero's consent screen) are both shown at
 // once; whichever the user successfully completes becomes the active method
 // (config.xero.connectionType, decided server-side by which one actually succeeds).
-function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs, onTest }) {
+function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs, onTest, onConnectionChange }) {
   const [tenants, setTenants]       = useState(null); // null = loading
   const [connectionType, setConnectionType] = useState('custom');
   const [connecting, setConnecting] = useState(false);
@@ -239,6 +239,11 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
       setTenants(d.tenants || []);
     } catch (_) {
       setTenants([]);
+    } finally {
+      // Anything else on this page reading Xero data has to be told the
+      // connection moved. Without this, disconnecting left the previous
+      // organisation's chart of accounts sitting below, looking live.
+      onConnectionChange?.();
     }
   }
 
@@ -547,6 +552,9 @@ export default function Setup() {
   const [saving,  setSaving]  = useState(false);
   const [testing, setTesting] = useState({});
   const [msgs,    setMsgs]    = useState({});
+  // Bumped whenever the Xero connection changes, so anything below reading Xero
+  // data refetches instead of showing a disconnected organisation's figures.
+  const [xeroVersion, setXeroVersion] = useState(0);
   const [saved,   setSaved]   = useState(false);
 
   useEffect(() => {
@@ -638,6 +646,7 @@ export default function Setup() {
           <XeroConnectionCard
             idx={0} sectionData={config.xero}
             values={values} onChange={handleChange} testing={testing} msgs={msgs} onTest={runTest}
+            onConnectionChange={() => setXeroVersion(v => v + 1)}
           />
         )}
 
@@ -693,7 +702,7 @@ export default function Setup() {
           because "are my account codes right?" is a setup question, and a list
           of codes is not something you would act on from a dashboard. */}
       <div style={{ marginTop: 24 }}>
-        <ChartOfAccounts />
+        <ChartOfAccounts refreshKey={xeroVersion} />
       </div>
     </div>
   );
