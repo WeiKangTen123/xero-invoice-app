@@ -2275,3 +2275,39 @@ describe('financial narrative — what the model may see and say', () => {
     });
   });
 });
+
+// ── Narrative: what changed after watching it fail on live data ─────────────
+describe('financial narrative — lessons from the first live run', () => {
+  const { _narrativeFacts, _narrativePrompt } = require('./reports');
+
+  const cf = {
+    organisation: { currency: 'SGD' },
+    reconciliation: { revenueAccrual: 109330, customerReceipts: 26000 },
+    workingCapital: { receivable: 109330, overdue: 57330, dso: 349, collectionRate: 0 },
+    alerts: { alerts: [
+      { title: 'Cash is positive but operations are not',
+        detail: 'the trading side consumed SGD 3,077.30 a month', amount: 3077.3 },
+    ] },
+  };
+
+  test('figures quoted from an alert are allowed — they came from us', () => {
+    // The guard dropped a TRUE sentence for quoting an alert back, because the
+    // allowed set was built only from the figures list.
+    expect(_narrativeFacts(cf).allowed.has(3077)).toBe(true);
+  });
+
+  test('the prompt forbids monetary amounts outright', () => {
+    // A guard can prove a number is real. It cannot prove the number was
+    // attached to the right label — and the first live run wrote "none of the
+    // SGD 57,330 invoiced revenue has been collected", where 57,330 is the
+    // OVERDUE figure and invoiced is 109,330. Both real, so it passed. Removing
+    // amounts from the prose removes the failure mode entirely.
+    const p = _narrativePrompt(_narrativeFacts(cf));
+    expect(p).toMatch(/DO NOT WRITE ANY MONETARY AMOUNTS/);
+    expect(p).toMatch(/wrong label/i);
+  });
+
+  test('percentages and day counts are still permitted', () => {
+    expect(_narrativePrompt(_narrativeFacts(cf))).toMatch(/Percentages and counts of days or months are fine/);
+  });
+});

@@ -2159,7 +2159,12 @@ Write at most 3 short sentences, plain text, no markdown, no bullet points:
 3. The single most useful next step, and only if the figures clearly support it.
 
 Rules:
-- Use ONLY numbers that appear above. Never invent, estimate, or recalculate one.
+- DO NOT WRITE ANY MONETARY AMOUNTS. No figures like "SGD 109,330". The reader is
+  looking at every one of these numbers on the same screen, so repeating them adds
+  nothing and risks attaching an amount to the wrong label. Say "most of what you
+  invoiced", "the overdue balance", "the bulk of your cash in" instead.
+- Percentages and counts of days or months are fine, but only exactly as given above.
+- Never invent, estimate or recalculate anything.
 - Do not give business advice beyond what the figures show. Never suggest hiring, firing, pricing or borrowing.
 - If the figures look healthy, say so briefly rather than manufacturing a concern.
 - Write to the owner as "you". No preamble, no sign-off.`;
@@ -2208,7 +2213,16 @@ function _narrativeFacts(cf) {
     if (rw.propped) addRaw('Note', 'the balance grew only because of receipts that did not come from customers');
   }
 
-  return { lines, allowed, alerts: cf.alerts?.alerts || [] };
+  // Figures inside the alerts are ours as well: they were computed here and
+  // handed to the model as ground truth. Quoting one back is correct, and the
+  // guard dropped a true sentence for doing so until this was added.
+  const alerts = cf.alerts?.alerts || [];
+  for (const a of alerts) {
+    for (const n of _largeNumbersIn(`${a.title} ${a.detail}`)) allowed.add(Math.round(n));
+    if (Number.isFinite(a.amount)) allowed.add(Math.round(Math.abs(a.amount)));
+  }
+
+  return { lines, allowed, alerts };
 }
 
 // Keeps only sentences whose numbers we supplied. A model inventing a
@@ -2233,17 +2247,22 @@ async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
-  let raw;
-  try {
-    raw = await callGemini(userId, [
-      { role: 'system', content: 'You are a careful financial analyst. Return plain sentences only.' },
-      { role: 'user',   content: _narrativePrompt(facts) },
-    ], { temperature: 0.2, maxTokens: 350 });
-  } catch (err) {
-    logger.warn('Financial narrative unavailable', { userId, tenantId, error: err.message });
-    // The card simply will not render. Figures never wait on this.
-    return { available: false, reason: 'unavailable' };
+  // Two attempts. The shared client already rotates models and keys on a quota
+  // error, so this only covers a transient blip — but one blip used to hide the
+  // card for the whole cache window.
+  let raw = null;
+  for (let attempt = 1; attempt <= 2 && raw === null; attempt++) {
+    try {
+      raw = await callGemini(userId, [
+        { role: 'system', content: 'You are a careful financial analyst. Return plain sentences only.' },
+        { role: 'user',   content: _narrativePrompt(facts) },
+      ], { temperature: 0.2, maxTokens: 350 });
+    } catch (err) {
+      logger.warn('Financial narrative attempt failed', { userId, tenantId, attempt, error: err.message });
+    }
   }
+  // The card simply will not render. Figures never wait on this.
+  if (raw === null) return { available: false, reason: 'unavailable' };
 
   const { text, dropped } = _groundNarrative(raw, facts.allowed);
   if (dropped) logger.warn('Narrative sentences dropped as ungrounded', { userId, tenantId, dropped });
