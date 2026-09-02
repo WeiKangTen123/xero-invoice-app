@@ -2241,21 +2241,25 @@ function _groundNarrative(text, allowed) {
   return { text: kept.join(' '), dropped: sentences.length - kept.length };
 }
 
-async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
-  const cf = await getCashFlow(userId, tenantId, { timezone, force, period });
-
+// Everything after the Xero read: prompt, call, ground, cache. Split out so it
+// can be tested directly — the fetch is one line of delegation, and keeping them
+// together meant the only way to reach this logic in a test was to stand up a
+// whole Xero token. "callGemini is not defined" shipped green for exactly that
+// reason.
+async function _narrateFrom(userId, tenantId, cf, { force = false } = {}) {
   const facts = _narrativeFacts(cf);
   // Keyed on the figures themselves, so it is rewritten only when they change.
   const key = `narrative:${userId}:${tenantId}:${facts.lines.join('|')}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
+  // Required lazily, exactly as getVarianceInsights does — reports.js has no
+  // module-level Gemini import.
+  const { callGemini } = require('../utils/gemini-client');
+
   // Two attempts, WITH a pause between them. callGemini already rotates through
-  // every model and every key before it throws, so by the time it does, an
-  // immediate retry repeats a request that just failed on all of them — which is
-  // exactly what happened on the first live run: both attempts failed together,
-  // then the same prompt succeeded moments later. The gap is the whole point of
-  // the retry.
+  // every model and every key before it throws, so an immediate retry re-sends a
+  // request that just failed on all of them. The gap is the point.
   let raw = null;
   for (let attempt = 1; attempt <= 2 && raw === null; attempt++) {
     if (attempt > 1) await new Promise(r => setTimeout(r, NARRATIVE_RETRY_DELAY_MS));
@@ -2286,6 +2290,11 @@ async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force
   }, NARRATIVE_CACHE_TTL_MS);
 }
 
+async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
+  const cf = await getCashFlow(userId, tenantId, { timezone, force, period });
+  return _narrateFrom(userId, tenantId, cf, { force });
+}
+
 // Called on disconnect so nothing here can outlive the connection it came from.
 function clearCache(userId) {
   for (const key of _cache.keys()) {
@@ -2306,5 +2315,5 @@ module.exports = {
   _buildAlerts, ALERT_THRESHOLDS,
   _isTransfer, _isReceiptPayment, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
-  _narrativeFacts, _groundNarrative, _narrativePrompt,
+  _narrativeFacts, _groundNarrative, _narrativePrompt, _narrateFrom,
 };
