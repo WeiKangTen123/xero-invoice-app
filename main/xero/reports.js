@@ -2143,6 +2143,9 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
 //   * it is read-only — it proposes nothing and can act on nothing
 //   * if it fails, the card simply does not render; figures never wait on it
 const NARRATIVE_CACHE_TTL_MS = 30 * 60 * 1000;
+// Long enough for a rate limit to ease. Nothing waits on this — the card is
+// fetched separately from the figures — so a pause costs the reader nothing.
+const NARRATIVE_RETRY_DELAY_MS = 2500;
 
 function _narrativePrompt(facts) {
   return `You are a financial analyst writing three short sentences for a business owner looking at their own dashboard.
@@ -2247,11 +2250,15 @@ async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
-  // Two attempts. The shared client already rotates models and keys on a quota
-  // error, so this only covers a transient blip — but one blip used to hide the
-  // card for the whole cache window.
+  // Two attempts, WITH a pause between them. callGemini already rotates through
+  // every model and every key before it throws, so by the time it does, an
+  // immediate retry repeats a request that just failed on all of them — which is
+  // exactly what happened on the first live run: both attempts failed together,
+  // then the same prompt succeeded moments later. The gap is the whole point of
+  // the retry.
   let raw = null;
   for (let attempt = 1; attempt <= 2 && raw === null; attempt++) {
+    if (attempt > 1) await new Promise(r => setTimeout(r, NARRATIVE_RETRY_DELAY_MS));
     try {
       raw = await callGemini(userId, [
         { role: 'system', content: 'You are a careful financial analyst. Return plain sentences only.' },
