@@ -2187,3 +2187,91 @@ describe('_buildAlerts', () => {
     expect(codes(r)).toContain('dso');
   });
 });
+
+// ── AI narrative ────────────────────────────────────────────────────────────
+// The card exists to join up alerts that are already correct. What matters is
+// that it can never contradict them, never invent a figure, and never block the
+// numbers from rendering.
+describe('financial narrative — what the model may see and say', () => {
+  const { _narrativeFacts, _groundNarrative, _narrativePrompt } = require('./reports');
+
+  const cf = {
+    organisation: { currency: 'SGD' },
+    period: { label: 'Financial year to date' },
+    reconciliation: { revenueAccrual: 109330, customerReceipts: 26000 },
+    cash: { closing: 75397 },
+    workingCapital: { receivable: 109330, overdue: 57330, payable: 0, dso: 349, collectionRate: 0 },
+    runway: { available: true, avgCashIn: 31500, avgCashOut: 8391, avgOperatingIn: 6500, propped: true },
+    alerts: { alerts: [{ title: 'Most receivables are overdue', detail: '52% is past due' }] },
+  };
+
+  describe('_narrativeFacts', () => {
+    test('every figure it may mention is added to the allowed set', () => {
+      const f = _narrativeFacts(cf);
+      for (const n of [109330, 26000, 75397, 57330, 349]) expect(f.allowed.has(n)).toBe(true);
+    });
+
+    test('the alerts are passed in as ground truth to connect, not restate', () => {
+      expect(_narrativeFacts(cf).alerts).toHaveLength(1);
+      expect(_narrativePrompt(_narrativeFacts(cf))).toMatch(/connect them, not to re-state/i);
+    });
+
+    test('a null or non-finite figure is omitted rather than shown as zero', () => {
+      const f = _narrativeFacts({ ...cf, workingCapital: { ...cf.workingCapital, dso: null, collectionRate: null } });
+      expect(f.lines.join('\n')).not.toMatch(/Debtor days/);
+      expect(f.lines.join('\n')).not.toMatch(/Share of invoiced work/);
+    });
+
+    test('survives an empty payload instead of throwing', () => {
+      const f = _narrativeFacts({});
+      expect(Array.isArray(f.lines)).toBe(true);
+      expect(f.alerts).toEqual([]);
+    });
+
+    test('the prompt forbids inventing figures and giving business advice', () => {
+      const p = _narrativePrompt(_narrativeFacts(cf));
+      expect(p).toMatch(/never invent/i);
+      expect(p).toMatch(/hiring, firing, pricing or borrowing/i);
+    });
+  });
+
+  describe('_groundNarrative', () => {
+    const allowed = new Set([109330, 26000, 349]);
+
+    test('keeps sentences whose numbers we supplied', () => {
+      const r = _groundNarrative('You invoiced 109,330 and collected 26,000.', allowed);
+      expect(r.text).toMatch(/109,330/);
+      expect(r.dropped).toBe(0);
+    });
+
+    test('drops a sentence containing a figure nobody computed', () => {
+      // The failure that actually matters: a plausible-looking invented amount.
+      const r = _groundNarrative('You invoiced 109,330. Your margin is 48,200.', allowed);
+      expect(r.text).toMatch(/109,330/);
+      expect(r.text).not.toMatch(/48,200/);
+      expect(r.dropped).toBe(1);
+    });
+
+    test('small numbers pass freely — they are counts and percentages, not amounts', () => {
+      const r = _groundNarrative('Three of your five alerts share one cause.', allowed);
+      expect(r.dropped).toBe(0);
+    });
+
+    test('everything ungrounded means no text, so the card does not render', () => {
+      const r = _groundNarrative('Revenue was 55,000 and costs were 41,000.', allowed);
+      expect(r.text).toBe('');
+    });
+
+    test('handles empty, null and whitespace input', () => {
+      expect(_groundNarrative('', allowed).text).toBe('');
+      expect(_groundNarrative(null, allowed).text).toBe('');
+      expect(_groundNarrative('   ', allowed).text).toBe('');
+    });
+
+    test('splits on sentence ends so one bad claim does not discard the good ones', () => {
+      const r = _groundNarrative('First is fine. Second says 99,999. Third is fine too.', allowed);
+      expect(r.text).toBe('First is fine. Third is fine too.');
+      expect(r.dropped).toBe(1);
+    });
+  });
+});

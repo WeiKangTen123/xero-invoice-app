@@ -2126,6 +2126,140 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
   }, _periodCacheTtl(months, today));
 }
 
+
+// ── Financial narrative (AI-written, from figures we computed) ──────────────
+//
+// The alerts are excellent at DETECTION and silent on INTERPRETATION. A reader
+// facing five separate red flags has to work out for themselves that they are
+// one story — which is exactly what people are worst at when tired. This joins
+// them up in a few sentences.
+//
+// The safety model is the same one getVarianceInsights already runs without
+// trouble, and it is not negotiable:
+//   * every figure is computed here; Gemini never calculates anything
+//   * the deterministic alerts go in as GROUND TRUTH, so it can only join them
+//     up, never contradict them
+//   * any sentence containing a large number we did not supply is dropped
+//   * it is read-only — it proposes nothing and can act on nothing
+//   * if it fails, the card simply does not render; figures never wait on it
+const NARRATIVE_CACHE_TTL_MS = 30 * 60 * 1000;
+
+function _narrativePrompt(facts) {
+  return `You are a financial analyst writing three short sentences for a business owner looking at their own dashboard.
+
+THE FIGURES (already calculated — use them exactly, never recalculate):
+${facts.lines.join('\n')}
+
+ALERTS ALREADY RAISED (these are correct; your job is to connect them, not to re-state each one):
+${facts.alerts.length ? facts.alerts.map(a => `- ${a.title}: ${a.detail}`).join('\n') : '- none'}
+
+Write at most 3 short sentences, plain text, no markdown, no bullet points:
+1. The ONE thing that matters most, said plainly.
+2. Why the separate alerts above are or are not the same underlying issue.
+3. The single most useful next step, and only if the figures clearly support it.
+
+Rules:
+- Use ONLY numbers that appear above. Never invent, estimate, or recalculate one.
+- Do not give business advice beyond what the figures show. Never suggest hiring, firing, pricing or borrowing.
+- If the figures look healthy, say so briefly rather than manufacturing a concern.
+- Write to the owner as "you". No preamble, no sign-off.`;
+}
+
+// Assembles the facts the narrative may refer to, and the set of numbers it is
+// allowed to use. Pure and exported, because what the model is permitted to see
+// is the whole safety argument.
+function _narrativeFacts(cf) {
+  const wc = cf.workingCapital || {};
+  const rw = cf.runway || {};
+  const rec = cf.reconciliation || {};
+  const cur = cf.organisation?.currency || '';
+  const lines = [];
+  const allowed = new Set();
+  const add = (label, value, suffix = '') => {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return;
+    const n = Number(value);
+    lines.push(`- ${label}: ${cur} ${Math.round(n).toLocaleString('en')}${suffix}`);
+    allowed.add(Math.round(Math.abs(n)));
+  };
+  const addRaw = (label, text, numbers = []) => {
+    lines.push(`- ${label}: ${text}`);
+    for (const n of numbers) if (Number.isFinite(n)) allowed.add(Math.round(Math.abs(n)));
+  };
+
+  lines.push(`- Period: ${cf.period?.label || 'current period'}`);
+  add('Revenue invoiced (accrual)', rec.revenueAccrual);
+  add('Cash actually received from customers', rec.customerReceipts);
+  add('Cash at bank now', cf.cash?.closing);
+  add('Owed to you by customers', wc.receivable);
+  add('Of that, past its due date', wc.overdue);
+  add('You owe suppliers', wc.payable);
+  if (wc.dso !== null && wc.dso !== undefined && Number.isFinite(wc.dso)) {
+    addRaw('Debtor days (how long invoices take to become cash)', `${Math.round(wc.dso)} days`, [Math.round(wc.dso)]);
+  }
+  if (wc.collectionRate !== null && wc.collectionRate !== undefined) {
+    addRaw('Share of invoiced work collected', `${Math.round(wc.collectionRate * 100)}%`, [Math.round(wc.collectionRate * 100)]);
+  }
+  if (rw.available) {
+    add('Average cash in per month', rw.avgCashIn);
+    add('Average cash out per month', rw.avgCashOut);
+    if (rw.avgOperatingIn !== null && rw.avgOperatingIn !== undefined) {
+      add('Of that cash in, the part from customers', rw.avgOperatingIn);
+    }
+    if (rw.propped) addRaw('Note', 'the balance grew only because of receipts that did not come from customers');
+  }
+
+  return { lines, allowed, alerts: cf.alerts?.alerts || [] };
+}
+
+// Keeps only sentences whose numbers we supplied. A model inventing a
+// plausible-looking amount inside financial commentary is the failure that
+// matters, and it is cheap to detect.
+function _groundNarrative(text, allowed) {
+  const sentences = String(text || '')
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[.!?])\s+/)
+    .map(t => t.trim())
+    .filter(Boolean);
+  const kept = sentences.filter(t => _insightIsGrounded(t, allowed));
+  return { text: kept.join(' '), dropped: sentences.length - kept.length };
+}
+
+async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
+  const cf = await getCashFlow(userId, tenantId, { timezone, force, period });
+
+  const facts = _narrativeFacts(cf);
+  // Keyed on the figures themselves, so it is rewritten only when they change.
+  const key = `narrative:${userId}:${tenantId}:${facts.lines.join('|')}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached;
+
+  let raw;
+  try {
+    raw = await callGemini(userId, [
+      { role: 'system', content: 'You are a careful financial analyst. Return plain sentences only.' },
+      { role: 'user',   content: _narrativePrompt(facts) },
+    ], { temperature: 0.2, maxTokens: 350 });
+  } catch (err) {
+    logger.warn('Financial narrative unavailable', { userId, tenantId, error: err.message });
+    // The card simply will not render. Figures never wait on this.
+    return { available: false, reason: 'unavailable' };
+  }
+
+  const { text, dropped } = _groundNarrative(raw, facts.allowed);
+  if (dropped) logger.warn('Narrative sentences dropped as ungrounded', { userId, tenantId, dropped });
+  if (!text) return { available: false, reason: 'ungrounded' };
+
+  logger.info('Financial narrative written', { userId, tenantId, alerts: facts.alerts.length, dropped });
+  return _cacheSet(key, {
+    available: true,
+    text,
+    source: 'gemini',
+    period: cf.period,
+    basedOnAlerts: facts.alerts.length,
+    fetchedAt: new Date().toISOString(),
+  }, NARRATIVE_CACHE_TTL_MS);
+}
+
 // Called on disconnect so nothing here can outlive the connection it came from.
 function clearCache(userId) {
   for (const key of _cache.keys()) {
@@ -2135,7 +2269,7 @@ function clearCache(userId) {
 
 module.exports = {
   getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
-  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, getCashFlow, getVarianceInsights, clearCache,
+  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
   _splitIntoReportWindows, _clampReportFrom,
@@ -2146,4 +2280,5 @@ module.exports = {
   _buildAlerts, ALERT_THRESHOLDS,
   _isTransfer, _isReceiptPayment, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
+  _narrativeFacts, _groundNarrative, _narrativePrompt,
 };

@@ -205,6 +205,30 @@ router.get('/variance-insights', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/xero-reports/narrative?preset=|from=&to=
+// Three sentences joining up the alerts, written by Gemini from figures this
+// server computed. Split from /performance for the same reason variance
+// insights are: the dashboard paints from real numbers first, and this arrives
+// after, so an LLM outage can never delay or blank the figures.
+//
+// Read-only. It proposes nothing and can act on nothing.
+router.get('/narrative', requireAuth, async (req, res) => {
+  try {
+    const { tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false, available: false });
+
+    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
+    const data = await reports.getFinancialNarrative(req.user.id, tenantId, {
+      timezone, period: _periodFromQuery(req), force: req.query.force === 'true',
+    });
+    res.json({ connected: true, ...data });
+  } catch (err) {
+    logger.error('Financial narrative failed', { error: xeroErrMsg(err), userId: req.user.id });
+    // Never a hard failure: the card is an extra, not a figure.
+    res.json({ connected: true, available: false, reason: 'error' });
+  }
+});
+
 // GET /api/xero-reports/cash-flow?preset=|from=&to=
 // Xero has no cash-flow-statement endpoint, so this is built from Bank Summary,
 // Payments, Bank Transactions and Invoices. Every one of those is a read.

@@ -317,6 +317,9 @@ export default function XeroInsights() {
   // Fetched separately from the figures so an LLM outage or a missing API key
   // can never delay or blank the dashboard itself.
   const [insights, setInsights] = useState(null);
+  // Arrives after the figures, like insights — an LLM outage must never delay
+  // or blank the numbers.
+  const [narrative, setNarrative] = useState(null);
   // Its own fetch: cash flow needs Payments, Bank Transactions and Invoices that
   // no other tab requires, so nothing else pays for them.
   const [cashflow, setCashflow] = useState({ status: 'idle', data: null, error: '' });
@@ -431,6 +434,11 @@ export default function XeroInsights() {
     api.get(`/xero-reports/variance-insights?${ip.toString()}`)
       .then(d => setInsights(d))
       .catch(() => setInsights(null));
+
+    setNarrative(null);
+    api.get(`/xero-reports/narrative?${ip.toString()}`)
+      .then(d => setNarrative(d))
+      .catch(() => setNarrative(null));
   }
 
   function fetchBudget(opts = {}) {
@@ -645,7 +653,7 @@ export default function XeroInsights() {
           )}
           {perf.data && !perf.error && (
             <OverviewPanel data={perf.data} from={monthFrom} to={monthTo}
-                           insights={insights} summary={data} />
+                           insights={insights} summary={data} narrative={narrative} />
           )}
         </>
       )}

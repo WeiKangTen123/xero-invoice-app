@@ -618,7 +618,7 @@ function rangeGrowth(d, from, to) {
 }
 
 // ── Overview ─────────────────────────────────────────────────────────────────
-export function OverviewPanel({ data, from, to, insights, summary }) {
+export function OverviewPanel({ data, from, to, insights, summary, narrative }) {
   const [trendMode, setTrendMode] = useState('bar');
   const cur = data.organisation?.currency || '';
   const T   = useRangeTotals(data, from, to);
@@ -677,6 +677,8 @@ export function OverviewPanel({ data, from, to, insights, summary }) {
 
   return (
     <>
+      <NarrativeCard narrative={narrative} />
+
       {/* Health strip — the reference dashboard's top banner, but the verdict is
           derived from the figures rather than a stored status. */}
       <div className="card" style={{
@@ -1141,6 +1143,30 @@ function varianceBridgeSteps(T) {
 // quiet when there is nothing to say — an empty band renders as a single line of
 // reassurance rather than an empty box, and a missing figure produces no alert
 // at all rather than a false all-clear.
+// The synthesis card. The alerts elsewhere are excellent at detection and
+// silent on interpretation — five separate red flags are often one story, and
+// this says which. Written by Gemini from figures the server computed; any
+// sentence containing a number the server did not supply is dropped before it
+// ever reaches here.
+//
+// Renders nothing at all when unavailable. It is an extra, never a figure.
+function NarrativeCard({ narrative }) {
+  if (!narrative?.available || !narrative.text) return null;
+  return (
+    <div className="card" style={{ marginBottom: 16, borderLeft: '3px solid var(--accent)' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
+        <div className="card-title" style={{ marginBottom: 0 }}>What this period comes down to</div>
+        <span style={{ fontSize: 10, color: 'var(--accent)' }}>AI-written</span>
+      </div>
+      <div style={{ fontSize: 13, lineHeight: 1.65, color: 'var(--text-secondary)' }}>{narrative.text}</div>
+      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 10, paddingTop: 9, borderTop: '1px solid var(--border)', lineHeight: 1.5 }}>
+        Written from the figures on this page{narrative.basedOnAlerts ? ` and the ${narrative.basedOnAlerts} alert${narrative.basedOnAlerts === 1 ? '' : 's'} on Cash Flow` : ''}.
+        Every amount is checked against the source before it is shown. A summary, not financial advice.
+      </div>
+    </div>
+  );
+}
+
 function AlertBand({ alerts, counts, currency }) {
   if (!alerts) return null;
 
