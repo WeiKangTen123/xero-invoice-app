@@ -4,7 +4,7 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney, fmtPct, fmtCell } from '../utils/format';
-import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPanel } from '../components/performance/PerformancePanels';
+import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPanel, BarList, GroupedMonthlyBars } from '../components/performance/PerformancePanels';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
@@ -255,6 +255,24 @@ function SearchBox({ value, onChange, placeholder }) {
   return <input type="text" className="form-input" placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)} style={{ maxWidth: 240 }} />;
 }
 
+
+// The Bank Summary report identifies accounts by NAME only — it carries no
+// account id — so balances can only be joined to the Accounts list by name.
+// A miss returns null and the UI shows an em dash: a missing balance is honest,
+// a balance attached to the wrong account is not.
+function balancesByName(cashAccounts = []) {
+  const map = new Map();
+  for (const a of cashAccounts) {
+    const key = String(a.name || '').trim().toLowerCase();
+    if (key) map.set(key, a);
+  }
+  return map;
+}
+
+function balanceFor(map, account) {
+  return map.get(String(account?.name || '').trim().toLowerCase()) || null;
+}
+
 export default function XeroInsights() {
   const { user }   = useAuth();
   const navigate   = useNavigate();
@@ -442,6 +460,12 @@ export default function XeroInsights() {
       .then(d => setStatement({ status: 'done', data: d.transactions || [], error: '' }))
       .catch(err => setStatement({ status: 'done', data: [], error: err.message }));
   }
+
+  // Balances arrive keyed by name from the Bank Summary; the accounts list is
+  // keyed by id. Built once rather than per row.
+  const bankBalances = useMemo(
+    () => balancesByName(perf.data?.cash?.accounts || []),
+    [perf.data]);
 
   const filteredContacts = useMemo(() => {
     if (!contacts.data) return [];
@@ -690,6 +714,48 @@ export default function XeroInsights() {
             </div>
           )}
 
+          {/* Both charts read perf.data.cash.accounts, which this tab already
+              receives — no extra Xero call. Until now that array was fetched
+              and discarded, so the balance of each account was never shown. */}
+          {perf.data?.cash?.accounts?.length > 0 && (
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
+              <div className="card" style={{ flex: 6, minWidth: 320 }}>
+                <div className="card-title">Where the money sits</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
+                  Closing balance per account, and its share of total cash.
+                </div>
+                <BarList
+                  currency={currency}
+                  showPctOfTotal
+                  items={perf.data.cash.accounts
+                    .filter(a => a.balance !== 0)
+                    .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance))
+                    .map(a => ({ label: a.name, value: a.balance }))}
+                />
+              </div>
+
+              <div className="card" style={{ flex: 6, minWidth: 320 }}>
+                <div className="card-title">Movement by account</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
+                  Which account is actually doing the work this period.
+                </div>
+                <GroupedMonthlyBars
+                  rawLabels
+                  currency={currency}
+                  months={perf.data.cash.accounts.map(a => ({ key: a.name, label: a.name }))}
+                  series={[
+                    { label: 'In',  color: 'var(--success)', values: perf.data.cash.accounts.map(a => a.cashIn  || 0) },
+                    { label: 'Out', color: 'var(--danger)',  values: perf.data.cash.accounts.map(a => a.cashOut || 0) },
+                  ]}
+                />
+                <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 10.5, color: 'var(--text-muted)' }}>
+                  <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, background: 'var(--success)', marginRight: 5 }} />In</span>
+                  <span><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: 2, background: 'var(--danger)', marginRight: 5 }} />Out</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-title" style={{ marginBottom: 2 }}>Bank &amp; Cash Accounts</div>
             <div className="card-subtitle" style={{ marginBottom: 2 }}>Click an account for its transaction statement.</div>
@@ -704,14 +770,31 @@ export default function XeroInsights() {
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
                   <thead><tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
-                    <th style={{ padding: '6px 10px' }}>Code</th><th style={{ padding: '6px 10px' }}>Name</th>
+                    <th style={{ padding: '6px 10px' }}>Name</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'right' }}>Balance</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'right' }}>In</th>
+                    <th style={{ padding: '6px 10px', textAlign: 'right' }}>Out</th>
                     <th style={{ padding: '6px 10px' }}>Account Number</th><th style={{ padding: '6px 10px' }}>Currency</th>
                     <th style={{ padding: '6px 10px' }}>Status</th><th style={{ padding: '6px 10px' }}></th>
                   </tr></thead>
-                  <tbody>{banking.data.map(a => (
+                  <tbody>{banking.data.map(a => {
+                    const bal = balanceFor(bankBalances, a);
+                    return (
                     <tr key={a.accountId} style={{ borderTop: '1px solid var(--border)', background: selectedBankAccount?.accountId === a.accountId ? 'var(--bg-hover)' : undefined }}>
-                      <td style={{ padding: '9px 10px' }}>{a.code || '—'}</td>
-                      <td style={{ padding: '9px 10px' }}>{a.name}</td>
+                      <td style={{ padding: '9px 10px' }}>
+                        {a.name}
+                        {a.code ? <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> · {a.code}</span> : null}
+                      </td>
+                      {/* Em dash when the name join misses, never a wrong number. */}
+                      <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+                        {bal ? fmtMoney(bal.balance, a.currency || currency) : '—'}
+                      </td>
+                      <td style={{ padding: '9px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: bal?.cashIn ? 'var(--success)' : 'var(--text-muted)' }}>
+                        {bal?.cashIn ? fmtMoney(bal.cashIn, a.currency || currency) : '—'}
+                      </td>
+                      <td style={{ padding: '9px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: bal?.cashOut ? 'var(--danger)' : 'var(--text-muted)' }}>
+                        {bal?.cashOut ? fmtMoney(bal.cashOut, a.currency || currency) : '—'}
+                      </td>
                       <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{a.accountNumber || '—'}</td>
                       <td style={{ padding: '9px 10px' }}>{a.currency || '—'}</td>
                       <td style={{ padding: '9px 10px' }}><span className={`badge ${a.status === 'ACTIVE' ? 'badge-green' : 'badge-gray'}`}>{a.status || '—'}</span></td>
@@ -719,7 +802,8 @@ export default function XeroInsights() {
                         <button type="button" className="btn btn-outline btn-sm" onClick={() => viewStatement(a)}>View Transactions</button>
                       </td>
                     </tr>
-                  ))}</tbody>
+                    );
+                  })}</tbody>
                 </table>
               </div>
             )}
@@ -733,6 +817,22 @@ export default function XeroInsights() {
               </div>
               <div className="card-subtitle" style={{ marginBottom: 2 }}>Most recent transactions for this account</div>
               <SourceNote>Xero Bank Transactions + Payments API — bill/invoice payments show up here too, not just raw bank entries</SourceNote>
+              {/* Unreconciled items are the clearest sign the books and the bank
+                  disagree. The flag was already on every row, but as a faint dash
+                  with no total — easy to scroll past. */}
+              {statement.status === 'done' && !statement.error && statement.data.length > 0 && (() => {
+                const un = statement.data.filter(t => !t.isReconciled).length;
+                return un === 0 ? (
+                  <div style={{ fontSize: 11.5, color: 'var(--success)', marginBottom: 10 }}>
+                    ✓ All {statement.data.length} transactions shown are reconciled.
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 11.5, color: 'var(--warning)', marginBottom: 10, lineHeight: 1.5 }}>
+                    ▲ {un} of {statement.data.length} transactions shown are not reconciled — the books and the
+                    bank statement disagree until they are matched in Xero.
+                  </div>
+                );
+              })()}
               {statement.status !== 'done' ? (
                 <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
               ) : statement.error ? (
@@ -755,7 +855,11 @@ export default function XeroInsights() {
                         <td style={{ padding: '9px 10px' }}>{t.contact}</td>
                         <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{t.reference || '—'}</td>
                         <td style={{ padding: '9px 10px', color: 'var(--text-muted)', fontSize: 11 }}>{t.source === 'payment' ? 'Invoice payment' : 'Bank'}</td>
-                        <td style={{ padding: '9px 10px' }}>{t.isReconciled ? '✓' : '—'}</td>
+                        <td style={{ padding: '9px 10px' }}>
+                          {t.isReconciled
+                            ? <span style={{ color: 'var(--success)' }}>✓</span>
+                            : <span className="badge badge-yellow" style={{ fontSize: 9.5 }}>not matched</span>}
+                        </td>
                         <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: t.type === 'Money In' ? 'var(--success)' : 'var(--danger)' }}>
                           {t.type === 'Money In' ? '+' : '−'}{fmtMoney(t.total, currency)}
                         </td>
