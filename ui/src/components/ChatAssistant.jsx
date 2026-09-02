@@ -194,6 +194,35 @@ export default function ChatAssistant() {
   const [error,    setError]    = useState('');
   const scrollRef = useRef(null);
   const taRef     = useRef(null);
+  const panelRef  = useRef(null);
+  const buttonRef = useRef(null);
+
+  // Close when pressing 'Escape' or clicking outside the chat panel
+  useEffect(() => {
+    if (!open) return;
+
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') {
+        setOpen(false);
+      }
+    }
+
+    function handleClickOutside(e) {
+      if (
+        panelRef.current && !panelRef.current.contains(e.target) &&
+        buttonRef.current && !buttonRef.current.contains(e.target)
+      ) {
+        setOpen(false);
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!pinnedId) { setPinInfo(null); return; }
@@ -237,6 +266,7 @@ export default function ChatAssistant() {
           which makes this one redundant exactly when it is in the way.
           Kept mounted so the fade is not a pop. */}
       <button
+        ref={buttonRef}
         onClick={() => setOpen(true)}
         title="Ask about your invoices"
         aria-hidden={open}
@@ -255,7 +285,9 @@ export default function ChatAssistant() {
         💬
       </button>
 
-      <div style={{
+      <div
+        ref={panelRef}
+        style={{
         position: 'fixed', top: 0, right: 0, bottom: 0, width: 400, maxWidth: '92vw',
         background: 'var(--bg-card)', borderLeft: '1px solid var(--border)',
         boxShadow: '-12px 0 40px rgba(0,0,0,0.18)',

@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Master Security, Data Protection & Architecture Guide - Xero Invoice Automation</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 15mm 13mm;
+      @bottom-right {
+        content: counter(page);
+      }
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #1e293b;
+      line-height: 1.42;
+      font-size: 9pt;
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+    }
+    .header {
+      border-bottom: 2.5px solid #0f172a;
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+    }
+    .header-badge {
+      display: inline-block;
+      background: #0284c7;
+      color: #ffffff;
+      font-size: 7pt;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 2px 7px;
+      border-radius: 10px;
+      margin-bottom: 4px;
+    }
+    .header-title {
+      font-size: 16pt;
+      font-weight: 800;
+      color: #0f172a;
+      letter-spacing: -0.4px;
+      margin: 0 0 3px 0;
+    }
+    .header-subtitle {
+      font-size: 8.5pt;
+      color: #64748b;
+      margin: 0 0 6px 0;
+      font-weight: 500;
+    }
+    .guarantee-box {
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 5px;
+      padding: 8px 10px;
+      margin-bottom: 12px;
+    }
+    .guarantee-title {
+      font-size: 9.5pt;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 5px;
+    }
+    .guarantee-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 10px;
+      font-size: 8.2pt;
+    }
+    .guarantee-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 5px;
+    }
+    .guarantee-icon {
+      color: #0284c7;
+      font-weight: bold;
+    }
+    .section-title {
+      font-size: 11pt;
+      font-weight: 700;
+      color: #0f172a;
+      background: #f1f5f9;
+      padding: 4px 8px;
+      border-left: 4px solid #0284c7;
+      margin: 14px 0 8px 0;
+      page-break-after: avoid;
+    }
+    .qa-card {
+      margin-bottom: 8px;
+      page-break-inside: avoid;
+      border: 1px solid #e2e8f0;
+      border-radius: 4px;
+      padding: 7px 9px;
+      background: #ffffff;
+    }
+    .question {
+      font-size: 9pt;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 3px;
+      display: flex;
+      align-items: flex-start;
+      gap: 5px;
+    }
+    .q-badge {
+      display: inline-block;
+      background: #0284c7;
+      color: #ffffff;
+      font-size: 7pt;
+      font-weight: 700;
+      padding: 1px 4px;
+      border-radius: 3px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .q-text {
+      flex: 1;
+    }
+    .answer {
+      font-size: 8.5pt;
+      color: #334155;
+      line-height: 1.38;
+    }
+    .answer p {
+      margin: 0 0 3px 0;
+    }
+    .answer p:last-child {
+      margin-bottom: 0;
+    }
+    .answer ul, .answer ol {
+      margin: 2px 0 3px 14px;
+      padding: 0;
+    }
+    .answer li {
+      margin-bottom: 2px;
+    }
+    .highlight {
+      font-weight: 600;
+      color: #0f172a;
+    }
+    table.cheat-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 8.2pt;
+      margin-top: 6px;
+      page-break-inside: avoid;
+    }
+    table.cheat-table th, table.cheat-table td {
+      border: 1px solid #cbd5e1;
+      padding: 5px 7px;
+      text-align: left;
+    }
+    table.cheat-table th {
+      background: #f8fafc;
+      font-weight: 700;
+      color: #0f172a;
+    }
+    table.cheat-table tr:nth-child(even) {
+      background: #f8fafc;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="header-badge">Executive Security & Due Diligence Guide</div>
+    <div class="header-title">Master Security, Data Protection & Architecture Guide</div>
+    <div class="header-subtitle">Plain-English Security, Cloud Hosting, and Financial Safety Guarantees for Enterprise Clients & Finance Teams</div>
+  </div>
+
+  <div class="guarantee-box">
+    <div class="guarantee-title">⭐ Our 5 Golden Security Guarantees:</div>
+    <div class="guarantee-grid">
+      <div class="guarantee-item"><span class="guarantee-icon">✔</span><span><strong>Bank-Grade Encryption:</strong> All credentials encrypted with AES-256 before storage.</span></div>
+      <div class="guarantee-item"><span class="guarantee-icon">✔</span><span><strong>Strict Company Isolation:</strong> Your data is isolated in a private digital vault.</span></div>
+      <div class="guarantee-item"><span class="guarantee-icon">✔</span><span><strong>World-Class Cloud Hosting:</strong> Hosted on Google Cloud (GCP) & DigitalOcean.</span></div>
+      <div class="guarantee-item"><span class="guarantee-icon">✔</span><span><strong>100% Draft Mode Safety Net:</strong> Never alters approved books or pays bills blindly.</span></div>
+      <div class="guarantee-item" style="grid-column: span 2;"><span class="guarantee-icon">✔</span><span><strong>Zero AI Training Retention:</strong> Invoices are never saved or used to train public AI models.</span></div>
+    </div>
+  </div>
+
+  <!-- SECTION 1 -->
+  <div class="section-title">1. Cloud Hosting & Server Infrastructure (Google Cloud & DigitalOcean)</div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q1</span><div class="q-text">Where is our company's data hosted, and who operates the servers?</div></div>
+    <div class="answer">
+      <p>We host our application and database on enterprise-grade cloud providers—<strong>Google Cloud Platform (GCP)</strong> and <strong>DigitalOcean</strong>. These global infrastructure leaders host applications for Fortune 500 companies, featuring 24/7 on-site physical security guards, biometric access verification, redundant power generators, fire suppression systems, and climate-controlled environments.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q2</span><div class="q-text">Why do you host on Google Cloud and DigitalOcean instead of maintaining on-premise physical servers?</div></div>
+    <div class="answer">
+      <p>Enterprise cloud providers offer vastly superior reliability, physical security, and disaster recovery compared to traditional in-house office servers. They provide 99.99% uptime guarantees, enterprise compliance certifications (ISO 27001, SOC 2, HIPAA), and automatic hardware replacement in the event of component failure.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q3</span><div class="q-text">Can staff or engineers from Google Cloud or DigitalOcean view our confidential invoices?</div></div>
+    <div class="answer">
+      <p><span class="highlight">No.</span> All sensitive credentials, connection keys, and financial accounting data are encrypted with bank-grade encryption <strong>before</strong> being saved to the database. To Google or DigitalOcean, the stored data looks like completely scrambled, unreadable characters. Only our application possessing the secret runtime key can decrypt the data during live synchronization.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q4</span><div class="q-text">What happens if a cloud data center experiences a power outage or hardware disaster?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Automated Daily Backups:</strong> The entire database is automatically snapshotted daily with 7-day point-in-time recovery.</li>
+        <li><strong>Rapid System Recovery:</strong> If a server experiences a hardware failure, a fresh replacement server can be brought online in <strong>under 15 minutes</strong>.</li>
+        <li><strong>Permanent Cloud Safety in Xero:</strong> Once an invoice is uploaded as a draft into Xero, it is stored permanently in Xero’s own secure cloud, ensuring accounting records are never lost.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q5</span><div class="q-text">In which country is our company's data physically stored?</div></div>
+    <div class="answer">
+      <p>Our servers and databases are provisioned in dedicated <span class="highlight">Singapore (Southeast Asia) data centers</span>. This ensures compliance with regional data privacy laws (such as Singapore's <strong>PDPA</strong>, Malaysia's <strong>PDPA</strong>, and the Australian Privacy Principles), while delivering lightning-fast, low-latency performance for accounting teams across the region.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q6</span><div class="q-text">How does the infrastructure protect against hackers, DDoS attacks, and suspicious bots?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Cloudflare Cyber Shield:</strong> All incoming web traffic passes through <strong>Cloudflare</strong>, which automatically detects and blocks DDoS attacks, malicious bots, and suspicious IP addresses before they ever reach our application.</li>
+        <li><strong>Cloaked Server IP:</strong> Our server’s actual IP address is completely hidden from the public internet.</li>
+        <li><strong>Firewall Protection:</strong> Cloud firewalls block unauthorized ports, allowing only secure web traffic coming directly from Cloudflare.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q7</span><div class="q-text">How are our databases protected from public internet exposure?</div></div>
+    <div class="answer">
+      <p>Our PostgreSQL database is placed inside an <span class="highlight">isolated Private Cloud Network (VPC)</span> with zero public internet access. The database only accepts encrypted connections from our authorized application server via internal private routing.</p>
+    </div>
+  </div>
+
+  <!-- SECTION 2 -->
+  <div class="section-title">2. System Architecture & "All-in-One" Design</div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q8</span><div class="q-text">Your platform handles the web portal, email reader, and Xero sync in one place ("All-in-One"). Why is it built this way, and is it safe?</div></div>
+    <div class="answer">
+      <p><span class="highlight">Yes, it is completely safe and highly efficient.</span> Combining the portal, email listener, and Xero sync engine into a unified system provides key business benefits:</p>
+      <ul>
+        <li><strong>Instant Processing:</strong> Invoices are read, parsed, and pushed to Xero in seconds with zero delay between separate external services.</li>
+        <li><strong>Maximum Reliability:</strong> Fewer disconnected components mean fewer points of failure, higher stability, and lower hosting costs.</li>
+        <li><strong>Strict Internal Safeguards:</strong> The server runs isolated safety boundaries, ensuring background email reading and interactive dashboard browsing operate smoothly without interfering with one another.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q9</span><div class="q-text">What prevents the "All-in-One" design from slowing down or freezing during heavy month-end billing?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Smart Queue Pacing:</strong> The system organizes incoming invoices into a paced background line, processing each document smoothly with built-in buffers.</li>
+        <li><strong>Attachment Size Filter:</strong> Invoices exceeding 10MB are filtered to prevent memory spikes.</li>
+        <li><strong>Independent Task Prioritization:</strong> User dashboard interactions take priority over background scanning, keeping your web portal fast and responsive.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q10</span><div class="q-text">If the server restarts or undergoes maintenance while an email is arriving, will the email or invoice be lost?</div></div>
+    <div class="answer">
+      <p><span class="highlight">No.</span> When an email arrives, its tracking ID is recorded immediately to a persistent on-disk queue before extraction begins. If the server restarts, our startup recovery system automatically identifies any interrupted jobs, verifies whether the draft was created in Xero, and safely finishes any pending tasks.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q11</span><div class="q-text">How does the system handle high traffic so one heavy company doesn't slow down the platform for others?</div></div>
+    <div class="answer">
+      <p>The platform enforces <span class="highlight">Individual Company Rate Limits</span>. Each company account receives its own independent allocation of processing requests per 15-minute window. A sudden spike in invoices from one company cannot consume resources allocated to other businesses.</p>
+    </div>
+  </div>
+
+  <!-- SECTION 3 -->
+  <div class="section-title">3. Data Privacy, Multi-Tenancy & Preventing Data Leaks</div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q12</span><div class="q-text">Can another company using your platform ever see our invoices, supplier names, or pricing?</div></div>
+    <div class="answer">
+      <p><span class="highlight">Never.</span> Multi-tenant privacy is our highest priority:</p>
+      <ul>
+        <li>Every company account is strictly partitioned into its own private digital vault.</li>
+        <li>When you log in, your secure session token acts like a unique digital key that only unlocks your company's specific records.</li>
+        <li>Even if another user attempts to guess your invoice numbers, the server automatically rejects the request with an access denied error.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q13</span><div class="q-text">How does the system guarantee digital vault isolation in the database?</div></div>
+    <div class="answer">
+      <p>Every single database query strictly requires your unique company identification code. The database will never execute a search or display records across multiple company accounts simultaneously. User PDF files are stored in physically isolated folders dedicated exclusively to each tenant.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q14</span><div class="q-text">How do you prevent sensitive financial data, passwords, or bank numbers from leaking into server logs?</div></div>
+    <div class="answer">
+      <p>Our system logging engine automatically scans and scrubs all internal logs, permanently masking passwords, authentication tokens, bank details, and personal contact information before writing entries to disk.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q15</span><div class="q-text">What happens if an unexpected system error occurs—will technical database details be exposed to users?</div></div>
+    <div class="answer">
+      <p><span class="highlight">No.</span> Our security error handler intercepts all technical errors, records technical details privately to our secure internal log, and returns a simple, friendly message (<code>"Internal server error"</code>) to the web browser to prevent sensitive code or database layouts from being exposed.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q16</span><div class="q-text">How does the system protect against unauthorized file downloads or attempts to access another company's PDF attachments?</div></div>
+    <div class="answer">
+      <p>File download requests require an active, authenticated user session and verify that the requested document belongs strictly to the logged-in company before delivering the file. Direct folder navigation or path guessing (<code>../</code>) is automatically blocked.</p>
+    </div>
+  </div>
+
+  <!-- SECTION 4 -->
+  <div class="section-title">4. Data Security, Encryption & Passwords</div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q17</span><div class="q-text">How are our third-party connection keys (Xero access tokens, email passwords, AI keys) protected in the database?</div></div>
+    <div class="answer">
+      <p>All stored credentials are encrypted at rest using <span class="highlight">authenticated AES-256-GCM</span>, the gold standard used by global financial institutions:</p>
+      <ul>
+        <li>Every secret is encrypted with a unique, randomized digital initialization vector.</li>
+        <li>An authentication verification tag guarantees the data has not been tampered with.</li>
+        <li>Master encryption keys are stored strictly in isolated server memory and are never stored in the database.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q18</span><div class="q-text">How are user login passwords protected against database theft and cracking?</div></div>
+    <div class="answer">
+      <p>User passwords are never stored in plain readable text. We use industry-standard <span class="highlight">Bcrypt</span> cryptographic hashing. We store only an irreversible mathematical fingerprint of your password. Even in the theoretical scenario where a database was stolen, your actual password cannot be reversed or read.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q19</span><div class="q-text">How is data protected while traveling across the internet and internal systems?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Web Portal:</strong> Enforced <strong>TLS 1.3 / HTTPS</strong> encryption across all web pages.</li>
+        <li><strong>Database Connection:</strong> Private network communication with mandatory SSL encryption.</li>
+        <li><strong>Email Ingestion:</strong> Encrypted email reading over secure IMAP sockets (Port 993).</li>
+        <li><strong>Xero & AI Connections:</strong> Outbound connections to Xero and AI providers utilize encrypted HTTPS channels with strict digital certificate validation.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q20</span><div class="q-text">How are user sessions and logins managed securely?</div></div>
+    <div class="answer">
+      <p>Logins utilize stateless, digitally signed secure tokens (JWT). Each token is signed with a high-entropy secret key and expires automatically after a set period, requiring periodic re-authentication to prevent session hijacking.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q21</span><div class="q-text">Can internal system administrators access or snoop on customer connection secrets?</div></div>
+    <div class="answer">
+      <p><span class="highlight">No.</span> All secrets are scrambled before they touch the database. Decryption requires the master encryption key, which is isolated to the application runtime environment and segregated from administrative database access.</p>
+    </div>
+  </div>
+
+  <!-- SECTION 5 -->
+  <div class="section-title">5. Financial Accuracy, Deduplication & Xero Integration</div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q22</span><div class="q-text">What stops the system from accidentally creating duplicate bills in Xero if an email is sent or forwarded multiple times?</div></div>
+    <div class="answer">
+      <p>We implement a <span class="highlight">Two-Stage Duplicate Protection System</span>:</p>
+      <ol>
+        <li><strong>Initial Database Scan:</strong> Before processing an invoice, the system checks whether the supplier name, invoice number, and grand total already exist in your records. If found, the duplicate email is skipped automatically.</li>
+        <li><strong>Final Xero Verification:</strong> Immediately before sending data to Xero, a final safety verification confirms the invoice has not been uploaded. If it already exists, the system stops and links you to the existing bill.</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q23</span><div class="q-text">What happens if an invoice is blurry, handwritten, or oddly formatted? Will AI guess the wrong numbers?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Automatic Mathematical Sanity Checks:</strong> The system verifies that Line Items + Tax equal Grand Total. If the numbers do not add up or if the total is zero, the system <strong>refuses to upload it blindly</strong>.</li>
+        <li><strong>Human-in-the-Loop Review:</strong> Any unclear or scanned invoice is placed in a <strong>"Requires Review" tab</strong> on your dashboard. Your finance team can view the original PDF side-by-side, verify numbers with one click, and send it to Xero when satisfied.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q24</span><div class="q-text">Can this automated system accidentally approve a payment or alter our official accounting ledgers?</div></div>
+    <div class="answer">
+      <p><span class="highlight">No.</span> By design, the platform <strong>only creates DRAFT invoices</strong> (<code>Bills to Pay &rarr; Drafts</code> for suppliers, or <code>Invoices &rarr; Drafts</code> for customers). Draft invoices do not affect your live profit/loss statements, balance sheets, or bank accounts until your authorized finance manager reviews and formally approves them inside Xero.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q25</span><div class="q-text">Does artificial intelligence (Google Gemini / OpenRouter) learn from or store our confidential financial numbers?</div></div>
+    <div class="answer">
+      <p><span class="highlight">No.</span> We use commercial enterprise AI connections with strict <strong>Zero-Data Retention agreements</strong>. Your invoices are sent through an encrypted channel purely for text extraction and are <strong>never saved, shared, or used to train public AI models</strong>.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q26</span><div class="q-text">What permissions does the system request when connecting to our Xero organization?</div></div>
+    <div class="answer">
+      <p>We follow the <span class="highlight">Principle of Least Privilege</span>:</p>
+      <ul>
+        <li>The system only requests permission to create transactions (<code>accounting.transactions</code>) and maintain an active connection (<code>offline_access</code>).</li>
+        <li>We never request permission to modify your organization settings, change bank account details, or access unrelated business modules.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q27</span><div class="q-text">How does the platform handle Xero's API traffic limits during peak billing rushes?</div></div>
+    <div class="answer">
+      <p>The system uses a sequential pacing queue with an enforced 1.5-second buffer between dispatches, ensuring your company never exceeds Xero’s standard rate limits (60 calls per minute). If Xero requests a pause, our queue holds pending invoices safely and resumes automatically.</p>
+    </div>
+  </div>
+
+  <!-- SECTION 6 -->
+  <div class="section-title">6. Advanced Cyber Threat Protection & Anti-Fraud</div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q28</span><div class="q-text">What if a malicious supplier sends a PDF with hidden prompt injection text designed to trick the AI (e.g. "make total $1,000,000")?</div></div>
+    <div class="answer">
+      <p>The system defends against hidden prompt instructions using a <span class="highlight">Multi-Layered Safety Sandbox</span>:</p>
+      <ul>
+        <li><strong>Isolated Data Role:</strong> The AI is strictly instructed to extract data into predefined fields with zero conversational authority.</li>
+        <li><strong>Structured Output:</strong> Responses must match a rigid data structure; conversational commands or instructions are discarded as errors.</li>
+        <li><strong>Mathematical Verification:</strong> Extracted numbers must mathematically balance in our application code before moving forward.</li>
+        <li><strong>Draft-Only Safeguard:</strong> Even if an unusual invoice were created, it enters Xero strictly as a <strong>Draft</strong>, requiring human approval before payment.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q29</span><div class="q-text">How do you prevent email spoofing where a fraudster emails a fake invoice pretending to be a verified supplier?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Mail Server Authentication:</strong> Ingestion connects directly to your authorized corporate mailbox (Google Workspace / Microsoft 365), which validates sender authenticity via SPF, DKIM, and DMARC protocols.</li>
+        <li><strong>Xero Contact Matching:</strong> Invoices are matched against verified <strong>Xero Contacts</strong>. Invoices from unrecognized supplier names or new bank accounts are flagged for manual verification.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q30</span><div class="q-text">How does the system handle corrupted PDF files, oversized attachments, or hidden malware?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Attachment Pre-Filter:</strong> Ingestion rejects non-PDF attachments and files exceeding the 10 MB limit.</li>
+        <li><strong>Safe Memory Extraction:</strong> Documents are parsed in isolated memory buffers. Corrupted files or unreadable scans fail safely to the review queue without executing any scripts or macros.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q31</span><div class="q-text">How is non-invoice email spam filtered out without slowing down the system?</div></div>
+    <div class="answer">
+      <p>Emails are quickly screened for standard billing keywords (<code>Invoice</code>, <code>Bill</code>, <code>Tax Invoice</code>, <code>Receipt</code>) and verified for the presence of valid PDF attachments or structured text templates. Non-billing emails are ignored immediately.</p>
+    </div>
+  </div>
+
+  <!-- SECTION 7 -->
+  <div class="section-title">7. Deep Technical Security & Penetration Testing Assurances</div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q32</span><div class="q-text">How does the system prevent unauthorized server requests (Server-Side Request Forgery)?</div></div>
+    <div class="answer">
+      <p>The application cannot be tricked into connecting to unauthorized destinations. Outbound connections are hardcoded strictly to verified API endpoints (<code>api.xero.com</code>, <code>generativelanguage.googleapis.com</code>, <code>openrouter.ai</code>) and internal server query attempts are blocked.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q33</span><div class="q-text">How does login token verification protect against tampering or forged access tokens?</div></div>
+    <div class="answer">
+      <p>Every incoming request is verified using strict cryptographic signature checks against an algorithm allowlist. Unsigned tokens, altered user IDs, or forged access tokens are rejected instantly.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q34</span><div class="q-text">How does the Xero connection dance protect against login interception and replay attacks?</div></div>
+    <div class="answer">
+      <p>When connecting your Xero account, the platform creates a unique, high-entropy cryptographic security code (<code>state</code>) that is verified upon return from Xero before establishing the connection.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q35</span><div class="q-text">Can the master encryption keys be safely updated and rotated over time?</div></div>
+    <div class="answer">
+      <p><span class="highlight">Yes.</span> All encrypted fields use version-prefixed identifiers, allowing our engineering team to perform zero-downtime key rotation and re-encryption in the background whenever security policies require.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q36</span><div class="q-text">How are authentication and password checks protected against timing attacks?</div></div>
+    <div class="answer">
+      <p>Signature checks and password verifications use constant-time mathematical comparisons, preventing attackers from deducing secret tokens by measuring server response latencies.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q37</span><div class="q-text">Can a regular user manipulate web requests to promote their account to an Administrator?</div></div>
+    <div class="answer">
+      <p><span class="highlight">No.</span> User privilege levels are controlled strictly by the server database. Account registration defaults to standard permissions, and role elevation can only be executed through direct authorized database administration.</p>
+    </div>
+  </div>
+
+  <!-- SECTION 8 -->
+  <div class="section-title">8. Compliance, Governance & Disaster Recovery</div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q38</span><div class="q-text">How does the platform comply with regional privacy laws (Singapore PDPA, Malaysian PDPA, GDPR)?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Data Minimization:</strong> Only financial metadata required for bookkeeping reconciliation is stored.</li>
+        <li><strong>Data Sovereignty:</strong> Primary data resides in certified regional cloud data centers.</li>
+        <li><strong>Right to Erasure:</strong> Complete deletion workflows ensure customer data can be permanently erased upon request.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q39</span><div class="q-text">What happens to our data if we cancel our subscription or leave the platform?</div></div>
+    <div class="answer">
+      <p>In compliance with privacy regulations, account deletion triggers an automated purge that permanently deletes your company's records, user logins, credentials, and cached PDF files from our servers. Invoices previously uploaded to Xero remain safely in your Xero organization.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q40</span><div class="q-text">What is the Disaster Recovery timeline if a catastrophic hardware failure occurs?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Recovery Time Objective (RTO):</strong> Replacement cloud compute nodes can be provisioned in <strong>under 15 minutes</strong>.</li>
+        <li><strong>Recovery Point Objective (RPO):</strong> Maximum 24 hours of local cache (0 hours for Xero, as posted drafts reside permanently in Xero Cloud).</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q41</span><div class="q-text">What happens if the AI provider experiences a temporary service outage?</div></div>
+    <div class="answer">
+      <p>If an AI provider experiences a temporary disruption, pending invoices remain safely in our persistent queue marked for retry. As soon as connectivity returns, background workers process the remaining invoices without losing any data.</p>
+    </div>
+  </div>
+
+  <div class="qa-card">
+    <div class="question"><span class="q-badge">Q42</span><div class="q-text">What is the formal Incident Response Plan if a security issue is suspected?</div></div>
+    <div class="answer">
+      <ul>
+        <li><strong>Instant Containment:</strong> Ability to immediately rotate security secrets, invalidating all sessions and locking down credential access.</li>
+        <li><strong>Audit Forensics:</strong> Review immutable structured audit logs to determine the exact scope of affected records.</li>
+        <li><strong>Regulatory Notification:</strong> Formal 72-hour notification protocol in compliance with regional data protection authorities.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- SECTION 9 -->
+  <div class="section-title">9. Executive Quick-Reference Summary Table</div>
+
+  <table class="cheat-table">
+    <thead>
+      <tr>
+        <th style="width: 36%;">Client / Auditor Question</th>
+        <th style="width: 64%;">10-Second Executive Defense Response</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>"Can another company access our invoices?"</strong></td>
+        <td><strong>Impossible.</strong> Strict company-level digital vaults isolate every tenant's invoices, folders, and records.</td>
+      </tr>
+      <tr>
+        <td><strong>"Can staff at Google Cloud or DigitalOcean see our data?"</strong></td>
+        <td><strong>No.</strong> All credentials and accounting records are encrypted with <strong>AES-256</strong> before being saved. The data is completely unreadable to them.</td>
+      </tr>
+      <tr>
+        <td><strong>"Is the system vulnerable to DDoS or hackers?"</strong></td>
+        <td><strong>No.</strong> All web traffic passes through <strong>Cloudflare Cyber Shield</strong>, masking our server IP and filtering malicious traffic.</td>
+      </tr>
+      <tr>
+        <td><strong>"Can AI make financial errors on our books?"</strong></td>
+        <td>Invoices upload <strong>strictly as Drafts</strong>. If math doesn't check out, it pauses in a review screen for human approval.</td>
+      </tr>
+      <tr>
+        <td><strong>"Could an email glitch cause duplicate bills in Xero?"</strong></td>
+        <td><strong>No.</strong> Two-layer duplicate prevention automatically detects repeated emails or identical invoice numbers and stops duplicates.</td>
+      </tr>
+      <tr>
+        <td><strong>"Is our data safe from AI public learning?"</strong></td>
+        <td>Enterprise zero-retention contracts guarantee your financial numbers are never stored or used to train public AI models.</td>
+      </tr>
+      <tr>
+        <td><strong>"What if a supplier PDF contains hidden prompt injection?"</strong></td>
+        <td>Extracted data is forced into strict structures and verified with mathematical code before entering Xero strictly as <strong>Drafts</strong>.</td>
+      </tr>
+      <tr>
+        <td><strong>"How quickly can the system recover from a server crash?"</strong></td>
+        <td>With automated daily backups and persistent queues, full node recovery takes under <strong>15 minutes</strong> (RTO &lt; 15 min).</td>
+      </tr>
+    </tbody>
+  </table>
+
+</body>
+</html>
