@@ -140,7 +140,7 @@ function Empty({ children }) {
 // Horizontal bars — used for the service-line mix and the margin bridge. Scaled
 // against the largest ABSOLUTE value so a negative bar (a credit note month)
 // still renders at a truthful length.
-function BarList({ items, currency, showPctOfTotal }) {
+export function BarList({ items, currency, showPctOfTotal }) {
   const max = Math.max(...items.map(i => Math.abs(i.value)), 1);
   const total = sum(items.map(i => i.value));
   if (!items.length || items.every(i => i.value === 0)) return <Empty>No activity in this range.</Empty>;
@@ -464,7 +464,9 @@ function WatchBand({ items }) {
 // comparison the card exists to make. Shared scale, side-by-side bars.
 // `percent` switches the tooltip from money to a percentage — the same bars serve
 // the margin trend, where a currency symbol would be actively misleading.
-function GroupedMonthlyBars({ months, series, currency, height = 200, percent = false }) {
+// `rawLabels` keeps the axis text verbatim. The month shortener below would
+// mangle an account called "Savings 2024" into "Savings '24".
+export function GroupedMonthlyBars({ months, series, currency, height = 200, percent = false, rawLabels = false }) {
   const n = months.length;
   if (!n) return <Empty>Pick a wider period.</Empty>;
   const all = series.flatMap(s => s.values);
@@ -500,7 +502,7 @@ function GroupedMonthlyBars({ months, series, currency, height = 200, percent = 
                 );
               })}
               <text x={cx} y={H - 8} textAnchor="middle" fontSize="10" fill="var(--text-muted)">
-                {m.label.replace(' 20', " '")}
+                {rawLabels ? m.label : m.label.replace(' 20', " '")}
               </text>
             </g>
           );
