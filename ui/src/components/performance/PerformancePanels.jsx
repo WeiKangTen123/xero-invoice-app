@@ -784,12 +784,136 @@ export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse
         <VarianceReasons items={varianceItems} insights={insights} currency={cur} />
       </Surface>
 
+      <ExecutiveActionChecklist data={data} from={from} to={to} insights={insights} currency={cur} />
+
       <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 14, lineHeight: 1.6 }}>
         Every figure on this page is computed from your Xero data before the model sees it — it explains,
         it never calculates. Any sentence containing a number we did not supply is discarded rather than shown.
         A summary, not financial advice.
       </div>
     </>
+  );
+}
+
+// ── Executive Action Checklist (Signal-from-Noise Takeaways) ─────────────────
+export function ExecutiveActionChecklist({ data, from, to, insights, currency }) {
+  if (!data) return null;
+
+  const categories = insights?.categories || [];
+  const cur = currency || data.organisation?.currency || '';
+  
+  const revCat = categories.find(c => c.key === 'revenue');
+  const cashCat = categories.find(c => c.key === 'cash');
+  const deliveryCat = categories.find(c => c.key === 'delivery');
+  const opexCat = categories.find(c => c.key === 'opex');
+
+  const actionItems = [];
+
+  // 1. Cash & Collections
+  if (cashCat && cashCat.status === 'unfavorable') {
+    actionItems.push({
+      icon: '💵',
+      badge: 'Cash Flow Priority',
+      badgeColor: 'var(--danger)',
+      title: 'Accelerate Debtor Collections',
+      desc: cashCat.reason || 'Cash collections are lagging invoiced revenue. Review customer invoice aging to speed up bank receipts.',
+    });
+  } else if (cashCat) {
+    actionItems.push({
+      icon: '✅',
+      badge: 'Working Capital',
+      badgeColor: 'var(--success)',
+      title: 'Healthy Cash Realization',
+      desc: 'Customer cash collections are tracking in lockstep with billing.',
+    });
+  }
+
+  // 2. Cost Control / Direct Delivery
+  if (deliveryCat && deliveryCat.status === 'unfavorable' && deliveryCat.variance !== 0) {
+    actionItems.push({
+      icon: '📦',
+      badge: 'Cost Audit',
+      badgeColor: 'var(--warning)',
+      title: 'Review Direct Delivery & COGS',
+      desc: deliveryCat.reason || 'Direct fulfillment and contractor costs ran higher than budgeted for the period.',
+    });
+  }
+
+  // 3. Overhead / OPEX
+  if (opexCat && opexCat.status === 'unfavorable' && opexCat.variance !== 0) {
+    actionItems.push({
+      icon: '📉',
+      badge: 'Expense Control',
+      badgeColor: 'var(--warning)',
+      title: 'Audit Operating Overheads',
+      desc: opexCat.reason || 'Operating expenditure is currently exceeding plan targets.',
+    });
+  } else if (opexCat && opexCat.status === 'favorable') {
+    actionItems.push({
+      icon: '🎯',
+      badge: 'Budget Discipline',
+      badgeColor: 'var(--success)',
+      title: 'Operating Spend Under Budget',
+      desc: opexCat.reason || 'Operating overhead remained disciplined across major administrative lines.',
+    });
+  }
+
+  // 4. Topline Performance
+  if (revCat) {
+    actionItems.push({
+      icon: revCat.status === 'favorable' ? '🚀' : '⚠️',
+      badge: 'Topline Strategy',
+      badgeColor: revCat.status === 'favorable' ? 'var(--success)' : 'var(--danger)',
+      title: revCat.status === 'favorable' ? 'Revenue Expansion' : 'Revenue Target Lag',
+      desc: revCat.reason || (revCat.status === 'favorable' ? 'Sales outperformed plan targets.' : 'Revenue fell short of budgeted forecast.'),
+    });
+  }
+
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div className="card-title" style={{ marginBottom: 0 }}>Executive Action Checklist &amp; Key Focus</div>
+        <span style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 700 }}>Signal-from-Noise Filter</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+        {actionItems.map((item, idx) => (
+          <div
+            key={idx}
+            style={{
+              background: 'var(--bg-secondary)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: '12px 14px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>
+                <span>{item.icon}</span> {item.title}
+              </span>
+              <span
+                style={{
+                  fontSize: 9.5,
+                  fontWeight: 700,
+                  padding: '2px 7px',
+                  borderRadius: 10,
+                  color: item.badgeColor,
+                  border: `1px solid ${item.badgeColor}`,
+                  background: 'transparent',
+                }}
+              >
+                {item.badge}
+              </span>
+            </div>
+            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              {item.desc}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
