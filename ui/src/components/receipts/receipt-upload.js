@@ -10,7 +10,10 @@
 
 export const MAX_BYTES = 3 * 1024 * 1024;
 export const ACCEPTED  = ['image/jpeg', 'image/png', 'application/pdf'];
-export const ACCEPT_ATTR = 'image/jpeg,image/png,image/heic,image/heif,application/pdf';
+// What the FILE PICKER offers. Wider than what Xero accepts on purpose: every
+// image here is re-encoded to JPEG before upload, so Xero only ever sees a
+// format it takes. Being generous costs nothing and saves the user a conversion.
+export const ACCEPT_ATTR = 'image/jpeg,image/png,image/webp,image/gif,image/bmp,image/heic,image/heif,application/pdf';
 
 // Long edge. 2000px keeps small print on a receipt legible for the parser while
 // landing a typical photo comfortably under the cap.
@@ -57,9 +60,30 @@ export async function prepareReceipt(file) {
   // to JPEG is what makes an iPhone photo attachable at all.
   let bitmap;
   try {
-    bitmap = await createImageBitmap(file);
+    // imageOrientation MUST be explicit. A phone stores a portrait photo as
+    // landscape pixels plus an EXIF "rotate 90" flag, and browsers disagree on
+    // whether createImageBitmap honours that flag by default — the option has
+    // been specified as both "none" and "from-image" over time. Left implicit,
+    // the same receipt comes out upright in one browser and on its side in
+    // another, and a sideways receipt is markedly harder for the parser to read
+    // AND yields rotated bounding boxes, which then breaks the split guards.
+    //
+    // Passing it explicitly makes the result the same everywhere. The returned
+    // bitmap is already rotated, so width/height below are the upright ones.
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
   } catch {
-    throw new Error('That file could not be read as an image. Try a JPEG, PNG or PDF.');
+    // A browser that rejects the options bag rather than ignoring it still gets
+    // a usable image, just without the guaranteed rotation.
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch {
+      throw new Error(
+        file.type === 'image/heic' || file.type === 'image/heif'
+          // Safari and iOS decode HEIC; Chrome and Firefox on desktop do not.
+          // Naming the way out beats a generic failure.
+          ? 'HEIC photos only open in Safari on a computer. Send it from your phone instead, or export it as JPEG.'
+          : 'That file could not be read as an image. Try a JPEG, PNG or PDF.');
+    }
   }
 
   const scale = Math.min(1, MAX_DIM / Math.max(bitmap.width, bitmap.height));
