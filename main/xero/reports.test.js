@@ -2375,3 +2375,53 @@ describe('getFinancialNarrative — the wiring, not just the parts', () => {
     expect(prompt).toMatch(/most receivables are overdue/);
   });
 });
+
+// ── Two different refreshes ─────────────────────────────────────────────────
+// Xero bills on data egress, so "re-word this explanation" must not re-download
+// the ledger. force reaches Xero; reanalyse only re-runs the model.
+describe('getFinancialNarrative — force vs reanalyse', () => {
+  let reports, callGemini;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('../utils/gemini-client', () => ({ callGemini: jest.fn(), GEMINI_MODELS: ['m'] }));
+    ({ callGemini } = require('../utils/gemini-client'));
+    reports = require('./reports');
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const cf = {
+    organisation: { currency: 'SGD' }, period: { label: 'FY' },
+    reconciliation: { revenueAccrual: 109330, customerReceipts: 26000 },
+    workingCapital: { receivable: 109330, overdue: 57330, dso: 349, collectionRate: 0 },
+    alerts: { alerts: [] },
+  };
+
+  test('a second call reuses the cached text rather than paying for another', async () => {
+    callGemini.mockResolvedValue('The alerts share one cause.');
+    await reports._narrateFrom('u1', 't1', cf, { force: true });
+    await reports._narrateFrom('u1', 't1', cf, {});
+    expect(callGemini).toHaveBeenCalledTimes(1);
+  });
+
+  test('re-analysing asks the model again', async () => {
+    callGemini.mockResolvedValue('The alerts share one cause.');
+    await reports._narrateFrom('u1', 't1', cf, { force: true });
+    await reports._narrateFrom('u1', 't1', cf, { force: true });
+    expect(callGemini).toHaveBeenCalledTimes(2);
+  });
+
+  test('the cache key follows the figures, so changed numbers are re-explained', async () => {
+    callGemini.mockResolvedValue('The alerts share one cause.');
+    await reports._narrateFrom('u1', 't1', cf, {});
+    await reports._narrateFrom('u1', 't1', { ...cf, workingCapital: { ...cf.workingCapital, overdue: 99999 } }, {});
+    expect(callGemini).toHaveBeenCalledTimes(2);
+  });
+
+  test('one user\'s narrative is never served to another', async () => {
+    callGemini.mockResolvedValue('The alerts share one cause.');
+    await reports._narrateFrom('u1', 't1', cf, {});
+    await reports._narrateFrom('u2', 't1', cf, {});
+    expect(callGemini).toHaveBeenCalledTimes(2);
+  });
+});
