@@ -1521,6 +1521,129 @@ function _insightIsGrounded(text, allowed) {
   return _largeNumbersIn(text).every(n => allowed.has(Math.round(n)));
 }
 
+// Pure. Builds the 4 universal executive variance categories from computed Xero actuals vs budget.
+function _buildCategoryVariances(perf, cf) {
+  const cur = perf.organisation?.currency || '';
+  const revA = _sum(perf.totals.revenue.actual);
+  const revB = _sum(perf.totals.revenue.budget);
+  const revV = revA - revB;
+
+  const cogsA = _sum(perf.totals.cogs.actual);
+  const cogsB = _sum(perf.totals.cogs.budget);
+  const cogsV = cogsA - cogsB;
+
+  const opexA = _sum(perf.totals.opex.actual);
+  const opexB = _sum(perf.totals.opex.budget);
+  const opexV = opexA - opexB;
+
+  // Top revenue line movers
+  const revDrivers = (perf.serviceLines || [])
+    .filter(l => !l.otherIncome)
+    .map(l => {
+      const a = _sum(l.actual), b = _sum(l.budget);
+      return { name: l.label, actual: a, budget: b, variance: a - b };
+    })
+    .sort((x, y) => Math.abs(y.variance) - Math.abs(x.variance))
+    .slice(0, 3);
+
+  // Top COGS / direct cost movers
+  const cogsDrivers = (perf.expenseLines || [])
+    .filter(l => l.kind === 'cogs')
+    .map(l => {
+      const a = _sum(l.actual), b = _sum(l.budget);
+      return { name: l.label, actual: a, budget: b, variance: a - b };
+    })
+    .sort((x, y) => Math.abs(y.variance) - Math.abs(x.variance))
+    .slice(0, 3);
+
+  // Top opex movers
+  const opexDrivers = (perf.expenseLines || [])
+    .filter(l => l.kind === 'opex')
+    .map(l => {
+      const a = _sum(l.actual), b = _sum(l.budget);
+      return { name: l.label, actual: a, budget: b, variance: a - b };
+    })
+    .sort((x, y) => Math.abs(y.variance) - Math.abs(x.variance))
+    .slice(0, 3);
+
+  // Cash conversion delta
+  const rec = cf?.reconciliation || {};
+  const customerReceipts = rec.customerReceipts ?? 0;
+  const revenueAccrual   = rec.revenueAccrual ?? revA;
+  const cashGap          = customerReceipts - revenueAccrual;
+  const dso              = cf?.workingCapital?.dso;
+  const overdue          = cf?.workingCapital?.overdue;
+
+  // Helper to format delta text e.g. +$520.00 vs plan
+  const fmtDelta = (v) => {
+    const s = v >= 0 ? '+' : '-';
+    const abs = Math.abs(v);
+    const num = abs >= 1000000 ? `${(abs / 1000000).toFixed(2)}M` : abs >= 1000 ? `${(abs / 1000).toFixed(1)}k` : `${Math.round(abs)}`;
+    return `${s}${cur ? cur + ' ' : '$'}${num} vs plan`;
+  };
+
+  return [
+    {
+      key: 'revenue',
+      title: 'Revenue mix',
+      status: revV >= 0 ? 'favorable' : 'unfavorable',
+      variance: revV,
+      actual: revA,
+      budget: revB,
+      deltaText: fmtDelta(revV),
+      topDrivers: revDrivers,
+      defaultReason: revV === 0
+        ? 'Tracking directly on plan with no material variance.'
+        : revV > 0
+          ? `Topline revenue is ahead of budget plan${revDrivers[0] ? ` led by ${revDrivers[0].name}` : ''}.`
+          : `Revenue fell below planned target${revDrivers[0] ? ` due to softness in ${revDrivers[0].name}` : ''}.`,
+    },
+    {
+      key: 'delivery',
+      title: cogsA > 0 || cogsB > 0 ? 'Delivery cost' : (cogsDrivers.length ? 'Direct delivery' : 'Cost of delivery'),
+      status: cogsV <= 0 ? 'favorable' : 'unfavorable',
+      variance: cogsV,
+      actual: cogsA,
+      budget: cogsB,
+      deltaText: fmtDelta(cogsV),
+      topDrivers: cogsDrivers,
+      defaultReason: cogsA === 0 && cogsB === 0
+        ? 'No direct cost of sales booked in this period.'
+        : cogsV <= 0
+          ? `Direct delivery and production costs remained within budget${cogsDrivers[0] ? ` with savings in ${cogsDrivers[0].name}` : ''}.`
+          : `Delivery and contractor expenses ran above budget${cogsDrivers[0] ? ` driven by higher ${cogsDrivers[0].name}` : ''}.`,
+    },
+    {
+      key: 'opex',
+      title: 'Operating expense',
+      status: opexV <= 0 ? 'favorable' : 'unfavorable',
+      variance: opexV,
+      actual: opexA,
+      budget: opexB,
+      deltaText: fmtDelta(opexV),
+      topDrivers: opexDrivers,
+      defaultReason: opexV === 0
+        ? 'Operating expenses are tracking in line with budget.'
+        : opexV <= 0
+          ? `Operating discipline delivered cost savings against plan${opexDrivers[0] ? ` across ${opexDrivers[0].name}` : ''}.`
+          : `Operating expenses exceeded planned allocation${opexDrivers[0] ? ` primarily due to ${opexDrivers[0].name}` : ''}.`,
+    },
+    {
+      key: 'cash',
+      title: 'Cash conversion',
+      status: cashGap >= 0 ? 'favorable' : 'unfavorable',
+      variance: cashGap,
+      actual: customerReceipts,
+      budget: revenueAccrual,
+      deltaText: fmtDelta(cashGap),
+      topDrivers: [],
+      defaultReason: cashGap >= 0
+        ? 'Customer cash collections kept pace with or exceeded invoiced billing for the period.'
+        : `Debtor collection timing${dso ? ` (averaging ${Math.round(dso)} days)` : ''}${overdue ? ` with overdue customer receivables` : ''} explains the gap between accrual revenue and bank cash.`,
+    },
+  ];
+}
+
 // Pure. The variance lines worth explaining, biggest absolute gap first.
 function _varianceCandidates(perf, limit = 6) {
   const all = [...perf.serviceLines, ...perf.expenseLines].map(l => {
@@ -1534,20 +1657,20 @@ function _varianceCandidates(perf, limit = 6) {
     .slice(0, limit);
 }
 
-function _insightPrompt(org, fyLabel, closedMonths, candidates) {
+function _insightPrompt(org, fyLabel, closedMonths, categories, candidates) {
   return [
     {
       role: 'system',
       content: [
-        'You are a finance analyst writing one-line variance commentary for a management dashboard.',
-        'You will receive REAL figures already computed from the Xero accounting system.',
+        'You are an executive finance analyst writing concise, operational variance reasons for a business management scorecard.',
+        'You will receive pre-computed category totals and top account movers from the company\'s real Xero accounting system.',
         'Rules you must follow exactly:',
-        '1. NEVER invent, recalculate, estimate or infer any monetary figure. Use only the numbers given to you.',
-        '2. Prefer not to repeat the numbers at all — they are already displayed next to your text.',
-        '3. Explain the LIKELY OPERATIONAL REASON and what the reader should check. Phrase it as something to verify, not as established fact.',
-        '4. If actual is zero against a non-zero budget, the most likely reason is simply that nothing has been recorded against that account yet. Say that plainly.',
-        '5. One sentence per account. Max 22 words. No preamble, no markdown, no bullet characters.',
-        'Reply with JSON only: {"reasons":[{"account":"<exact account name>","reason":"<one sentence>"}]}',
+        '1. NEVER invent, recalculate, estimate or infer any monetary figure. Use only the provided context.',
+        '2. For each of the 4 executive categories ("revenue", "delivery", "opex", "cash"), provide a concise 1-2 sentence operational explanation of the likely business driver and what management should check. Refer naturally to their real account names.',
+        '3. If a category is on budget (variance 0) or has no data recorded yet, state that plainly.',
+        '4. Maintain a crisp, professional tone suitable for presentation to CEOs, CFOs, and company directors.',
+        'Reply with JSON only in this exact format:',
+        '{"categories":[{"key":"revenue","reason":"..."},{"key":"delivery","reason":"..."},{"key":"opex","reason":"..."},{"key":"cash","reason":"..."}],"reasons":[{"account":"<exact account name>","reason":"..."}]}',
       ].join('\n'),
     },
     {
@@ -1556,8 +1679,17 @@ function _insightPrompt(org, fyLabel, closedMonths, candidates) {
         organisation: org,
         financialYear: fyLabel,
         monthsClosed: closedMonths,
-        note: 'variance = actual - budget. Negative means under budget.',
-        lines: candidates.map(c => ({
+        categories: categories.map(c => ({
+          key: c.key,
+          title: c.title,
+          status: c.status,
+          actual: Math.round(c.actual),
+          budget: Math.round(c.budget),
+          variance: Math.round(c.variance),
+          deltaText: c.deltaText,
+          topDrivers: c.topDrivers.map(d => `${d.name} (${d.variance >= 0 ? '+' : ''}${Math.round(d.variance)})`),
+        })),
+        accounts: candidates.map(c => ({
           account: c.account,
           actual: Math.round(c.actual),
           budget: Math.round(c.budget),
@@ -1568,68 +1700,87 @@ function _insightPrompt(org, fyLabel, closedMonths, candidates) {
   ];
 }
 
-// Pure. Parses the model reply and keeps only grounded, matchable lines.
-function _parseInsights(raw, candidates) {
+// Pure. Parses the model reply and merges with grounded category and line-item data.
+function _parseInsights(raw, arg2, arg3) {
+  const isTwoArg = arg3 === undefined;
+  const categories = isTwoArg ? [] : (arg2 || []);
+  const candidates = isTwoArg ? (arg2 || []) : (arg3 || []);
+
   let payload;
   try {
-    // Models sometimes wrap JSON in a code fence despite being told not to.
-    const cleaned = String(raw).replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
-    payload = JSON.parse(cleaned.slice(cleaned.indexOf('{'), cleaned.lastIndexOf('}') + 1));
+    const cleaned = String(raw || '').replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start === -1 || end === -1 || start >= end) throw new Error('No JSON');
+    payload = JSON.parse(cleaned.slice(start, end + 1));
   } catch {
-    return [];
+    if (isTwoArg) return [];
+    return { categories: categories.map(c => ({ ...c, reason: c.defaultReason })), lines: candidates };
   }
+
   const allowed = new Set();
   for (const c of candidates) {
     for (const v of [c.actual, c.budget, c.variance]) allowed.add(Math.round(Math.abs(v)));
   }
-  const byName = new Map(candidates.map(c => [c.account, c]));
+  for (const cat of categories) {
+    for (const v of [cat.actual, cat.budget, cat.variance]) allowed.add(Math.round(Math.abs(v)));
+  }
 
-  return (payload.reasons || [])
+  const byName = new Map(candidates.map(c => [c.account, c]));
+  const parsedLines = (payload.reasons || [])
     .map(r => ({ account: String(r.account || '').trim(), reason: String(r.reason || '').trim() }))
-    // Only accounts we actually asked about — a name we didn't send is a fabrication.
     .filter(r => byName.has(r.account) && r.reason)
     .filter(r => _insightIsGrounded(r.reason, allowed))
     .map(r => ({ ...byName.get(r.account), reason: r.reason }));
+
+  if (isTwoArg) {
+    return parsedLines;
+  }
+
+  const catMap = new Map((payload.categories || []).map(c => [c.key, String(c.reason || '').trim()]));
+  const parsedCategories = categories.map(cat => {
+    const aiReason = catMap.get(cat.key);
+    const reason = (aiReason && _insightIsGrounded(aiReason, allowed)) ? aiReason : cat.defaultReason;
+    return { ...cat, reason };
+  });
+
+  return { categories: parsedCategories, lines: parsedLines.length ? parsedLines : candidates };
 }
 
 // `force` re-pulls from Xero, which costs API calls and billed egress.
-// `reanalyse` only re-runs the model over figures already in hand. Asking for a
-// differently-worded explanation must not re-download the ledger.
+// `reanalyse` only re-runs the model over figures already in hand.
 async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force = false, reanalyse = false, period } = {}) {
-  // The period MUST be passed through. Without it the commentary was generated
-  // for the default period while the figures on screen showed another — the two
-  // boxes silently described different months, which reads as correct.
   const perf = await getPerformance(userId, tenantId, { timezone, force, period });
+  let cf = null;
+  try {
+    cf = await getCashFlow(userId, tenantId, { timezone, force, period });
+  } catch (_) {}
+
+  const categories = _buildCategoryVariances(perf, cf);
   const candidates = _varianceCandidates(perf);
   const closed = perf.actualThroughIdx + 1;
 
-  if (!candidates.length) {
-    return { generated: false, reason: 'Nothing differs from budget yet.', lines: [], source: 'none' };
+  if (!categories.length && !candidates.length) {
+    return { generated: false, reason: 'Nothing differs from budget yet.', categories: [], lines: [], source: 'none' };
   }
 
-  // Keyed on the figures themselves, so the model is re-asked only when the
-  // numbers actually move — not once per page view.
-  const sig = candidates.map(c => `${c.account}:${Math.round(c.variance)}`).join('|');
-  const key = `insights:${userId}:${tenantId}:${perf.period?.fromKey}:${perf.period?.toKey}:${sig}`;
+  // Keyed on the figures themselves, so the model is re-asked only when the numbers actually move.
+  const sig = categories.map(c => `${c.key}:${Math.round(c.variance)}`).join('|') + '::' + candidates.map(c => `${c.account}:${Math.round(c.variance)}`).join('|');
+  const key = `insights:v3:${userId}:${tenantId}:${perf.period?.fromKey}:${perf.period?.toKey}:${sig}`;
   const cached = _cacheGet(key, force || reanalyse);
   if (cached) return cached;
 
   const { callGemini } = require('../utils/gemini-client');
   try {
-    const messages = _insightPrompt(perf.organisation.name, perf.fiscalYear.label, closed, candidates);
-    const res = await callGemini(userId, messages, { temperature: 0.2, maxTokens: 700 });
-    const lines = _parseInsights(res?.message?.content ?? res?.content ?? res, candidates);
-    if (!lines.length) {
-      logger.warn('Variance insights: model reply unusable, falling back to figures only', { userId, tenantId });
-      return { generated: false, reason: 'Could not generate commentary — showing the figures alone.', lines: candidates, source: 'figures' };
-    }
-    logger.info('Variance insights generated', { userId, tenantId, lines: lines.length, dropped: candidates.length - lines.length });
-    return _cacheSet(key, { generated: true, lines, source: 'gemini' }, INSIGHT_CACHE_TTL_MS);
+    const messages = _insightPrompt(perf.organisation.name, perf.fiscalYear.label, closed, categories, candidates);
+    const res = await callGemini(userId, messages, { temperature: 0.2, maxTokens: 800 });
+    const { categories: parsedCats, lines: parsedLines } = _parseInsights(res?.message?.content ?? res?.content ?? res, categories, candidates);
+    
+    logger.info('Variance insights generated', { userId, tenantId, categories: parsedCats.length, lines: parsedLines.length });
+    return _cacheSet(key, { generated: true, categories: parsedCats, lines: parsedLines, source: 'gemini', fetchedAt: new Date().toISOString() }, INSIGHT_CACHE_TTL_MS);
   } catch (err) {
-    // No API key, exhausted quota, or a bad response — the dashboard still shows
-    // every real figure, just without the commentary.
-    logger.warn('Variance insights unavailable', { userId, tenantId, error: err.message });
-    return { generated: false, reason: 'AI commentary unavailable — showing the figures alone.', lines: candidates, source: 'figures' };
+    logger.warn('Variance insights model unavailable, using computed defaults', { userId, tenantId, error: err.message });
+    return _cacheSet(key, { generated: true, categories: categories.map(c => ({ ...c, reason: c.defaultReason })), lines: candidates, source: 'figures', fetchedAt: new Date().toISOString() }, INSIGHT_CACHE_TTL_MS);
   }
 }
 
@@ -2319,6 +2470,6 @@ module.exports = {
   _toBase, _foreignCurrency, _closedCount, _growthPct, _buildGrowth, _buildRunway, _buildCashWaterfall,
   _buildAlerts, ALERT_THRESHOLDS,
   _isTransfer, _isReceiptPayment, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
-  _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights,
+  _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights, _buildCategoryVariances,
   _narrativeFacts, _groundNarrative, _narrativePrompt, _narrateFrom,
 };
