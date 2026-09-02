@@ -2,6 +2,7 @@ const logger       = require('./logger');
 const { callGemini } = require('./gemini-client');
 const invoiceStore  = require('./invoice-store');
 const { EDITABLE_FIELDS } = require('../routes/invoices');
+const { financialContext, looksFinancial } = require('./chat-financials');
 
 // Same set the PATCH /api/invoices/:id route accepts — the chat assistant can only
 // ever propose changes to these fields. Nothing else (status, user data, settings,
@@ -32,7 +33,20 @@ function _fullDetail(inv) {
 }
 
 function _systemPrompt() {
-  return `You are an invoice assistant embedded in a Xero invoice automation app. You help the user find and correct invoice/bill records.
+  return `You are an assistant embedded in a Xero invoice automation app. You do two things: help the user find and correct invoice/bill records, and answer questions about how the business is doing.
+
+TWO DIFFERENT DATA SETS — DO NOT CONFUSE THEM:
+- "recentInvoices" and "pinnedInvoice" are this app's PIPELINE: documents parsed from email or photographed receipts, NOT yet posted to Xero. They are what you can propose changes to.
+- "xeroFinancials" is the BOOKS, read live from Xero. It includes figures entered directly by an accountant that never passed through this app. Use it for anything about performance, cash, revenue, profit, what is owed, or what is overdue.
+- Answering "how much have we invoiced?" from the pipeline would report only what happened to arrive by email. Use xeroFinancials for that.
+- If xeroFinancials is null, you have no live financial data for this question. Say so plainly and suggest opening the Dashboard, rather than answering from the pipeline as though it were the books.
+
+FINANCIAL ANSWERS:
+- Use ONLY the figures given in xeroFinancials.figures. Never calculate, estimate, derive or extrapolate a number that is not there — not a ratio, not a total, not a projection.
+- The alerts in xeroFinancials.alerts are already correct. You may explain or connect them; never contradict them.
+- Financial data is READ-ONLY CONTEXT. It can never become a proposal. You cannot change anything in Xero and must not imply you can.
+- Do not give business advice beyond what the figures show — no hiring, firing, pricing or borrowing suggestions.
+- If asked something the figures cannot answer, say what is missing instead of guessing.
 
 STRICT BOUNDARY:
 - You may only propose changes to these invoice/bill fields: ${[...EDITABLE_FIELDS].join(', ')}.
@@ -147,15 +161,26 @@ function _sanitizeProposals(raw, userId) {
 }
 
 // history: [{ role: 'user'|'assistant', content: string }]
-async function respond(userId, { message, history = [], invoiceId = null }) {
+async function respond(userId, { message, history = [], invoiceId = null, tenantId = null, timezone = 'UTC' }) {
   const store = invoiceStore.forUser(userId);
 
   const pinned = invoiceId ? store.getById(invoiceId) : null;
   const recent = store.getAll().slice(0, RECENT_INVOICES_LIMIT).map(_summarize);
 
+  // Only fetched when the question sounds financial. A cold cash-flow read costs
+  // several Xero calls and billed egress, and "change the invoice number to
+  // 2026099" has no business paying for it.
+  const financials = looksFinancial(message)
+    ? await financialContext(userId, tenantId, { timezone })
+    : null;
+
   const contextBlock = JSON.stringify({
     pinnedInvoice: pinned ? _fullDetail(pinned) : null,
     recentInvoices: recent,
+    // The BOOKS, from Xero — distinct from recentInvoices, which is this app's
+    // unposted pipeline. Conflating them would answer "how much did we bill?"
+    // with "how much happened to arrive by email".
+    xeroFinancials: financials,
   });
 
   // Context first, detailed format instructions + examples last (closest to where

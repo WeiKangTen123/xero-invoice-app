@@ -3,6 +3,8 @@ const rateLimit = require('express-rate-limit');
 const router    = express.Router();
 const { requireAuth } = require('../middleware/auth-middleware');
 const chatAgent = require('../utils/chat-agent');
+const tokenCache = require('../utils/token-cache');
+const { getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const logger    = require('../utils/logger');
 
 // The global app-wide rate limit (500 req/15min) is far looser than Gemini's own
@@ -31,10 +33,20 @@ router.post('/', requireAuth, chatLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'Message is required' });
     }
 
+    // The user's own connected org, so the assistant can answer questions about
+    // the BOOKS and not only this app's unposted pipeline. Resolved here rather
+    // than trusted from the request, and absent when nothing is connected —
+    // in which case the assistant says so instead of guessing.
+    const tenants  = tokenCache.getPersistedTenants(req.user.id);
+    const tenantId = tenants.length ? tenants[0].tenantId : null;
+    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
+
     const result = await chatAgent.respond(req.user.id, {
       message: message.trim(),
       history: Array.isArray(history) ? history : [],
       invoiceId: invoiceId || null,
+      tenantId,
+      timezone,
     });
 
     res.json(result);
