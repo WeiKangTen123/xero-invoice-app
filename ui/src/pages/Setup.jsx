@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api/client';
+import ChartOfAccounts from '../components/ChartOfAccounts';
 import HelpTooltip from '../components/HelpTooltip';
 import AccountCodeSelect from '../components/AccountCodeSelect';
 import { useAuth } from '../context/AuthContext';
@@ -687,6 +688,13 @@ export default function Setup() {
           </button>
         </div>
       </form>
+
+      {/* Reference, not a setting: nothing here is saved. It lives in Settings
+          because "are my account codes right?" is a setup question, and a list
+          of codes is not something you would act on from a dashboard. */}
+      <div style={{ marginTop: 24 }}>
+        <ChartOfAccounts />
+      </div>
     </div>
   );
 }

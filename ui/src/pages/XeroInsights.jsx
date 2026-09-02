@@ -11,9 +11,9 @@ const TABS = [
   { key: 'revenue',  label: 'Revenue' },
   { key: 'cashflow', label: 'Cash Flow' },
   { key: 'profit',   label: 'Profitability' },
-  { key: 'invoices', label: 'Invoices & Bills' },
   { key: 'banking',  label: 'Banking' },
-  { key: 'accounts', label: 'Chart of Accounts' },
+  // Chart of Accounts moved to Settings: it answers "is my setup right?", not
+  // "how is the business doing?". Its route still backs AccountCodeSelect.
   { key: 'contacts', label: 'Contacts' },
   { key: 'budget',   label: 'Budget vs Actual' },
   { key: 'variance', label: 'Budget Variance' },
@@ -40,88 +40,10 @@ function SourceNote({ children }) {
 // ── Bar chart: any two values compared — interactive hover ──────────────────
 // Generic enough to serve Receivables/Payables (Overview), Income/Expenses
 // (P&L), and Cash In/Cash Out (Cash Flow) — same visual language throughout.
-function TwoBarChart({ leftLabel, leftValue, leftColor = 'var(--success)', rightLabel, rightValue, rightColor = 'var(--danger)', currency }) {
-  const [hover, setHover] = useState(null);
-  const max = Math.max(leftValue, rightValue, 1);
-  // PAD_T needs headroom for the value label drawn *above* the tallest bar
-  // (label baseline sits 8px above the bar top, and the text itself extends
-  // further up from its baseline by roughly the font's ascent) — 14 wasn't
-  // enough and let the whole-value label for whichever bar hit the chart's
-  // max clip off the top of the SVG.
-  const W = 360, H = 170, PAD_B = 26, PAD_T = 26, barW = 78;
-  const scale = v => (v / max) * (H - PAD_T - PAD_B);
-
-  const bars = [
-    { key: 'left',  label: leftLabel,  value: leftValue,  x: 70,  color: leftColor },
-    { key: 'right', label: rightLabel, value: rightValue, x: 210, color: rightColor },
-  ];
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
-      <line x1="40" y1={PAD_T} x2="40" y2={H - PAD_B} stroke="var(--border)" strokeWidth="1" />
-      <line x1="40" y1={H - PAD_B} x2={W - 20} y2={H - PAD_B} stroke="var(--border)" strokeWidth="1" />
-      {bars.map(b => {
-        const h = scale(b.value);
-        const y = H - PAD_B - h;
-        const active = hover === b.key;
-        return (
-          <g key={b.key} onMouseEnter={() => setHover(b.key)} onMouseLeave={() => setHover(null)} style={{ cursor: 'pointer' }}>
-            <rect x={b.x} y={PAD_T} width={barW} height={H - PAD_T - PAD_B} fill="transparent" />
-            <rect x={b.x} y={y} width={barW} height={Math.max(h, 2)} rx="6" fill={b.color} opacity={active ? 1 : 0.82} />
-            <text x={b.x + barW / 2} y={y - 8} textAnchor="middle" fontSize="12" fontWeight="700" fill="var(--text-primary)">
-              {active ? fmtMoney(b.value, currency) : b.value.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-            </text>
-            <text x={b.x + barW / 2} y={H - 8} textAnchor="middle" fontSize="11" fill="var(--text-secondary)">{b.label}</text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
 
 // ── Aging bars: outstanding amount bucketed by how soon it's due ────────────
 // Mirrors Xero's own "Invoices owed to you" / "Bills to pay" widgets, just
 // with fixed day windows instead of Xero's dynamic weekly columns.
-const AGING_BUCKETS = [
-  { key: 'overdue',  label: 'Overdue' },
-  { key: 'within7',  label: 'Due ≤7d' },
-  { key: 'within30', label: 'Due ≤30d' },
-  { key: 'later',    label: 'Later' },
-];
-function AgingChart({ aging, color, currency }) {
-  const [hover, setHover] = useState(null);
-  const total = AGING_BUCKETS.reduce((s, b) => s + (aging?.[b.key]?.amount || 0), 0);
-  if (!total) return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0', textAlign: 'center' }}>Nothing outstanding</div>;
-
-  const max = Math.max(...AGING_BUCKETS.map(b => aging[b.key].amount), 1);
-  // Same headroom fix as TwoBarChart — 14 clipped the value label on
-  // whichever bucket happened to be the tallest bar.
-  const W = 360, H = 150, PAD_B = 26, PAD_T = 26, barW = 62, gap = 20;
-  const scale = v => (v / max) * (H - PAD_T - PAD_B);
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
-      <line x1="0" y1={H - PAD_B} x2={W} y2={H - PAD_B} stroke="var(--border)" strokeWidth="1" />
-      {AGING_BUCKETS.map((b, i) => {
-        const bucket = aging[b.key];
-        const x = 14 + i * (barW + gap);
-        const h = scale(bucket.amount);
-        const y = H - PAD_B - h;
-        const active = hover === b.key;
-        return (
-          <g key={b.key} onMouseEnter={() => setHover(b.key)} onMouseLeave={() => setHover(null)} style={{ cursor: 'pointer' }}>
-            <rect x={x} y={PAD_T} width={barW} height={H - PAD_T - PAD_B} fill="transparent" />
-            <rect x={x} y={y} width={barW} height={Math.max(h, 2)} rx="6" fill={color} opacity={active ? 1 : 0.55 + 0.15 * (bucket.amount > 0)} />
-            <text x={x + barW / 2} y={y - 8} textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--text-primary)">
-              {active ? fmtMoney(bucket.amount, currency) : bucket.count}
-            </text>
-            <text x={x + barW / 2} y={H - 8} textAnchor="middle" fontSize="10.5" fill="var(--text-secondary)">{b.label}</text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
 
 // ── Donut: invoice status breakdown — interactive hover ─────────────────────
 function StatusDonut({ breakdown }) {
@@ -340,8 +262,6 @@ export default function XeroInsights() {
   const [error,     setError]     = useState('');
   const [refreshing,setRefreshing]= useState(false);
   const [tab,       setTab]       = useState('overview');
-  const [search,    setSearch]    = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
   const [activeTenantId, setActiveTenantId] = useState(null);
   const [, forceTick] = useState(0); // re-render every 15s so "synced Xs ago" stays live
   const tickRef = useRef(null);
@@ -352,9 +272,7 @@ export default function XeroInsights() {
   // one of these tabs — before the fetch effect has even fired, while status
   // is still 'idle' — never has to null-check .data.length mid-render.
   const [banking,  setBanking]  = useState({ status: 'idle', data: [], error: '' });
-  const [accounts, setAccounts] = useState({ status: 'idle', data: [], error: '' });
   const [contacts, setContacts] = useState({ status: 'idle', data: [], error: '' });
-  const [accountSearch, setAccountSearch] = useState('');
   const [contactSearch, setContactSearch] = useState('');
 
   // Banking tab's statement drill-down — which account, and its transactions.
@@ -435,12 +353,6 @@ export default function XeroInsights() {
       api.get(`/xero-reports/bank-accounts${activeTenantId ? `?tenantId=${activeTenantId}` : ''}`)
         .then(d => setBanking({ status: 'done', data: d.bankAccounts || [], error: '' }))
         .catch(err => setBanking({ status: 'done', data: [], error: err.message }));
-    }
-    if (tab === 'accounts' && accounts.status === 'idle') {
-      setAccounts(s => ({ ...s, status: 'loading' }));
-      api.get(`/xero-reports/accounts${activeTenantId ? `?tenantId=${activeTenantId}` : ''}`)
-        .then(d => setAccounts({ status: 'done', data: d.accounts || [], error: '' }))
-        .catch(err => setAccounts({ status: 'done', data: [], error: err.message }));
     }
     if (tab === 'contacts' && contacts.status === 'idle') {
       setContacts(s => ({ ...s, status: 'loading' }));
@@ -530,23 +442,6 @@ export default function XeroInsights() {
       .then(d => setStatement({ status: 'done', data: d.transactions || [], error: '' }))
       .catch(err => setStatement({ status: 'done', data: [], error: err.message }));
   }
-
-  const filteredInvoices = useMemo(() => {
-    if (!data?.invoices) return [];
-    const q = search.trim().toLowerCase();
-    return data.invoices.filter(inv => {
-      if (statusFilter !== 'all' && inv.status !== statusFilter) return false;
-      if (!q) return true;
-      return inv.contact.toLowerCase().includes(q) || inv.invoiceNumber.toLowerCase().includes(q);
-    });
-  }, [data, search, statusFilter]);
-
-  const filteredAccounts = useMemo(() => {
-    if (!accounts.data) return [];
-    const q = accountSearch.trim().toLowerCase();
-    if (!q) return accounts.data;
-    return accounts.data.filter(a => a.code.toLowerCase().includes(q) || a.name.toLowerCase().includes(q) || a.type.toLowerCase().includes(q));
-  }, [accounts.data, accountSearch]);
 
   const filteredContacts = useMemo(() => {
     if (!contacts.data) return [];
@@ -772,102 +667,6 @@ export default function XeroInsights() {
         </>
       )}
 
-      {tab === 'invoices' && (
-        <>
-          {/* Moved here from Overview: aging and invoice status answer "who owes
-              me money", which is this tab's question, not the performance
-              dashboard's. */}
-          <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
-                        color: 'var(--text-muted)', margin: '26px 0 12px' }}>
-            Outstanding · right now
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 16, marginBottom: 16 }}>
-            <div className="card">
-              <div className="card-title" style={{ marginBottom: 2 }}>Receivables vs. Payables</div>
-              <div className="card-subtitle" style={{ marginBottom: 2 }}>Hover a bar for the exact amount · right now</div>
-              <SourceNote>Xero Invoices API (AUTHORISED, unpaid)</SourceNote>
-              <TwoBarChart leftLabel="Receivables" leftValue={kpis.totalReceivables} rightLabel="Payables" rightValue={kpis.totalPayables} currency={currency} />
-            </div>
-            <div className="card">
-              <div className="card-title" style={{ marginBottom: 2 }}>Invoice Status</div>
-              <div className="card-subtitle">Sales &amp; bills combined</div>
-              <StatusDonut breakdown={kpis.statusBreakdown} />
-            </div>
-          </div>
-
-          {data.aging && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-              <div className="card">
-                <div className="card-title" style={{ marginBottom: 2 }}>Invoices Owed to You</div>
-                <div className="card-subtitle" style={{ marginBottom: 10 }}>Outstanding sales invoices, by how soon they're due · right now</div>
-                <AgingChart aging={data.aging.receivables} color="var(--success)" currency={currency} />
-              </div>
-              <div className="card">
-                <div className="card-title" style={{ marginBottom: 2 }}>Bills to Pay</div>
-                <div className="card-subtitle" style={{ marginBottom: 10 }}>Outstanding bills, by how soon they're due · right now</div>
-                <AgingChart aging={data.aging.payables} color="var(--danger)" currency={currency} />
-              </div>
-            </div>
-          )}
-
-
-        <div className="card">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
-            <div className="card-title" style={{ marginBottom: 0 }}>Invoices &amp; Bills</div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              {['all', 'paid', 'awaiting', 'overdue'].map(s => (
-                <button key={s} type="button" onClick={() => setStatusFilter(s)} className="btn btn-sm" style={{
-                  background: statusFilter === s ? 'var(--accent-gradient)' : 'var(--bg-secondary)',
-                  color: statusFilter === s ? '#fff' : 'var(--text-muted)', border: 'none', textTransform: 'capitalize',
-                }}>{s}</button>
-              ))}
-              <SearchBox value={search} onChange={setSearch} placeholder="Search contact or invoice #..." />
-            </div>
-          </div>
-
-          {filteredInvoices.length === 0 ? (
-            <div className="empty-state" style={{ padding: '30px 0' }}>
-              <div className="empty-state-icon">📄</div>
-              <div>No invoices match</div>
-            </div>
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                <thead>
-                  <tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
-                    <th style={{ padding: '6px 10px' }}>Type</th>
-                    <th style={{ padding: '6px 10px' }}>Contact</th>
-                    <th style={{ padding: '6px 10px' }}>Invoice #</th>
-                    <th style={{ padding: '6px 10px' }}>Date</th>
-                    <th style={{ padding: '6px 10px' }}>Due Date</th>
-                    <th style={{ padding: '6px 10px' }}>Status</th>
-                    <th style={{ padding: '6px 10px', textAlign: 'right' }}>Total</th>
-                    <th style={{ padding: '6px 10px', textAlign: 'right' }}>Amount Due</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredInvoices.map(inv => {
-                    const badge = STATUS_BADGE[inv.status];
-                    return (
-                      <tr key={inv.invoiceId} style={{ borderTop: '1px solid var(--border)' }}>
-                        <td style={{ padding: '9px 10px' }}>{inv.type}</td>
-                        <td style={{ padding: '9px 10px' }}>{inv.contact}</td>
-                        <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{inv.invoiceNumber || '—'}</td>
-                        <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{formatDateTime(inv.date, user?.timezone).split(',')[0]}</td>
-                        <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{inv.dueDate ? formatDateTime(inv.dueDate, user?.timezone).split(',')[0] : '—'}</td>
-                        <td style={{ padding: '9px 10px' }}><span className={`badge ${badge.cls}`}>{badge.label}</span></td>
-                        <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(inv.total, inv.currency)}</td>
-                        <td style={{ padding: '9px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(inv.amountDue, inv.currency)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-        </>
-      )}
 
       {tab === 'banking' && (
         <>
@@ -970,41 +769,6 @@ export default function XeroInsights() {
         </>
       )}
 
-      {tab === 'accounts' && (
-        <div className="card">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
-            <div className="card-title" style={{ marginBottom: 0 }}>Chart of Accounts</div>
-            <SearchBox value={accountSearch} onChange={setAccountSearch} placeholder="Search by code, name, or type..." />
-          </div>
-          <SourceNote>Xero Accounts API</SourceNote>
-          {accounts.status !== 'done' ? (
-            <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
-          ) : accounts.error ? (
-            <div className="alert alert-error"><span className="alert-icon">✕</span>{accounts.error}</div>
-          ) : filteredAccounts.length === 0 ? (
-            <div className="empty-state" style={{ padding: '30px 0' }}><div className="empty-state-icon">📋</div><div>No accounts match</div></div>
-          ) : (
-            <div style={{ overflowX: 'auto', maxHeight: 480, overflowY: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
-                <thead><tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
-                  <th style={{ padding: '6px 10px' }}>Code</th><th style={{ padding: '6px 10px' }}>Name</th>
-                  <th style={{ padding: '6px 10px' }}>Type</th><th style={{ padding: '6px 10px' }}>Tax Type</th>
-                  <th style={{ padding: '6px 10px' }}>Status</th>
-                </tr></thead>
-                <tbody>{filteredAccounts.map(a => (
-                  <tr key={a.accountId} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '9px 10px' }}>{a.code || '—'}</td>
-                    <td style={{ padding: '9px 10px' }}>{a.name}</td>
-                    <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{a.type}</td>
-                    <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{a.taxType || '—'}</td>
-                    <td style={{ padding: '9px 10px' }}><span className={`badge ${a.status === 'ACTIVE' ? 'badge-green' : 'badge-gray'}`}>{a.status || '—'}</span></td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
 
       {tab === 'contacts' && (
         <div className="card">
