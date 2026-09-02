@@ -231,17 +231,28 @@ export default function ChatAssistant() {
 
   return (
     <>
+      {/* Hidden while the panel is open. It sat at bottom-right on zIndex 200
+          with the panel on 199, so it floated ON TOP of the message box and
+          covered the send button. The panel header already has its own close,
+          which makes this one redundant exactly when it is in the way.
+          Kept mounted so the fade is not a pop. */}
       <button
-        onClick={() => setOpen(v => !v)}
+        onClick={() => setOpen(true)}
         title="Ask about your invoices"
+        aria-hidden={open}
         style={{
           position: 'fixed', right: 26, bottom: 26, width: 54, height: 54, borderRadius: '50%',
-          background: 'var(--accent-gradient)', border: 'none', cursor: 'pointer',
+          background: 'var(--accent-gradient)', border: 'none',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           boxShadow: 'var(--shadow-lg)', color: '#fff', fontSize: 21, zIndex: 200,
+          cursor: open ? 'default' : 'pointer',
+          opacity: open ? 0 : 1,
+          pointerEvents: open ? 'none' : 'auto',
+          transform: open ? 'scale(0.8)' : 'scale(1)',
+          transition: 'opacity 0.18s ease, transform 0.18s ease',
         }}
       >
-        {open ? '✕' : '💬'}
+        💬
       </button>
 
       <div style={{
