@@ -2311,3 +2311,67 @@ describe('financial narrative — lessons from the first live run', () => {
     expect(_narrativePrompt(_narrativeFacts(cf))).toMatch(/Percentages and counts of days or months are fine/);
   });
 });
+
+// ── Narrative wiring ────────────────────────────────────────────────────────
+// The pure functions above were tested thoroughly and the ORCHESTRATION was
+// not, so "callGemini is not defined" shipped and failed on every real call
+// with a green suite. Same blind spot that let a ReferenceError through in
+// getBudgetVariance earlier. This exercises the actual function.
+describe('getFinancialNarrative — the wiring, not just the parts', () => {
+  let reports, callGemini, cf;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('../utils/gemini-client', () => ({ callGemini: jest.fn(), GEMINI_MODELS: ['m'] }));
+    ({ callGemini } = require('../utils/gemini-client'));
+    reports = require('./reports');
+
+    cf = {
+      organisation: { currency: 'SGD' },
+      period: { label: 'FY to date' },
+      reconciliation: { revenueAccrual: 109330, customerReceipts: 26000 },
+      cash: { closing: 75397 },
+      workingCapital: { receivable: 109330, overdue: 57330, payable: 0, dso: 349, collectionRate: 0 },
+      runway: { available: true, avgCashIn: 31500, avgCashOut: 8391, avgOperatingIn: 6500, propped: true },
+      alerts: { alerts: [{ title: 'Overdue', detail: 'most receivables are overdue', amount: 57330 }] },
+    };
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  test('actually reaches Gemini and returns its prose', async () => {
+    callGemini.mockResolvedValue('Most of what you invoiced has not been collected. The alerts share one cause.');
+    const r = await reports._narrateFrom('u1', 't1', cf, { force: true });
+    expect(callGemini).toHaveBeenCalled();
+    expect(r.available).toBe(true);
+    expect(r.text).toMatch(/not been collected/);
+  });
+
+  test('a total Gemini failure degrades to available:false, never a throw', async () => {
+    callGemini.mockRejectedValue(new Error('quota'));
+    const r = await reports._narrateFrom('u1', 't1', cf, { force: true });
+    expect(r).toEqual({ available: false, reason: 'unavailable' });
+  });
+
+  test('retries once, so a single blip does not hide the card', async () => {
+    callGemini.mockRejectedValueOnce(new Error('blip'))
+              .mockResolvedValueOnce('The alerts share one underlying cause.');
+    const r = await reports._narrateFrom('u1', 't1', cf, { force: true });
+    expect(callGemini).toHaveBeenCalledTimes(2);
+    expect(r.available).toBe(true);
+  }, 10000);
+
+  test('prose that is entirely ungrounded yields no card rather than a wrong one', async () => {
+    callGemini.mockResolvedValue('Your margin improved to 48,200 this month.');
+    const r = await reports._narrateFrom('u1', 't1', cf, { force: true });
+    expect(r).toEqual({ available: false, reason: 'ungrounded' });
+  });
+
+  test('the alerts reach the prompt as ground truth', async () => {
+    callGemini.mockResolvedValue('The alerts share one cause.');
+    await reports._narrateFrom('u1', 't1', cf, { force: true });
+    const prompt = callGemini.mock.calls[0][1].find(m => m.role === 'user').content;
+    expect(prompt).toMatch(/ALERTS ALREADY RAISED/);
+    expect(prompt).toMatch(/most receivables are overdue/);
+  });
+});
