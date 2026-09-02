@@ -289,7 +289,7 @@ function ChartModeToggle({ mode, onChange }) {
 // Real variance figures, each with the model's suggested cause where one was
 // generated. The figures are always shown; the prose is additive and clearly
 // marked, so an LLM outage degrades this card rather than emptying it.
-function VarianceReasons({ items, insights, currency }) {
+export function VarianceReasons({ items, insights, currency }) {
   if (!items.length) return <Empty>Nothing differs from budget in this range.</Empty>;
   const reasonFor = new Map((insights?.lines || []).map(l => [l.account, l.reason]).filter(([, r]) => r));
 
@@ -618,7 +618,73 @@ function rangeGrowth(d, from, to) {
 }
 
 // ── Overview ─────────────────────────────────────────────────────────────────
-export function OverviewPanel({ data, from, to, insights, summary, narrative }) {
+
+// Everything the model writes, in one place.
+//
+// It was spread across Overview — a narrative card at the top and variance
+// reasons near the bottom — on a tab that already carried twelve blocks. Pulling
+// both out makes Overview lighter AND gives the AI somewhere with room for the
+// controls it needs: when it last ran, and a way to ask again.
+export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse, reanalysing, lastAnalysedAt }) {
+  const cur = data?.organisation?.currency || '';
+
+  const varianceItems = data ? [...data.serviceLines, ...data.expenseLines]
+    .map(l => ({ label: l.label, a: sliceSum(l.actual, from, to), b: sliceSum(l.budget, from, to) }))
+    .map(l => ({ ...l, v: l.a - l.b }))
+    .filter(l => l.v !== 0)
+    .sort((x, y) => Math.abs(y.v) - Math.abs(x.v))
+    .slice(0, 6) : [];
+
+  const stamp = lastAnalysedAt
+    ? new Date(lastAnalysedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null;
+
+  return (
+    <>
+      <div className="card" style={{ marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <div className="card-title" style={{ marginBottom: 2 }}>Analysis</div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
+            {data ? rangeLabel(data.months, from, to) : ''}{stamp ? ` · last analysed ${stamp}` : ''}
+          </div>
+        </div>
+        {/* Re-runs the model over figures already fetched. It does NOT re-pull
+            from Xero, which is billed by the gigabyte. */}
+        <button className="btn btn-outline btn-sm" onClick={onReanalyse} disabled={reanalysing}>
+          {reanalysing ? <><span className="btn-spinner" /> Analysing…</> : '↻ Analyse again'}
+        </button>
+      </div>
+
+      {narrative?.available
+        ? <NarrativeCard narrative={narrative} />
+        : (
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div className="card-title">What this period comes down to</div>
+            <Empty>
+              {narrative === null
+                ? 'Reading the figures…'
+                : 'No summary available right now — the figures on the other tabs are unaffected.'}
+            </Empty>
+          </div>
+        )}
+
+      <Surface title="Why the budget differs"
+               right={insights?.source === 'gemini'
+                 ? <span style={{ fontSize: 10, color: 'var(--accent)' }}>AI-written</span>
+                 : 'Actual − budget'}>
+        <VarianceReasons items={varianceItems} insights={insights} currency={cur} />
+      </Surface>
+
+      <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 14, lineHeight: 1.6 }}>
+        Every figure on this page is computed from your Xero data before the model sees it — it explains,
+        it never calculates. Any sentence containing a number we did not supply is discarded rather than shown.
+        A summary, not financial advice.
+      </div>
+    </>
+  );
+}
+
+export function OverviewPanel({ data, from, to, insights, summary, narrative, onOpenAnalysis }) {
   const [trendMode, setTrendMode] = useState('bar');
   const cur = data.organisation?.currency || '';
   const T   = useRangeTotals(data, from, to);
@@ -677,8 +743,6 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative }) 
 
   return (
     <>
-      <NarrativeCard narrative={narrative} />
-
       {/* Health strip — the reference dashboard's top banner, but the verdict is
           derived from the figures rather than a stored status. */}
       <div className="card" style={{
@@ -697,6 +761,25 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative }) 
         <div style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
           {fmtMoney(T.revenue, cur)} revenue · {T.netMargin === null ? '—' : fmtPct(T.netMargin)} net margin
         </div>
+
+        {/* One AI sentence INSIDE the strip that was already here, rather than a
+            thirteenth block on a crowded page. The full analysis has its own tab. */}
+        {narrative?.available && narrative.text && (
+          <div style={{ flexBasis: '100%', borderTop: '1px solid var(--border)', paddingTop: 10, marginTop: 2,
+                        display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.55, flex: 1, minWidth: 260 }}>
+              <span style={{ color: 'var(--accent)', fontSize: 10, marginRight: 6 }}>AI</span>
+              {narrative.text.split(/(?<=\.)\s+/)[0]}
+            </span>
+            {onOpenAnalysis && (
+              <button onClick={onOpenAnalysis}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                               fontSize: 11.5, color: 'var(--accent)', whiteSpace: 'nowrap' }}>
+                See full analysis →
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <WatchBand items={data.watchList} />
@@ -792,12 +875,13 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative }) 
             </div>
           )}
         </Surface>
-        <Surface title="Variance reasons"
-                 right={insights?.source === 'gemini'
-                   ? <span style={{ fontSize: 10, color: 'var(--accent)' }}>AI-suggested</span>
-                   : 'Actual − budget'}
-                 flex={5} minWidth={300}>
-          <VarianceReasons items={varianceItems} insights={insights} currency={cur} />
+        <Surface title="Biggest variances" right="Actual − budget" flex={5} minWidth={300}>
+          {/* The AI explanation of these now lives on the Analysis tab; the
+              figures stay here, where the rest of the numbers are. */}
+          <Rows currency={cur} items={varianceItems.map(l => ({ label: l.label, value: l.v }))} />
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 10 }}>
+            Why these differ → <strong>Analysis</strong> tab
+          </div>
         </Surface>
       </div>
     </>
@@ -1150,7 +1234,7 @@ function varianceBridgeSteps(T) {
 // ever reaches here.
 //
 // Renders nothing at all when unavailable. It is an extra, never a figure.
-function NarrativeCard({ narrative }) {
+export function NarrativeCard({ narrative, compact = false }) {
   if (!narrative?.available || !narrative.text) return null;
   return (
     <div className="card" style={{ marginBottom: 16, borderLeft: '3px solid var(--accent)' }}>

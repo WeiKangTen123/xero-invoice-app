@@ -1592,7 +1592,10 @@ function _parseInsights(raw, candidates) {
     .map(r => ({ ...byName.get(r.account), reason: r.reason }));
 }
 
-async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
+// `force` re-pulls from Xero, which costs API calls and billed egress.
+// `reanalyse` only re-runs the model over figures already in hand. Asking for a
+// differently-worded explanation must not re-download the ledger.
+async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force = false, reanalyse = false, period } = {}) {
   // The period MUST be passed through. Without it the commentary was generated
   // for the default period while the figures on screen showed another — the two
   // boxes silently described different months, which reads as correct.
@@ -1608,7 +1611,7 @@ async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force =
   // numbers actually move — not once per page view.
   const sig = candidates.map(c => `${c.account}:${Math.round(c.variance)}`).join('|');
   const key = `insights:${userId}:${tenantId}:${perf.period?.fromKey}:${perf.period?.toKey}:${sig}`;
-  const cached = _cacheGet(key, force);
+  const cached = _cacheGet(key, force || reanalyse);
   if (cached) return cached;
 
   const { callGemini } = require('../utils/gemini-client');
@@ -2290,9 +2293,11 @@ async function _narrateFrom(userId, tenantId, cf, { force = false } = {}) {
   }, NARRATIVE_CACHE_TTL_MS);
 }
 
-async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
+async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force = false, reanalyse = false, period } = {}) {
+  // Only `force` reaches Xero. `reanalyse` reuses whatever is cached and simply
+  // asks the model again.
   const cf = await getCashFlow(userId, tenantId, { timezone, force, period });
-  return _narrateFrom(userId, tenantId, cf, { force });
+  return _narrateFrom(userId, tenantId, cf, { force: force || reanalyse });
 }
 
 // Called on disconnect so nothing here can outlive the connection it came from.

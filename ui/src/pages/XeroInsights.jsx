@@ -4,10 +4,13 @@ import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney, fmtPct, fmtCell } from '../utils/format';
-import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPanel, BarList, GroupedMonthlyBars } from '../components/performance/PerformancePanels';
+import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPanel, AnalysisPanel, BarList, GroupedMonthlyBars } from '../components/performance/PerformancePanels';
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
+  // All AI-written commentary in one place, with its own controls. It used to be
+  // two blocks on Overview, which already carried twelve.
+  { key: 'analysis', label: 'Analysis' },
   { key: 'revenue',  label: 'Revenue' },
   { key: 'cashflow', label: 'Cash Flow' },
   { key: 'profit',   label: 'Profitability' },
@@ -320,6 +323,8 @@ export default function XeroInsights() {
   // Arrives after the figures, like insights — an LLM outage must never delay
   // or blank the numbers.
   const [narrative, setNarrative] = useState(null);
+  const [reanalysing, setReanalysing] = useState(false);
+  const [lastAnalysedAt, setLastAnalysedAt] = useState(null);
   // Its own fetch: cash flow needs Payments, Bank Transactions and Invoices that
   // no other tab requires, so nothing else pays for them.
   const [cashflow, setCashflow] = useState({ status: 'idle', data: null, error: '' });
@@ -358,7 +363,7 @@ export default function XeroInsights() {
     // refetch if it's on screen, otherwise let the lazy loader pick it up.
     if (tab === 'budget' || tab === 'variance') fetchBudget();
     else setBudget({ status: 'idle', data: null, error: '' });
-    if (tab === 'overview' || tab === 'revenue' || tab === 'banking' || tab === 'profit') fetchPerf();
+    if (['overview', 'revenue', 'banking', 'profit', 'analysis'].includes(tab)) fetchPerf();
     else setPerf({ status: 'idle', data: null, error: '' });
   }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -384,7 +389,7 @@ export default function XeroInsights() {
     // Both budget tabs share one fetch and one cache entry — the Budget Variance
     // view is a different presentation of the same merged data, not a second call.
     if ((tab === 'budget' || tab === 'variance') && budget.status === 'idle') fetchBudget();
-    if ((tab === 'overview' || tab === 'revenue' || tab === 'banking' || tab === 'profit') && perf.status === 'idle') fetchPerf();
+    if (['overview', 'revenue', 'banking', 'profit', 'analysis'].includes(tab) && perf.status === 'idle') fetchPerf();
     if (tab === 'cashflow' && cashflow.status === 'idle') fetchCashflow();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -401,14 +406,21 @@ export default function XeroInsights() {
       .catch(err => setCashflow({ status: 'done', data: null, error: err.message }));
   }
 
-  function fetchPerf(opts = {}) {
-    setPerf(s => ({ ...s, status: 'loading', error: '' }));
+  // The period the page is currently showing, as query params. Shared so the
+  // commentary can never be generated for a different span from the figures.
+  function periodParams(opts = {}) {
     const params = new URLSearchParams();
     if (activeTenantId) params.set('tenantId', activeTenantId);
     const range  = opts.range !== undefined ? opts.range : perfRange;
     const preset = opts.preset || perfPreset;
     if (range) { params.set('from', range.from); params.set('to', range.to); }
     else       { params.set('preset', preset); }
+    return params;
+  }
+
+  function fetchPerf(opts = {}) {
+    setPerf(s => ({ ...s, status: 'loading', error: '' }));
+    const params = periodParams(opts);
     if (opts.force) params.set('force', 'true');
     // Only Banking renders cash in/out. Asking for it elsewhere would make
     // getBankSummary split a long period into 365-day windows for a number
@@ -431,14 +443,8 @@ export default function XeroInsights() {
     // describe the SAME period, so it takes the identical params.
     const ip = new URLSearchParams(params);
     setInsights(null); // clear stale commentary while the new period loads
-    api.get(`/xero-reports/variance-insights?${ip.toString()}`)
-      .then(d => setInsights(d))
-      .catch(() => setInsights(null));
-
     setNarrative(null);
-    api.get(`/xero-reports/narrative?${ip.toString()}`)
-      .then(d => setNarrative(d))
-      .catch(() => setNarrative(null));
+    fetchAnalysis(ip);
   }
 
   function fetchBudget(opts = {}) {
@@ -474,6 +480,33 @@ export default function XeroInsights() {
   const bankBalances = useMemo(
     () => balancesByName(perf.data?.cash?.accounts || []),
     [perf.data]);
+
+  // Both AI fetches in one place. `extra` carries the month range when the reader
+  // has narrowed it, so the commentary describes the span they are looking at —
+  // a narrative sitting above numbers it is not describing is worse than none.
+  function fetchAnalysis(baseParams, { reanalyse = false } = {}) {
+    const q = new URLSearchParams(baseParams);
+    if (reanalyse) q.set('reanalyse', 'true');
+    const months = perf.data?.months;
+    if (months?.length && (monthFrom > 0 || monthTo < months.length - 1)) {
+      q.set('from', months[monthFrom].key);
+      q.set('to',   months[monthTo].key);
+      q.delete('preset');
+      q.delete('window');
+    }
+    return Promise.allSettled([
+      api.get(`/xero-reports/variance-insights?${q.toString()}`).then(d => setInsights(d)),
+      api.get(`/xero-reports/narrative?${q.toString()}`).then(d => setNarrative(d)),
+    ]).then(() => setLastAnalysedAt(new Date().toISOString()));
+  }
+
+  async function reanalyse() {
+    setReanalysing(true);
+    setInsights(null);
+    setNarrative(null);
+    try { await fetchAnalysis(periodParams(), { reanalyse: true }); }
+    finally { setReanalysing(false); }
+  }
 
   const filteredContacts = useMemo(() => {
     if (!contacts.data) return [];
@@ -544,7 +577,7 @@ export default function XeroInsights() {
           </div>
           <button className="btn btn-outline btn-sm" disabled={refreshing} onClick={() => {
             fetchSummary({ force: true });
-            if (tab === 'overview' || tab === 'revenue' || tab === 'banking' || tab === 'profit') fetchPerf({ force: true });
+            if (['overview', 'revenue', 'banking', 'profit', 'analysis'].includes(tab)) fetchPerf({ force: true });
           }}>
             {refreshing ? <span className="btn-spinner" /> : '↻'} Refresh
           </button>
@@ -614,7 +647,7 @@ export default function XeroInsights() {
         ))}
       </div>
 
-      {(tab === 'overview' || tab === 'revenue' || tab === 'cashflow' || tab === 'profit') && perf.data && !perf.error && (
+      {['overview', 'revenue', 'cashflow', 'profit', 'analysis'].includes(tab) && perf.data && !perf.error && (
         <div className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                                        gap: 14, flexWrap: 'wrap', marginBottom: 16, padding: '12px 16px' }}>
           <MonthRange months={perf.data.months} from={monthFrom} to={monthTo}
@@ -653,7 +686,26 @@ export default function XeroInsights() {
           )}
           {perf.data && !perf.error && (
             <OverviewPanel data={perf.data} from={monthFrom} to={monthTo}
-                           insights={insights} summary={data} narrative={narrative} />
+                           insights={insights} summary={data} narrative={narrative}
+                           onOpenAnalysis={() => setTab('analysis')} />
+          )}
+        </>
+      )}
+
+      {tab === 'analysis' && (
+        <>
+          {perf.status === 'loading' && !perf.data && (
+            <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading figures…</div>
+          )}
+          {perf.error && (
+            <div className="alert alert-error"><span className="alert-icon">✕</span>{perf.error}</div>
+          )}
+          {perf.data && !perf.error && (
+            <AnalysisPanel
+              data={perf.data} from={monthFrom} to={monthTo}
+              insights={insights} narrative={narrative}
+              onReanalyse={reanalyse} reanalysing={reanalysing} lastAnalysedAt={lastAnalysedAt}
+            />
           )}
         </>
       )}

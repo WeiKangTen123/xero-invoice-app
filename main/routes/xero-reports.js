@@ -196,7 +196,9 @@ router.get('/variance-insights', requireAuth, async (req, res) => {
     // Same period the figures used — otherwise the commentary describes months
     // the reader isn't looking at.
     const data = await reports.getVarianceInsights(req.user.id, tenantId, {
-      timezone, period: _periodFromQuery(req), force: req.query.force === 'true',
+      timezone, period: _periodFromQuery(req),
+      force:     req.query.force === 'true',        // re-pull from Xero
+      reanalyse: req.query.reanalyse === 'true',    // re-run the model only
     });
     res.json({ connected: true, ...data });
   } catch (err) {
@@ -219,7 +221,11 @@ router.get('/narrative', requireAuth, async (req, res) => {
 
     const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
     const data = await reports.getFinancialNarrative(req.user.id, tenantId, {
-      timezone, period: _periodFromQuery(req), force: req.query.force === 'true',
+      timezone, period: _periodFromQuery(req),
+      force:     req.query.force === 'true',
+      // Asking for another look must not re-download the ledger, which Xero
+      // bills by the gigabyte.
+      reanalyse: req.query.reanalyse === 'true',
     });
     res.json({ connected: true, ...data });
   } catch (err) {
