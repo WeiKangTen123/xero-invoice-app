@@ -1912,6 +1912,38 @@ export function CashFlowPanel({ data }) {
           )}
         </Surface>
 
+        <Surface title="Where the money goes"
+                 right={data.supplierSpend?.available ? `${data.supplierSpend.count} supplier${data.supplierSpend.count === 1 ? '' : 's'}` : null}
+                 flex={5} minWidth={300}>
+          {/* The revenue side has had Top Customers from the start; the cost side
+              only ever had expense ACCOUNTS. "Rent 12,000" names a category;
+              "one supplier is 40% of your spend" is something you can act on. */}
+          {data.supplierSpend?.available ? (
+            <>
+              <BarList currency={cur} showPctOfTotal
+                       items={data.supplierSpend.suppliers.slice(0, 8).map(x => ({
+                         label: x.name, value: x.spend,
+                         tag: x.bills > 1 ? `${x.bills} bills` : null,
+                       }))} />
+              {data.supplierSpend.topShare !== null && data.supplierSpend.count > 1 && (
+                <div style={{ fontSize: 11.5, marginTop: 12,
+                              color: data.supplierSpend.topShare > 0.5 ? 'var(--warning)' : 'var(--text-muted)' }}>
+                  {data.supplierSpend.topShare > 0.5 ? '▲ ' : ''}
+                  {fmtPct(data.supplierSpend.topShare, 0)} of spend goes to {data.supplierSpend.suppliers[0].name}
+                  {data.supplierSpend.topShare > 0.5 ? ' — concentrated on one supplier.' : '.'}
+                </div>
+              )}
+              <CurrencyNote currency={data.supplierSpend.currency} />
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
+                Bills raised in this period, from Xero. Includes tax, so it will not tie exactly to the
+                net expense figures on Profitability.
+              </div>
+            </>
+          ) : <Empty>No bills raised in this period.</Empty>}
+        </Surface>
+      </div>
+
+      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Surface title="Receivables ageing" right={fmtMoney(wc.receivable, cur)} flex={5} minWidth={300}>
           <BarList currency={cur} items={[
             { label: 'Not yet due',      value: wc.arAgeing.current, color: 'var(--success)' },

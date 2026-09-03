@@ -2425,3 +2425,86 @@ describe('getFinancialNarrative — force vs reanalyse', () => {
     expect(callGemini).toHaveBeenCalledTimes(2);
   });
 });
+
+// ── Supplier spend ──────────────────────────────────────────────────────────
+// The revenue side has had Top Customers from the start; the cost side only
+// ever had expense ACCOUNTS and never suppliers. These pin the two things that
+// make the figure trustworthy: it covers the period on screen, and it ranks on
+// like-for-like amounts.
+describe('_buildSupplierSpend', () => {
+  const { _buildSupplierSpend } = require('./cash-flow');
+  const bill = (name, total, date, extra = {}) =>
+    ({ type: 'ACCPAY', contact: { name }, total, date, currencyCode: 'SGD', ...extra });
+
+  const period = { baseCurrency: 'SGD', fromISO: '2026-04-01', toISO: '2026-06-30' };
+
+  test('groups bills by supplier, biggest spend first', () => {
+    const r = _buildSupplierSpend([
+      bill('Cloud Co', 800, '2026-05-11'),
+      bill('Landlord', 12000, '2026-05-10'),
+      bill('Landlord', 12000, '2026-06-10'),
+    ], period);
+    expect(r.suppliers.map(s => s.name)).toEqual(['Landlord', 'Cloud Co']);
+    expect(r.suppliers[0]).toMatchObject({ spend: 24000, bills: 2 });
+    expect(r.total).toBe(24800);
+  });
+
+  test('ignores sales invoices — this is what you PAY', () => {
+    const r = _buildSupplierSpend([
+      bill('Supplier', 100, '2026-05-01'),
+      { type: 'ACCREC', contact: { name: 'Customer' }, total: 99999, date: '2026-05-01' },
+    ], period);
+    expect(r.total).toBe(100);
+    expect(r.suppliers.map(s => s.name)).not.toContain('Customer');
+  });
+
+  test('covers the period on screen, not the whole fetch window', () => {
+    // The invoice fetch reaches back further than the period so the forecast can
+    // see older unpaid bills. Aggregating it unfiltered would report a two-year
+    // total under a heading that says this quarter.
+    const r = _buildSupplierSpend([
+      bill('Recent', 100, '2026-05-01'),
+      bill('Ancient', 50000, '2024-01-01'),
+    ], period);
+    expect(r.total).toBe(100);
+    expect(r.count).toBe(1);
+  });
+
+  test('an undated bill is excluded rather than counted in whichever period is open', () => {
+    const r = _buildSupplierSpend([bill('Recent', 100, '2026-05-01'), bill('Undated', 999, null)], period);
+    expect(r.total).toBe(100);
+  });
+
+  test('with no period given, everything counts', () => {
+    const r = _buildSupplierSpend([bill('A', 10, '2020-01-01'), bill('B', 20, '2026-05-01')], { baseCurrency: 'SGD' });
+    expect(r.total).toBe(30);
+  });
+
+  test('ranks on base currency, so a USD supplier is comparable', () => {
+    const r = _buildSupplierSpend([
+      bill('SG Co', 1200, '2026-05-01'),
+      bill('US Co', 1000, '2026-05-01', { currencyCode: 'USD', currencyRate: 1.35 }),
+    ], period);
+    expect(r.suppliers[0].name).toBe('US Co');          // 1350 > 1200
+    expect(r.suppliers[0].spend).toBeCloseTo(1350);
+    expect(r.currency.currencies).toEqual(['USD']);
+  });
+
+  test('concentration is the share going to the largest supplier', () => {
+    const r = _buildSupplierSpend([bill('Big', 90, '2026-05-01'), bill('Small', 10, '2026-05-01')], period);
+    expect(r.topShare).toBeCloseTo(0.9);
+  });
+
+  test('no bills means unavailable, and a null concentration rather than zero', () => {
+    // A concentration of no spend is meaningless, not 0%.
+    const r = _buildSupplierSpend([], period);
+    expect(r.available).toBe(false);
+    expect(r.topShare).toBeNull();
+    expect(r.average).toBeNull();
+  });
+
+  test('a missing contact becomes Unknown rather than undefined', () => {
+    const r = _buildSupplierSpend([{ type: 'ACCPAY', total: 50, date: '2026-05-01' }], period);
+    expect(r.suppliers[0].name).toBe('Unknown');
+  });
+});

@@ -1353,6 +1353,7 @@ const {
   _buildWorkingCapital,
   _isReceiptPayment,
   _isTransfer,
+  _buildSupplierSpend,
 } = require('./cash-flow');
 
 async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
@@ -1418,6 +1419,9 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
   const days     = Math.max(1, Math.round((_dateFromParts(_parseISODate(last)) - _dateFromParts(fromP)) / 86400000) + 1);
 
   const workingCapital = _buildWorkingCapital({ invoices, revenue, expenses, days, today, baseCurrency });
+  // Scoped to the period on screen, not the wider window the invoice fetch uses
+  // so the forecast can see older unpaid bills.
+  const supplierSpend = _buildSupplierSpend(invoices, { baseCurrency, fromISO: first, toISO: last });
   const hygiene = _buildInvoiceHygiene(invoices, baseCurrency);
   const closing  = bank ? bank.accounts.reduce((s, a) => s + a.closingBalance, 0) : 0;
   const opening  = bank ? bank.accounts.reduce((s, a) => s + (a.openingBalance || 0), 0) : 0;
@@ -1466,6 +1470,7 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
     unreconciled,
     hygiene,
     workingCapital,
+    supplierSpend,
     forecast,
     // The two figures tell opposite stories here, so the gap is stated rather
     // than left for the reader to notice.
