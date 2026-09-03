@@ -58,6 +58,60 @@ function _buildCashMovement({ payments = [], bankTransactions = [], months = [],
 
 // Pure. What is owed in each direction, and how much of what was invoiced has
 // actually turned into money.
+
+// Pure. Who the money actually goes to.
+//
+// The revenue side has had Top Customers since the beginning; the cost side only
+// ever had expense ACCOUNTS — "Rent", "Payroll" — and never suppliers. For an
+// app whose primary document is a bill, that was a blind spot: "Rent 12,000"
+// names a category, while "Landlord X is 40% of your fixed costs" is something
+// you might act on.
+//
+// Filtered by DATE to the period on screen. The invoice fetch deliberately
+// reaches back further than the period so the forecast can see older unpaid
+// bills, so aggregating it unfiltered would report a two-year total under a
+// heading that says this quarter.
+function _buildSupplierSpend(invoices, { baseCurrency = '', fromISO = null, toISO = null } = {}) {
+  const bills = (invoices || []).filter(inv => {
+    if (inv.type !== 'ACCPAY') return false;
+    if (!fromISO && !toISO) return true;
+    const d = inv.date ? String(inv.date).slice(0, 10) : null;
+    // An undated bill cannot be placed in a period, so it is excluded rather
+    // than silently counted in whichever one happens to be on screen.
+    if (!d) return false;
+    if (fromISO && d < fromISO) return false;
+    if (toISO && d > toISO) return false;
+    return true;
+  });
+
+  const byContact = new Map();
+  for (const inv of bills) {
+    const name = inv.contact?.name || 'Unknown';
+    // Base currency, so a USD supplier and an SGD one are ranked on like numbers.
+    const amount = _toBase(inv, inv.total, baseCurrency);
+    if (!byContact.has(name)) byContact.set(name, { name, spend: 0, bills: 0 });
+    const c = byContact.get(name);
+    c.spend += amount;
+    c.bills += 1;
+  }
+
+  const suppliers = [...byContact.values()].sort((a, b) => b.spend - a.spend);
+  const total = suppliers.reduce((s, c) => s + c.spend, 0);
+
+  return {
+    suppliers,
+    total,
+    count: suppliers.length,
+    // Share of spend going to the single largest supplier — the concentration
+    // question. Null rather than zero when nothing was billed, because a
+    // concentration of no spend is meaningless, not 0%.
+    topShare: total > 0 && suppliers.length ? suppliers[0].spend / total : null,
+    average: suppliers.length ? total / suppliers.length : null,
+    currency: _foreignCurrency(bills, baseCurrency),
+    available: suppliers.length > 0,
+  };
+}
+
 function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days = 0, today, baseCurrency = '' }) {
   const ar = { raised: 0, due: 0, count: 0 }, ap = { raised: 0, due: 0, count: 0 };
   const buckets = { current: 0, d1_30: 0, d31_60: 0, d60plus: 0 };
@@ -365,4 +419,4 @@ function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unrecon
   };
 }
 
-module.exports = { ALERT_THRESHOLDS, _buildAlerts, _buildCashForecast, _buildCashMovement, _buildCashWaterfall, _buildRunway, _buildWorkingCapital, _isReceiptPayment, _isTransfer };
+module.exports = { _buildSupplierSpend, ALERT_THRESHOLDS, _buildAlerts, _buildCashForecast, _buildCashMovement, _buildCashWaterfall, _buildRunway, _buildWorkingCapital, _isReceiptPayment, _isTransfer };
