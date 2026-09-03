@@ -1814,39 +1814,7 @@ export function CashFlowPanel({ data }) {
         )}
       </div>
 
-      {/* The distinction that a single "cash in" line hides completely. */}
-      {rw.propped && (
-        <div className="card" style={{ marginBottom: 16, borderLeft: '3px solid var(--warning)' }}>
-          <div className="card-title" style={{ marginBottom: 8 }}>Cash is positive, operations are not</div>
-          <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-            The balance grew by {fmtMoney(rw.avgNet, cur)} a month, but only {fmtMoney(rw.avgOperatingIn, cur)} of the
-            {' '}{fmtMoney(rw.avgCashIn, cur)} coming in each month came from customers. Against
-            {' '}{fmtMoney(rw.avgCashOut, cur)} of payments, the trading side of the business is consuming
-            {' '}{fmtMoney(-rw.operatingNet, cur)} a month
-            {rw.operatingRunwayMonths !== null && ` — about ${rw.operatingRunwayMonths >= 24 ? '24+' : rw.operatingRunwayMonths.toFixed(1)} months of the current balance`}.
-          </div>
-          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 }}>
-            Customer receipts are Xero payments against sales invoices. Everything else — capital introduced,
-            loans, refunds — is counted as other receipts.
-          </div>
-        </div>
-      )}
 
-      {/* Revenue and cash tell opposite stories when nothing has been collected,
-          so the gap is stated rather than left for the reader to spot. */}
-      {rec.notCollected !== 0 && (
-        <div className="card" style={{ marginBottom: 16, borderLeft: '3px solid var(--warning)' }}>
-          <div className="card-title" style={{ marginBottom: 8 }}>Profit is not cash</div>
-          <Rows currency={cur} items={[
-            { label: 'Revenue invoiced (P&L, accrual)', value: rec.revenueAccrual },
-            { label: 'Not yet collected',                value: -rec.notCollected },
-            { label: 'Cash actually received from customers', value: rec.customerReceipts, strong: true },
-          ]} />
-          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 }}>
-            A sales invoice hits the Profit &amp; Loss the day it is raised. Cash only moves when it is paid.
-          </div>
-        </div>
-      )}
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Surface title="How the cash balance moved" right={wf?.reconciles === false ? 'does not tie to bank' : undefined} flex={6} minWidth={340}>
@@ -1864,6 +1832,12 @@ export function CashFlowPanel({ data }) {
               { label: 'Net movement',    value: data.cash.net },
               { label: 'Closing balance', value: data.cash.closing, strong: true },
             ]} />
+            {rec.notCollected !== 0 && (
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
+                A sales invoice hits the Profit &amp; Loss the day it is raised; cash only moves when it is
+                paid. {fmtMoney(rec.revenueAccrual, cur)} invoiced, {fmtMoney(rec.customerReceipts, cur)} received.
+              </div>
+            )}
             {data.unreconciled?.material && (
               <div style={{ fontSize: 11, color: 'var(--warning)', marginTop: 10, lineHeight: 1.5 }}>
                 ▲ The payment records don&apos;t tie to the bank statement
