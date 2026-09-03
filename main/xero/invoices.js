@@ -229,7 +229,11 @@ async function _submitWithCurrencyRetry(submitFn, accountingApi, tenantId, invoi
       try {
         const invStore = require('../utils/invoice-store').forUser(userId);
         await invStore.update(invoiceData._invoiceStoreId, { currency: baseCurrency });
-      } catch (_) {}
+      } catch (err) {
+        // Cosmetic — the invoice still posts. But leaving it silent means the
+        // stored record disagrees with what was sent and nothing says why.
+        logger.warn('Could not stamp base currency on stored invoice', { userId, id: invoiceData._invoiceStoreId, error: err.message });
+      }
     }
     return await withRetry(() => submitFn(invoiceBody));
   }
