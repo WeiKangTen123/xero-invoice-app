@@ -320,7 +320,40 @@ function forUser(userId) {
     db.prepare('DELETE FROM invoices WHERE user_id = ?').run(userId);
   }
 
-  return { getAll, getById, add, update, addReport, getReported, getFlagged, remove, clear, findPosted, findStored, claimForSubmit };
+  // ── Narrow reads ───────────────────────────────────────────────────────────
+  // getAll() costs three queries and hydrates every invoice with its line items
+  // and reports. Callers that only need a count, a handful of rows, or one
+  // group were paying all of that to throw nearly all of it away.
+
+  function count() {
+    return db.prepare('SELECT COUNT(*) AS n FROM invoices WHERE user_id = ?').get(userId).n;
+  }
+
+  // Newest first, matching getAll's order.
+  function getRecent(limit = 50) {
+    const rows = db.prepare('SELECT * FROM invoices WHERE user_id = ? ORDER BY rowid DESC LIMIT ?')
+      .all(userId, Math.max(1, limit));
+    return _hydrateMany(rows);
+  }
+
+  // Siblings created from one upload — a photo holding several receipts, or a
+  // multi-page PDF.
+  function getReceiptGroup(groupId) {
+    if (!groupId) return [];
+    const rows = db.prepare('SELECT * FROM invoices WHERE user_id = ? AND receipt_group = ?').all(userId, groupId);
+    return _hydrateMany(rows);
+  }
+
+  // Split siblings share one stored file, so it may only be deleted once nothing
+  // references it. A count answers that without loading anything.
+  function countByReceiptFile(filename) {
+    if (!filename) return 0;
+    return db.prepare('SELECT COUNT(*) AS n FROM invoices WHERE user_id = ? AND receipt_file = ?')
+      .get(userId, filename).n;
+  }
+
+  return { getAll, getById, add, update, addReport, getReported, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
+           count, getRecent, getReceiptGroup, countByReceiptFile };
 }
 
 module.exports = { forUser, FIELD_TO_COLUMN, _toBindable }; // exposed for the one-time JSON->SQLite importer

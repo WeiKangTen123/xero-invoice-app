@@ -1,5 +1,6 @@
 const logger = require('../utils/logger');
 const { callGemini } = require('../utils/gemini-client');
+const { parseLlmJson } = require('../utils/llm-json');
 
 // ── Prompt ────────────────────────────────────────────────────────────────────
 
@@ -29,10 +30,10 @@ async function _callLLM(pdfText, filename, userId) {
     { role: 'user',   content: `Invoice filename: ${filename}\n\nInvoice text:\n${pdfText.slice(0, 3000)}` },
   ], { temperature: 0, maxTokens: 800 });
 
-  const raw       = content.trim();
-  const noThought = raw.replace(/<thought>[\s\S]*?<\/thought>/g, '').trim();
-  const cleaned   = noThought.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-  return JSON.parse(cleaned);
+  const parsed = parseLlmJson(content);
+  // extractWithRetry treats a throw as a retryable attempt, so keep that contract.
+  if (!parsed) throw new Error('Model reply was not valid JSON');
+  return parsed;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

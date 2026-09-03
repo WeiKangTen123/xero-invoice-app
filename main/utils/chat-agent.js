@@ -3,6 +3,7 @@ const { callGemini } = require('./gemini-client');
 const invoiceStore  = require('./invoice-store');
 const { EDITABLE_FIELDS } = require('../routes/invoices');
 const { financialContext, looksFinancial } = require('./chat-financials');
+const { parseLlmJson } = require('./llm-json');
 
 // Same set the PATCH /api/invoices/:id route accepts — the chat assistant can only
 // ever propose changes to these fields. Nothing else (status, user data, settings,
@@ -165,7 +166,7 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
   const store = invoiceStore.forUser(userId);
 
   const pinned = invoiceId ? store.getById(invoiceId) : null;
-  const recent = store.getAll().slice(0, RECENT_INVOICES_LIMIT).map(_summarize);
+  const recent = store.getRecent(RECENT_INVOICES_LIMIT).map(_summarize);
 
   // Only fetched when the question sounds financial. A cold cash-flow read costs
   // several Xero calls and billed egress, and "change the invoice number to
@@ -195,13 +196,10 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
 
   const raw = await callGemini(userId, messages, { temperature: 0, maxTokens: 1000 });
 
-  let parsed;
-  try {
-    const cleaned = raw.trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-    parsed = JSON.parse(cleaned);
-  } catch (err) {
-    logger.warn('Chat agent returned non-JSON response', { error: err.message, userId });
-    return { reply: raw.trim() || "Sorry, I couldn't process that — could you rephrase?", proposals: [] };
+  const parsed = parseLlmJson(raw);
+  if (!parsed || typeof parsed !== 'object') {
+    logger.warn('Chat agent returned non-JSON response', { userId });
+    return { reply: String(raw || '').trim() || "Sorry, I couldn't process that — could you rephrase?", proposals: [] };
   }
 
   const proposals = _sanitizeProposals(parsed.proposals, userId);
