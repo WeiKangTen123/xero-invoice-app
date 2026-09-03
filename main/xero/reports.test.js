@@ -2508,3 +2508,48 @@ describe('_buildSupplierSpend', () => {
     expect(r.suppliers[0].name).toBe('Unknown');
   });
 });
+
+// ── Date shapes ─────────────────────────────────────────────────────────────
+// Xero's SDK returns invoice.date as a Date OBJECT. The first version of the
+// supplier filter did String(date).slice(0,10), which yields "Sun May 10" —
+// that compares without erroring, passes a lower bound because "S" sorts above
+// "2", then fails the upper bound. Every bill was silently dropped, and every
+// test passed because the fixtures all used ISO strings.
+describe('_isoDay — the shapes Xero actually returns', () => {
+  const { _isoDay, _buildSupplierSpend } = require('./cash-flow');
+
+  test('a Date object', () => {
+    expect(_isoDay(new Date('2026-05-10T00:00:00Z'))).toBe('2026-05-10');
+  });
+
+  test('an ISO string, with or without a time part', () => {
+    expect(_isoDay('2026-05-10')).toBe('2026-05-10');
+    expect(_isoDay('2026-05-10T13:45:00Z')).toBe('2026-05-10');
+  });
+
+  test('absent or unparseable is null, not a crash or a wrong day', () => {
+    expect(_isoDay(null)).toBeNull();
+    expect(_isoDay(undefined)).toBeNull();
+    expect(_isoDay('')).toBeNull();
+    expect(_isoDay('not a date')).toBeNull();
+  });
+
+  test('supplier spend counts Date-object bills — the bug that shipped', () => {
+    const r = _buildSupplierSpend([
+      { type: 'ACCPAY', contact: { name: 'Landlord' }, total: 12000, date: new Date('2026-05-10T00:00:00Z'), currencyCode: 'SGD' },
+      { type: 'ACCPAY', contact: { name: 'Old Co' },   total: 5000,  date: new Date('2024-01-01T00:00:00Z'), currencyCode: 'SGD' },
+    ], { baseCurrency: 'SGD', fromISO: '2026-04-01', toISO: '2026-06-30' });
+
+    expect(r.available).toBe(true);
+    expect(r.total).toBe(12000);                 // in-period one counted
+    expect(r.suppliers.map(s => s.name)).toEqual(['Landlord']);   // out-of-period one still excluded
+  });
+
+  test('Date and string fixtures give identical results', () => {
+    const asString = _buildSupplierSpend([{ type: 'ACCPAY', contact: { name: 'A' }, total: 100, date: '2026-05-01', currencyCode: 'SGD' }],
+      { baseCurrency: 'SGD', fromISO: '2026-04-01', toISO: '2026-06-30' });
+    const asDate = _buildSupplierSpend([{ type: 'ACCPAY', contact: { name: 'A' }, total: 100, date: new Date('2026-05-01T00:00:00Z'), currencyCode: 'SGD' }],
+      { baseCurrency: 'SGD', fromISO: '2026-04-01', toISO: '2026-06-30' });
+    expect(asDate.total).toBe(asString.total);
+  });
+});

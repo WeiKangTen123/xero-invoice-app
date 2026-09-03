@@ -59,6 +59,17 @@ function _buildCashMovement({ payments = [], bankTransactions = [], months = [],
 // Pure. What is owed in each direction, and how much of what was invoiced has
 // actually turned into money.
 
+// Xero's SDK hands dates back as Date OBJECTS, not ISO strings. String(date)
+// on one yields "Sun May 10", which compares as a string against "2026-04-01"
+// without erroring — it passes a lower-bound check because "S" sorts above "2",
+// then fails the upper bound, so every bill was silently dropped. Normalising
+// through Date is the only safe way to get a comparable day.
+function _isoDay(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
+
 // Pure. Who the money actually goes to.
 //
 // The revenue side has had Top Customers since the beginning; the cost side only
@@ -75,7 +86,7 @@ function _buildSupplierSpend(invoices, { baseCurrency = '', fromISO = null, toIS
   const bills = (invoices || []).filter(inv => {
     if (inv.type !== 'ACCPAY') return false;
     if (!fromISO && !toISO) return true;
-    const d = inv.date ? String(inv.date).slice(0, 10) : null;
+    const d = _isoDay(inv.date);
     // An undated bill cannot be placed in a period, so it is excluded rather
     // than silently counted in whichever one happens to be on screen.
     if (!d) return false;
@@ -419,4 +430,4 @@ function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unrecon
   };
 }
 
-module.exports = { _buildSupplierSpend, ALERT_THRESHOLDS, _buildAlerts, _buildCashForecast, _buildCashMovement, _buildCashWaterfall, _buildRunway, _buildWorkingCapital, _isReceiptPayment, _isTransfer };
+module.exports = { _buildSupplierSpend, _isoDay, ALERT_THRESHOLDS, _buildAlerts, _buildCashForecast, _buildCashMovement, _buildCashWaterfall, _buildRunway, _buildWorkingCapital, _isReceiptPayment, _isTransfer };
