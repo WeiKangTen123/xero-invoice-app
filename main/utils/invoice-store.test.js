@@ -313,3 +313,97 @@ describe('utils/invoice-store — every mapped field survives a round trip', () 
     s.clear();
   });
 });
+
+// ── Narrow reads ────────────────────────────────────────────────────────────
+// getAll() runs three queries and hydrates every invoice with its line items and
+// reports. Callers wanting a count, a handful of rows, or one group were paying
+// all of that and discarding nearly all of it.
+describe('invoice-store — reads that fetch only what is needed', () => {
+  let store, s, userId;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    store = require('./invoice-store');
+    const u = await require('./users').createUser(`nr${Date.now()}@test.com`, 'password123', 'user');
+    userId = u.id;
+    s = store.forUser(userId);
+  });
+
+  const add = (id, extra = {}) => s.add({
+    id, status: 'pending', vendorName: 'V', totalAmount: 10,
+    processedAt: new Date().toISOString(), ...extra,
+  });
+
+  describe('count', () => {
+    test('counts without hydrating anything', () => {
+      expect(s.count()).toBe(0);
+      add('a'); add('b'); add('c');
+      expect(s.count()).toBe(3);
+      expect(s.count()).toBe(s.getAll().length);
+    });
+
+    test('counts only this user\'s rows', async () => {
+      add('a');
+      const other = await require('./users').createUser(`nr2${Date.now()}@test.com`, 'password123', 'user');
+      expect(store.forUser(other.id).count()).toBe(0);
+    });
+  });
+
+  describe('getRecent', () => {
+    test('returns newest first, matching getAll order', () => {
+      add('a'); add('b'); add('c');
+      expect(s.getRecent(10).map(r => r.id)).toEqual(s.getAll().map(r => r.id));
+    });
+
+    test('caps at the limit instead of loading everything', () => {
+      for (let i = 0; i < 8; i++) add(`i${i}`);
+      expect(s.getRecent(3)).toHaveLength(3);
+      // The newest three, not an arbitrary three.
+      expect(s.getRecent(3).map(r => r.id)).toEqual(s.getAll().slice(0, 3).map(r => r.id));
+    });
+
+    test('a zero or negative limit still returns at least one row rather than none', () => {
+      add('a');
+      expect(s.getRecent(0)).toHaveLength(1);
+      expect(s.getRecent(-5)).toHaveLength(1);
+    });
+  });
+
+  describe('getReceiptGroup', () => {
+    test('returns only the siblings from one upload', () => {
+      add('g1', { receiptGroup: 'grp', invoiceType: 'EXPENSE' });
+      add('g2', { receiptGroup: 'grp', invoiceType: 'EXPENSE' });
+      add('other', { receiptGroup: 'different' });
+      add('none');
+      expect(s.getReceiptGroup('grp').map(r => r.id).sort()).toEqual(['g1', 'g2']);
+    });
+
+    test('an absent group is an empty list, not everything', () => {
+      // A falsy group id filtering to "no WHERE clause" would return the lot.
+      add('a'); add('b');
+      expect(s.getReceiptGroup(null)).toEqual([]);
+      expect(s.getReceiptGroup('')).toEqual([]);
+      expect(s.getReceiptGroup('nope')).toEqual([]);
+    });
+  });
+
+  describe('countByReceiptFile', () => {
+    test('counts records sharing one stored file', () => {
+      add('a', { receiptFile: 'shared.jpg' });
+      add('b', { receiptFile: 'shared.jpg' });
+      add('c', { receiptFile: 'other.jpg' });
+      expect(s.countByReceiptFile('shared.jpg')).toBe(2);
+      expect(s.countByReceiptFile('other.jpg')).toBe(1);
+      expect(s.countByReceiptFile('gone.jpg')).toBe(0);
+    });
+
+    test('a missing filename counts zero rather than matching every null', () => {
+      // Returning a match here would delete a file that is still in use.
+      add('a', { receiptFile: 'x.jpg' });
+      add('b');
+      expect(s.countByReceiptFile(null)).toBe(0);
+      expect(s.countByReceiptFile('')).toBe(0);
+    });
+  });
+});

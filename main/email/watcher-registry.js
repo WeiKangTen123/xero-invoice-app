@@ -332,4 +332,15 @@ function isRunning(userId) {
   return !!_registry.get(userId)?.imap;
 }
 
-module.exports = { start, stop, rescan, isRunning, _resolveLookbackDays }; // last one exposed for tests
+// Stops every live watcher. Needed in two places that both lacked it: server
+// shutdown left IMAP sockets and their reconnect timers open on SIGTERM, and
+// tests that started watchers left them running into later test files.
+function stopAll() {
+  const ids = [..._registry.keys()];
+  for (const userId of ids) {
+    try { stop(userId); } catch (err) { logger.warn('Failed to stop watcher', { userId, error: err.message }); }
+  }
+  return ids.length;
+}
+
+module.exports = { start, stop, stopAll, rescan, isRunning, _resolveLookbackDays }; // last one exposed for tests

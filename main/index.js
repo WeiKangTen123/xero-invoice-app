@@ -190,6 +190,14 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 // the old process exits but the port binding lingers for a moment.
 function shutdown(signal) {
   logger.info(`Shutting down (${signal})`);
+  // Close IMAP sockets and cancel their reconnect timers. Without this a SIGTERM
+  // left them open, and a watcher mid-backoff would try to reconnect during exit.
+  try {
+    const stopped = require('./email/watcher-registry').stopAll();
+    if (stopped) logger.info(`Stopped ${stopped} email watcher(s)`);
+  } catch (err) {
+    logger.warn('Failed to stop watchers on shutdown', { error: err.message });
+  }
   server.close(() => {
     logger.info('Server closed — port released');
     process.exit(0);

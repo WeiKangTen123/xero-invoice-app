@@ -1708,7 +1708,7 @@ function _parseInsights(raw, arg2, arg3) {
 
   let payload;
   try {
-    const cleaned = String(raw || '').replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+    const cleaned = require('../utils/llm-json').stripWrapping(raw);
     const start = cleaned.indexOf('{');
     const end = cleaned.lastIndexOf('}');
     if (start === -1 || end === -1 || start >= end) throw new Error('No JSON');

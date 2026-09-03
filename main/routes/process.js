@@ -36,7 +36,7 @@ router.get('/status', requireAuth, (req, res, next) => {
     // Sync invoice count from disk once per server lifetime per user
     if (!_synced.has(userId)) {
       _synced.add(userId);
-      state.syncCount(invoiceStore.forUser(userId).getAll().length);
+      state.syncCount(invoiceStore.forUser(userId).count());
     }
 
     const running  = watcherRegistry.isRunning(userId);

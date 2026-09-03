@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import CroppedImage from '../components/receipts/CroppedImage';
@@ -155,6 +155,11 @@ export default function InvoiceReview() {
   const [receiptUrl, setReceiptUrl] = useState(null);
   const [receiptRot, setReceiptRot] = useState(0);
   const [group,      setGroup]      = useState(null);   // { index, total, siblings }
+  // Parsed once per change rather than in the middle of the markup on every
+  // render. A malformed box means "show the whole image", never a crash.
+  const receiptBox = useMemo(() => {
+    try { return inv?.receiptBox ? JSON.parse(inv.receiptBox) : null; } catch { return null; }
+  }, [inv?.receiptBox]);
   const [merging,    setMerging]    = useState(false);
   const [reporting,  setReporting]  = useState(false);
   const [marking,    setMarking]    = useState(false);
@@ -581,7 +586,7 @@ export default function InvoiceReview() {
                   ) : (
                     <CroppedImage
                       src={receiptUrl}
-                      box={(() => { try { return inv.receiptBox ? JSON.parse(inv.receiptBox) : null; } catch { return null; } })()}
+                      box={receiptBox}
                       alt="Receipt"
                       style={{ maxWidth: '100%', maxHeight: 'calc(100vh - 280px)', objectFit: 'contain',
                                transform: `rotate(${receiptRot}deg)`, transition: 'transform .2s ease' }}

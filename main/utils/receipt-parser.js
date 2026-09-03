@@ -1,5 +1,6 @@
 const logger = require('./logger');
 const { callGemini } = require('./gemini-client');
+const { parseLlmJson } = require('./llm-json');
 
 // Reads a photographed receipt.
 //
@@ -166,12 +167,6 @@ function splittable(receipts) {
   return { split: true, reason: null };
 }
 
-function _stripToJson(content) {
-  const raw       = String(content || '').trim();
-  const noThought = raw.replace(/<thought>[\s\S]*?<\/thought>/g, '').trim();
-  const cleaned   = noThought.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-  return JSON.parse(cleaned);
-}
 
 // Reads a receipt image. Returns a normalised record, or null if it could not
 // be read — never throws at the caller, because a parse failure must not lose
@@ -194,7 +189,7 @@ async function parseReceiptImage(userId, buffer, mime, { maxAttempts = 2 } = {})
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const content = await callGemini(userId, messages, { temperature: 0, maxTokens: 1200 });
-      const result  = normaliseMany(_stripToJson(content));
+      const result  = normaliseMany(parseLlmJson(content));
       if (result) return result;
       logger.warn('Receipt parse returned an unusable shape', { userId, attempt });
     } catch (err) {

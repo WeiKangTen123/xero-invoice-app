@@ -70,6 +70,9 @@ describe('_resolveLookbackDays', () => {
 // worse, burned the rescan rate-limit's one slot for nothing.
 describe('rescan vs. mailbox-open race', () => {
   afterEach(() => {
+    // Stop anything this file started. Two of nine start() calls had no matching
+    // stop(), so watchers and their reconnect timers survived into later files.
+    watcherRegistry.stopAll();
     jest.clearAllTimers();
     jest.useRealTimers();
     jest.clearAllMocks();
@@ -138,6 +141,7 @@ describe('IMAP reconnect is de-duplicated per disconnect', () => {
 
   beforeEach(() => { jest.useFakeTimers(); Imap.mockClear(); Imap.mockImplementation(o => new FakeImap(o)); });
   afterEach(() => {
+    watcherRegistry.stopAll();
     jest.clearAllTimers(); jest.useRealTimers(); jest.clearAllMocks();
     Imap.mockImplementation(o => new FakeImap(o));
   });

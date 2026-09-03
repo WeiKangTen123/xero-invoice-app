@@ -392,8 +392,9 @@ router.delete('/:id', requireAuth, (req, res) => {
   // last record referencing it is gone. Removing it with the first would leave
   // the others pointing at nothing.
   if (record.receiptFile) {
-    const stillUsed = store.getAll().some(r => r.receiptFile === record.receiptFile);
-    if (!stillUsed) receiptStore.forUser(req.user.id).remove(record.receiptFile);
+    if (store.countByReceiptFile(record.receiptFile) === 0) {
+      receiptStore.forUser(req.user.id).remove(record.receiptFile);
+    }
   }
 
   logger.info('Receipt deleted', { userId: req.user.id, id: req.params.id });
@@ -408,8 +409,7 @@ router.get('/:id/group', requireAuth, (req, res) => {
   if (!record) return res.status(404).json({ error: 'Receipt not found' });
   if (!record.receiptGroup) return res.json({ split: false, index: 1, total: 1, siblings: [] });
 
-  const members = store.getAll()
-    .filter(r => r.receiptGroup === record.receiptGroup)
+  const members = store.getReceiptGroup(record.receiptGroup)
     // Stable, human order: PDF pages by page, photo regions top-to-bottom.
     .sort((a, b) => (a.receiptPage || 0) - (b.receiptPage || 0) || String(a.id).localeCompare(String(b.id)));
 
@@ -432,7 +432,7 @@ router.post('/:id/merge', requireAuth, (req, res) => {
   if (!record) return res.status(404).json({ error: 'Receipt not found' });
   if (!record.receiptGroup) return res.status(400).json({ error: 'This receipt was not split' });
 
-  const siblings = store.getAll().filter(r => r.receiptGroup === record.receiptGroup && r.id !== record.id);
+  const siblings = store.getReceiptGroup(record.receiptGroup).filter(r => r.id !== record.id);
   for (const sib of siblings) store.remove(sib.id);
 
   const merged = store.update(req.params.id, { receiptBox: null, receiptPage: null, receiptGroup: null });
