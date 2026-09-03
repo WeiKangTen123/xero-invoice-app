@@ -1291,10 +1291,15 @@ const {
 
 async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force = false, reanalyse = false, period } = {}) {
   const perf = await getPerformance(userId, tenantId, { timezone, force, period });
+  // Cash flow enriches the commentary with category context; it is not required
+  // for it. Losing it must not blank the insights — but it must not vanish
+  // silently either, or "why are the category variances empty" has no trail.
   let cf = null;
   try {
     cf = await getCashFlow(userId, tenantId, { timezone, force, period });
-  } catch (_) {}
+  } catch (err) {
+    logger.warn('Variance insights: cash-flow context unavailable', { userId, tenantId, error: err.message });
+  }
 
   const categories = _buildCategoryVariances(perf, cf);
   const candidates = _varianceCandidates(perf);
