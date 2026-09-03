@@ -321,11 +321,14 @@ const ALERT_THRESHOLDS = {
   overdueWarnShare:     0.20,
   overdueCriticalShare: 0.50,
   collectionWarnRate:   0.50,
+  // Share of spend going to one supplier. Relative like every other threshold
+  // here, so it means the same thing whatever the size of the business.
+  supplierConcentrationWarn: 0.50,
 };
 
 const _SEVERITY_ORDER = { critical: 0, warn: 1, info: 2 };
 
-function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unreconciled = {}, cash = {} } = {}, thresholds = ALERT_THRESHOLDS) {
+function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unreconciled = {}, cash = {}, supplierSpend = {} } = {}, thresholds = ALERT_THRESHOLDS) {
   const alerts = [];
   // `detail` may carry a single {amount} placeholder. The figure stays a number
   // so the UI can format it in the org's own currency — the server never guesses
@@ -411,7 +414,19 @@ function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unrecon
       `${Math.round(wc.collectionRate * 100)}% of {amount} invoiced has turned into cash.`, wc.invoiced);
   }
 
-  // 8. The records disagree with the bank. Not a business problem — a
+  // 8. One supplier taking most of the spend. The panel already coloured this
+  //    amber, but it was not an alert — so it never reached the band, the AI, or
+  //    anything else that reads alerts. A signal shown in only one place is a
+  //    signal that gets missed.
+  if (supplierSpend.available && supplierSpend.topShare !== null && supplierSpend.topShare !== undefined
+      && supplierSpend.count > 1 && supplierSpend.topShare >= thresholds.supplierConcentrationWarn) {
+    const pct = Math.round(supplierSpend.topShare * 100);
+    add('warn', 'supplier-concentration', 'Most of your spend goes to one supplier',
+      `${pct}% of what you were billed this period went to ${supplierSpend.suppliers[0].name} — {amount}.`,
+      supplierSpend.suppliers[0].spend);
+  }
+
+  // 9. The records disagree with the bank. Not a business problem — a
   //    bookkeeping one — but it undermines every figure above it.
   if (unreconciled.material) {
     add('info', 'unreconciled', 'Payment records do not tie to the bank',

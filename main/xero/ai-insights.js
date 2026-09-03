@@ -330,6 +330,21 @@ function _narrativeFacts(cf) {
     if (Number.isFinite(a.amount)) allowed.add(Math.round(Math.abs(a.amount)));
   }
 
+  // Who the money goes to. The model was given "You owe suppliers: 24,603" and
+  // nothing about WHOM, so neither the narrative nor the chat assistant could
+  // answer "who do I spend the most with" from a figure sitting on screen.
+  const spend = cf.supplierSpend;
+  if (spend?.available) {
+    add('Billed by suppliers this period', spend.total);
+    if (spend.topShare !== null && spend.topShare !== undefined && spend.suppliers?.length) {
+      addRaw('Largest supplier',
+        `${spend.suppliers[0].name} — ${Math.round(spend.topShare * 100)}% of billed spend`,
+        [Math.round(spend.topShare * 100), Math.round(spend.suppliers[0].spend)]);
+    }
+    // A handful, not the whole ledger: the model needs the shape, not the list.
+    for (const sup of spend.suppliers.slice(0, 3)) add(`Spend with ${sup.name}`, sup.spend);
+  }
+
   return { lines, allowed, alerts };
 }
 

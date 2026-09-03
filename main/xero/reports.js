@@ -1443,7 +1443,7 @@ async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, 
   unreconciled.material = Math.abs(unreconciled.inGap) > 1 || Math.abs(unreconciled.outGap) > 1;
 
   const alerts = _buildAlerts({
-    runway, workingCapital, forecast, unreconciled,
+    runway, workingCapital, forecast, unreconciled, supplierSpend,
     cash: { available: !!bank, closing },
   });
 

@@ -2553,3 +2553,51 @@ describe('_isoDay — the shapes Xero actually returns', () => {
     expect(asDate.total).toBe(asString.total);
   });
 });
+
+// ── Supplier concentration alert ────────────────────────────────────────────
+// The panel already coloured this amber, but it was not an alert — so it never
+// reached the alert band, the AI narrative, or the chat assistant. A signal
+// shown in exactly one place is a signal that gets missed.
+describe('_buildAlerts — supplier concentration', () => {
+  const { _buildAlerts, ALERT_THRESHOLDS } = require('./cash-flow');
+  const codes = r => r.alerts.map(a => a.code);
+  const spend = (topShare, count = 3) => ({
+    available: true, topShare, count, total: 100,
+    suppliers: [{ name: 'Big Co', spend: 100 * topShare }],
+  });
+
+  test('fires when one supplier takes at least half the spend', () => {
+    const r = _buildAlerts({ supplierSpend: spend(0.62) });
+    const a = r.alerts.find(x => x.code === 'supplier-concentration');
+    expect(a.severity).toBe('warn');
+    expect(a.detail).toMatch(/62%/);
+    expect(a.detail).toMatch(/Big Co/);
+  });
+
+  test('stays quiet below the threshold — 38% is not a concentration', () => {
+    // The live org sits here, and must not be nagged about it.
+    expect(codes(_buildAlerts({ supplierSpend: spend(0.38) }))).toEqual([]);
+  });
+
+  test('a sole supplier is not a concentration risk to warn about', () => {
+    // With one supplier the share is always 100%, which says nothing.
+    expect(codes(_buildAlerts({ supplierSpend: spend(1, 1) }))).toEqual([]);
+  });
+
+  test('no spend data produces no alert rather than a false all-clear', () => {
+    expect(codes(_buildAlerts({ supplierSpend: { available: false } }))).toEqual([]);
+    expect(codes(_buildAlerts({ supplierSpend: spend(null) }))).toEqual([]);
+    expect(codes(_buildAlerts({}))).toEqual([]);
+  });
+
+  test('the threshold is relative, so it means the same at any size', () => {
+    const small = _buildAlerts({ supplierSpend: { available: true, topShare: 0.7, count: 2, suppliers: [{ name: 'A', spend: 700 }] } });
+    const huge  = _buildAlerts({ supplierSpend: { available: true, topShare: 0.7, count: 2, suppliers: [{ name: 'A', spend: 7000000 }] } });
+    expect(codes(small)).toEqual(codes(huge));
+  });
+
+  test('the threshold is injectable like the others', () => {
+    const r = _buildAlerts({ supplierSpend: spend(0.3) }, { ...ALERT_THRESHOLDS, supplierConcentrationWarn: 0.25 });
+    expect(codes(r)).toContain('supplier-concentration');
+  });
+});
