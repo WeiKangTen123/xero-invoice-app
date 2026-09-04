@@ -44,6 +44,7 @@ const FIELD_TO_COLUMN = {
   // and a single field would hide which one a row actually has.
   receiptFile: 'receipt_file', receiptMime: 'receipt_mime',
   receiptBox: 'receipt_box', receiptPage: 'receipt_page', receiptGroup: 'receipt_group',
+  receivedAt: 'received_at',
 };
 
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
@@ -101,6 +102,9 @@ function _rowToRecord(row, reports, lineItems) {
     receiptBox:        row.receipt_box,
     receiptPage:       row.receipt_page,
     receiptGroup:      row.receipt_group,
+    // When the document arrived. Falls back to processedAt for rows created
+    // before this existed — approximate for those, exact from here on.
+    receivedAt:        row.received_at || row.processed_at,
     reports:           reports || [],
   };
 }
