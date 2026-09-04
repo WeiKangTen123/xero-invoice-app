@@ -127,6 +127,8 @@ function createHandler(userId) {
       subTotal:         invoiceData.subTotal       || 0,
       paymentReference: invoiceData.paymentReference || '',
       processedAt:      new Date().toISOString(),
+      // The email's own date when we have it; otherwise arrival is now.
+      receivedAt:       invoiceData.receivedAt || new Date().toISOString(),
       reports:          [],
     };
 

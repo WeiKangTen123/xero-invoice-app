@@ -86,6 +86,7 @@ function storeReceipt(userId, { mime, data, filename, source }) {
     receiptMime: mime,
     description: filename ? String(filename).slice(0, 200) : null,
     processedAt: new Date().toISOString(),
+    receivedAt:  new Date().toISOString(),   // an upload arrives when it is uploaded
   });
 
   logger.info('Receipt stored', { userId, id, bytes: buffer.length, mime, source: source || 'upload' });
@@ -162,6 +163,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName) {
         receiptPage: page,
         receiptGroup: group,
         processedAt: new Date().toISOString(),
+        receivedAt:  new Date().toISOString(),
       });
     }
     logger.info('PDF split by page', { userId, id, pages: decision.pageNumbers.length });

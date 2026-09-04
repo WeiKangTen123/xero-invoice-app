@@ -286,6 +286,8 @@ function parseTemplateFormat(text, email, defaults) {
     'INV-' + Date.now();
 
   return {
+    // When the EMAIL arrived, not when we got round to reading it.
+    receivedAt:       email.date ? new Date(email.date).toISOString() : null,
     contactName:      contactName.trim().slice(0, 255),
     contactEmail:     contactEmail.trim(),
     contactAddress:   contactAddress.slice(0, 500),
@@ -347,6 +349,8 @@ function parseGenericFormat(text, email, defaults) {
   const cleanVendor = vendorName.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim().slice(0, 255) || 'Unknown Vendor';
 
   return {
+    // When the EMAIL arrived, not when we got round to reading it.
+    receivedAt:       email.date ? new Date(email.date).toISOString() : null,
     contactName:      cleanVendor,
     contactEmail:     email.from?.value?.[0]?.address || '',
     contactAddress:   '',
@@ -402,6 +406,8 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   const fallbackInvoiceNumber = path.basename(pdfFilename || '', '.pdf').split(' ')[0] || ('INV-' + Date.now());
 
   return {
+    // When the EMAIL arrived, not when we got round to reading it.
+    receivedAt:       email.date ? new Date(email.date).toISOString() : null,
     contactName:      (llm.vendorName || 'Unknown Vendor').slice(0, 255),
     contactEmail:     llm.vendorEmail   || email.from?.value?.[0]?.address || '',
     contactAddress:   llm.vendorAddress || '',

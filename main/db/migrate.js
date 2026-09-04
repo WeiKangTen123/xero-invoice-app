@@ -34,6 +34,11 @@ function run() {
   _ensureColumn('invoices', 'receipt_box',  'receipt_box TEXT');     // JSON [ymin,xmin,ymax,xmax], 0-1000
   _ensureColumn('invoices', 'receipt_page', 'receipt_page INTEGER'); // 1-based page of a multi-page PDF
   _ensureColumn('invoices', 'receipt_group','receipt_group TEXT');   // ties siblings from one upload together
+  // When the DOCUMENT reached us, as distinct from when we made the row.
+  // processed_at is our processing time, so an email from June scanned today
+  // showed "received today" — turning on the watcher made three months of mail
+  // all look like it arrived at once.
+  _ensureColumn('invoices', 'received_at', 'received_at TEXT');
 
   // Rebuilds user_settings so a NEW account starts with auto-submit off.
   // Idempotent and value-preserving — see the migration for why.

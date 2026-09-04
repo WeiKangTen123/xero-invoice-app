@@ -49,6 +49,47 @@ function receivedCutoff(preset) {
   }
 }
 
+
+// Buckets for the grouped list. Named days for recent arrivals, calendar months
+// for history — that is how you would describe them out loud. Deliberately NOT
+// "last 7 / 30 days": those already exist as filters directly above, and
+// repeating them as group headings would be two controls answering one question.
+function receivedBucket(iso, now = new Date()) {
+  if (!iso) return { key: 'undated', label: 'Undated', rank: 9e9 };
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return { key: 'undated', label: 'Undated', rank: 9e9 };
+
+  const startOfDay = x => { const c = new Date(x); c.setHours(0, 0, 0, 0); return c; };
+  const days = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+
+  if (days <= 0) return { key: 'today',     label: 'Today',              rank: 0 };
+  if (days === 1) return { key: 'yesterday', label: 'Yesterday',          rank: 1 };
+  if (days < 7)  return { key: 'thisweek',  label: 'Earlier this week',  rank: 2 };
+
+  const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  return {
+    key,
+    label: d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }),
+    // Newest month first, always after the named-day buckets.
+    rank: 10 + (9999 - d.getFullYear()) * 12 + (11 - d.getMonth()),
+  };
+}
+
+// A batch scanned long after it arrived is the case this whole column exists for
+// — turning on the watcher backfills months of mail in one sweep. Saying so on
+// the group header explains an otherwise confusing "August · scanned today".
+function scannedNote(rows) {
+  const late = rows.filter(r => {
+    if (!r.receivedAt || !r.processedAt) return false;
+    return (new Date(r.processedAt) - new Date(r.receivedAt)) > 36 * 3600000; // more than a day and a half
+  });
+  if (!late.length) return null;
+  const when = new Date(Math.max(...late.map(r => new Date(r.processedAt))));
+  const days = Math.round((Date.now() - when) / 86400000);
+  const word = days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
+  return `${late.length} scanned ${word}`;
+}
+
 function TypeBadge({ type }) {
   if (type === 'ACCPAY') return <span className="badge badge-blue">Bill</span>;
   if (type === 'ACCREC') return <span className="badge badge-purple">Invoice</span>;
@@ -170,7 +211,7 @@ export default function Invoices() {
 
     // Filters on WHEN IT ARRIVED, not the date on the document.
     if (receivedFilter !== 'all') {
-      const at = inv.processedAt ? new Date(inv.processedAt) : null;
+      const at = (inv.receivedAt || inv.processedAt) ? new Date(inv.receivedAt || inv.processedAt) : null;
       if (!at || Number.isNaN(at.getTime())) return false;
       if (receivedFilter === 'custom') {
         if (customFrom && at < new Date(`${customFrom}T00:00:00`)) return false;
@@ -200,6 +241,40 @@ export default function Invoices() {
       setSelected(prev => new Set([...prev, ...filtered.map(i => i.id)]));
     }
   }
+
+  // Grouped by ARRIVAL, not document date — the question is "what came in and
+  // when", and grouping by invoice date would scatter one day's intake across
+  // months. Order within a group is untouched, so the existing sort still holds.
+  const groups = useMemo(() => {
+    const now = new Date();
+    const byKey = new Map();
+    for (const inv of filtered) {
+      const b = receivedBucket(inv.receivedAt || inv.processedAt, now);
+      if (!byKey.has(b.key)) byKey.set(b.key, { ...b, rows: [] });
+      byKey.get(b.key).rows.push(inv);
+    }
+    return [...byKey.values()]
+      .sort((a, b) => a.rank - b.rank)
+      .map(g => ({
+        ...g,
+        total: g.rows.reduce((sum, r) => sum + (Number(r.totalAmount) || 0), 0),
+        note:  scannedNote(g.rows),
+        // Recent buckets open; history collapsed, because everything expanded is
+        // the same wall of rows this is meant to fix.
+        openByDefault: g.rank <= 2,
+      }));
+  }, [filtered]);
+
+  // Only the groups the user has actually clicked are remembered; everything
+  // else follows openByDefault. Storing the exceptions rather than the state
+  // means a new month appears collapsed without anyone updating a list.
+  const [toggled, setToggled] = useState(() => new Set());
+  const isOpen = g => (toggled.has(g.key) ? !g.openByDefault : g.openByDefault);
+  const toggleGroup = key => setToggled(prev => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
 
   const bills       = invoices.filter(i => i.invoiceType === 'ACCPAY').length;
   const invCount    = invoices.filter(i => i.invoiceType === 'ACCREC').length;
@@ -322,7 +397,7 @@ export default function Invoices() {
             onClick={() => setReceivedFilter(t.key)}
             label={t.label}
             count={t.key === 'all' ? undefined : invoices.filter(i => {
-              const at = i.processedAt ? new Date(i.processedAt) : null;
+              const at = (i.receivedAt || i.processedAt) ? new Date(i.receivedAt || i.processedAt) : null;
               if (!at || Number.isNaN(at.getTime())) return false;
               if (t.key === 'custom') return false;
               const c = receivedCutoff(t.key);
@@ -425,7 +500,27 @@ export default function Invoices() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((inv, i) => {
+                {groups.flatMap(g => [
+                  // A full-width row inside the same table — separate tables per
+                  // group would let the columns drift out of alignment.
+                  <tr key={`h-${g.key}`} style={{ borderTop: '1px solid var(--border)' }}>
+                    <td colSpan={10} style={{ padding: '14px 10px 8px', cursor: 'pointer' }}
+                        onClick={() => toggleGroup(g.key)}>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)', width: 10 }}>{isOpen(g) ? '▼' : '▶'}</span>
+                        <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.06em', textTransform: 'uppercase' }}>{g.label}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {g.rows.length}</span>
+                        {/* How much came in — the main reason to group at all. */}
+                        <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+                          {g.total ? `${invoices[0]?.currency || ''} ${g.total.toLocaleString('en', { minimumFractionDigits: 2 })}` : ''}
+                        </span>
+                      </div>
+                      {g.note && (
+                        <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginLeft: 20, marginTop: 3 }}>↳ {g.note}</div>
+                      )}
+                    </td>
+                  </tr>,
+                  ...(isOpen(g) ? g.rows : []).map((inv, i) => {
                   const { cls, label } = STATUS_MAP[inv.status] || { cls: 'badge-gray', label: inv.status };
                   const isSelected    = selected.has(inv.id);
                   const isDeleting    = deleting.has(inv.id);
@@ -490,8 +585,11 @@ export default function Invoices() {
                         {inv.invoiceDate || '—'}
                       </td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
-                          title={inv.processedAt ? new Date(inv.processedAt).toLocaleString() : ''}>
-                        {receivedLabel(inv.processedAt)}
+                          title={[
+                            inv.receivedAt  ? `Arrived: ${new Date(inv.receivedAt).toLocaleString()}` : null,
+                            inv.processedAt ? `Scanned: ${new Date(inv.processedAt).toLocaleString()}` : null,
+                          ].filter(Boolean).join('\n')}>
+                        {receivedLabel(inv.receivedAt || inv.processedAt)}
                       </td>
                       <td>
                         {inv.hasPdf
@@ -529,7 +627,8 @@ export default function Invoices() {
                       </td>
                     </tr>
                   );
-                })}
+                  }),
+                ])}
               </tbody>
             </table>
           </div>
