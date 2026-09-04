@@ -53,3 +53,43 @@ describe('UI API paths', () => {
     for (const f of fetches) expect(f).toMatch(/\/api\//);
   });
 });
+
+// ── Free identifiers ────────────────────────────────────────────────────────
+// vite bundles free identifiers without complaint — they only explode at
+// runtime. useMemo was used in Invoices.jsx while the file imported only
+// useState and useEffect: the build passed, the suite passed, and the page went
+// black on first render. A build succeeding is not evidence the page renders.
+const REACT_HOOKS = [
+  'useState', 'useEffect', 'useMemo', 'useRef', 'useCallback',
+  'useContext', 'useReducer', 'useLayoutEffect', 'useId',
+];
+
+describe('UI React hooks are imported where they are used', () => {
+  const files = jsxFiles(UI_SRC);
+
+  test('every hook a file calls is in its react import', () => {
+    const missing = [];
+
+    for (const file of files) {
+      const src = fs.readFileSync(file, 'utf8');
+      const importMatch = src.match(/import\s*\{([^}]*)\}\s*from\s*['"]react['"]/);
+      const imported = new Set((importMatch ? importMatch[1] : '').split(',').map(s => s.trim()));
+
+      for (const hook of REACT_HOOKS) {
+        // A call, not a mention in a comment or a string.
+        if (!new RegExp(`\\b${hook}\\s*\\(`).test(src)) continue;
+        if (imported.has(hook)) continue;
+        // React.useMemo(...) is legitimate without a named import.
+        if (new RegExp(`React\\.${hook}\\s*\\(`).test(src)) continue;
+        missing.push(`${path.relative(UI_SRC, file)} calls ${hook} without importing it`);
+      }
+    }
+
+    expect(missing).toEqual([]);
+  });
+
+  test('the scan reaches the files that actually use hooks', () => {
+    const withHooks = files.filter(f => /\buseState\s*\(/.test(fs.readFileSync(f, 'utf8')));
+    expect(withHooks.length).toBeGreaterThan(3);
+  });
+});
