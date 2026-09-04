@@ -161,6 +161,8 @@ export default function InvoiceReview() {
     try { return inv?.receiptBox ? JSON.parse(inv.receiptBox) : null; } catch { return null; }
   }, [inv?.receiptBox]);
   const [merging,    setMerging]    = useState(false);
+  const [rereading,  setRereading]  = useState(false);
+  const [rereadMsg,  setRereadMsg]  = useState('');
   const [reporting,  setReporting]  = useState(false);
   const [marking,    setMarking]    = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -253,6 +255,28 @@ export default function InvoiceReview() {
       .catch(() => { if (active) setGroup(null); });
     return () => { active = false; };
   }, [inv?.receiptFile, inv?.receiptGroup, id]);
+
+  // Ask the model to look at the photo again. Without this a failed read was
+  // permanent — a quota blip meant typing every field by hand forever. Costs one
+  // Gemini call and no Xero call.
+  async function rereadReceipt() {
+    setRereading(true);
+    setRereadMsg('');
+    try {
+      const res = await api.post(`/receipts/${id}/reread`, {});
+      if (res.ok) {
+        window.location.reload();
+      } else {
+        setRereadMsg(res.reason === 'unavailable'
+          ? 'The reader is unavailable right now — your figures are unchanged. Try again in a moment.'
+          : 'Still could not read this photo. The fields are unchanged, so enter them by hand.');
+      }
+    } catch (err) {
+      setRereadMsg(err.message || 'Could not re-read this receipt');
+    } finally {
+      setRereading(false);
+    }
+  }
 
   // Undo a split: removes the siblings and restores the whole original on this
   // record. Only possible because the file was never cut apart.
@@ -568,6 +592,12 @@ export default function InvoiceReview() {
                 <div style={{ display: 'flex', gap: 6 }}>
                   {/* A receipt is photographed one-handed and often lands sideways. */}
                   <button className="btn btn-outline btn-sm" onClick={() => setReceiptRot(r => (r + 90) % 360)} title="Rotate">↻</button>
+                  {inv.receiptMime !== 'application/pdf' && (
+                    <button className="btn btn-outline btn-sm" onClick={rereadReceipt} disabled={rereading}
+                            title="Ask the reader to look at this photo again">
+                      {rereading ? <><span className="btn-spinner" /> Reading…</> : '✦ Re-read'}
+                    </button>
+                  )}
                   {receiptUrl && (
                     <a href={receiptUrl} target="_blank" rel="noopener noreferrer" className="btn btn-outline btn-sm">↗ Full size</a>
                   )}
@@ -622,6 +652,11 @@ export default function InvoiceReview() {
                     The original upload is intact — merging deletes the other {group.total - 1} record
                     {group.total - 1 === 1 ? '' : 's'} and restores the whole {inv.receiptPage ? 'PDF' : 'photo'} here.
                   </div>
+                </div>
+              )}
+              {rereadMsg && (
+                <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border)', fontSize: 11.5, color: 'var(--warning)', lineHeight: 1.5 }}>
+                  {rereadMsg}
                 </div>
               )}
               <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border)', fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>

@@ -401,6 +401,76 @@ router.delete('/:id', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// POST /api/receipts/:id/reread — ask the model to look at the photo again.
+//
+// Without this, a receipt that failed to read was stuck forever: Gemini being
+// down, over quota, or simply having a bad moment meant typing every field by
+// hand, with no way to retry even on a perfectly legible photo.
+//
+// This re-reads and UPDATES FIELDS ONLY — it never splits. A re-read that
+// decided the photo held two receipts would create siblings alongside any that
+// already exist, and duplicate records are worse than an unsplit one. Splitting
+// stays a decision made once, at upload.
+//
+// Costs one Gemini call and NO Xero call. Nothing here writes to Xero.
+router.post('/:id/reread', requireAuth, async (req, res) => {
+  const store  = invoiceStore.forUser(req.user.id);
+  const record = store.getById(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Receipt not found' });
+  if (!record.receiptFile) return res.status(400).json({ error: 'This record has no receipt image to read' });
+  if (record.receiptMime === 'application/pdf') {
+    return res.status(400).json({ error: 'PDF receipts are read from their text, not re-read as an image.' });
+  }
+
+  const buffer = receiptStore.forUser(req.user.id).read(record.receiptFile);
+  if (!buffer) return res.status(404).json({ error: 'The receipt image is missing from storage' });
+
+  try {
+    const parsed = await parseReceiptImage(req.user.id, buffer, record.receiptMime);
+    if (!parsed || !parsed.receipts?.length) {
+      // Honest failure: the record is untouched and still typeable by hand.
+      return res.json({ ok: false, reason: 'unreadable', receipt: record });
+    }
+
+    // The region this record owns, if it is one of several from a single photo.
+    // Re-reading a split sibling must describe ITS receipt, not the first one
+    // the model happens to see in the frame.
+    let chosen = parsed.receipts[0];
+    if (record.receiptBox && parsed.receipts.length > 1) {
+      let box = null;
+      try { box = JSON.parse(record.receiptBox); } catch { box = null; }
+      if (box) {
+        const centre = b => [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
+        const [cy, cx] = centre(box);
+        const withBox = parsed.receipts.filter(r => r.box);
+        if (withBox.length) {
+          chosen = withBox.reduce((best, r) => {
+            const [ry, rx] = centre(r.box);
+            const d = Math.hypot(ry - cy, rx - cx);
+            return d < best.d ? { r, d } : best;
+          }, { r: withBox[0], d: Infinity }).r;
+        }
+      }
+    }
+
+    const updated = store.update(req.params.id, {
+      vendorName:  chosen.merchant    ?? undefined,
+      invoiceDate: chosen.date        ?? undefined,
+      currency:    chosen.currency    ?? undefined,
+      totalAmount: chosen.total       ?? undefined,
+      taxAmount:   chosen.tax         ?? undefined,
+      subTotal:    chosen.subTotal    ?? undefined,
+      description: chosen.description ?? undefined,
+    });
+
+    logger.info('Receipt re-read', { userId: req.user.id, id: req.params.id, confidence: chosen.confidence, found: parsed.receipts.length });
+    res.json({ ok: true, receipt: updated, confidence: chosen.confidence, found: parsed.receipts.length });
+  } catch (err) {
+    logger.warn('Receipt re-read failed', { userId: req.user.id, id: req.params.id, error: err.message });
+    res.json({ ok: false, reason: 'unavailable', receipt: record });
+  }
+});
+
 // GET /api/receipts/:id/group — the other records that came from the same
 // upload, so the review screen can say "1 of 2" and offer to step between them.
 router.get('/:id/group', requireAuth, (req, res) => {
