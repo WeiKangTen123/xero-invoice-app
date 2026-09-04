@@ -800,7 +800,6 @@ export function ExecutiveActionChecklist({ data, from, to, insights, currency })
   if (!data) return null;
 
   const categories = insights?.categories || [];
-  const cur = currency || data.organisation?.currency || '';
   
   const revCat = categories.find(c => c.key === 'revenue');
   const cashCat = categories.find(c => c.key === 'cash');

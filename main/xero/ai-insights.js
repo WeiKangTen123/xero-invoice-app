@@ -10,6 +10,12 @@
 // orchestration, and the safety argument lives here where it can be tested
 // without a Xero token.
 
+// Left behind by the split: _buildCategoryVariances moved here and _sum stayed
+// in reports.js. Not caught by the suite because the only caller reaches these
+// lines with data the tests never supply — ESLint's no-undef found it in a
+// second, which is the whole argument for having it.
+const _sum = a => a.reduce((s, v) => s + v, 0);
+
 const MIN_VARIANCE_TO_EXPLAIN = 1;           // ignore rounding dust
 
 function _largeNumbersIn(text) {
