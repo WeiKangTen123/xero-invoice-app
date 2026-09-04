@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
-import { fmtMoney, fmtPct, fmtCell } from '../utils/format';
+import { fmtMoney, fmtCell } from '../utils/format';
 import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPanel, AnalysisPanel, BarList, GroupedMonthlyBars } from '../components/performance/PerformancePanels';
 
 const TABS = [
@@ -49,65 +49,9 @@ function SourceNote({ children }) {
 // with fixed day windows instead of Xero's dynamic weekly columns.
 
 // ── Donut: invoice status breakdown — interactive hover ─────────────────────
-function StatusDonut({ breakdown }) {
-  const [hover, setHover] = useState(null);
-  const segments = [
-    { key: 'paid',    label: 'Paid',     value: breakdown.paid,    color: 'var(--success)' },
-    { key: 'awaiting',label: 'Awaiting', value: breakdown.awaiting,color: 'var(--warning)' },
-    { key: 'overdue', label: 'Overdue',  value: breakdown.overdue, color: 'var(--danger)' },
-  ];
-  const total = segments.reduce((s, x) => s + x.value, 0) || 1;
-  const R = 52, CX = 90, CY = 74, CIRC = 2 * Math.PI * R;
-  let offset = 0;
-
-  return (
-    <div>
-      <svg viewBox="0 0 180 150" style={{ width: '100%', height: 'auto', display: 'block' }}>
-        <circle cx={CX} cy={CY} r={R} fill="none" stroke="var(--bg-secondary)" strokeWidth="20" />
-        {segments.map(s => {
-          const frac = s.value / total;
-          const dash = frac * CIRC;
-          const el = (
-            <circle
-              key={s.key} cx={CX} cy={CY} r={R} fill="none" stroke={s.color}
-              strokeWidth={hover === s.key ? 24 : 20}
-              strokeDasharray={`${dash} ${CIRC - dash}`}
-              strokeDashoffset={-offset}
-              transform={`rotate(-90 ${CX} ${CY})`}
-              style={{ cursor: 'pointer', transition: 'stroke-width 0.12s' }}
-              onMouseEnter={() => setHover(s.key)} onMouseLeave={() => setHover(null)}
-            />
-          );
-          offset += dash;
-          return el;
-        })}
-        <text x={CX} y={CY - 4} textAnchor="middle" fontSize="19" fontWeight="800" fill="var(--text-primary)">
-          {hover ? segments.find(s => s.key === hover).value : total}
-        </text>
-        <text x={CX} y={CY + 13} textAnchor="middle" fontSize="9.5" fill="var(--text-muted)">
-          {hover ? segments.find(s => s.key === hover).label : 'total'}
-        </text>
-      </svg>
-      <div style={{ display: 'flex', gap: 14, fontSize: 11, color: 'var(--text-secondary)', flexWrap: 'wrap', marginTop: 4 }}>
-        {segments.map(s => (
-          <span key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 5, opacity: hover && hover !== s.key ? 0.5 : 1, cursor: 'pointer' }}
-                onMouseEnter={() => setHover(s.key)} onMouseLeave={() => setHover(null)}>
-            <span style={{ width: 9, height: 9, borderRadius: 3, background: s.color, display: 'inline-block' }} />
-            {s.label} {s.value}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 
 
-const STATUS_BADGE = {
-  paid:     { cls: 'badge-green',  label: 'Paid' },
-  awaiting: { cls: 'badge-yellow', label: 'Awaiting' },
-  overdue:  { cls: 'badge-red',    label: 'Overdue' },
-};
 
 
 // The monthly actual/budget grid. 14 columns don't fit any normal screen, so the
