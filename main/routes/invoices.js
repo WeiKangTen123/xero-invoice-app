@@ -4,6 +4,7 @@ const jwt          = require('jsonwebtoken');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
 const invoiceStore = require('../utils/invoice-store');
 const pdfStore     = require('../utils/pdf-store');
+const receiptStore = require('../utils/receipt-store');
 const emailQueue   = require('../queue/email-queue');
 const emailWorker  = require('../queue/email-worker');
 const { submitInvoiceToXero } = require('../utils/invoice-handler');
@@ -307,9 +308,22 @@ router.post('/submit-all', requireAuth, async (req, res) => {
 // ── DELETE /api/invoices/:id ──────────────────────────────────────────────────
 router.delete('/:id', requireAuth, async (req, res, next) => {
   try {
-    const removed = await invoiceStore.forUser(req.user.id).remove(req.params.id);
+    const store = invoiceStore.forUser(req.user.id);
+    // Read the record BEFORE removing it — the receipt filename is the only way
+    // to find the image, and it goes with the row.
+    const record  = store.getById(req.params.id);
+    const removed = await store.remove(req.params.id);
     if (!removed) return res.status(404).json({ error: 'Invoice not found' });
+
     pdfStore.forUser(req.user.id).remove(req.params.id);
+
+    // Expense claims carry a photograph, and this route knew nothing about it —
+    // so every deleted receipt left its image on disk forever. Split siblings
+    // SHARE one file, so it may only go once the last row using it has gone.
+    if (record?.receiptFile && store.countByReceiptFile(record.receiptFile) === 0) {
+      receiptStore.forUser(req.user.id).remove(record.receiptFile);
+    }
+
     logger.info('Invoice deleted', { id: req.params.id, by: req.user.email });
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -323,7 +337,8 @@ router.delete('/', requireAuth, async (req, res, next) => {
     emailQueue.clearAll(userId);
     await invoiceStore.forUser(userId).clear();
     pdfStore.forUser(userId).clearAll();
-    logger.info('Invoice cache cleared (invoices + PDFs + email queue)', { by: req.user.email });
+    receiptStore.forUser(userId).clearAll();   // receipts were left behind here too
+    logger.info('Invoice cache cleared (invoices + PDFs + receipts + email queue)', { by: req.user.email });
     res.json({ success: true });
   } catch (err) { next(err); }
 });

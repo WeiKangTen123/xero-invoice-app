@@ -724,3 +724,131 @@ describe('routes/receipts — one upload, several records', () => {
     });
   });
 });
+
+// ── Re-reading a receipt ────────────────────────────────────────────────────
+// Without this a failed read was permanent: Gemini down, over quota, or simply
+// having a bad moment meant typing every field by hand with no way to retry on
+// a perfectly legible photo.
+describe('routes/receipts — reading a receipt again', () => {
+  let app, users, jwtSecret, testUser, invoiceStore, parser;
+  const created = [];
+  const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+  const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
+
+  const read = (merchant, total, box = null) => ({
+    merchant, date: '2026-08-24', currency: 'SGD', total,
+    tax: null, subTotal: null, description: null, confidence: 'high', box,
+  });
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users = require('../utils/users');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    invoiceStore = require('../utils/invoice-store');
+    parser = require('../utils/receipt-parser');
+    parser.parseReceiptImage.mockReset();
+    parser.parseReceiptImage.mockResolvedValue(null);
+    require('../utils/pairing')._reset();
+    const receiptRoutes = require('./receipts');
+
+    testUser = await users.createUser(`rr${Date.now()}@test.com`, 'password123', 'user');
+    created.push(testUser.id);
+    app = express();
+    app.use(express.json({ limit: '10mb' }));
+    app.use('/api/receipts', receiptRoutes);
+  });
+
+  afterAll(() => {
+    for (const id of created) {
+      try { fs.rmSync(path.join(__dirname, '../data/users', String(id)), { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
+  const upload = (mime = 'image/jpeg') => request(app).post('/api/receipts').set('Authorization', auth()).send({ mime, data: JPEG_B64 });
+  const reread = id => request(app).post(`/api/receipts/${id}/reread`).set('Authorization', auth());
+
+  test('fills in a receipt that failed to read the first time', async () => {
+    parser.parseReceiptImage.mockResolvedValue(null);          // upload: unreadable
+    const { body } = await upload().expect(201);
+    await settle();
+    expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id).vendorName).toBeFalsy();
+
+    parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [read('Grab', 18.4)] });
+    const res = await reread(body.receipt.id).expect(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.receipt.vendorName).toBe('Grab');
+    expect(res.body.receipt.totalAmount).toBe(18.4);
+  });
+
+  test('a still-unreadable photo leaves the record untouched and says so', async () => {
+    parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [read('Grab', 18.4)] });
+    const { body } = await upload().expect(201);
+    await settle();
+
+    parser.parseReceiptImage.mockResolvedValue(null);
+    const res = await reread(body.receipt.id).expect(200);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.reason).toBe('unreadable');
+    expect(res.body.receipt.vendorName).toBe('Grab');          // not wiped
+  });
+
+  test('a model failure degrades rather than erroring the request', async () => {
+    parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [read('Grab', 18.4)] });
+    const { body } = await upload().expect(201);
+    await settle();
+
+    parser.parseReceiptImage.mockRejectedValue(new Error('quota'));
+    const res = await reread(body.receipt.id).expect(200);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.reason).toBe('unavailable');
+  });
+
+  test('re-reading NEVER creates siblings, however many it now sees', async () => {
+    // A re-read that split would add rows alongside any that already exist, and
+    // duplicate records are worse than an unsplit one.
+    parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [read('Grab', 18.4)] });
+    const { body } = await upload().expect(201);
+    await settle();
+    const before = invoiceStore.forUser(testUser.id).getAll().length;
+
+    parser.parseReceiptImage.mockResolvedValue({ split: true, receipts: [read('A', 1, [0,0,400,400]), read('B', 2, [500,500,900,900])] });
+    await reread(body.receipt.id).expect(200);
+    expect(invoiceStore.forUser(testUser.id).getAll().length).toBe(before);
+  });
+
+  test('a split sibling re-reads ITS OWN region, not the first one in frame', async () => {
+    parser.parseReceiptImage.mockResolvedValue({
+      split: true,
+      receipts: [read('Grab', 18.4, [100, 20, 900, 460]), read('FairPrice', 62.1, [100, 540, 900, 980])],
+    });
+    await upload().expect(201);
+    await settle();
+
+    const rows = invoiceStore.forUser(testUser.id).getAll();
+    const fair = rows.find(r => r.vendorName === 'FairPrice');
+    expect(fair).toBeTruthy();
+
+    // Model returns them in the other order this time; the box must still decide.
+    parser.parseReceiptImage.mockResolvedValue({
+      split: true,
+      receipts: [read('Grab UPDATED', 20, [100, 20, 900, 460]), read('FairPrice UPDATED', 70, [100, 540, 900, 980])],
+    });
+    const res = await reread(fair.id).expect(200);
+    expect(res.body.receipt.vendorName).toBe('FairPrice UPDATED');
+    expect(res.body.receipt.totalAmount).toBe(70);
+  });
+
+  test('refuses a PDF, which is read from text rather than as an image', async () => {
+    const { body } = await upload('application/pdf').expect(201);
+    await settle();
+    const res = await reread(body.receipt.id).expect(400);
+    expect(res.body.error).toMatch(/PDF/i);
+  });
+
+  test('requires auth, and 404s for something that does not exist', async () => {
+    await request(app).post('/api/receipts/whatever/reread').expect(401);
+    await reread('nope').expect(404);
+  });
+});
