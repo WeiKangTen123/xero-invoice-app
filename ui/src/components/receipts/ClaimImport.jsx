@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 // api/client prepends BASE = '/api', so paths here start after it.
 import { api } from '../../api/client';
 
@@ -33,12 +33,20 @@ function fileToBase64(file) {
   });
 }
 
-export default function ClaimImport({ onClose, onImported }) {
+export default function ClaimImport({ onClose, onImported, initialJobId = null }) {
   const fileRef = useRef(null);
   const [files, setFiles]   = useState([]);
-  const [job, setJob]       = useState(null);
+  const [job, setJob]       = useState(initialJobId ? { id: initialJobId, stage: 'reading receipts' } : null);
   const [error, setError]   = useState('');
   const [starting, setStart] = useState(false);
+
+  useEffect(() => {
+    if (initialJobId) {
+      api.get(`/claims/import/${initialJobId}`)
+        .then(res => setJob(res))
+        .catch(err => setError(err.message || 'Could not load import job'));
+    }
+  }, [initialJobId]);
 
   const archives = files.filter(f => /\.zip$/i.test(f.name));
   const forms    = files.filter(f => /\.xlsx?$/i.test(f.name));

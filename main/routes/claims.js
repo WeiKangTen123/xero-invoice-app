@@ -163,6 +163,41 @@ router.post('/import', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/claims/active — returns any currently in-flight or queued claim import
+router.get('/active', requireAuth, (req, res) => {
+  const memJobs = claimImport.listJobs(req.user.id);
+  const activeMem = memJobs.find(j => !['done', 'failed', 'cancelled'].includes(j.stage));
+  if (activeMem) {
+    return res.json({
+      job: {
+        id: activeMem.id,
+        label: activeMem.label,
+        stage: activeMem.stage,
+        receiptsTotal: activeMem.receiptsTotal,
+        receiptsRead: activeMem.receiptsRead,
+        rowsTotal: activeMem.rowsTotal,
+      }
+    });
+  }
+
+  const diskJobs = claimQueue.getPending(req.user.id);
+  if (diskJobs.length > 0) {
+    const dj = diskJobs[0];
+    return res.json({
+      job: {
+        id: dj.id,
+        label: dj.label,
+        stage: dj.stage,
+        receiptsTotal: dj.receiptsTotal,
+        receiptsRead: dj.receiptsRead,
+        rowsTotal: dj.rowsTotal,
+      }
+    });
+  }
+
+  res.json({ job: null });
+});
+
 // GET /api/claims/import/:jobId — progress, then the reconciliation
 router.get('/import/:jobId', requireAuth, (req, res) => {
   const memJob = claimImport.getJob(req.params.jobId, req.user.id);

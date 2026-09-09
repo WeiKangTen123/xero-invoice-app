@@ -391,6 +391,37 @@ export default function InvoiceReview() {
     }
   }
 
+  // Discrepancy detector: Claimed <claimed> but the receipt says <onReceipt>
+  const discrepancyMatch = useMemo(() => {
+    if (!inv?.errorMsg) return null;
+    const m = inv.errorMsg.match(/Claimed\s+([0-9.]+)\s+but the receipt says\s+([0-9.]+)/i);
+    if (!m) return null;
+    return {
+      claimed: Number(m[1]),
+      onReceipt: Number(m[2]),
+      diff: Math.round((Number(m[2]) - Number(m[1])) * 100) / 100,
+    };
+  }, [inv?.errorMsg]);
+
+  async function resolveDiscrepancy(chosenAmount) {
+    setSaving(true);
+    setSaveErr('');
+    try {
+      const d = await api.patch(`/invoices/${id}`, {
+        totalAmount: chosenAmount,
+        errorMsg: null,
+      });
+      setInv(d.invoice);
+      if (editing && form) {
+        setForm(f => ({ ...f, totalAmount: chosenAmount, errorMsg: null }));
+      }
+    } catch (err) {
+      setSaveErr(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   // ── Loading / error states ────────────────────────────────────────────────
   if (loading) {
     return (
@@ -410,7 +441,7 @@ export default function InvoiceReview() {
     );
   }
 
-  const typeLabel  = inv.invoiceType === 'ACCPAY' ? 'Bill (ACCPAY)' : 'Invoice (ACCREC)';
+  const typeLabel  = inv.invoiceType === 'EXPENSE' ? 'Expense Claim' : (inv.invoiceType === 'ACCPAY' ? 'Bill (ACCPAY)' : 'Invoice (ACCREC)');
   const canSubmit  = SUBMITTABLE.has(inv.status) && !submitOk && !editing;
   const canReview  = MARKABLE.has(inv.status) && !editing;
   const canEdit    = SUBMITTABLE.has(inv.status); // same set the backend allows PATCH /:id for
@@ -536,16 +567,52 @@ export default function InvoiceReview() {
           </div>
         )}
 
-        {/* Parsing / previous submission error */}
-        {isError && inv.errorMsg && !submitErr && (
+        {/* 1-Click Discrepancy Resolver Banner */}
+        {discrepancyMatch && !submitErr && (
+          <div className="alert alert-warning" style={{ marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 10, border: '1px solid #f59e0b', background: 'rgba(245, 158, 11, 0.08)' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+              <span className="alert-icon" style={{ fontSize: 18, marginTop: 1 }}>⚠️</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 13.5 }}>Amount Discrepancy Detected</div>
+                <div style={{ fontSize: 13, marginTop: 3, color: 'var(--text-primary)' }}>
+                  The employee claimed <strong>{inv.currency || 'SGD'} {discrepancyMatch.claimed.toFixed(2)}</strong>, but the scanned receipt total is <strong>{inv.currency || 'SGD'} {discrepancyMatch.onReceipt.toFixed(2)}</strong>
+                  <span style={{ marginLeft: 6, color: 'var(--text-muted)' }}>
+                    ({discrepancyMatch.diff > 0 ? `+${discrepancyMatch.diff.toFixed(2)}` : discrepancyMatch.diff.toFixed(2)})
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginLeft: 28 }}>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                disabled={saving}
+                onClick={() => resolveDiscrepancy(discrepancyMatch.onReceipt)}
+              >
+                ✓ Use Receipt Total ({inv.currency || 'SGD'} {discrepancyMatch.onReceipt.toFixed(2)})
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline"
+                disabled={saving}
+                onClick={() => resolveDiscrepancy(discrepancyMatch.claimed)}
+              >
+                Keep Claimed Amount ({inv.currency || 'SGD'} {discrepancyMatch.claimed.toFixed(2)})
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Parsing / general warning error (when not a standard discrepancy) */}
+        {!discrepancyMatch && inv.errorMsg && !submitErr && (
           <div className="alert alert-warning" style={{ marginBottom: 12 }}>
             <span className="alert-icon">⚠</span>
             <div>
-              <strong>{inv.status === 'review-needed' ? 'Could not auto-process' : 'Previous submission failed'}</strong>
+              <strong>{inv.status === 'review-needed' ? 'Attention Needed' : 'Previous submission failed'}</strong>
               {' — '}{inv.errorMsg}
               {inv.status === 'review-needed' && (
                 <div style={{ marginTop: 4, fontSize: 12, opacity: 0.85 }}>
-                  Review the PDF, correct any fields below, then click "Post to Xero".
+                  Review the document, correct any fields below, then click "Mark as Reviewed".
                 </div>
               )}
             </div>
