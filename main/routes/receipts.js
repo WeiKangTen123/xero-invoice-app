@@ -98,17 +98,28 @@ function storeReceipt(userId, { mime, data, filename, source }) {
   // pointing at an image that was never saved.
   const storedName = receiptStore.forUser(userId).save(id, buffer, mime);
 
+  const { getUserConfig } = require('../utils/users');
+  const userConfig = getUserConfig(userId);
+  const defaultCurrency = userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'SGD';
+  const defaultAccount = userConfig.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '429';
+  const today = new Date().toISOString().split('T')[0];
+
   const record = invoiceStore.forUser(userId).add({
     id,
-    status:      'review-needed',   // nothing is known until it is read or typed
-    invoiceType: 'EXPENSE',
-    source:      source === 'phone' ? 'phone' : 'upload',
-    receiptFile: storedName,
-    receiptMime: mime,
-    receiptHash: hash,
-    description: filename ? String(filename).slice(0, 200) : null,
-    processedAt: new Date().toISOString(),
-    receivedAt:  new Date().toISOString(),   // an upload arrives when it is uploaded
+    status:        'review-needed',   // nothing is known until it is read or typed
+    invoiceType:   'EXPENSE',
+    source:        source === 'phone' ? 'phone' : 'upload',
+    invoiceNumber: `EXP-${id.slice(-6).toUpperCase()}`,
+    invoiceDate:   today,
+    dueDate:       today,
+    currency:      defaultCurrency,
+    accountCode:   defaultAccount,
+    receiptFile:   storedName,
+    receiptMime:   mime,
+    receiptHash:   hash,
+    description:   filename ? String(filename).slice(0, 200) : null,
+    processedAt:   new Date().toISOString(),
+    receivedAt:    new Date().toISOString(),   // an upload arrives when it is uploaded
   });
 
   logger.info('Receipt stored', { userId, id, bytes: buffer.length, mime, source: source || 'upload' });
@@ -158,6 +169,7 @@ function _applyFields(userId, id, r, extra = {}) {
   invoiceStore.forUser(userId).update(id, {
     vendorName:  r.merchant    ?? undefined,
     invoiceDate: r.date        ?? undefined,
+    dueDate:     r.date        ?? undefined,
     currency:    r.currency    ?? undefined,
     totalAmount: r.total       ?? undefined,
     taxAmount:   r.tax         ?? undefined,

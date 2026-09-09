@@ -407,3 +407,26 @@ describe('invoice-store — reads that fetch only what is needed', () => {
     });
   });
 });
+
+describe('normalizeInvoiceNumber', () => {
+  const { normalizeInvoiceNumber } = require('./invoice-store');
+
+  test('strips leading # and colons', () => {
+    expect(normalizeInvoiceNumber('#INV-12345')).toBe('INV-12345');
+    expect(normalizeInvoiceNumber(':# 9988')).toBe('9988');
+    expect(normalizeInvoiceNumber('# 2024-001')).toBe('2024-001');
+  });
+
+  test('strips trailing punctuation and whitespace', () => {
+    expect(normalizeInvoiceNumber('INV-9900:')).toBe('INV-9900');
+    expect(normalizeInvoiceNumber('INV-9900. ')).toBe('INV-9900');
+    expect(normalizeInvoiceNumber('  #INV-8877;  ')).toBe('INV-8877');
+  });
+
+  test('returns null for empty or invalid values', () => {
+    expect(normalizeInvoiceNumber('')).toBeNull();
+    expect(normalizeInvoiceNumber(null)).toBeNull();
+    expect(normalizeInvoiceNumber('   ')).toBeNull();
+    expect(normalizeInvoiceNumber(undefined)).toBeNull();
+  });
+});

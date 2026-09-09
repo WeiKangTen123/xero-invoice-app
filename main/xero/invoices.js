@@ -193,7 +193,7 @@ async function _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi) {
     currencyCode,
     invoiceBody: {
       invoices: [{
-        type:          invoiceData.invoiceType || 'ACCPAY',
+        type:          invoiceData.invoiceType === 'ACCREC' ? 'ACCREC' : 'ACCPAY',
         status:        'DRAFT',
         contact:       { contactID },
         date:          invoiceData.invoiceDate,

@@ -32,6 +32,17 @@ function sanitizeFilename(name) {
   return (safe || 'invoice') + ext;
 }
 
+// Strips email forwarding clutter (Fwd:, Re:, [EXTERNAL], [Spam]) so descriptions
+// derived from email subjects are clean and human-readable.
+function cleanSubject(subject) {
+  if (!subject || typeof subject !== 'string') return '';
+  return subject
+    .replace(/^(\s*(fwd?|re|fw)\s*:\s*)+/i, '')
+    .replace(/^\[(external|spam|bulk)\]\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // ── Date utilities ────────────────────────────────────────────────────────────
 
 function localDateStr(d) {
@@ -270,7 +281,7 @@ function parseTemplateFormat(text, email, defaults) {
 
   if (!lineItems.length) {
     const desc = getMatch(text, /(?:\d+\.\s*)?Description\s*\/\s*Details\s*:\s*([^\n]+)/i) ||
-                 email.subject || `Invoice from ${contactName}`;
+                 cleanSubject(email.subject) || `Invoice from ${contactName}`;
     const amt  = parseFloat(
       (getMatch(text, /Amount\s*:\s*([\d,]+\.?\d*)/i) || '0').replace(/,/g, '')
     );
@@ -302,7 +313,7 @@ function parseTemplateFormat(text, email, defaults) {
     totalAmount:      parseFloat(totalAmount.toFixed(2)),
     subTotal:         parseFloat(subTotal.toFixed(2)),
     taxAmount:        parseFloat(taxAmount.toFixed(2)),
-    description:      (email.subject || `Invoice from ${contactName}`).slice(0, 500),
+    description:      (cleanSubject(email.subject) || `Invoice from ${contactName}`).slice(0, 500),
     sourceEmail:      email.from?.text || '',
     accountCode:      defaults.accountCode,
   };
@@ -362,12 +373,12 @@ function parseGenericFormat(text, email, defaults) {
     brandingThemeName:'Standard',
     lineAmountTypes:  'Exclusive',
     lineItems: [{
-      description:  (email.subject || `Invoice from ${cleanVendor}`).slice(0, 500),
+      description:  (cleanSubject(email.subject) || `Invoice from ${cleanVendor}`).slice(0, 500),
       unitAmount:   parseFloat(subTotal.toFixed(2)),
       discountRate: 0,
     }],
     totalAmount:   parseFloat(totalAmount.toFixed(2)),
-    description:   (email.subject || `Invoice from ${cleanVendor}`).slice(0, 500),
+    description:   (cleanSubject(email.subject) || `Invoice from ${cleanVendor}`).slice(0, 500),
     sourceEmail:   email.from?.text || '',
     accountCode:   defaults.accountCode,
     subTotal:      parseFloat(subTotal.toFixed(2)),
@@ -397,7 +408,7 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
 
   if (!lineItems.length) {
     lineItems.push({
-      description:  email.subject || `Invoice from ${llm.vendorName}`,
+      description:  cleanSubject(email.subject) || `Invoice from ${llm.vendorName}`,
       unitAmount:   parseFloat(llm.totalAmount) || 0,
       discountRate: 0,
     });
@@ -428,7 +439,7 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     // always has a real dollar figure to look up the org's actual tax rate with.
     subTotal:         llm.subTotal  != null ? parseFloat(llm.subTotal)  : null,
     taxAmount:        llm.taxAmount != null ? parseFloat(llm.taxAmount) : null,
-    description:      (email.subject || `Invoice from ${llm.vendorName}`).slice(0, 500),
+    description:      (cleanSubject(email.subject) || `Invoice from ${llm.vendorName}`).slice(0, 500),
     sourceEmail:      email.from?.text || '',
     accountCode:      defaults.accountCode,
     paymentReference: llm.paymentReference || '',
@@ -521,4 +532,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency }; // helpers exposed for tests
+module.exports = { parseInvoice, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject }; // helpers exposed for tests
