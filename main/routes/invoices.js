@@ -35,7 +35,7 @@ const EDITABLE_FIELDS = new Set([
   'invoiceNumber', 'invoiceDate', 'dueDate',
   'totalAmount', 'subTotal', 'taxAmount', 'currency',
   'invoiceType', 'description', 'lineItems', 'accountCode',
-  'paymentReference',
+  'paymentReference', 'errorMsg',
 ]);
 
 // 'posted' is included so a correction can be edited and re-posted — re-posting an
@@ -173,10 +173,12 @@ router.patch('/:id', requireAuth, async (req, res, next) => {
         if (!Array.isArray(v)) return res.status(400).json({ error: '"lineItems" must be an array' });
         patch[k] = v;
       } else if (k === 'invoiceType') {
-        if (!['ACCPAY', 'ACCREC'].includes(v)) {
-          return res.status(400).json({ error: '"invoiceType" must be "ACCPAY" or "ACCREC"' });
+        if (!['ACCPAY', 'ACCREC', 'EXPENSE'].includes(v)) {
+          return res.status(400).json({ error: '"invoiceType" must be "ACCPAY", "ACCREC", or "EXPENSE"' });
         }
         patch[k] = v;
+      } else if (k === 'errorMsg') {
+        patch[k] = v ? String(v) : null;
       } else if (k === 'currency') {
         if (typeof v !== 'string' || v.trim().length !== 3) {
           return res.status(400).json({ error: '"currency" must be a 3-letter ISO code' });
@@ -274,6 +276,33 @@ router.patch('/:id/status', requireAuth, async (req, res, next) => {
 
     const updated = await invoiceStore.forUser(req.user.id).update(req.params.id, { status });
     res.json({ success: true, invoice: updated });
+  } catch (err) { next(err); }
+});
+
+// ── POST /api/invoices/batch-status ──────────────────────────────────────────
+// Batch update status for a list of invoice IDs (e.g. approving all verified claims in a batch).
+router.post('/batch-status', requireAuth, async (req, res, next) => {
+  try {
+    const { ids, status } = req.body;
+    if (!Array.isArray(ids) || !ids.length) {
+      return res.status(400).json({ error: 'ids array required' });
+    }
+    const allowed = ['pending', 'reviewed', 'reported', 'review-needed'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: `Invalid status. Allowed: ${allowed.join(', ')}` });
+    }
+
+    const store = invoiceStore.forUser(req.user.id);
+    const LOCKED = new Set(['posted', 'duplicate']);
+    let updatedCount = 0;
+    for (const id of ids) {
+      const inv = store.getById(id);
+      if (inv && !LOCKED.has(inv.status)) {
+        await store.update(id, { status });
+        updatedCount++;
+      }
+    }
+    res.json({ success: true, count: updatedCount });
   } catch (err) { next(err); }
 });
 

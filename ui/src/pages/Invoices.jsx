@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import ReceiptUpload from '../components/receipts/ReceiptUpload';
+import ClaimImport from '../components/receipts/ClaimImport';
 
 // reviewed is blue (not yet in Xero), posted is green (done).
 // Keeping them visually distinct prevents the "I clicked Reviewed and it looked
@@ -113,6 +114,8 @@ export default function Invoices() {
   const [customFrom,   setCustomFrom]   = useState('');
   const [customTo,     setCustomTo]     = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [activeClaimJob, setActiveClaimJob] = useState(null);
+  const [claimModalJobId, setClaimModalJobId] = useState(null);
 
   function fetchInvoices() {
     setLoading(true);
@@ -123,6 +126,21 @@ export default function Invoices() {
   }
 
   useEffect(() => { fetchInvoices(); }, []);
+
+  // Poll for background claim import jobs to drive the persistent progress banner
+  useEffect(() => {
+    let mounted = true;
+    function checkActiveClaim() {
+      api.get('/claims/active')
+        .then(res => {
+          if (mounted) setActiveClaimJob(res.job || null);
+        })
+        .catch(() => {});
+    }
+    checkActiveClaim();
+    const timer = setInterval(checkActiveClaim, 3500);
+    return () => { mounted = false; clearInterval(timer); };
+  }, []);
 
   useEffect(() => {
     setSelected(s => {
@@ -198,6 +216,46 @@ export default function Invoices() {
       n.has(id) ? n.delete(id) : n.add(id);
       return n;
     });
+  }
+
+  // Groups of claims imported in batches
+  const claimBatches = useMemo(() => {
+    const map = new Map();
+    for (const inv of invoices) {
+      if (inv.receiptGroup) {
+        if (!map.has(inv.receiptGroup)) {
+          map.set(inv.receiptGroup, {
+            groupId: inv.receiptGroup,
+            items: [],
+            total: 0,
+            currency: inv.currency || 'SGD',
+          });
+        }
+        const b = map.get(inv.receiptGroup);
+        b.items.push(inv);
+        b.total += Number(inv.totalAmount) || 0;
+      }
+    }
+    return [...map.values()];
+  }, [invoices]);
+
+  async function handleBatchApprove(ids) {
+    try {
+      await api.post('/invoices/batch-status', { ids, status: 'reviewed' });
+      fetchInvoices();
+    } catch (err) {
+      alert(err.message || 'Could not approve batch');
+    }
+  }
+
+  async function handleUndoBatch(groupId) {
+    if (!confirm('Undo this batch and remove all its claims and receipt files?\n\nThis cannot be undone.')) return;
+    try {
+      await api.delete(`/claims/group/${groupId}`);
+      fetchInvoices();
+    } catch (err) {
+      alert(err.message || 'Could not undo batch');
+    }
   }
 
   // 'needs-action' is a virtual filter covering review-needed + error
@@ -291,6 +349,100 @@ export default function Invoices() {
         <h1>AR &amp; AP</h1>
         <p>Persisted across restarts — up to 500 records stored. Click any row to review.</p>
       </div>
+
+      {/* Active background claim import banner */}
+      {activeClaimJob && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '12px 18px', background: 'rgba(99, 102, 241, 0.08)',
+          border: '1px solid rgba(99, 102, 241, 0.3)', borderRadius: 14,
+          marginBottom: 16, animation: 'fadeIn 0.2s ease', gap: 12, flexWrap: 'wrap'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{
+              display: 'inline-block', width: 16, height: 16,
+              border: '2px solid rgba(99, 102, 241, 0.3)',
+              borderTopColor: 'var(--accent)', borderRadius: '50%',
+              animation: 'spin 0.8s linear infinite'
+            }} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--text-primary)' }}>
+                Claim Import in Progress: {activeClaimJob.label || 'Expense claim'}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                Stage: <strong style={{ color: 'var(--accent)', textTransform: 'capitalize' }}>{activeClaimJob.stage}</strong>
+                {activeClaimJob.receiptsTotal > 0 && ` • Receipts read: ${activeClaimJob.receiptsRead || 0} / ${activeClaimJob.receiptsTotal}`}
+                {activeClaimJob.rowsTotal > 0 && ` • Form rows: ${activeClaimJob.rowsTotal}`}
+              </div>
+            </div>
+          </div>
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={() => setClaimModalJobId(activeClaimJob.id)}
+          >
+            View Progress →
+          </button>
+        </div>
+      )}
+
+      {/* Claim Batches Action Cards */}
+      {claimBatches.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          {claimBatches.map(b => {
+            const verifiedItems = b.items.filter(i => i.status === 'review-needed' && !i.errorMsg);
+            const discrepancyItems = b.items.filter(i => i.errorMsg);
+            const reviewedItems = b.items.filter(i => ['reviewed', 'posted'].includes(i.status));
+            return (
+              <div key={b.groupId} style={{
+                padding: '12px 16px', background: 'var(--bg-card)',
+                border: '1px solid var(--border)', borderRadius: 12,
+                marginBottom: 8, display: 'flex', flexWrap: 'wrap',
+                alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                boxShadow: 'var(--shadow-sm)'
+              }}>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 16 }}>📁</span>
+                    <strong>Batch: {b.groupId}</strong>
+                    <span className="badge badge-gray">{b.items.length} claims</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                      Total: {b.currency} {b.total.toFixed(2)}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                    <span style={{ color: 'var(--success)' }}>✓ {verifiedItems.length} verified</span>
+                    {discrepancyItems.length > 0 && (
+                      <span style={{ color: 'var(--warning)', fontWeight: 600 }}>⚠️ {discrepancyItems.length} need attention</span>
+                    )}
+                    {reviewedItems.length > 0 && (
+                      <span style={{ color: 'var(--accent)' }}>● {reviewedItems.length} ready to post</span>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  {verifiedItems.length > 0 && (
+                    <button
+                      className="btn btn-sm btn-primary"
+                      onClick={() => handleBatchApprove(verifiedItems.map(i => i.id))}
+                      title="Mark all verified claims in this batch as Ready to Post"
+                    >
+                      ✓ Approve Verified ({verifiedItems.length})
+                    </button>
+                  )}
+                  <button
+                    className="btn btn-sm btn-outline"
+                    onClick={() => handleUndoBatch(b.groupId)}
+                    style={{ color: 'var(--danger)', borderColor: 'rgba(239, 68, 68, 0.3)' }}
+                    title="Undo and remove all claims and receipts in this batch"
+                  >
+                    Undo Batch
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Reviewed-but-not-posted banner */}
       {reviewed > 0 && (
@@ -634,6 +786,14 @@ export default function Invoices() {
           </div>
         )}
       </div>
+
+      {claimModalJobId && (
+        <ClaimImport
+          initialJobId={claimModalJobId}
+          onClose={() => { setClaimModalJobId(null); fetchInvoices(); }}
+          onImported={() => { setClaimModalJobId(null); fetchInvoices(); }}
+        />
+      )}
     </div>
   );
 }
