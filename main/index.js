@@ -50,6 +50,7 @@ const chatRoutes    = require('./routes/chat');
 const xeroOAuthRoutes = require('./routes/xero-oauth');
 const xeroReportsRoutes = require('./routes/xero-reports');
 const receiptRoutes = require('./routes/receipts');
+const claimRoutes = require('./routes/claims');
 
 
 const app  = express();
@@ -96,6 +97,7 @@ app.use('/api/chat',     chatRoutes);
 app.use('/api/xero',     xeroOAuthRoutes);
 app.use('/api/xero-reports', xeroReportsRoutes);
 app.use('/api/receipts', receiptRoutes);
+app.use('/api/claims', claimRoutes);
 // Mounted under /api, not /dashboard — Express matches mounted routers before the
 // SPA catch-all below, so owning /dashboard here meant a hard refresh or bookmark
 // on the React app's own /dashboard route got this router's JSON (in practice a
