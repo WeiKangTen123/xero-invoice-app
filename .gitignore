@@ -28,3 +28,7 @@ unused/notes/*.bak
 
 # Server access notes — external IP and SSH key material, not for the public repo.
 server.MD
+
+# Real claim samples — actual names, email addresses and expense data.
+# Kept locally for testing; never committed. The repo is public.
+sample_expenses/
