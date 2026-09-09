@@ -540,6 +540,9 @@ router.post('/:id/reread', requireAuth, async (req, res) => {
 
 // GET /api/receipts/:id/group — the other records that came from the same
 // upload, so the review screen can say "1 of 2" and offer to step between them.
+// groupType distinguishes:
+//   'batch'  — a folder/zip claim import (source === 'claim'). No merge allowed.
+//   'split'  — a single photo or PDF that was automatically split into regions/pages.
 router.get('/:id/group', requireAuth, (req, res) => {
   const store  = invoiceStore.forUser(req.user.id);
   const record = store.getById(req.params.id);
@@ -550,11 +553,29 @@ router.get('/:id/group', requireAuth, (req, res) => {
     // Stable, human order: PDF pages by page, photo regions top-to-bottom.
     .sort((a, b) => (a.receiptPage || 0) - (b.receiptPage || 0) || String(a.id).localeCompare(String(b.id)));
 
+  // A batch import is one where the receipts came from a claim folder/zip
+  // (source === 'claim'). An actual split has receiptBox or receiptPage set.
+  const isBatch = members.every(r => r.source === 'claim');
+  // Use the original filename / zip name stored on the first sibling, falling
+  // back to the group ID when none is available.
+  const batchLabel = isBatch
+    ? (members[0]?.claimBatch || members[0]?.receiptGroup || 'Batch Import')
+    : null;
+
   res.json({
     split: true,
+    groupType: isBatch ? 'batch' : 'split',
+    batchLabel,
     index: members.findIndex(r => r.id === record.id) + 1,
     total: members.length,
-    siblings: members.map(r => ({ id: r.id, vendorName: r.vendorName, totalAmount: r.totalAmount, currency: r.currency, page: r.receiptPage })),
+    siblings: members.map(r => ({
+      id: r.id,
+      vendorName: r.vendorName,
+      totalAmount: r.totalAmount,
+      currency: r.currency,
+      page: r.receiptPage,
+      status: r.status,
+    })),
   });
 });
 
