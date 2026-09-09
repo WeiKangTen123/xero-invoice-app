@@ -350,7 +350,8 @@ export default function InvoiceReview() {
       subTotal:         inv.subTotal         ?? 0,
       taxAmount:        inv.taxAmount        ?? 0,
       currency:         inv.currency         || '',
-      invoiceType:      inv.invoiceType      || 'ACCPAY',
+      description:      inv.description      || '',
+      invoiceType:      inv.invoiceType      || (inv.receiptFile ? 'EXPENSE' : 'ACCPAY'),
       accountCode:      inv.accountCode      || '',
       paymentReference: inv.paymentReference || '',
       lineItems:        (inv.lineItems || []).map(li => ({ ...li })),
@@ -810,10 +811,25 @@ export default function InvoiceReview() {
                         onChange={e => updateField('totalAmount', e.target.value)} />
                     </div>
                   </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="form-label">Subtotal</label>
+                      <input className="form-input" type="number" step="0.01" value={form.subTotal ?? ''}
+                        placeholder="0.00"
+                        onChange={e => updateField('subTotal', e.target.value !== '' ? Number(e.target.value) : null)} />
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="form-label">Tax / GST</label>
+                      <input className="form-input" type="number" step="0.01" value={form.taxAmount ?? ''}
+                        placeholder="0.00"
+                        onChange={e => updateField('taxAmount', e.target.value !== '' ? Number(e.target.value) : null)} />
+                    </div>
+                  </div>
                   <div className="form-group">
                     <label className="form-label">Type</label>
                     <select className="form-input" value={form.invoiceType}
                       onChange={e => updateField('invoiceType', e.target.value)}>
+                      <option value="EXPENSE">Expense Claim</option>
                       <option value="ACCPAY">Bill (ACCPAY)</option>
                       <option value="ACCREC">Invoice (ACCREC)</option>
                     </select>
@@ -850,10 +866,17 @@ export default function InvoiceReview() {
                 <>
                   <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 16 }}>
                     <div>
-                      <div style={{ fontWeight: 700, fontSize: 15 }}>
+                      <div style={{ fontWeight: 700, fontSize: 16 }}>
                         {inv.currency} {Number(inv.totalAmount || 0).toLocaleString('en', { minimumFractionDigits: 2 })}
                       </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Total amount</div>
+                      {(inv.subTotal != null || inv.taxAmount != null) ? (
+                        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3, display: 'flex', gap: 12 }}>
+                          {inv.subTotal != null && <span>Subtotal: {inv.currency} {Number(inv.subTotal).toFixed(2)}</span>}
+                          {inv.taxAmount != null && <span>Tax/GST: {inv.currency} {Number(inv.taxAmount).toFixed(2)}</span>}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Total amount</div>
+                      )}
                     </div>
                     <span className="badge badge-gray" style={{ fontSize: 11 }}>{typeLabel}</span>
                   </div>
@@ -865,11 +888,51 @@ export default function InvoiceReview() {
                     <MiniField label="Due Date"     value={inv.dueDate} />
                   </div>
                   <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
-                    Source: {inv.source === 'pdf' ? 'PDF Attachment' : 'Email Body'}
+                    Source: {
+                      inv.source === 'claim' ? 'Expense Claim (Imported)' :
+                      inv.source === 'phone' ? 'Mobile Camera Upload' :
+                      inv.source === 'upload' ? 'Direct Receipt Upload' :
+                      inv.source === 'pdf' ? 'PDF Attachment' :
+                      (inv.receiptFile ? 'Receipt Upload' : 'Email Body')
+                    }
                   </div>
                 </>
               )}
             </div>
+
+            {/* Claim Purpose / Description card */}
+            {(inv.description || editing || inv.invoiceType === 'EXPENSE') && (
+              <div className="card">
+                <div className="card-title" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>📝</span> Claim Purpose / Description
+                </div>
+                {editing ? (
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <textarea
+                      className="form-input"
+                      rows={2}
+                      value={form.description || ''}
+                      placeholder="e.g. Transport to client meeting at Suntec"
+                      onChange={e => updateField('description', e.target.value)}
+                      style={{ resize: 'vertical', fontFamily: 'inherit' }}
+                    />
+                  </div>
+                ) : (
+                  <div style={{
+                    fontSize: 13,
+                    color: inv.description ? 'var(--text-primary)' : 'var(--text-muted)',
+                    fontStyle: inv.description ? 'normal' : 'italic',
+                    lineHeight: 1.5,
+                    background: 'var(--bg-secondary)',
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    border: '1px solid var(--border)'
+                  }}>
+                    {inv.description || 'No description provided'}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Vendor card */}
             <div className="card">

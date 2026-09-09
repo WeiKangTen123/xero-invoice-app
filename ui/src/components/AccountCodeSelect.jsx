@@ -35,8 +35,9 @@ const TYPE_LABEL = {
 // A bill is coded to a cost account, a sales invoice to a revenue account. Both
 // lists stay fully reachable — this only decides what floats to the top.
 const RELEVANT_FIRST = {
-  ACCPAY: ['DIRECTCOSTS', 'EXPENSE', 'OVERHEADS'],
-  ACCREC: ['REVENUE', 'OTHERINCOME'],
+  ACCPAY:  ['DIRECTCOSTS', 'EXPENSE', 'OVERHEADS'],
+  EXPENSE: ['EXPENSE', 'DIRECTCOSTS', 'OVERHEADS'],
+  ACCREC:  ['REVENUE', 'OTHERINCOME'],
 };
 
 function typeLabel(type) { return TYPE_LABEL[type] || (type || 'Other'); }
