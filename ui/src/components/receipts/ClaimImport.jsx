@@ -191,74 +191,77 @@ export default function ClaimImport({ onClose, onImported, initialJobId = null }
         )}
 
         {/* ── Reconciliation ────────────────────────────────────────────── */}
-        {done && s && (
-          <div>
-            {/* "27 imported" is useless. What matters is which ones need a person. */}
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
-              {[
-                { n: s.verified, label: 'matched and verified', tone: 'var(--success)' },
-                { n: s.discrepancies, label: "amount doesn't match", tone: 'var(--danger)' },
-                { n: s.missingReceipts, label: 'no receipt found', tone: 'var(--warning)' },
-                { n: s.extraReceipts, label: 'receipt with no claim line', tone: 'var(--warning)' },
-                { n: s.unreadable, label: 'could not be read', tone: 'var(--text-muted)' },
-              ].filter(x => x.n > 0).map(x => (
-                <div key={x.label} style={{ flex: '1 1 150px', background: 'var(--bg-secondary)', borderRadius: 10, padding: '10px 12px' }}>
-                  <div style={{ fontSize: 20, fontWeight: 800, color: x.tone, fontVariantNumeric: 'tabular-nums' }}>{x.n}</div>
-                  <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>{x.label}</div>
-                </div>
-              ))}
-            </div>
-
-            {job.result.discrepancies?.length > 0 && (
-              <Section title="Amounts that don't match the receipt">
-                {job.result.discrepancies.map(d => (
-                  <Line key={d.rowNo}
-                        left={`Row ${d.rowNo} · ${d.description || ''}`}
-                        right={`claimed ${d.claimed} · receipt ${d.onReceipt}`}
-                        tone="var(--danger)" />
+        {done && s && (() => {
+          const totalClaims = s.total || job.result?.created?.length || 0;
+          return (
+            <div>
+              {/* "27 imported" is useless. What matters is which ones need a person. */}
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+                {[
+                  { n: s.verified, label: 'matched and verified', tone: 'var(--success)' },
+                  { n: s.discrepancies, label: "amount doesn't match", tone: 'var(--danger)' },
+                  { n: s.missingReceipts, label: 'no receipt found', tone: 'var(--warning)' },
+                  { n: s.extraReceipts, label: job.rowsTotal > 0 ? 'receipt with no claim line' : 'receipts ready for review', tone: job.rowsTotal > 0 ? 'var(--warning)' : 'var(--success)' },
+                  { n: s.unreadable, label: 'could not be read', tone: 'var(--text-muted)' },
+                ].filter(x => x.n > 0).map(x => (
+                  <div key={x.label} style={{ flex: '1 1 150px', background: 'var(--bg-secondary)', borderRadius: 10, padding: '10px 12px' }}>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: x.tone, fontVariantNumeric: 'tabular-nums' }}>{x.n}</div>
+                    <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>{x.label}</div>
+                  </div>
                 ))}
-              </Section>
-            )}
-
-            {job.result.missingReceipts?.length > 0 && (
-              <Section title="Claim lines with no receipt">
-                {job.result.missingReceipts.map(m => (
-                  <Line key={m.rowNo} left={`Row ${m.rowNo} · ${m.description || ''}`} right={String(m.amount ?? '')} tone="var(--warning)" />
-                ))}
-              </Section>
-            )}
-
-            {job.result.extraReceipts?.length > 0 && (
-              <Section title="Receipts with no claim line">
-                {job.result.extraReceipts.map(r => (
-                  <Line key={r.file} left={r.file.split('/').pop()} right={`${r.merchant || '—'} ${r.total ?? ''}`} tone="var(--warning)" />
-                ))}
-              </Section>
-            )}
-
-            {job.result.categoriesSuggested > 0 && (
-              <div style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '10px 0', lineHeight: 1.5 }}>
-                {job.result.categoriesSuggested} categor{job.result.categoriesSuggested === 1 ? 'y was' : 'ies were'} suggested
-                for lines the claimant left blank — marked as suggestions, not answers.
               </div>
-            )}
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
-              <button className="btn btn-primary" style={{ flex: 1 }} onClick={onClose}>
-                Open {s.total} claim{s.total === 1 ? '' : 's'}
-              </button>
-              {/* An import that went wrong should not need twenty-seven deletions. */}
-              <button className="btn btn-outline"
-                      onClick={async () => {
-                        if (!confirm(`Remove all ${s.total} claims from this import?`)) return;
-                        try { await api.delete(`/claims/group/${job.result.groupId}`); onImported?.(); onClose(); }
-                        catch (err) { setError(err.message); }
-                      }}>
-                Undo import
-              </button>
+              {job.result.discrepancies?.length > 0 && (
+                <Section title="Amounts that don't match the receipt">
+                  {job.result.discrepancies.map(d => (
+                    <Line key={d.rowNo}
+                          left={`Row ${d.rowNo} · ${d.description || ''}`}
+                          right={`claimed ${d.claimed} · receipt ${d.onReceipt}`}
+                          tone="var(--danger)" />
+                  ))}
+                </Section>
+              )}
+
+              {job.result.missingReceipts?.length > 0 && (
+                <Section title="Claim lines with no receipt">
+                  {job.result.missingReceipts.map(m => (
+                    <Line key={m.rowNo} left={`Row ${m.rowNo} · ${m.description || ''}`} right={String(m.amount ?? '')} tone="var(--warning)" />
+                  ))}
+                </Section>
+              )}
+
+              {job.result.extraReceipts?.length > 0 && job.rowsTotal > 0 && (
+                <Section title="Receipts with no claim line">
+                  {job.result.extraReceipts.map(r => (
+                    <Line key={r.file} left={r.file.split('/').pop()} right={`${r.merchant || '—'} ${r.total ?? ''}`} tone="var(--warning)" />
+                  ))}
+                </Section>
+              )}
+
+              {job.result.categoriesSuggested > 0 && (
+                <div style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '10px 0', lineHeight: 1.5 }}>
+                  {job.result.categoriesSuggested} categor{job.result.categoriesSuggested === 1 ? 'y was' : 'ies were'} suggested
+                  for lines the claimant left blank — marked as suggestions, not answers.
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
+                <button className="btn btn-primary" style={{ flex: 1 }} onClick={onClose}>
+                  Open {totalClaims} claim{totalClaims === 1 ? '' : 's'}
+                </button>
+                {/* An import that went wrong should not need twenty-seven deletions. */}
+                <button className="btn btn-outline"
+                        onClick={async () => {
+                          if (!confirm(`Remove all ${totalClaims} claims from this import?`)) return;
+                          try { await api.delete(`/claims/group/${job.result.groupId}`); onImported?.(); onClose(); }
+                          catch (err) { setError(err.message); }
+                        }}>
+                  Undo import
+                </button>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );

@@ -101,7 +101,7 @@ function matchClaims(rows = [], receipts = []) {
     // A receipt nobody claimed for.
     unmatchedReceipts: receipts.filter((_, i) => !receiptTaken.has(i)),
     summary: {
-      total: rows.length,
+      total: rows.length > 0 ? rows.length : receipts.length,
       matched: matches.length,
       verified: matches.filter(m => m.amountAgrees).length,
       discrepancies: matches.filter(m => !m.amountAgrees).length,

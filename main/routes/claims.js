@@ -112,7 +112,25 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
     subTotal:    receipt && receipt.subTotal != null ? receipt.subTotal : null,
     taxAmount:   receipt && receipt.tax != null ? receipt.tax : null,
     lineItems:   (receipt && Array.isArray(receipt.lineItems) && receipt.lineItems.length) ? receipt.lineItems : [],
-    description: [row.description, category ? `[${category}]` : null].filter(Boolean).join(' ').slice(0, 200) || null,
+    description: (() => {
+      const cat = category || (receipt && receipt.category) || null;
+      if (receipt && receipt.description && (!row.description || row.description === receipt.merchant)) {
+        return receipt.description;
+      }
+      if (row.description) {
+        const parts = [];
+        if (cat && !row.description.startsWith('[')) parts.push(`[${cat}]`);
+        parts.push(row.description);
+        if (receipt && receipt.time && !row.description.includes(receipt.time)) parts.push(`(${receipt.time})`);
+        return parts.join(' ').slice(0, 250);
+      }
+      if (receipt && receipt.merchant) {
+        const catPrefix = cat ? `[${cat}] ` : '';
+        const timeSuffix = receipt.time ? ` (${receipt.time})` : '';
+        return `${catPrefix}Expense claim @ ${receipt.merchant}${timeSuffix}`.slice(0, 250);
+      }
+      return cat ? `[${cat}] Expense claim` : null;
+    })(),
     receiptFile: storedName,
     receiptMime: mime,
     receiptHash: hash,

@@ -292,7 +292,8 @@ export default function Invoices() {
     return (
       inv.vendorName?.toLowerCase().includes(q) ||
       inv.invoiceNumber?.toLowerCase().includes(q) ||
-      inv.sourceEmail?.toLowerCase().includes(q)
+      inv.sourceEmail?.toLowerCase().includes(q) ||
+      inv.description?.toLowerCase().includes(q)
     );
   });
 
@@ -533,7 +534,7 @@ export default function Invoices() {
         {/* Expense claims are the only type the user creates by hand — bills and
             invoices arrive by email — so the input lives with the filters. */}
         <div style={{ marginLeft: 'auto' }}>
-          <ReceiptUpload onUploaded={fetchInvoices} />
+          <ReceiptUpload onUploaded={() => { setTypeFilter('EXPENSE'); fetchInvoices(); }} />
         </div>
       </div>
 
@@ -717,7 +718,14 @@ export default function Invoices() {
                           }}>
                             {(inv.vendorName || '?').slice(0, 2).toUpperCase()}
                           </div>
-                          <span style={{ fontWeight: 500 }}>{inv.vendorName || '—'}</span>
+                          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                            <span style={{ fontWeight: 500 }}>{inv.vendorName || '—'}</span>
+                            {inv.description && inv.description !== inv.vendorName && (
+                              <span style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={inv.description}>
+                                {inv.description}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </td>
                       <td>
@@ -751,9 +759,13 @@ export default function Invoices() {
                         {receivedLabel(inv.receivedAt || inv.processedAt)}
                       </td>
                       <td>
-                        {inv.hasPdf
-                          ? <span className="badge badge-green">📄 PDF</span>
-                          : <span className="badge badge-gray">✉ Email</span>}
+                        {inv.receiptFile
+                          ? <span className="badge badge-yellow" title={inv.source === 'phone' ? 'Captured with phone' : 'Receipt photo'}>
+                              {inv.source === 'phone' ? '📱 Phone' : '🧾 Receipt'}
+                            </span>
+                          : inv.hasPdf
+                            ? <span className="badge badge-green">📄 PDF</span>
+                            : <span className="badge badge-gray">✉ Email</span>}
                       </td>
                       <td><span className={`badge ${cls}`}>{label}</span></td>
                       <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
@@ -809,8 +821,8 @@ export default function Invoices() {
       {claimModalJobId && (
         <ClaimImport
           initialJobId={claimModalJobId}
-          onClose={() => { setClaimModalJobId(null); fetchInvoices(); }}
-          onImported={() => { setClaimModalJobId(null); fetchInvoices(); }}
+          onClose={() => { setClaimModalJobId(null); setTypeFilter('EXPENSE'); fetchInvoices(); }}
+          onImported={() => { setClaimModalJobId(null); setTypeFilter('EXPENSE'); fetchInvoices(); }}
         />
       )}
     </div>
