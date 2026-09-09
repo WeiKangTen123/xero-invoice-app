@@ -94,7 +94,24 @@ export default function ReceiptUpload({ onUploaded }) {
         <span style={{ fontSize: 10.5, color: 'var(--text-muted)', maxWidth: 340, textAlign: 'right', lineHeight: 1.45 }}>{note}</span>
       )}
       {error && (
-        <span style={{ fontSize: 10.5, color: 'var(--danger)', maxWidth: 340, textAlign: 'right', lineHeight: 1.45 }}>{error}</span>
+        <div style={{
+          background: 'rgba(239,68,68,0.08)',
+          border: '1px solid rgba(239,68,68,0.25)',
+          borderRadius: 8,
+          padding: '7px 12px',
+          fontSize: 12,
+          color: 'var(--danger)',
+          maxWidth: 360,
+          textAlign: 'left',
+          lineHeight: 1.45,
+          marginTop: 2,
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 6,
+        }}>
+          <span style={{ fontSize: 13, lineHeight: 1 }}>⚠</span>
+          <span>{error}</span>
+        </div>
       )}
 
       {pairing && (

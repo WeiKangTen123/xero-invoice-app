@@ -193,12 +193,14 @@ export default function ClaimImport({ onClose, onImported, initialJobId = null }
         {/* ── Reconciliation ────────────────────────────────────────────── */}
         {done && s && (() => {
           const totalClaims = s.total || job.result?.created?.length || 0;
+          const dupCount = (job.result?.duplicates?.length || 0) + (job.result?.suspectedDuplicates?.length || 0);
           return (
             <div>
               {/* "27 imported" is useless. What matters is which ones need a person. */}
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
                 {[
                   { n: s.verified, label: 'matched and verified', tone: 'var(--success)' },
+                  { n: dupCount, label: 'duplicates detected', tone: 'var(--danger)' },
                   { n: s.discrepancies, label: "amount doesn't match", tone: 'var(--danger)' },
                   { n: s.missingReceipts, label: 'no receipt found', tone: 'var(--warning)' },
                   { n: s.extraReceipts, label: job.rowsTotal > 0 ? 'receipt with no claim line' : 'receipts ready for review', tone: job.rowsTotal > 0 ? 'var(--warning)' : 'var(--success)' },
@@ -210,6 +212,17 @@ export default function ClaimImport({ onClose, onImported, initialJobId = null }
                   </div>
                 ))}
               </div>
+
+              {dupCount > 0 && (
+                <Section title="Duplicate receipts detected">
+                  {[...(job.result.duplicates || []), ...(job.result.suspectedDuplicates || [])].map((d, i) => (
+                    <Line key={d.id || i}
+                          left={`Receipt #${String(d.id || '').slice(-6)} · ${d.why || 'Matches existing receipt'}`}
+                          right={d.of ? `duplicate of #${String(d.of).slice(-6)}` : 'duplicate'}
+                          tone="var(--danger)" />
+                  ))}
+                </Section>
+              )}
 
               {job.result.discrepancies?.length > 0 && (
                 <Section title="Amounts that don't match the receipt">

@@ -335,7 +335,7 @@ Claims are deduplicated on two tiers:
 ```
 xero-invoice-app/
 ├── main/
-│   ├── index.js                  Server entry point
+│   ├── index.js                  Server entry point + middleware + route mounts
 │   ├── .env                      Server-wide secrets (JWT_SECRET, SLACK_WEBHOOK_URL)
 │   ├── data/
 │   │   ├── users.json            User accounts
@@ -344,15 +344,30 @@ xero-invoice-app/
 │   │       ├── settings.json     autoProcess toggle
 │   │       ├── invoices.json     Invoice history (max 500)
 │   │       ├── pdfs/             PDF files (one per invoice)
-│   │       └── email-queue/      Background job queue (.que + .pdf files)
+│   │       ├── receipts/         Receipt image files (one per claim)
+│   │       ├── email-queue/      Background email job queue (.que + .pdf files)
+│   │       └── claim-queue/      Background claim job queue (.que + .bin files)
+│   ├── claims/                   Expense claims processing module
+│   │   ├── claim-import.js       Job runner: archive → parse → match → save
+│   │   ├── claim-queue.js        Disk-backed claim job store + recovery
+│   │   ├── claim-worker.js       Per-user background worker (start/stop/recover)
+│   │   ├── claim-archive.js      ZIP / folder extraction
+│   │   ├── claim-form.js         Excel (.xlsx) claim form parser
+│   │   ├── claim-matcher.js      Match form rows against parsed receipts
+│   │   ├── claim-categories.js   LLM-powered category suggestions
+│   │   └── claim-dedup.js        Tier-1 SHA-256 + Tier-2 suspicion dedup
 │   ├── email/
 │   │   ├── watcher-registry.js   Per-user IMAP watcher management
+│   │   ├── idle-sweeper.js       Cleans up abandoned watcher sessions
 │   │   ├── parser.js             Email and PDF field extraction (batch-aware)
 │   │   └── llm-parser.js         LLM API calls with per-user rate limiter
+│   ├── middleware/
+│   │   └── auth-middleware.js    requireAuth JWT guard
 │   ├── xero/
 │   │   ├── connect.js            Per-user Xero auth (client credentials)
 │   │   ├── contacts.js           Contact lookup and creation
-│   │   └── invoices.js           Draft invoice creation with PDF/email attachment
+│   │   ├── invoices.js           Draft invoice creation with PDF/email attachment
+│   │   └── reports.js            Xero reporting queries (P&L, cash flow, etc.)
 │   ├── queue/
 │   │   ├── email-queue.js        Disk-based email job store (.que files)
 │   │   ├── email-worker.js       Per-user background worker (start/stop/recover)
@@ -361,16 +376,23 @@ xero-invoice-app/
 │   │   ├── auth.js               Login, register, JWT
 │   │   ├── setup.js              Per-user config save/load + connection tests
 │   │   ├── process.js            Watcher start/stop/rescan/settings per user
-│   │   ├── invoices.js           Invoice CRUD (per-user scoped)
+│   │   ├── invoices.js           Invoice CRUD + submit + batch-status
+│   │   ├── receipts.js           Receipt store, image serving, QR pairing, group/merge
+│   │   ├── claims.js             Claim import jobs, active-job list, group delete
+│   │   ├── chat.js               AI assistant (read-only, Gemini-powered)
+│   │   ├── xero-oauth.js         Xero OAuth2 connect/callback/disconnect/tenants
+│   │   ├── xero-reports.js       Xero Insights: P&L, cash flow, accounts, contacts, etc.
 │   │   ├── admin.js              User management, cross-user reports
-│   │   └── dashboard.js          Xero org list, health check
+│   │   └── dashboard.js          Health check + org list
 │   └── utils/
 │       ├── invoice-store.js      Per-user invoice store with write mutex + claimForSubmit
 │       ├── pdf-store.js          Per-user PDF file store
+│       ├── receipt-store.js      Per-user receipt image file store
 │       ├── settings-store.js     Per-user settings store
 │       ├── token-cache.js        Per-user Xero token cache (in-memory)
 │       ├── process-state.js      Per-user watcher activity tracking
 │       ├── invoice-handler.js    Orchestrates dedup, PDF save, Xero queue
+│       ├── chat-agent.js         Gemini chat agent (reads invoices, proposes edits)
 │       ├── users.js              User accounts + per-user config
 │       └── logger.js             Winston structured logging
 └── ui/                           React frontend (Vite)
@@ -384,44 +406,208 @@ xero-invoice-app/
         │   ├── Sidebar.jsx           Navigation + compact pipeline widget (always visible)
         │   └── Header.jsx            Top bar
         └── pages/
+            ├── Login.jsx             Login / register page
             ├── Dashboard.jsx         Full pipeline panel, watcher controls, recent invoices
-            ├── Invoices.jsx          Invoice list + bulk submit banner
-            └── InvoiceReview.jsx     Invoice detail + post to Xero + polling
+            ├── Invoices.jsx          Invoice list + bulk submit banner + expense claims tab
+            ├── InvoiceReview.jsx     Invoice/claim detail + post to Xero + batch nav
+            ├── Capture.jsx           Phone QR-pairing camera UI (mobile browser)
+            ├── Setup.jsx             Per-user credentials + connection tests
+            ├── XeroInsights.jsx      Xero analytics dashboard (P&L, cash flow, contacts)
+            └── Admin.jsx             Admin: user management, cross-user flagged reports
 ```
+
 
 ---
 
 ## API endpoints
 
+### Auth
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/api/auth/login` | — | Login, returns JWT |
 | POST | `/api/auth/register` | — | Register (first user only, or admin) |
 | GET | `/api/auth/status` | JWT | Current user info |
+
+### Setup
+| Method | Path | Auth | Description |
+|---|---|---|---|
 | GET | `/api/setup` | JWT | Get this user's config |
 | POST | `/api/setup` | JWT | Save this user's config |
 | POST | `/api/setup/test/xero` | JWT | Test Xero connection |
 | POST | `/api/setup/test/imap` | JWT | Test IMAP connection |
-| POST | `/api/setup/test/llm` | JWT | Test LLM API |
+| POST | `/api/setup/test/llm` | JWT | Test LLM API key |
+
+### Email watcher & pipeline
+| Method | Path | Auth | Description |
+|---|---|---|---|
 | GET | `/api/process/status` | JWT | Watcher status + email queue stats + Xero counts |
 | POST | `/api/process/start` | JWT | Start this user's IMAP watcher |
 | POST | `/api/process/stop` | JWT | Stop this user's IMAP watcher |
 | POST | `/api/process/rescan` | JWT | Trigger immediate inbox scan |
 | GET | `/api/process/settings` | JWT | Get autoProcess toggle |
 | PATCH | `/api/process/settings` | JWT | Update autoProcess toggle |
-| GET | `/api/invoices` | JWT | List this user's invoices |
+
+### Invoices
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/invoices` | JWT | List this user's invoices (supports `?type=`, `?status=`, `?q=`) |
 | GET | `/api/invoices/:id` | JWT | Invoice detail |
-| GET | `/api/invoices/:id/pdf` | JWT | Download PDF |
+| PATCH | `/api/invoices/:id` | JWT | Edit invoice fields |
+| GET | `/api/invoices/:id/pdf` | JWT | Download PDF (token-authenticated) |
+| GET | `/api/invoices/:id/pdf-url` | JWT | Get short-lived signed URL for PDF (for iframe embed) |
+| POST | `/api/invoices/:id/submit` | JWT | Submit single invoice to Xero |
+| POST | `/api/invoices/:id/report` | JWT | Flag an issue on an invoice |
+| PATCH | `/api/invoices/:id/status` | JWT | Update invoice status directly |
+| POST | `/api/invoices/submit-all` | JWT | Submit all pending invoices to Xero |
+| POST | `/api/invoices/batch-status` | JWT | Poll status of multiple invoices in one call |
 | DELETE | `/api/invoices/:id` | JWT | Delete invoice + PDF |
 | DELETE | `/api/invoices` | JWT | Clear all invoices, PDFs, and email queue |
-| POST | `/api/invoices/submit-all` | JWT | Submit all pending invoices to Xero |
-| PATCH | `/api/invoices/:id/status` | JWT | Update status |
-| POST | `/api/invoices/:id/report` | JWT | Flag an issue |
+
+### Receipts & phone capture
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/receipts` | JWT | Upload a receipt image (Add Claim) |
+| POST | `/api/receipts/pair` | JWT | Generate QR pairing token + SVG for phone capture |
+| GET | `/api/receipts/pair/:token` | JWT | Poll pairing for newly arrived receipts |
+| DELETE | `/api/receipts/pair/:token` | JWT | Revoke a pairing (QR dialog closed) |
+| GET | `/api/receipts/capture/:token` | — | Phone checks if the QR link is still valid |
+| GET | `/api/receipts/capture/:token/status` | — | Phone polls parsed fields of its uploaded receipts |
+| POST | `/api/receipts/capture/:token` | — | Phone uploads a receipt image |
+| GET | `/api/receipts/:id/token` | JWT | Get short-lived signed token for receipt image |
+| GET | `/api/receipts/:id/image` | token | Serve receipt image (signed token in query param) |
+| DELETE | `/api/receipts/:id` | JWT | Delete a receipt record + image file |
+| POST | `/api/receipts/:id/reread` | JWT | Re-run AI on this receipt (costs 1 LLM call) |
+| GET | `/api/receipts/:id/group` | JWT | Siblings + `groupType` (`batch`/`split`) + `batchLabel` |
+| POST | `/api/receipts/:id/merge` | JWT | Undo a genuine photo split (not for batch imports) |
+
+### Expense claims
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/claims/import` | JWT | Start a batch import job (multipart: ZIP + optional XLSX) |
+| GET | `/api/claims/active` | JWT | List active/recent import jobs for this user |
+| GET | `/api/claims/import/:jobId` | JWT | Poll a specific import job for progress |
+| DELETE | `/api/claims/import/:jobId` | JWT | Cancel / remove an import job |
+| DELETE | `/api/claims/group/:groupId` | JWT | Delete all records from a batch import group |
+
+### Xero OAuth
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/xero/oauth/connect` | JWT | Start Xero OAuth2 flow (redirects to Xero) |
+| GET | `/api/xero/oauth/callback` | — | OAuth2 callback URL (Xero redirects here) |
+| POST | `/api/xero/oauth/complete` | JWT | Exchange code for tokens, store connection |
+| DELETE | `/api/xero/oauth/disconnect` | JWT | Revoke Xero connection |
+| GET | `/api/xero/tenants` | JWT | List connected Xero orgs |
+
+### Xero Insights
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/xero-reports/summary` | JWT | Outstanding balances snapshot (what's owed now) |
+| GET | `/api/xero-reports/period` | JWT | Invoice trend for a date range (`?preset=week\|month\|year\|custom`) |
+| GET | `/api/xero-reports/accounts` | JWT | Chart of accounts |
+| GET | `/api/xero-reports/bank-accounts` | JWT | Bank accounts list |
+| GET | `/api/xero-reports/contacts` | JWT | Contacts with outstanding balances |
+| GET | `/api/xero-reports/bank-transactions` | JWT | Bank transactions |
+| GET | `/api/xero-reports/profit-loss` | JWT | Profit & Loss report |
+| GET | `/api/xero-reports/bank-summary` | JWT | Bank summary |
+| GET | `/api/xero-reports/budget-variance` | JWT | Budget vs actual variance |
+| GET | `/api/xero-reports/performance` | JWT | Financial performance metrics |
+| GET | `/api/xero-reports/variance-insights` | JWT | AI-generated variance insights (Gemini) |
+| GET | `/api/xero-reports/narrative` | JWT | AI-generated P&L narrative (Gemini) |
+| GET | `/api/xero-reports/cash-flow` | JWT | Cash flow report |
+
+### AI Chat assistant
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/chat` | JWT | Send a message; returns AI reply + validated proposals (read-only, 12 RPM limit) |
+
+### Admin
+| Method | Path | Auth | Description |
+|---|---|---|---|
 | GET | `/api/admin/users` | Admin | List all users |
 | POST | `/api/admin/users` | Admin | Create user |
 | DELETE | `/api/admin/users/:id` | Admin | Delete user |
 | GET | `/api/admin/reports` | Admin | Flagged invoices across all users |
-| GET | `/dashboard/health` | — | Health check |
+
+### Health
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/dashboard/health` | — | Health check |
+| GET | `/dashboard/health` | — | Legacy alias (same response) |
+
+
+---
+
+## Phone capture (QR pairing)
+
+You can photograph receipts directly from your phone without installing any app:
+
+1. On the **Invoices** page (desktop), click **Add Claim** → **Use Phone** → a QR code appears.
+2. Scan the QR code with your phone's camera — it opens the capture page in your mobile browser.
+3. Take a photo of the receipt. The AI reads it immediately on the server.
+4. The desktop panel refreshes automatically and shows the parsed result (vendor, amount) as the photo arrives.
+
+**How it works:**
+- The desktop generates a short-lived token (`POST /api/receipts/pair`) and a QR SVG. The token encodes a URL your phone opens.
+- The phone does **not** need to be logged in — the token is the credential. It expires after a fixed time window or after a maximum number of uploads (whichever comes first).
+- Once the desktop dialog closes, it revokes the token (`DELETE /api/receipts/pair/:token`) immediately so the QR cannot be reused.
+- The phone can only see parsed fields (vendor, amount) of its own uploads via the `/capture/:token/status` endpoint — it cannot access any other user data.
+
+---
+
+## Xero Insights
+
+The **Xero Insights** page (`XeroInsights.jsx`) provides a live analytics dashboard sourced from your connected Xero organisation. All reports are **read-only** — nothing is written to Xero.
+
+| Report | What it shows |
+|---|---|
+| **Summary** | Outstanding receivables/payables snapshot |
+| **Period trend** | Invoice values over day/week/month/year or a custom date range |
+| **Profit & Loss** | Revenue, expenses, net profit |
+| **Cash flow** | Operating/investing/financing activities |
+| **Bank summary** | Account balances at a glance |
+| **Budget variance** | Actual vs budget with variance % |
+| **Performance** | KPI metrics derived from your Xero data |
+| **Contacts** | Contacts with outstanding balances |
+| **Bank accounts** | Account list with current balances |
+| **Bank transactions** | Recent transactions |
+| **Chart of accounts** | Account codes and types |
+| **AI variance insights** | Gemini-generated natural-language explanation of budget variances |
+| **AI P&L narrative** | Gemini-generated summary of profit & loss trends |
+
+> Xero Insights requires a live Xero OAuth2 connection. If no org is connected, the page shows a "Connect Xero" prompt. Reports are cached in-memory per request to avoid hammering the Xero API.
+
+---
+
+## AI Chat assistant
+
+A Gemini-powered conversational assistant is available in the sidebar. It can:
+- Answer questions about your invoice pipeline ("How many claims are pending?", "What did Grab charge last month?")
+- Propose field edits to a specific invoice ("Change the account code to 429")
+- Explain why a Xero submission failed
+
+**Important constraints:**
+- The chat route (`POST /api/chat`) is **strictly read-only** — it cannot write to the database.
+- Any edits it proposes are returned as *proposals* and are only applied when the user clicks **Confirm** in the UI (which calls the existing `PATCH /api/invoices/:id` endpoint with the same validation as a manual edit).
+- Rate-limited to **12 messages per minute** per user to protect the daily Gemini quota from being exhausted by the chat feature alone.
+- Requires a `Gemini_API_KEY` in the user's Setup. If no key is configured, the assistant responds with an error rather than silently failing.
+
+---
+
+## Security
+
+The following hardening measures are active on every deployment:
+
+| Layer | Measure |
+|---|---|
+| **Global rate limit** | 500 requests per 15 minutes, keyed by JWT user ID (not IP) so a shared office network doesn't penalise all users for one user's traffic |
+| **Chat rate limit** | Separate 12 RPM cap on `POST /api/chat` to protect Gemini daily quota |
+| **Auth rate limit** | Login and register endpoints are individually rate-limited to prevent brute-force |
+| **Registration lock** | After the first user registers, registration is closed unless an admin explicitly enables it |
+| **JWT authentication** | All API routes (except auth, QR capture, and health check) require a valid signed JWT in the `Authorization: Bearer` header |
+| **Path traversal sanitization** | File paths for PDFs and receipt images are sanitized before disk access; `..` sequences are rejected |
+| **Helmet** | `helmet` sets standard HTTP security headers (HSTS, X-Frame-Options, etc.) |
+| **Data isolation** | Every file read/write is scoped to the authenticated user's directory — no cross-user data access is possible through the API |
+| **QR token scoping** | Phone capture tokens carry no identity and expire automatically; the phone can only read back its own upload's parsed fields |
 
 ---
 

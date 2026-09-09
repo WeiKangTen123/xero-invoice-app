@@ -1,0 +1,1222 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Executive Financial Cockpit — Comprehensive Overview</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root[data-theme="dark"] {
+      --bg-base: #07090e;
+      --bg-surface: #0e131f;
+      --bg-surface-elevated: #151c2d;
+      --bg-surface-hover: #1c263c;
+      --border-subtle: rgba(255, 255, 255, 0.07);
+      --border-strong: rgba(255, 255, 255, 0.13);
+      
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      
+      --accent-primary: #3b82f6;
+      --accent-hover: #2563eb;
+      --accent-subtle: rgba(59, 130, 246, 0.12);
+      
+      --success: #10b981;
+      --success-subtle: rgba(16, 185, 129, 0.12);
+      --warning: #f59e0b;
+      --warning-subtle: rgba(245, 158, 11, 0.12);
+      --danger: #ef4444;
+      --danger-subtle: rgba(239, 68, 68, 0.12);
+      --purple: #a855f7;
+      --purple-subtle: rgba(168, 85, 247, 0.12);
+
+      --shadow-card: 0 4px 20px -2px rgba(0, 0, 0, 0.5);
+    }
+
+    :root[data-theme="light"] {
+      --bg-base: #f4f6fa;
+      --bg-surface: #ffffff;
+      --bg-surface-elevated: #f8fafc;
+      --bg-surface-hover: #eef2f6;
+      --border-subtle: rgba(0, 0, 0, 0.07);
+      --border-strong: rgba(0, 0, 0, 0.14);
+      
+      --text-primary: #0f172a;
+      --text-secondary: #475569;
+      --text-muted: #8e9bb0;
+      
+      --accent-primary: #2563eb;
+      --accent-hover: #1d4ed8;
+      --accent-subtle: rgba(37, 99, 235, 0.08);
+      
+      --success: #059669;
+      --success-subtle: rgba(5, 150, 105, 0.08);
+      --warning: #d97706;
+      --warning-subtle: rgba(217, 119, 6, 0.08);
+      --danger: #dc2626;
+      --danger-subtle: rgba(220, 38, 38, 0.08);
+      --purple: #9333ea;
+      --purple-subtle: rgba(147, 51, 234, 0.08);
+
+      --shadow-card: 0 4px 16px -2px rgba(0, 0, 0, 0.05);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg-base);
+      color: var(--text-primary);
+      min-height: 100vh;
+      padding: 24px 32px 80px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+      transition: background-color 0.2s ease, color 0.2s ease;
+    }
+
+    .num {
+      font-family: 'JetBrains Mono', monospace;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .dashboard-container {
+      max-width: 1480px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* ── Header Bar ── */
+    .header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .title-group h1 {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .org-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 5px;
+      background: var(--accent-subtle);
+      color: var(--accent-primary);
+      border: 1px solid var(--border-strong);
+      letter-spacing: 0.02em;
+    }
+
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--success);
+      display: inline-block;
+      box-shadow: 0 0 8px var(--success);
+    }
+
+    .title-group p {
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-top: 3px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .controls-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .time-selector {
+      display: flex;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 7px;
+      padding: 3px;
+      gap: 2px;
+    }
+
+    .time-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 11.5px;
+      font-weight: 600;
+      padding: 5px 11px;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .time-btn:hover {
+      color: var(--text-primary);
+    }
+
+    .time-btn.active {
+      background: var(--bg-surface-elevated);
+      color: var(--text-primary);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-primary);
+      padding: 6px 12px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn:hover {
+      background: var(--bg-surface-hover);
+      border-color: var(--border-strong);
+    }
+
+    /* ── Sub Navigation Tabs ── */
+    .subnav-tabs {
+      display: flex;
+      gap: 6px;
+      border-bottom: 1px solid var(--border-subtle);
+      padding-bottom: 10px;
+      margin-top: -6px;
+      overflow-x: auto;
+    }
+
+    .tab-link {
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 5px 12px;
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+
+    .tab-link:hover {
+      color: var(--text-primary);
+      background: var(--bg-surface-elevated);
+    }
+
+    .tab-link.active {
+      color: var(--accent-primary);
+      background: var(--accent-subtle);
+    }
+
+    /* ── 5 Master Executive KPI Cards ── */
+    .kpi-row-5 {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 14px;
+    }
+
+    .kpi-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 10px;
+      box-shadow: var(--shadow-card);
+      position: relative;
+    }
+
+    .kpi-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .kpi-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .kpi-badge {
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .badge-success { background: var(--success-subtle); color: var(--success); }
+    .badge-warning { background: var(--warning-subtle); color: var(--warning); }
+    .badge-danger  { background: var(--danger-subtle);  color: var(--danger);  }
+    .badge-neutral { background: var(--bg-surface-elevated); color: var(--text-secondary); }
+
+    .kpi-value {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      color: var(--text-primary);
+    }
+
+    .kpi-subtext {
+      font-size: 11.5px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid var(--border-subtle);
+      padding-top: 8px;
+    }
+
+    /* ── Card Base ── */
+    .card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      padding: 20px;
+      box-shadow: var(--shadow-card);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 16px;
+    }
+
+    .card-title {
+      font-size: 14.5px;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+    }
+
+    .card-subtitle {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    /* ── Dual Tier 2 Visual Analytics (60/40 Grid) ── */
+    .tier2-grid {
+      display: grid;
+      grid-template-columns: 1.6fr 1fr;
+      gap: 14px;
+    }
+
+    /* Trajectory Bar Chart */
+    .chart-container {
+      height: 220px;
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      padding-top: 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      position: relative;
+    }
+
+    .chart-bar-group {
+      flex: 1;
+      display: flex;
+      gap: 3px;
+      height: 100%;
+      align-items: flex-end;
+      justify-content: center;
+      position: relative;
+      cursor: pointer;
+    }
+
+    .chart-bar-group:hover .chart-tooltip {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(-6px);
+    }
+
+    .chart-tooltip {
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-strong);
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.15s ease;
+      z-index: 10;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+    }
+
+    .bar-wrapper {
+      flex: 1;
+      max-width: 16px;
+      background: rgba(255, 255, 255, 0.02);
+      border-radius: 3px 3px 0 0;
+      display: flex;
+      align-items: flex-end;
+      height: 100%;
+    }
+
+    .bar-fill {
+      width: 100%;
+      border-radius: 3px 3px 0 0;
+      transition: height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .bar-revenue { background: var(--accent-primary); }
+    .bar-cogs { background: #f59e0b; }
+    .bar-expense { background: #64748b; }
+
+    .chart-x-labels {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 4px 0;
+      font-size: 10.5px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .legend-row {
+      display: flex;
+      gap: 14px;
+      font-size: 11.5px;
+      color: var(--text-secondary);
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .legend-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 2px;
+    }
+
+    /* Bank Account & Cash Liquidity Cards */
+    .bank-account-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .bank-item {
+      background: var(--bg-surface-elevated);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: border-color 0.15s;
+    }
+
+    .bank-item:hover {
+      border-color: var(--border-strong);
+    }
+
+    .bank-name {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .bank-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .bank-balance {
+      font-size: 15px;
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .bank-delta {
+      font-size: 10.5px;
+      margin-top: 2px;
+    }
+
+    /* ── Tier 3: 3-Column Working Capital & Operations Grid ── */
+    .tier3-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+
+    /* Aging meters */
+    .aging-meter-wrap {
+      margin-bottom: 14px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .aging-stacked-bar {
+      display: flex;
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.06);
+      margin-bottom: 8px;
+    }
+
+    .aging-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10.5px;
+      color: var(--text-muted);
+    }
+
+    .list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: 12.5px;
+    }
+
+    .list-item:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .item-entity {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .item-meta {
+      font-size: 10.5px;
+      color: var(--text-muted);
+      margin-top: 1px;
+    }
+
+    .item-amount {
+      font-weight: 700;
+      text-align: right;
+    }
+
+    /* Variance Bar */
+    .variance-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: 12px;
+    }
+
+    .variance-line:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    /* ── Tier 4: Financial Ratios 4-Strip ── */
+    .ratios-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+    }
+
+    .ratio-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 14px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .ratio-title {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .ratio-val {
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--text-primary);
+      margin-top: 2px;
+    }
+
+    .ratio-status {
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 3px 7px;
+      border-radius: 4px;
+    }
+
+    /* ── Tier 5: Recent Transactions Table ── */
+    .audit-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      text-align: left;
+    }
+
+    .audit-table th {
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border-strong);
+    }
+
+    .audit-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+    }
+
+    .audit-table tr:hover td {
+      background: var(--bg-surface-elevated);
+      color: var(--text-primary);
+    }
+
+    .status-pill {
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      display: inline-block;
+    }
+
+    .pill-paid { background: var(--success-subtle); color: var(--success); }
+    .pill-awaiting { background: var(--warning-subtle); color: var(--warning); }
+    .pill-overdue { background: var(--danger-subtle); color: var(--danger); }
+
+    /* Responsive */
+    @media (max-width: 1200px) {
+      .kpi-row-5 { grid-template-columns: repeat(3, 1fr); }
+      .tier2-grid { grid-template-columns: 1fr; }
+      .tier3-grid { grid-template-columns: 1fr; }
+      .ratios-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    @media (max-width: 768px) {
+      .kpi-row-5 { grid-template-columns: repeat(2, 1fr); }
+      .ratios-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="dashboard-container">
+    
+    <!-- Top Executive Header -->
+    <header class="header-bar">
+      <div class="title-group">
+        <h1>
+          Executive Overview 
+          <span class="org-badge">Demo Company (NZ)</span>
+        </h1>
+        <p>
+          <span class="live-dot"></span> 
+          <span>Live Xero Telemetry (Read-Only)</span>
+          <span>•</span>
+          <span>Base Currency: <strong>NZD ($)</strong></span>
+          <span>•</span>
+          <span>Fiscal Year End: <strong>31 March</strong></span>
+          <span>•</span>
+          <span>Last Sync: <strong>Just now</strong></span>
+        </p>
+      </div>
+
+      <div class="controls-group">
+        <div class="time-selector">
+          <button class="time-btn" onclick="selectTime(this)">Day</button>
+          <button class="time-btn" onclick="selectTime(this)">Week</button>
+          <button class="time-btn active" onclick="selectTime(this)">This Month</button>
+          <button class="time-btn" onclick="selectTime(this)">QTD</button>
+          <button class="time-btn" onclick="selectTime(this)">Fiscal Year</button>
+          <button class="time-btn" onclick="selectTime(this)">All Time</button>
+        </div>
+        <button class="btn" onclick="triggerSync(this)">
+          <span id="sync-icon">↻</span> Sync Live
+        </button>
+        <button class="btn" onclick="toggleTheme()" title="Toggle Light/Dark Theme">
+          <span id="theme-icon">☼</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Sub Navigation Tabs -->
+    <nav class="subnav-tabs">
+      <span class="tab-link active">Overview</span>
+      <span class="tab-link">Profit &amp; Loss</span>
+      <span class="tab-link">Balance Sheet</span>
+      <span class="tab-link">Bank &amp; Cash</span>
+      <span class="tab-link">Budget vs Actual</span>
+      <span class="tab-link">Budget Variance</span>
+    </nav>
+
+    <!-- ── Tier 1: 5 Executive Master KPI Vitals ── -->
+    <section class="kpi-row-5">
+      <!-- KPI 1: Realised Revenue -->
+      <div class="kpi-card">
+        <div class="kpi-top">
+          <span class="kpi-label">Revenue (Accrued)</span>
+          <span class="kpi-badge badge-success">+195% vs Budget</span>
+        </div>
+        <div class="kpi-value num">$52,000.00</div>
+        <div class="kpi-subtext">
+          <span>Target: <strong class="num">$17,615.00</strong></span>
+          <span style="color:var(--success)">▲ $34,385</span>
+        </div>
+      </div>
+
+      <!-- KPI 2: Net Operating Income -->
+      <div class="kpi-card">
+        <div class="kpi-top">
+          <span class="kpi-label">Net Profit (EBIT)</span>
+          <span class="kpi-badge badge-success">53.2% Margin</span>
+        </div>
+        <div class="kpi-value num">$27,700.00</div>
+        <div class="kpi-subtext">
+          <span>Gross Margin: <strong class="num">74.8%</strong></span>
+          <span style="color:var(--success)">Healthy</span>
+        </div>
+      </div>
+
+      <!-- KPI 3: Total Bank Liquidity -->
+      <div class="kpi-card">
+        <div class="kpi-top">
+          <span class="kpi-label">Total Liquid Cash</span>
+          <span class="kpi-badge badge-success">+12.4% MoM</span>
+        </div>
+        <div class="kpi-value num">$184,250.00</div>
+        <div class="kpi-subtext">
+          <span>In: <strong class="num" style="color:var(--success)">+$52.0k</strong></span>
+          <span>Out: <strong class="num" style="color:var(--text-muted)">-$24.3k</strong></span>
+        </div>
+      </div>
+
+      <!-- KPI 4: Net Working Capital (AR vs AP) -->
+      <div class="kpi-card">
+        <div class="kpi-top">
+          <span class="kpi-label">Net Working Capital</span>
+          <span class="kpi-badge badge-warning">2 Overdue</span>
+        </div>
+        <div class="kpi-value num">$43,120.00</div>
+        <div class="kpi-subtext">
+          <span>AR: <strong class="num">$48.9k</strong></span>
+          <span>AP: <strong class="num">$5.8k</strong></span>
+        </div>
+      </div>
+
+      <!-- KPI 5: Cash Runway -->
+      <div class="kpi-card">
+        <div class="kpi-top">
+          <span class="kpi-label">Est. Cash Runway</span>
+          <span class="kpi-badge badge-success">&gt;6 Months</span>
+        </div>
+        <div class="kpi-value num" style="color:var(--success)">7.6 Months</div>
+        <div class="kpi-subtext">
+          <span>Monthly Burn: <strong class="num">$24,300</strong></span>
+          <span>Low Risk</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Tier 2: 60/40 Deep Visual Analytics Grid ── -->
+    <section class="tier2-grid">
+      
+      <!-- Panel 1: Trajectory (Revenue vs COGS vs Opex) -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">P&amp;L Trajectory &amp; Cost Breakdown</div>
+            <div class="card-subtitle">Monthly Invoiced Revenue, Direct Costs (COGS), and Operating Expenses</div>
+          </div>
+          <div class="legend-row">
+            <div class="legend-item">
+              <div class="legend-dot" style="background:var(--accent-primary);"></div>
+              <span>Revenue</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot" style="background:#f59e0b;"></div>
+              <span>COGS</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot" style="background:#64748b;"></div>
+              <span>Opex</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="chart-container">
+          <!-- Mar -->
+          <div class="chart-bar-group">
+            <div class="chart-tooltip num">Mar 2026<br/>Rev: $23,400<br/>COGS: $5,200<br/>Opex: $13,000</div>
+            <div class="bar-wrapper"><div class="bar-fill bar-revenue" style="height: 45%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-cogs" style="height: 15%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-expense" style="height: 28%;"></div></div>
+          </div>
+          <!-- Apr -->
+          <div class="chart-bar-group">
+            <div class="chart-tooltip num">Apr 2026<br/>Rev: $31,200<br/>COGS: $7,100<br/>Opex: $13,700</div>
+            <div class="bar-wrapper"><div class="bar-fill bar-revenue" style="height: 60%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-cogs" style="height: 18%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-expense" style="height: 30%;"></div></div>
+          </div>
+          <!-- May -->
+          <div class="chart-bar-group">
+            <div class="chart-tooltip num">May 2026<br/>Rev: $27,000<br/>COGS: $6,000<br/>Opex: $13,500</div>
+            <div class="bar-wrapper"><div class="bar-fill bar-revenue" style="height: 52%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-cogs" style="height: 16%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-expense" style="height: 29%;"></div></div>
+          </div>
+          <!-- Jun -->
+          <div class="chart-bar-group">
+            <div class="chart-tooltip num">Jun 2026<br/>Rev: $36,500<br/>COGS: $9,200<br/>Opex: $16,800</div>
+            <div class="bar-wrapper"><div class="bar-fill bar-revenue" style="height: 70%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-cogs" style="height: 22%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-expense" style="height: 35%;"></div></div>
+          </div>
+          <!-- Jul -->
+          <div class="chart-bar-group">
+            <div class="chart-tooltip num">Jul 2026<br/>Rev: $41,800<br/>COGS: $10,500<br/>Opex: $14,600</div>
+            <div class="bar-wrapper"><div class="bar-fill bar-revenue" style="height: 80%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-cogs" style="height: 24%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-expense" style="height: 32%;"></div></div>
+          </div>
+          <!-- Aug (Current) -->
+          <div class="chart-bar-group">
+            <div class="chart-tooltip num">Aug 2026 (Live)<br/>Rev: $52,000<br/>COGS: $13,100<br/>Opex: $11,200</div>
+            <div class="bar-wrapper"><div class="bar-fill bar-revenue" style="height: 95%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-cogs" style="height: 28%;"></div></div>
+            <div class="bar-wrapper"><div class="bar-fill bar-expense" style="height: 24%;"></div></div>
+          </div>
+        </div>
+        <div class="chart-x-labels">
+          <span>Mar 2026</span>
+          <span>Apr 2026</span>
+          <span>May 2026</span>
+          <span>Jun 2026</span>
+          <span>Jul 2026</span>
+          <span>Aug 2026 (Live)</span>
+        </div>
+      </div>
+
+      <!-- Panel 2: Live Bank Accounts & Cash Positions -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Live Bank Accounts &amp; Liquidity</div>
+            <div class="card-subtitle">Connected Xero bank feeds and closing balances</div>
+          </div>
+          <span class="kpi-badge badge-success">3 Feeds Online</span>
+        </div>
+
+        <div class="bank-account-list">
+          <div class="bank-item">
+            <div>
+              <div class="bank-name">ANZ Business Operating Account</div>
+              <div class="bank-meta">01-0288-0049281-00 • Statement synced</div>
+            </div>
+            <div>
+              <div class="bank-balance num">$118,420.00</div>
+              <div class="bank-delta num" style="color:var(--success)">▲ +$18,200 (30d)</div>
+            </div>
+          </div>
+
+          <div class="bank-item">
+            <div>
+              <div class="bank-name">ANZ High-Interest Savings</div>
+              <div class="bank-meta">01-0288-0049281-02 • Reserve buffer</div>
+            </div>
+            <div>
+              <div class="bank-balance num">$54,830.00</div>
+              <div class="bank-delta num" style="color:var(--text-muted)">— No outflow</div>
+            </div>
+          </div>
+
+          <div class="bank-item">
+            <div>
+              <div class="bank-name">Stripe USD Clearing Account</div>
+              <div class="bank-meta">Digital gateway payout holding</div>
+            </div>
+            <div>
+              <div class="bank-balance num">$11,000.00</div>
+              <div class="bank-delta num" style="color:var(--success)">▲ Payout in 2d</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Tier 3: Working Capital, Payables & Budget Variance Grid (3 Columns) ── -->
+    <section class="tier3-grid">
+      
+      <!-- Col 1: Accounts Receivable (AR) Intelligence -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Accounts Receivable (AR)</div>
+            <div class="card-subtitle">Total Outstanding: <strong class="num">$48,900.00</strong> (14 Invoices)</div>
+          </div>
+          <span class="kpi-badge badge-danger">2 Critical</span>
+        </div>
+
+        <!-- Aging Meter -->
+        <div class="aging-meter-wrap">
+          <div class="aging-stacked-bar">
+            <div style="width: 58%; background: var(--success);" title="Current: $28.3k (58%)"></div>
+            <div style="width: 18%; background: #3b82f6;" title="1-30d Overdue: $8.8k (18%)"></div>
+            <div style="width: 14%; background: var(--warning);" title="31-60d Overdue: $6.8k (14%)"></div>
+            <div style="width: 10%; background: var(--danger);" title=">60d Overdue: $5.0k (10%)"></div>
+          </div>
+          <div class="aging-labels">
+            <span>Current: $28.3k</span>
+            <span>1-30d: $8.8k</span>
+            <span>31-60d: $6.8k</span>
+            <span style="color:var(--danger)">60d+: $5.0k</span>
+          </div>
+        </div>
+
+        <!-- Critical Debtor List -->
+        <div>
+          <div class="list-item">
+            <div>
+              <div class="item-entity">Port Philip Freight</div>
+              <div class="item-meta">INV-0042 • 14 days overdue</div>
+            </div>
+            <div class="item-amount num" style="color:var(--danger)">$12,450.00</div>
+          </div>
+          <div class="list-item">
+            <div>
+              <div class="item-entity">City Limousines</div>
+              <div class="item-meta">INV-0039 • 5 days overdue</div>
+            </div>
+            <div class="item-amount num" style="color:var(--danger)">$4,320.00</div>
+          </div>
+          <div class="list-item">
+            <div>
+              <div class="item-entity">Bayside Club NZ</div>
+              <div class="item-meta">INV-0051 • Due in 3 days</div>
+            </div>
+            <div class="item-amount num" style="color:var(--text-secondary)">$3,100.00</div>
+          </div>
+          <div class="list-item">
+            <div>
+              <div class="item-entity">Marine Systems Ltd</div>
+              <div class="item-meta">INV-0054 • Due in 8 days</div>
+            </div>
+            <div class="item-amount num" style="color:var(--text-secondary)">$2,450.00</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Col 2: Accounts Payable (AP) Intelligence -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Accounts Payable (AP)</div>
+            <div class="card-subtitle">Total Outstanding: <strong class="num">$5,780.00</strong> (6 Bills)</div>
+          </div>
+          <span class="kpi-badge badge-neutral">4 Upcoming</span>
+        </div>
+
+        <!-- AP Timeline Meter -->
+        <div class="aging-meter-wrap">
+          <div class="aging-stacked-bar">
+            <div style="width: 48%; background: var(--danger);" title="Due 7d: $2.8k"></div>
+            <div style="width: 29%; background: var(--warning);" title="Due 14d: $1.7k"></div>
+            <div style="width: 23%; background: #64748b;" title="Due 30d: $1.3k"></div>
+          </div>
+          <div class="aging-labels">
+            <span style="color:var(--danger)">Within 7d: $2.8k</span>
+            <span>8-14d: $1.7k</span>
+            <span>15-30d: $1.3k</span>
+          </div>
+        </div>
+
+        <!-- Payout Schedule -->
+        <div>
+          <div class="list-item">
+            <div>
+              <div class="item-entity">Apex Cyber Security</div>
+              <div class="item-meta">BILL-0091 • Due tomorrow</div>
+            </div>
+            <div class="item-amount num">$2,800.00</div>
+          </div>
+          <div class="list-item">
+            <div>
+              <div class="item-entity">Smart Agency Ads</div>
+              <div class="item-meta">BILL-0084 • Due in 6 days</div>
+            </div>
+            <div class="item-amount num">$1,650.00</div>
+          </div>
+          <div class="list-item">
+            <div>
+              <div class="item-entity">Cloud Services AWS</div>
+              <div class="item-meta">BILL-0077 • Due in 12 days</div>
+            </div>
+            <div class="item-amount num">$1,350.00</div>
+          </div>
+          <div class="list-item">
+            <div>
+              <div class="item-entity">Corporate Office Rent</div>
+              <div class="item-meta">BILL-0072 • Due in 20 days</div>
+            </div>
+            <div class="item-amount num">$4,200.00</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Col 3: Budget Variance Pulse & Key Cost Centers -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Budget Variance Radar</div>
+            <div class="card-subtitle">Performance vs Xero Fiscal Budget</div>
+          </div>
+          <span class="kpi-badge badge-success">+195% Rev Target</span>
+        </div>
+
+        <div>
+          <div class="variance-line">
+            <div>
+              <div style="font-weight:600;">Sales Turnover</div>
+              <div class="item-meta">Bud: $17.6k • Act: $52.0k</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="num" style="color:var(--success); font-weight:700;">+$34,385.00</div>
+              <div class="kpi-badge badge-success" style="font-size:9.5px;">+195.2%</div>
+            </div>
+          </div>
+
+          <div class="variance-line">
+            <div>
+              <div style="font-weight:600;">Direct Cost of Goods</div>
+              <div class="item-meta">Bud: $4.5k • Act: $13.1k</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="num" style="color:var(--warning); font-weight:700;">+$8,600.00</div>
+              <div class="kpi-badge badge-warning" style="font-size:9.5px;">Higher volume</div>
+            </div>
+          </div>
+
+          <div class="variance-line">
+            <div>
+              <div style="font-weight:600;">Operating Expenses</div>
+              <div class="item-meta">Bud: $12.0k • Act: $11.2k</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="num" style="color:var(--success); font-weight:700;">-$800.00</div>
+              <div class="kpi-badge badge-success" style="font-size:9.5px;">Under budget</div>
+            </div>
+          </div>
+
+          <div class="variance-line">
+            <div>
+              <div style="font-weight:600;">Advertising &amp; Marketing</div>
+              <div class="item-meta">Bud: $3.5k • Act: $2,850</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="num" style="color:var(--success); font-weight:700;">-$650.00</div>
+              <div class="kpi-badge badge-success" style="font-size:9.5px;">Under budget</div>
+            </div>
+          </div>
+
+          <div class="variance-line">
+            <div>
+              <div style="font-weight:600;">Salaries &amp; Contractor Wages</div>
+              <div class="item-meta">Bud: $6.0k • Act: $5,800</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="num" style="color:var(--success); font-weight:700;">-$200.00</div>
+              <div class="kpi-badge badge-success" style="font-size:9.5px;">Target met</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Tier 4: CFO Solvency & Performance Ratios (4 Strip) ── -->
+    <section class="ratios-grid">
+      <div class="ratio-card">
+        <div>
+          <div class="ratio-title">Quick Ratio (Acid Test)</div>
+          <div class="ratio-val num">4.2x</div>
+        </div>
+        <span class="ratio-status badge-success">High Solvency (&gt;1.5)</span>
+      </div>
+
+      <div class="ratio-card">
+        <div>
+          <div class="ratio-title">Days Sales Outstanding (DSO)</div>
+          <div class="ratio-val num">27 Days</div>
+        </div>
+        <span class="ratio-status badge-success">Efficient (&lt;35d)</span>
+      </div>
+
+      <div class="ratio-card">
+        <div>
+          <div class="ratio-title">Gross Profit Margin</div>
+          <div class="ratio-val num">74.8%</div>
+        </div>
+        <span class="ratio-status badge-success">Strong Pricing</span>
+      </div>
+
+      <div class="ratio-card">
+        <div>
+          <div class="ratio-title">Operating Net Margin</div>
+          <div class="ratio-val num">53.2%</div>
+        </div>
+        <span class="ratio-status badge-success">High Conversion</span>
+      </div>
+    </section>
+
+    <!-- ── Tier 5: Recent High-Value Transaction Stream (Live Xero Audit) ── -->
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Recent Invoices &amp; Bill Settlements</div>
+          <div class="card-subtitle">Real-time accounting ledger entries synchronized directly from Xero</div>
+        </div>
+        <button class="btn" style="font-size:11px;">View All AR &amp; AP →</button>
+      </div>
+
+      <table class="audit-table">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Ref #</th>
+            <th>Contact / Entity</th>
+            <th>Issue Date</th>
+            <th>Due Date</th>
+            <th>Total Amount</th>
+            <th>Amount Due</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong style="color:var(--accent-primary)">Sale</strong></td>
+            <td class="num">INV-0042</td>
+            <td><strong>Port Philip Freight</strong></td>
+            <td>01 Aug 2026</td>
+            <td style="color:var(--danger)">03 Aug 2026</td>
+            <td class="num">$12,450.00</td>
+            <td class="num" style="color:var(--danger); font-weight:700;">$12,450.00</td>
+            <td><span class="status-pill pill-overdue">Overdue</span></td>
+          </tr>
+          <tr>
+            <td><strong style="color:var(--accent-primary)">Sale</strong></td>
+            <td class="num">INV-0045</td>
+            <td><strong>Ridgeway Bank Corp</strong></td>
+            <td>05 Aug 2026</td>
+            <td>19 Aug 2026</td>
+            <td class="num">$24,000.00</td>
+            <td class="num">$0.00</td>
+            <td><span class="status-pill pill-paid">Paid</span></td>
+          </tr>
+          <tr>
+            <td><strong style="color:#64748b">Bill</strong></td>
+            <td class="num">BILL-0091</td>
+            <td><strong>Apex Cyber Security</strong></td>
+            <td>08 Aug 2026</td>
+            <td style="color:var(--warning)">18 Aug 2026</td>
+            <td class="num">$2,800.00</td>
+            <td class="num" style="font-weight:700;">$2,800.00</td>
+            <td><span class="status-pill pill-awaiting">Awaiting Payment</span></td>
+          </tr>
+          <tr>
+            <td><strong style="color:var(--accent-primary)">Sale</strong></td>
+            <td class="num">INV-0048</td>
+            <td><strong>Swanston Media Group</strong></td>
+            <td>10 Aug 2026</td>
+            <td>24 Aug 2026</td>
+            <td class="num">$15,550.00</td>
+            <td class="num">$0.00</td>
+            <td><span class="status-pill pill-paid">Paid</span></td>
+          </tr>
+          <tr>
+            <td><strong style="color:#64748b">Bill</strong></td>
+            <td class="num">BILL-0084</td>
+            <td><strong>Smart Agency Ads</strong></td>
+            <td>11 Aug 2026</td>
+            <td>23 Aug 2026</td>
+            <td class="num">$1,650.00</td>
+            <td class="num" style="font-weight:700;">$1,650.00</td>
+            <td><span class="status-pill pill-awaiting">Awaiting Payment</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+  </div>
+
+  <script>
+    function selectTime(btn) {
+      document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    }
+
+    function triggerSync(btn) {
+      const icon = document.getElementById('sync-icon');
+      icon.textContent = '…';
+      setTimeout(() => {
+        icon.textContent = '✓';
+        setTimeout(() => {
+          icon.textContent = '↻';
+        }, 1200);
+      }, 600);
+    }
+
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', next);
+      document.getElementById('theme-icon').textContent = next === 'dark' ? '☼' : '☾';
+    }
+  </script>
+</body>
+</html>

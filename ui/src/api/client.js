@@ -8,7 +8,9 @@ function clearSession() {
   localStorage.removeItem('token');
   // Hard-navigate to login so all React state is wiped — avoids stale UI
   // showing for a split second after an expired-token 401.
-  if (!window.location.pathname.startsWith('/login')) {
+  // Phone capture pages (/capture/:token) are deliberately unauthenticated and must never redirect to login.
+  const path = window.location.pathname;
+  if (!path.startsWith('/login') && !path.startsWith('/capture')) {
     window.location.href = '/login';
   }
 }

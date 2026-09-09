@@ -80,6 +80,12 @@ describe('claims/claim-dedup', () => {
       expect(findDuplicate({ store: s, vendorName: 'cdg  zig.', date: '2026-02-23', amount: 15.8 }).match.id).toBe('old');
     });
 
+    test('vendor comparison matches brand substrings and strips corporate suffixes', () => {
+      const s = store([rec('old', { vendorName: 'ISETAN (SINGAPORE) PTE LTD' })]);
+      expect(findDuplicate({ store: s, vendorName: 'Isetan', date: '2026-02-23', amount: 15.8 }).match.id).toBe('old');
+      expect(findDuplicate({ store: s, vendorName: 'ISETAN SINGAPORE', date: '2026-02-23', amount: 15.8 }).match.id).toBe('old');
+    });
+
     test('a timestamped date still compares by day', () => {
       const s = store([rec('old', { invoiceDate: '2026-02-23T10:00:00Z' })]);
       expect(findDuplicate({ store: s, vendorName: 'Grab', date: '2026-02-23', amount: 15.8 }).match.id).toBe('old');

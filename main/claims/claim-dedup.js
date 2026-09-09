@@ -40,6 +40,21 @@ function sameAmount(a, b) {
   return Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
 }
 
+function vendorMatches(v1, v2) {
+  const a = _norm(v1);
+  const b = _norm(v2);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  // Strip corporate suffixes (pte, ltd, limited, sdn, bhd, inc, corp, llc, co)
+  const strip = s => s.replace(/\b(pte|ltd|limited|sdn|bhd|inc|corp|corporation|llc|co)\b/g, '').trim().replace(/\s+/g, ' ');
+  const sa = strip(a);
+  const sb = strip(b);
+  if (sa === sb) return true;
+  // Substring containment for brands (e.g. "isetan" in "isetan singapore limited")
+  if (sa.length >= 4 && sb.length >= 4 && (sa.includes(sb) || sb.includes(sa))) return true;
+  return false;
+}
+
 // Returns the existing record this one duplicates, or null.
 //
 // `store` is the invoice store for the user; `candidates` is an optional
@@ -59,11 +74,10 @@ function findDuplicate({ store, hash, vendorName, date, amount, candidates = nul
   if (!vendorName || !date || amount === null || amount === undefined) return null;
 
   const rows = candidates || store.getAll();
-  const v = _norm(vendorName);
   const hit = rows.find(r =>
     r.id !== excludeId &&
     r.status !== 'duplicate' && r.status !== 'error' &&
-    _norm(r.vendorName) === v &&
+    vendorMatches(r.vendorName, vendorName) &&
     String(r.invoiceDate || '').slice(0, 10) === String(date).slice(0, 10) &&
     sameAmount(r.totalAmount, amount));
 

@@ -86,7 +86,7 @@ function storeReceipt(userId, { mime, data, filename, source }) {
   if (dup) {
     logger.info('Receipt already uploaded', { userId, existingId: dup.match.id, source: source || 'upload' });
     return { status: 409, body: {
-      error: 'You have already uploaded this receipt.',
+      error: `You have already uploaded this receipt (matches ${dup.match.invoiceNumber || dup.match.id}).`,
       reason: dup.reason,
       duplicateOf: dup.match.id,
       receipt: dup.match,
@@ -161,7 +161,10 @@ function _flagIfSuspected(userId, id) {
   if (!dup) return;
 
   logger.info('Possible duplicate receipt', { userId, id, of: dup.match.id });
-  store.update(id, { errorMsg: `Possible duplicate of ${dup.match.id} — ${dup.reason}. Check before approving.` });
+  store.update(id, {
+    duplicateOf: dup.match.id,
+    errorMsg: `Possible duplicate of ${dup.match.id}${dup.match.invoiceNumber ? ` (${dup.match.invoiceNumber})` : ''} — ${dup.reason}. Check before approving.`,
+  });
 }
 
 // Applies one receipt's fields to a record.
