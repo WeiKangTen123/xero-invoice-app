@@ -93,7 +93,7 @@ function scannedNote(rows) {
 function TypeBadge({ type }) {
   if (type === 'ACCPAY') return <span className="badge badge-blue">Bill</span>;
   if (type === 'ACCREC') return <span className="badge badge-purple">Invoice</span>;
-  if (type === 'EXPENSE') return <span className="badge badge-yellow">Receipt</span>;
+  if (type === 'EXPENSE') return <span className="badge badge-yellow">Expense Claim</span>;
   return <span className="badge badge-gray">{type || '—'}</span>;
 }
 
@@ -354,7 +354,7 @@ export default function Invoices() {
           { key: 'all',    label: 'All',      count: invoices.length },
           { key: 'ACCPAY', label: 'Bills',    count: bills },
           { key: 'ACCREC', label: 'Invoices', count: invCount },
-          { key: 'EXPENSE', label: 'Receipts', count: receipts },
+          { key: 'EXPENSE', label: 'Expense Claims', count: receipts },
         ].map(t => (
           <FilterPill key={t.key} active={typeFilter === t.key} onClick={() => setTypeFilter(t.key)} label={t.label} count={t.count} />
         ))}

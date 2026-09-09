@@ -583,7 +583,7 @@ export default function InvoiceReview() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ fontSize: 16 }}>🧾</span>
                   <span style={{ fontWeight: 600, fontSize: 13 }}>
-                    Receipt
+                    Expense claim
                     {group?.split ? ` · ${group.index} of ${group.total}` : ''}
                     {inv.source === 'phone' ? ' · from phone' : ''}
                     {inv.receiptPage ? ` · page ${inv.receiptPage}` : ''}
@@ -632,7 +632,7 @@ export default function InvoiceReview() {
               {group?.split && (
                 <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
                   <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 8 }}>
-                    {inv.receiptPage ? `Split from a ${group.total}-page PDF` : `Split from one photo of ${group.total} receipts`}
+                    {inv.receiptPage ? `Split from a ${group.total}-page PDF` : `Split from one photo of ${group.total} claims`}
                   </div>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
                     {group.siblings.map((sib, i) => (
