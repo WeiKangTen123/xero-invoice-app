@@ -4,6 +4,7 @@ import { useRef, useState } from 'react';
 import { api } from '../../api/client';
 import { prepareReceipt, blobToBase64, humanSize, ACCEPT_ATTR } from './receipt-upload';
 import PhonePairingModal from './PhonePairingModal';
+import ClaimImport from './ClaimImport';
 
 // Add-receipt controls for AR & AP. Expense claims are the only document type
 // the user creates by hand — bills and invoices arrive by email on their own —
@@ -17,6 +18,7 @@ export default function ReceiptUpload({ onUploaded }) {
   const [error, setError]   = useState('');
   const [note, setNote]     = useState('');
   const [pairing, setPairing] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   async function handleFiles(files) {
     const list = Array.from(files || []);
@@ -72,6 +74,14 @@ export default function ReceiptUpload({ onUploaded }) {
         </button>
         <button
           className="btn btn-sm"
+          onClick={() => setImporting(true)}
+          style={{ whiteSpace: 'nowrap' }}
+          title="Import a zip of receipts with its claim form, as emailed"
+        >
+          🗂 Import claim
+        </button>
+        <button
+          className="btn btn-sm"
           onClick={() => setPairing(true)}
           style={{ whiteSpace: 'nowrap' }}
           title="Scan a code to photograph expense claims with your phone"
@@ -89,6 +99,10 @@ export default function ReceiptUpload({ onUploaded }) {
 
       {pairing && (
         <PhonePairingModal onClose={() => setPairing(false)} onArrived={onUploaded} />
+      )}
+
+      {importing && (
+        <ClaimImport onClose={() => setImporting(false)} onImported={onUploaded} />
       )}
     </div>
   );
