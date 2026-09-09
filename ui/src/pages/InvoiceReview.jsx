@@ -948,10 +948,33 @@ export default function InvoiceReview() {
                       className="form-input"
                       rows={2}
                       value={form.description || ''}
-                      placeholder="e.g. Transport to client meeting at Suntec"
+                      placeholder="e.g. [Entertainment/Meals] Business working lunch with client @ Dong Seoul Supply"
                       onChange={e => updateField('description', e.target.value)}
                       style={{ resize: 'vertical', fontFamily: 'inherit' }}
                     />
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                      {[
+                        { label: '💼 Client Lunch', prefix: '[Entertainment/Meals] Business working lunch with client' },
+                        { label: '🍷 Client Dinner', prefix: '[Entertainment/Meals] Client business dinner discussion' },
+                        { label: '👥 Team Welfare', prefix: '[Staff Welfare] Team project meeting refreshments & lunch' },
+                        { label: '🚗 Business Transit', prefix: '[Local Travel] Business transit to client meeting' },
+                        { label: '🌙 Overtime Commute', prefix: '[Local Travel] Late-night event commute home' },
+                        { label: '✈️ Overseas Travel', prefix: '[Overseas Travel] Business travel accommodation / transit' },
+                      ].map(preset => (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          className="btn btn-sm btn-ghost"
+                          style={{ fontSize: 11, padding: '2px 8px', borderRadius: 12, border: '1px solid var(--border)', background: 'var(--bg-secondary)' }}
+                          onClick={() => {
+                            const merchant = form.vendorName || inv.vendorName || '';
+                            updateField('description', `${preset.prefix}${merchant ? ` @ ${merchant}` : ''}`);
+                          }}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 ) : (
                   <div style={{
