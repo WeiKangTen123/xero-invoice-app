@@ -161,23 +161,26 @@ export default function InvoiceReview() {
   const receiptBox = useMemo(() => {
     try { return inv?.receiptBox ? JSON.parse(inv.receiptBox) : null; } catch { return null; }
   }, [inv?.receiptBox]);
-  const [merging,    setMerging]    = useState(false);
-  const [rereading,  setRereading]  = useState(false);
-  const [rereadMsg,  setRereadMsg]  = useState('');
-  const [reporting,  setReporting]  = useState(false);
-  const [marking,    setMarking]    = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [submitErr,  setSubmitErr]  = useState('');
-  const [submitOk,   setSubmitOk]   = useState(false);
-  const [wasRepost,  setWasRepost]  = useState(false);
-  const [editing,    setEditing]    = useState(false);
-  const [form,       setForm]       = useState(null);
-  const [saving,     setSaving]     = useState(false);
-  const [saveErr,    setSaveErr]    = useState('');
-  const [showMeta,   setShowMeta]   = useState(false);
+  const [merging,       setMerging]       = useState(false);
+  const [approvingNext, setApprovingNext] = useState(false);
+  const [rereading,     setRereading]     = useState(false);
+  const [rereadMsg,     setRereadMsg]     = useState('');
+  const [reporting,     setReporting]     = useState(false);
+  const [marking,       setMarking]       = useState(false);
+  const [submitting,    setSubmitting]    = useState(false);
+  const [submitErr,     setSubmitErr]     = useState('');
+  const [submitOk,      setSubmitOk]      = useState(false);
+  const [wasRepost,     setWasRepost]     = useState(false);
+  const [editing,       setEditing]       = useState(false);
+  const [form,          setForm]          = useState(null);
+  const [saving,        setSaving]        = useState(false);
+  const [saveErr,       setSaveErr]       = useState('');
+  const [showMeta,      setShowMeta]      = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting,        setDeleting]        = useState(false);
   const [deleteErr,       setDeleteErr]       = useState('');
+  // Ref so keyboard handler always has the latest group without stale closures.
+  const groupRef = useRef(null);
 
   // ── Fetch invoice ─────────────────────────────────────────────────────────
   async function fetchInvoice() {
@@ -255,10 +258,31 @@ export default function InvoiceReview() {
     if (!inv?.receiptFile) return;
     let active = true;
     api.get(`/receipts/${id}/group`)
-      .then(g => { if (active) setGroup(g); })
-      .catch(() => { if (active) setGroup(null); });
+      .then(g => { if (active) { setGroup(g); groupRef.current = g; } })
+      .catch(() => { if (active) { setGroup(null); groupRef.current = null; } });
     return () => { active = false; };
   }, [inv?.receiptFile, inv?.receiptGroup, id]);
+
+  // Keyboard ← / → to step through siblings instantly (SPA navigation, no reload).
+  // Only fires when no input/textarea/select is focused, so typing fields still work.
+  useEffect(() => {
+    function onKey(e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      const g = groupRef.current;
+      if (!g?.split || g.total < 2) return;
+      const idx = g.index - 1;  // 0-based
+      if (e.key === 'ArrowLeft' && idx > 0) {
+        e.preventDefault();
+        navigate(`/invoices/${g.siblings[idx - 1].id}`);
+      } else if (e.key === 'ArrowRight' && idx < g.total - 1) {
+        e.preventDefault();
+        navigate(`/invoices/${g.siblings[idx + 1].id}`);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [navigate]);
+
 
   // Ask the model to look at the photo again. Without this a failed read was
   // permanent — a quota blip meant typing every field by hand forever. Costs one
@@ -294,6 +318,33 @@ export default function InvoiceReview() {
       alert(err.message || 'Could not merge');
     }
   }
+
+  // Mark as reviewed and instantly jump to the next sibling in the batch via SPA
+  // navigation. If no next, goes to the first unreviewed, otherwise stays.
+  async function approveAndNext() {
+    setApprovingNext(true);
+    try {
+      await api.patch(`/invoices/${id}/status`, { status: 'reviewed' });
+      setInv(prev => ({ ...prev, status: 'reviewed' }));
+      const g = groupRef.current;
+      if (g?.split && g.total > 1) {
+        const idx = g.index - 1;  // 0-based current index
+        // Prefer next unreviewed sibling after the current one; fall back to next.
+        const candidates = [
+          ...g.siblings.slice(idx + 1),
+          ...g.siblings.slice(0, idx),
+        ];
+        const nextUnreviewed = candidates.find(s => s.id !== id && s.status !== 'reviewed' && s.status !== 'posted');
+        const next = nextUnreviewed || (idx < g.total - 1 ? g.siblings[idx + 1] : null);
+        if (next) { navigate(`/invoices/${next.id}`); return; }
+      }
+    } catch (err) {
+      alert(err.message || 'Could not mark as reviewed');
+    } finally {
+      setApprovingNext(false);
+    }
+  }
+
 
   // ── Actions ───────────────────────────────────────────────────────────────
   async function markReviewed() {
@@ -733,31 +784,110 @@ export default function InvoiceReview() {
                   Loading receipt...
                 </div>
               )}
-              {group?.split && (
-                <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
-                  <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 8 }}>
-                    {inv.receiptPage ? `Split from a ${group.total}-page PDF` : `Split from one photo of ${group.total} claims`}
+              {group?.split && (() => {
+                const isBatch = group.groupType === 'batch';
+                const currentIdx = group.index - 1; // 0-based
+                const prevSib = currentIdx > 0 ? group.siblings[currentIdx - 1] : null;
+                const nextSib = currentIdx < group.total - 1 ? group.siblings[currentIdx + 1] : null;
+                const canApprove = MARKABLE.has(inv?.status);
+
+                if (isBatch) {
+                  // ── Batch folder navigation bar ───────────────────────────
+                  return (
+                    <div style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
+                      {/* Top bar: label + Prev / index / Next */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.04em', textTransform: 'uppercase', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          📁 {group.batchLabel || 'Batch Import'}
+                        </span>
+                        <button
+                          disabled={!prevSib}
+                          onClick={() => prevSib && navigate(`/invoices/${prevSib.id}`)}
+                          style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 8px', cursor: prevSib ? 'pointer' : 'not-allowed', opacity: prevSib ? 1 : 0.35, fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.2 }}
+                          title="Previous (←)"
+                        >← Prev</button>
+                        <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-primary)', minWidth: 52, textAlign: 'center' }}>
+                          {group.index} / {group.total}
+                        </span>
+                        <button
+                          disabled={!nextSib}
+                          onClick={() => nextSib && navigate(`/invoices/${nextSib.id}`)}
+                          style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 8px', cursor: nextSib ? 'pointer' : 'not-allowed', opacity: nextSib ? 1 : 0.35, fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.2 }}
+                          title="Next (→)"
+                        >Next →</button>
+                      </div>
+
+                      {/* Pill filmstrip — click navigates instantly via SPA */}
+                      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', padding: '8px 14px' }}>
+                        {group.siblings.map((sib, i) => {
+                          const isCurrent = sib.id === id;
+                          const isDone    = sib.status === 'reviewed' || sib.status === 'posted';
+                          return (
+                            <button key={sib.id}
+                              onClick={() => !isCurrent && navigate(`/invoices/${sib.id}`)}
+                              style={{
+                                fontSize: 11, padding: '4px 9px', borderRadius: 6, border: 'none', cursor: isCurrent ? 'default' : 'pointer',
+                                background: isCurrent ? 'var(--accent)' : isDone ? 'var(--bg-success, #e6f4ea)' : 'var(--bg-primary)',
+                                color: isCurrent ? '#fff' : isDone ? 'var(--success, #1a7f37)' : 'var(--text-secondary)',
+                                outline: isCurrent ? 'none' : '1px solid var(--border)',
+                                fontWeight: isCurrent ? 700 : 400,
+                              }}
+                              title={sib.vendorName || `Claim ${i + 1}`}
+                            >
+                              {isDone && !isCurrent ? '✓ ' : ''}{i + 1}. {sib.vendorName || 'Unread'}{sib.totalAmount ? ` · ${sib.totalAmount}` : ''}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Approve & Next */}
+                      {canApprove && (
+                        <div style={{ padding: '0 14px 10px', display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <button
+                            className="btn btn-primary btn-sm"
+                            onClick={approveAndNext}
+                            disabled={approvingNext}
+                            style={{ fontSize: 12 }}
+                          >
+                            {approvingNext ? 'Marking…' : nextSib ? '✓ Approve & Next →' : '✓ Approve'}
+                          </button>
+                          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                            Use ← → to navigate · Approved claims shown in green
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+
+                // ── Genuine photo/PDF split panel (unchanged behaviour) ───────
+                return (
+                  <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
+                    <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 8 }}>
+                      {inv.receiptPage ? `Split from a ${group.total}-page PDF` : `Split from one photo of ${group.total} claims`}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+                      {group.siblings.map((sib, i) => (
+                        <button key={sib.id}
+                          onClick={() => sib.id !== id && navigate(`/invoices/${sib.id}`)}
+                          style={{ fontSize: 11, padding: '4px 9px', borderRadius: 6, border: '1px solid var(--border)', cursor: sib.id === id ? 'default' : 'pointer',
+                                   background: sib.id === id ? 'var(--accent)' : 'transparent',
+                                   color: sib.id === id ? '#fff' : 'var(--text-secondary)' }}>
+                          {i + 1}. {sib.vendorName || 'Unread'}{sib.totalAmount ? ` · ${sib.totalAmount}` : ''}
+                        </button>
+                      ))}
+                    </div>
+                    <button className="btn btn-outline btn-sm" onClick={mergeBack} disabled={merging}>
+                      {merging ? 'Merging…' : '⇤ Merge back into one'}
+                    </button>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 }}>
+                      The original upload is intact — merging deletes the other {group.total - 1} record
+                      {group.total - 1 === 1 ? '' : 's'} and restores the whole {inv.receiptPage ? 'PDF' : 'photo'} here.
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-                    {group.siblings.map((sib, i) => (
-                      <a key={sib.id} href={`/invoices/${sib.id}`}
-                         style={{ fontSize: 11, padding: '4px 9px', borderRadius: 6, textDecoration: 'none',
-                                  border: '1px solid var(--border)',
-                                  background: sib.id === id ? 'var(--accent)' : 'transparent',
-                                  color: sib.id === id ? '#fff' : 'var(--text-secondary)' }}>
-                        {i + 1}. {sib.vendorName || 'Unread'}{sib.totalAmount ? ` · ${sib.totalAmount}` : ''}
-                      </a>
-                    ))}
-                  </div>
-                  <button className="btn btn-outline btn-sm" onClick={mergeBack} disabled={merging}>
-                    {merging ? 'Merging…' : '⇤ Merge back into one'}
-                  </button>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 }}>
-                    The original upload is intact — merging deletes the other {group.total - 1} record
-                    {group.total - 1 === 1 ? '' : 's'} and restores the whole {inv.receiptPage ? 'PDF' : 'photo'} here.
-                  </div>
-                </div>
-              )}
+                );
+              })()}
+
               {rereadMsg && (
                 <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border)', fontSize: 11.5, color: 'var(--warning)', lineHeight: 1.5 }}>
                   {rereadMsg}
