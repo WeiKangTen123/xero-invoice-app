@@ -68,13 +68,13 @@ export default function ReceiptUpload({ onUploaded }) {
           onClick={() => fileRef.current?.click()}
           style={{ background: 'rgba(99,102,241,0.12)', color: 'var(--accent)', border: '1px solid rgba(99,102,241,0.3)', whiteSpace: 'nowrap' }}
         >
-          {busy ? 'Uploading…' : '+ Add receipt'}
+          {busy ? 'Uploading…' : '+ Add claim'}
         </button>
         <button
           className="btn btn-sm"
           onClick={() => setPairing(true)}
           style={{ whiteSpace: 'nowrap' }}
-          title="Scan a code to photograph receipts with your phone"
+          title="Scan a code to photograph expense claims with your phone"
         >
           📷 Use my phone
         </button>

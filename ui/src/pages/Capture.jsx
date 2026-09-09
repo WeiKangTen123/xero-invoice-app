@@ -115,7 +115,7 @@ export default function Capture() {
 
   return (
     <div style={wrap}>
-      <h2 style={{ fontSize: 19, margin: 0 }}>Add a receipt</h2>
+      <h2 style={{ fontSize: 19, margin: 0 }}>Add an expense claim</h2>
       <p style={{ color: 'var(--text-muted)', fontSize: 13, maxWidth: 320, lineHeight: 1.6, margin: 0 }}>
         Photograph the receipt. It appears on your computer straight away.
       </p>
@@ -169,7 +169,7 @@ export default function Capture() {
                 {s.parsed ? (
                   <>
                     <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      <span style={{ color: 'var(--success)' }}>✓</span> {s.vendorName || 'Receipt'}
+                      <span style={{ color: 'var(--success)' }}>✓</span> {s.vendorName || 'Expense claim'}
                     </div>
                     <div style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
                       {s.totalAmount != null ? `${s.currency ? s.currency + ' ' : ''}${s.totalAmount}` : 'Amount not read'}
