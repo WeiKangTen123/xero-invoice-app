@@ -4,7 +4,7 @@ const parser = require('./receipt-parser');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
 const good = {
-  merchant: 'Grab', date: '2026-08-24', currency: 'SGD',
+  merchant: 'Grab', date: '2026-08-24', time: null, category: null, currency: 'SGD',
   total: 18.4, tax: 1.51, subTotal: 16.89, description: 'Airport ride', confidence: 'high',
 };
 
@@ -14,6 +14,24 @@ describe('utils/receipt-parser', () => {
   describe('normalise — where a bad model response is made harmless', () => {
     test('passes a clean response through', () => {
       expect(parser.normalise(good)).toEqual({ ...good, lineItems: [], box: null });
+    });
+
+    test('normalises time and prefixes category onto description if missing', () => {
+      const res = parser.normalise({
+        ...good,
+        time: '12:01:47 PM',
+        category: 'Entertainment/Meals',
+        description: 'Business working lunch with client @ Dong Seoul Supply (12:01, Johor)',
+      });
+      expect(res.time).toBe('12:01');
+      expect(res.category).toBe('Entertainment/Meals');
+      expect(res.description).toBe('[Entertainment/Meals] Business working lunch with client @ Dong Seoul Supply (12:01, Johor)');
+    });
+
+    test('normalises 24-hour time correctly', () => {
+      expect(parser.normalise({ ...good, time: '21:09:44' }).time).toBe('21:09');
+      expect(parser.normalise({ ...good, time: '08:30' }).time).toBe('08:30');
+      expect(parser.normalise({ ...good, time: 'invalid' }).time).toBeNull();
     });
 
     test('normalises line items and their prices correctly', () => {

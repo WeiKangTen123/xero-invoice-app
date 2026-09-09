@@ -29,11 +29,36 @@ For each receipt also return:
 Per receipt, extract:
 - merchant: the shop or business that was PAID (not the customer, not the payment network, not the bank)
 - date: YYYY-MM-DD of the purchase (null if unreadable)
+- time: HH:MM in 24-hour format if printed on the receipt (e.g. "12:01", "16:37", "21:09"), null if not printed.
 - currency: 3-letter ISO code read from the receipt (SGD, USD, MYR, GBP, EUR, AUD...). "S$" or PayNow implies SGD; "RM" implies MYR; "£" GBP; "€" EUR. If only a bare "$" appears with no other signal, return null rather than guessing.
 - total: the FINAL amount paid, as a plain number. No symbols, no thousands separators.
 - tax: the GST/VAT/service-tax amount as a plain number, only if the receipt states it separately. null if not shown. 0 if the receipt says no tax applies.
 - subTotal: the pre-tax amount as a plain number, only if explicitly printed. null otherwise.
-- description: a short phrase describing what was bought, at most 60 characters.
+- category: one of the following exact corporate expense categories:
+    "Entertainment/Meals", "Staff Welfare", "Staff Overtime Meal", "Local Travel",
+    "Overtime Transport", "Overseas Travel", "Office Supplies", "Software/Utilities",
+    "Medical/Dental", "General Expense"
+- description: a concise, professional corporate expense claim description answering business justification and policy compliance (max 200 characters).
+  Format: "[Category] <Business Purpose> @ <Merchant> (<Time/Location Context>)"
+  Rules:
+  * Dining/Food at lunchtime (11:00-14:59):
+    "[Entertainment/Meals] Business working lunch with client @ <Merchant> (<Time>, <City/Location if visible>)"
+  * Confectionery/bakery/snacks in afternoon (15:00-17:59):
+    "[Staff Welfare] Office pantry refreshments & team snacks @ <Merchant> (<Time>)"
+  * Dining/Food at dinner time (18:00-20:59):
+    "[Entertainment/Meals] Client business dinner discussion @ <Merchant> (<Time>)"
+  * Food/Dining late night (after 21:00):
+    "[Staff Overtime Meal] Overtime dinner while working late @ <Merchant> (<Time>)"
+  * Grab/Gojek/taxi during business hours:
+    "[Local Travel] Business transit to client meeting: <Origin> to <Destination> (<Merchant>)"
+  * Grab/Gojek/taxi late night (after 20:00):
+    "[Local Travel] Event commute or late-night ride home: <Origin> to <Destination> (<Merchant>, <Time>)"
+  * Hotel/Flights:
+    "[Overseas Travel] Hotel accommodation / business travel stay @ <Merchant>"
+  * Office supplies:
+    "[Office Supplies] Office stationery and supplies @ <Merchant>"
+  * Software/Hosting:
+    "[Software/Utilities] Monthly software/cloud service subscription @ <Merchant>"
 - lineItems: array of each individual item or service listed on the receipt with its price:
     [
       {
@@ -75,6 +100,18 @@ function _isoDate(value) {
   return value.trim();
 }
 
+function _time(value) {
+  if (!value || typeof value !== 'string') return null;
+  const m = value.trim().match(/^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?\s*(AM|PM)?$/i);
+  if (!m) return null;
+  let hours = parseInt(m[1], 10);
+  const minutes = m[2];
+  const ampm = m[3] ? m[3].toUpperCase() : null;
+  if (ampm === 'PM' && hours < 12) hours += 12;
+  if (ampm === 'AM' && hours === 12) hours = 0;
+  return `${String(hours).padStart(2, '0')}:${minutes}`;
+}
+
 function _currency(value) {
   if (!value || typeof value !== 'string') return null;
   const code = value.trim().toUpperCase();
@@ -112,16 +149,24 @@ function normalise(parsed) {
         .filter(Boolean)
     : [];
 
+  const category = typeof parsed.category === 'string' && parsed.category.trim() ? parsed.category.trim().slice(0, 50) : null;
+  let desc = typeof parsed.description === 'string' && parsed.description.trim() ? parsed.description.trim().slice(0, 250) : null;
+  if (desc && category && !desc.startsWith('[')) {
+    desc = `[${category}] ${desc}`.slice(0, 250);
+  }
+
   return {
     merchant:    typeof parsed.merchant === 'string' && parsed.merchant.trim() ? parsed.merchant.trim().slice(0, 120) : null,
     date:        _isoDate(parsed.date),
+    time:        _time(parsed.time),
+    category,
     currency:    _currency(parsed.currency),
     total:       usableTotal,
     // Tax cannot exceed the total; if it does, one of the two was misread and
     // neither should be presented as fact.
     tax:         tax !== null && tax >= 0 && (usableTotal === null || tax <= usableTotal) ? tax : null,
     subTotal:    sub !== null && sub >= 0 && (usableTotal === null || sub <= usableTotal) ? sub : null,
-    description: typeof parsed.description === 'string' && parsed.description.trim() ? parsed.description.trim().slice(0, 200) : null,
+    description: desc,
     lineItems,
     confidence:  parsed.confidence === 'high' ? 'high' : 'low',
     box:         _box(parsed.box_2d),
@@ -315,4 +360,4 @@ async function parseReceiptBatch(userId, images, { batchSize = BATCH_SIZE, onPro
   return results;
 }
 
-module.exports = { parseReceiptImage, parseReceiptBatch, _readBatch, BATCH_SIZE, normalise, normaliseMany, splittable, SYSTEM_PROMPT, _num, _isoDate, _currency, _box, _overlapFraction };
+module.exports = { parseReceiptImage, parseReceiptBatch, _readBatch, BATCH_SIZE, normalise, normaliseMany, splittable, SYSTEM_PROMPT, _num, _isoDate, _time, _currency, _box, _overlapFraction };
