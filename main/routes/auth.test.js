@@ -67,4 +67,29 @@ describe('routes/auth', () => {
       .expect(401);
     expect(users.findById(u.id).last_seen_at).toBeFalsy();
   });
+
+  describe('POST /register security controls', () => {
+    test('enforces minimum 8 character password', async () => {
+      const res = await request(app)
+        .post('/api/auth/register')
+        .send({ email: 'short@test.com', password: 'short' })
+        .expect(400);
+      expect(res.body.error).toMatch(/at least 8 characters/);
+    });
+
+    test('blocks registration when ALLOW_REGISTRATION=false and users exist', async () => {
+      await users.createUser('existing@test.com', 'password123', 'admin');
+      const prevEnv = process.env.ALLOW_REGISTRATION;
+      try {
+        process.env.ALLOW_REGISTRATION = 'false';
+        const res = await request(app)
+          .post('/api/auth/register')
+          .send({ email: 'stranger@test.com', password: 'password123' })
+          .expect(403);
+        expect(res.body.error).toMatch(/registration is disabled/i);
+      } finally {
+        process.env.ALLOW_REGISTRATION = prevEnv;
+      }
+    });
+  });
 });
