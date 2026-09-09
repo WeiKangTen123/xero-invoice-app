@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import CroppedImage from '../components/receipts/CroppedImage';
 import AccountCodeSelect, { useAccountName } from '../components/AccountCodeSelect';
+import DeleteConfirmModal from '../components/DeleteConfirmModal';
 
 // Statuses that allow the user to trigger a Xero submission.
 // 'posted' is included so a correction can be re-posted — this updates the existing
@@ -174,6 +175,9 @@ export default function InvoiceReview() {
   const [saving,     setSaving]     = useState(false);
   const [saveErr,    setSaveErr]    = useState('');
   const [showMeta,   setShowMeta]   = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleting,        setDeleting]        = useState(false);
+  const [deleteErr,       setDeleteErr]       = useState('');
 
   // ── Fetch invoice ─────────────────────────────────────────────────────────
   async function fetchInvoice() {
@@ -301,6 +305,19 @@ export default function InvoiceReview() {
       alert(err.message);
     } finally {
       setMarking(false);
+    }
+  }
+
+  async function handleDelete() {
+    setDeleting(true);
+    setDeleteErr('');
+    try {
+      await api.delete(`/invoices/${id}`);
+      navigate('/invoices', { replace: true });
+    } catch (err) {
+      setDeleteErr(err.message || 'Failed to delete');
+      setDeleting(false);
+      setShowDeleteModal(false);
     }
   }
 
@@ -442,7 +459,8 @@ export default function InvoiceReview() {
     );
   }
 
-  const typeLabel  = inv.invoiceType === 'EXPENSE' ? 'Expense Claim' : (inv.invoiceType === 'ACCPAY' ? 'Bill (ACCPAY)' : 'Invoice (ACCREC)');
+  const isExpense  = inv.invoiceType === 'EXPENSE' || !!inv.receiptFile;
+  const typeLabel  = isExpense ? 'Expense Claim' : (inv.invoiceType === 'ACCPAY' ? 'Bill (ACCPAY)' : 'Invoice (ACCREC)');
   const canSubmit  = SUBMITTABLE.has(inv.status) && !submitOk && !editing;
   const canReview  = MARKABLE.has(inv.status) && !editing;
   const canEdit    = SUBMITTABLE.has(inv.status); // same set the backend allows PATCH /:id for
@@ -521,6 +539,18 @@ export default function InvoiceReview() {
               </button>
             )}
 
+            {!editing && (
+              <button
+                className="btn btn-sm"
+                style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
+                onClick={() => setShowDeleteModal(true)}
+                disabled={deleting}
+                title={`Delete this ${isExpense ? 'receipt' : 'invoice'}`}
+              >
+                🗑 Delete
+              </button>
+            )}
+
             {/* Edit — correct LLM-extracted fields before/instead of posting to Xero */}
             {canEdit && !editing && (
               <button className="btn btn-outline btn-sm" onClick={startEdit}>
@@ -539,6 +569,12 @@ export default function InvoiceReview() {
             )}
           </div>
         </div>
+
+        {deleteErr && (
+          <div className="alert alert-error" style={{ marginBottom: 12 }}>
+            <span className="alert-icon">✕</span>{deleteErr}
+          </div>
+        )}
 
         {saveErr && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
@@ -1084,6 +1120,17 @@ export default function InvoiceReview() {
           </div>
         </div>
       </div>
+
+      <DeleteConfirmModal
+        isOpen={showDeleteModal}
+        title={isExpense ? 'Delete Receipt' : 'Delete Invoice'}
+        itemName={inv.vendorName || inv.invoiceNumber || inv.id}
+        isExpense={isExpense}
+        confirmLabel={isExpense ? 'Delete Receipt' : 'Delete Invoice'}
+        loading={deleting}
+        onConfirm={handleDelete}
+        onClose={() => { if (!deleting) setShowDeleteModal(false); }}
+      />
     </>
   );
 }

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import ReceiptUpload from '../components/receipts/ReceiptUpload';
 import ClaimImport from '../components/receipts/ClaimImport';
+import DeleteConfirmModal from '../components/DeleteConfirmModal';
 
 // reviewed is blue (not yet in Xero), posted is green (done).
 // Keeping them visually distinct prevents the "I clicked Reviewed and it looked
@@ -108,6 +109,8 @@ export default function Invoices() {
   const [deleting,      setDeleting]      = useState(new Set());
   const [selected,      setSelected]      = useState(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [deleteTarget,  setDeleteTarget]  = useState(null); // { type: 'single', invoice } | { type: 'bulk', count, ids } | { type: 'clear' }
+  const [deleteLoading, setDeleteLoading] = useState(false);
   const [filter,       setFilter]       = useState('');
   const [typeFilter,   setTypeFilter]   = useState('all');
   const [receivedFilter, setReceivedFilter] = useState('all');
@@ -179,33 +182,37 @@ export default function Invoices() {
     }
   }
 
-  async function handleDeleteOne(id, e) {
+  function promptDeleteOne(inv, e) {
     e.stopPropagation();
-    setDeleting(prev => new Set([...prev, id]));
-    try {
-      await api.delete(`/invoices/${id}`);
-      setInvoices(prev => prev.filter(i => i.id !== id));
-      setSelected(prev => { const n = new Set(prev); n.delete(id); return n; });
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setDeleting(prev => { const n = new Set(prev); n.delete(id); return n; });
-    }
+    setDeleteTarget({ type: 'single', invoice: inv });
   }
 
-  async function handleDeleteSelected() {
-    const ids = [...selected];
-    if (!confirm(`Delete ${ids.length} selected invoice${ids.length !== 1 ? 's' : ''}?\n\nThis cannot be undone.`)) return;
-    setBulkDeleting(true);
+  function promptDeleteSelected() {
+    if (!selected.size) return;
+    setDeleteTarget({ type: 'bulk', count: selected.size, ids: [...selected] });
+  }
+
+  async function handleConfirmDelete() {
+    if (!deleteTarget) return;
+    setDeleteLoading(true);
     try {
-      await Promise.all(ids.map(id => api.delete(`/invoices/${id}`)));
-      setInvoices(prev => prev.filter(i => !selected.has(i.id)));
-      setSelected(new Set());
+      if (deleteTarget.type === 'single') {
+        const id = deleteTarget.invoice.id;
+        await api.delete(`/invoices/${id}`);
+        setInvoices(prev => prev.filter(i => i.id !== id));
+        setSelected(prev => { const n = new Set(prev); n.delete(id); return n; });
+      } else if (deleteTarget.type === 'bulk') {
+        const ids = deleteTarget.ids;
+        await Promise.all(ids.map(id => api.delete(`/invoices/${id}`)));
+        setInvoices(prev => prev.filter(i => !selected.has(i.id)));
+        setSelected(new Set());
+      }
+      setDeleteTarget(null);
     } catch (err) {
       alert(err.message);
-      fetchInvoices();
+      if (deleteTarget.type === 'bulk') fetchInvoices();
     } finally {
-      setBulkDeleting(false);
+      setDeleteLoading(false);
     }
   }
 
@@ -591,11 +598,11 @@ export default function Invoices() {
           {selected.size > 0 && (
             <button
               className="btn btn-sm"
-              disabled={bulkDeleting}
-              onClick={handleDeleteSelected}
+              disabled={deleteLoading}
+              onClick={promptDeleteSelected}
               style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.25)', whiteSpace: 'nowrap', animation: 'scaleIn 0.15s ease' }}
             >
-              {bulkDeleting ? '...' : `🗑 Delete selected (${selected.size})`}
+              {deleteLoading ? '...' : `🗑 Delete selected (${selected.size})`}
             </button>
           )}
 
@@ -768,12 +775,12 @@ export default function Invoices() {
                           </button>
                           <button
                             className="btn btn-sm"
-                            disabled={isDeleting}
-                            onClick={e => handleDeleteOne(inv.id, e)}
+                            disabled={deleteLoading && deleteTarget?.invoice?.id === inv.id}
+                            onClick={e => promptDeleteOne(inv, e)}
                             style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)', minWidth: 28 }}
-                            title="Delete this invoice"
+                            title={inv.invoiceType === 'EXPENSE' || inv.receiptFile ? 'Delete this receipt' : 'Delete this invoice'}
                           >
-                            {isDeleting ? '...' : '✕'}
+                            {deleteLoading && deleteTarget?.invoice?.id === inv.id ? '...' : '✕'}
                           </button>
                         </div>
                       </td>
@@ -786,6 +793,18 @@ export default function Invoices() {
           </div>
         )}
       </div>
+
+      <DeleteConfirmModal
+        isOpen={!!deleteTarget}
+        title={deleteTarget?.type === 'bulk' ? 'Delete Selected Items' : (deleteTarget?.invoice?.invoiceType === 'EXPENSE' || deleteTarget?.invoice?.receiptFile ? 'Delete Receipt' : 'Delete Invoice')}
+        itemName={deleteTarget?.invoice ? (deleteTarget.invoice.vendorName || deleteTarget.invoice.invoiceNumber || deleteTarget.invoice.id) : undefined}
+        isExpense={deleteTarget?.invoice ? (deleteTarget.invoice.invoiceType === 'EXPENSE' || !!deleteTarget.invoice.receiptFile) : false}
+        count={deleteTarget?.type === 'bulk' ? deleteTarget.count : 1}
+        confirmLabel={deleteTarget?.type === 'bulk' ? `Delete ${deleteTarget.count} Items` : (deleteTarget?.invoice?.invoiceType === 'EXPENSE' || deleteTarget?.invoice?.receiptFile ? 'Delete Receipt' : 'Delete Invoice')}
+        loading={deleteLoading}
+        onConfirm={handleConfirmDelete}
+        onClose={() => { if (!deleteLoading) setDeleteTarget(null); }}
+      />
 
       {claimModalJobId && (
         <ClaimImport
