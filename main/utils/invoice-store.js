@@ -14,6 +14,17 @@ function _normalizeVendor(name) {
     .trim();
 }
 
+// Normalise an invoice number for display and dedup comparison.
+// Strips leading '#' or ':', trailing punctuation/colons, and collapses whitespace.
+function normalizeInvoiceNumber(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const clean = raw
+    .replace(/^[#:\s]+/, '')
+    .replace(/[:.,;\s]+$/, '')
+    .trim();
+  return clean.length ? clean.slice(0, 100) : null;
+}
+
 // ── Row <-> JS record mapping ─────────────────────────────────────────────────
 // DB columns are snake_case; every field the rest of the app reads/writes on an
 // invoice record is camelCase (unchanged from the old invoices.json shape).
@@ -371,4 +382,4 @@ function forUser(userId) {
            count, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash };
 }
 
-module.exports = { forUser, FIELD_TO_COLUMN, _toBindable }; // exposed for the one-time JSON->SQLite importer
+module.exports = { forUser, FIELD_TO_COLUMN, _toBindable, normalizeInvoiceNumber, _normalizeVendor }; // exposed for tests and callers

@@ -85,6 +85,13 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
       // arrived without a form. Only a line MISSING its receipt is a problem.
       : (!receipt && row.no ? 'No receipt found for this claim line' : null);
 
+  const { getUserConfig } = require('../utils/users');
+  const userConfig = getUserConfig(userId);
+  const defaultCurrency = userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'SGD';
+  const defaultAccount = userConfig.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '429';
+  const invDate = row.date || (receipt && receipt.date) || new Date().toISOString().split('T')[0];
+  const claimNum = (receipt && receipt.receiptNumber) || (row.no ? `EXP-${row.no}` : `EXP-${id.slice(-6).toUpperCase()}`);
+
   return invStore.add({
     id,
     // Only an exact image match is auto-marked. A fields match is a suspicion,
@@ -93,12 +100,17 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
     duplicateOf: dup && dup.certain ? dup.match.id : null,
     invoiceType: 'EXPENSE',
     source: 'claim',
+    invoiceNumber: claimNum,
+    invoiceDate: invDate,
+    dueDate: invDate,
+    accountCode: defaultAccount,
     // The claimant's own figures are what is recorded. The receipt read is
     // evidence, and a disagreement is reported rather than silently preferred.
     vendorName:  (receipt && receipt.merchant) || null,
-    invoiceDate: row.date || null,
-    currency:    row.currency || (receipt && receipt.currency) || null,
-    totalAmount: row.amount ?? null,
+    currency:    row.currency || (receipt && receipt.currency) || defaultCurrency,
+    totalAmount: row.amount ?? (receipt && receipt.total) ?? null,
+    subTotal:    receipt && receipt.subTotal != null ? receipt.subTotal : null,
+    taxAmount:   receipt && receipt.tax != null ? receipt.tax : null,
     description: [row.description, category ? `[${category}]` : null].filter(Boolean).join(' ').slice(0, 200) || null,
     receiptFile: storedName,
     receiptMime: mime,

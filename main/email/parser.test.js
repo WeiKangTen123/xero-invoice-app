@@ -115,3 +115,24 @@ describe('_detectCurrency', () => {
     expect(_detectCurrency('Total: 500.00')).toBeNull();
   });
 });
+
+describe('cleanSubject', () => {
+  const { cleanSubject } = require('./parser');
+
+  test('strips single and multiple Fwd/Re prefixes', () => {
+    expect(cleanSubject('Fwd: Invoice INV-2024')).toBe('Invoice INV-2024');
+    expect(cleanSubject('Fwd: Re: Fw: Invoice #123')).toBe('Invoice #123');
+    expect(cleanSubject('RE: [EXTERNAL] Bill for March')).toBe('Bill for March');
+  });
+
+  test('strips external/spam tags', () => {
+    expect(cleanSubject('[EXTERNAL] Invoice from Acme Corp')).toBe('Invoice from Acme Corp');
+    expect(cleanSubject('[SPAM] Notice of Payment')).toBe('Notice of Payment');
+  });
+
+  test('preserves clean subjects and trims whitespace', () => {
+    expect(cleanSubject('  Invoice #8849  ')).toBe('Invoice #8849');
+    expect(cleanSubject('')).toBe('');
+    expect(cleanSubject(null)).toBe('');
+  });
+});
