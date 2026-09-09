@@ -147,6 +147,23 @@ describe('routes/claims', () => {
       await request(app).get(`/api/claims/import/${body.jobId}`).set('Authorization', auth(other)).expect(404);
       await finish(body.jobId);
     });
+
+    test('GET /active returns null when no job is running, or active job info when running', async () => {
+      // When nothing is active
+      const idleRes = await request(app).get('/api/claims/active').set('Authorization', auth()).expect(200);
+      expect(idleRes.body.job).toBeNull();
+
+      // When an import is enqueued
+      const zip = makeZip([{ name: 'a.jpg', data: jpegBytes(3) }]);
+      const { body } = await start({ archives: [{ name: 'c.zip', data: b64(zip) }] }).expect(202);
+      const activeRes = await request(app).get('/api/claims/active').set('Authorization', auth()).expect(200);
+      expect(activeRes.body.job).toBeTruthy();
+      expect(activeRes.body.job.id).toBe(body.jobId);
+
+      await finish(body.jobId);
+      const afterRes = await request(app).get('/api/claims/active').set('Authorization', auth()).expect(200);
+      expect(afterRes.body.job).toBeNull();
+    });
   });
 
   describe('a receipt with no claim form still becomes a claim', () => {
