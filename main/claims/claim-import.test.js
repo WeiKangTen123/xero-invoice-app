@@ -55,10 +55,9 @@ function deps({ reads = {}, onCreate } = {}) {
   return {
     // waitMs 0: the four-second throttle is for the real model's quota, not tests.
     waitMs: 0,
-    parseReceipt: jest.fn(async (userId, buf, mime) => {
-      const key = Object.keys(reads).find(k => reads[k] && reads[k].__match !== false);
-      return null;
-    }),
+    // The job now reads in batches: one call for several images, returning an
+    // array the same length as the input.
+    parseReceipts: jest.fn(async (userId, images) => images.map(() => null)),
     storeReceipt: jest.fn(async () => 'stored.jpg'),
     createRecord: jest.fn(async ({ row }) => { onCreate && onCreate(row); return { id: 'rec-' + row.no }; }),
     suggest: jest.fn(async () => []),
@@ -77,9 +76,10 @@ describe('claims/claim-import', () => {
     const seen = [];
     const d = {
       ...deps({ onCreate: r => seen.push(r.no) }),
-      parseReceipt: jest.fn()
-        .mockResolvedValueOnce({ receipts: [{ merchant: 'Grab', date: '2026-02-23', total: 15.8, currency: 'SGD' }] })
-        .mockResolvedValueOnce({ receipts: [{ merchant: 'CDG', date: '2026-02-26', total: 56.7, currency: 'SGD' }] }),
+      parseReceipts: jest.fn(async () => ([
+        { merchant: 'Grab', date: '2026-02-23', total: 15.8, currency: 'SGD' },
+        { merchant: 'CDG',  date: '2026-02-26', total: 56.7, currency: 'SGD' },
+      ])),
     };
     const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [{ name: 'f.xlsx', buffer: form }] }, d);
     await settle(job);
@@ -92,7 +92,7 @@ describe('claims/claim-import', () => {
   test('an amount mismatch reaches the reconciliation, with the numbers', async () => {
     const zip = makeZip([{ name: 'c/a.png', data: JPEG }]);
     const form = await makeForm([{ no: 1, date: '2026-02-26', description: 'Home to Apple', amount: 30.6 }]);
-    const d = { ...deps(), parseReceipt: jest.fn().mockResolvedValue({ receipts: [{ merchant: 'CDG', date: '2026-02-26', total: 36.0 }] }) };
+    const d = { ...deps(), parseReceipts: jest.fn(async () => ([{ merchant: 'CDG', date: '2026-02-26', total: 36.0 }])) };
     const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [{ name: 'f.xlsx', buffer: form }] }, d);
     await settle(job);
 
@@ -117,9 +117,8 @@ describe('claims/claim-import', () => {
     const zip = makeZip([{ name: 'c/a.png', data: JPEG }, { name: 'c/b.png', data: JPEG }]);
     const form = await makeForm([{ no: 1, date: '2026-02-23', description: 'Grab', amount: 15.8 }]);
     const d = { ...deps(),
-      parseReceipt: jest.fn()
-        .mockRejectedValueOnce(new Error('quota'))
-        .mockResolvedValueOnce({ receipts: [{ merchant: 'Grab', date: '2026-02-23', total: 15.8 }] }) };
+      // one unreadable, one fine — the batch reader returns null in place.
+      parseReceipts: jest.fn(async () => ([null, { merchant: 'Grab', date: '2026-02-23', total: 15.8 }])) };
     const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [{ name: 'f.xlsx', buffer: form }] }, d);
     await settle(job);
 
@@ -154,7 +153,7 @@ describe('claims/claim-import', () => {
 
   test('a corrupt spreadsheet is reported without stopping the receipts', async () => {
     const zip = makeZip([{ name: 'c/a.png', data: JPEG }]);
-    const d = { ...deps(), parseReceipt: jest.fn().mockResolvedValue({ receipts: [{ merchant: 'Grab', date: '2026-02-23', total: 15.8 }] }) };
+    const d = { ...deps(), parseReceipts: jest.fn(async () => ([{ merchant: 'Grab', date: '2026-02-23', total: 15.8 }])) };
     const job = claimImport.startImport(
       { userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [{ name: 'bad.xlsx', buffer: Buffer.from('nope') }] }, d);
     await settle(job);
@@ -165,12 +164,128 @@ describe('claims/claim-import', () => {
 
   test('a job can be cancelled mid-read', async () => {
     const zip = makeZip(Array.from({ length: 6 }, (_, i) => ({ name: `c/${i}.png`, data: JPEG })));
-    const d = { ...deps(), waitMs: 20, parseReceipt: jest.fn(async () => ({ receipts: [{ merchant: 'x', date: '2026-01-01', total: 1 }] })) };
+    const d = { ...deps(), waitMs: 20, batch: 1, parseReceipts: jest.fn(async (u, imgs) => imgs.map(() => ({ merchant: 'x', date: '2026-01-01', total: 1 }))) };
     const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] }, d);
     await new Promise(r => setTimeout(r, 30));
     claimImport.cancel(job.id, 'u1');
     await settle(job);
     expect(job.stage).toBe('cancelled');
     expect(job.receiptsRead).toBeLessThan(6);
+  });
+});
+
+// ── A claim with no spreadsheet ─────────────────────────────────────────────
+// The commonest case, and the one that produced nothing: a zip of receipts with
+// no form matched nothing, so no records were created and the import reported
+// success having imported zero claims.
+describe('claims/claim-import — receipts without a claim form', () => {
+  beforeEach(() => claimImport._reset());
+
+  test('a zip of receipts and no form still becomes one claim each', async () => {
+    const zip = makeZip([
+      { name: 'c/a.png', data: JPEG }, { name: 'c/b.png', data: JPEG }, { name: 'c/c.png', data: JPEG },
+    ]);
+    const seen = [];
+    const d = {
+      waitMs: 0,
+      storeReceipt: jest.fn(async () => 'stored.jpg'),
+      createRecord: jest.fn(async ({ row, receipt }) => { seen.push({ amount: row.amount, merchant: receipt && receipt.merchant }); return { id: 'r' + seen.length }; }),
+      suggest: jest.fn(async () => []),
+      parseReceipts: jest.fn(async () => ([
+        { merchant: 'Grab',  date: '2026-02-23', total: 15.8, currency: 'SGD' },
+        { merchant: 'Gojek', date: '2026-03-10', total: 25,   currency: 'SGD' },
+        { merchant: 'CDG',   date: '2026-04-17', total: 21.8, currency: 'SGD' },
+      ])),
+    };
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] }, d);
+    await settle(job);
+
+    expect(job.stage).toBe('done');
+    expect(seen).toHaveLength(3);                                   // not zero
+    expect(seen.map(s => s.amount).sort((a, b) => a - b)).toEqual([15.8, 21.8, 25]);
+    expect(seen.map(s => s.merchant).sort()).toEqual(['CDG', 'Gojek', 'Grab']);
+  });
+
+  test('the figures come from what the model read, not left blank', async () => {
+    const zip = makeZip([{ name: 'c/a.png', data: JPEG }]);
+    let captured = null;
+    const d = {
+      waitMs: 0,
+      storeReceipt: jest.fn(async () => 'stored.jpg'),
+      createRecord: jest.fn(async (args) => { captured = args; return { id: 'r1' }; }),
+      suggest: jest.fn(async () => []),
+      parseReceipts: jest.fn(async () => ([{ merchant: 'Isetan', date: '2015-05-01', total: 6.6, currency: 'SGD' }])),
+    };
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] }, d);
+    await settle(job);
+
+    expect(captured.row).toMatchObject({ date: '2015-05-01', amount: 6.6, currency: 'SGD', description: 'Isetan' });
+    expect(captured.receipt.buffer).toBeInstanceOf(Buffer);   // the image is stored with it
+  });
+
+  test('an unreadable receipt with no form still becomes a claim to type by hand', async () => {
+    const zip = makeZip([{ name: 'c/blurry.png', data: JPEG }]);
+    let captured = null;
+    const d = {
+      waitMs: 0,
+      storeReceipt: jest.fn(async () => 'stored.jpg'),
+      createRecord: jest.fn(async (args) => { captured = args; return { id: 'r1' }; }),
+      suggest: jest.fn(async () => []),
+      parseReceipts: jest.fn(async (u, imgs) => imgs.map(() => null)),
+    };
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] }, d);
+    await settle(job);
+
+    expect(captured).not.toBeNull();
+    // Falls back to the filename so the row is identifiable in the list.
+    expect(captured.row.description).toBe('blurry.png');
+  });
+});
+
+// ── Batching ────────────────────────────────────────────────────────────────
+// Nine receipts one at a time is nine round trips, each throttled for the
+// per-minute quota. Batching is what makes a large claim finish in a minute.
+describe('claims/claim-import — reads in batches', () => {
+  beforeEach(() => claimImport._reset());
+
+  test('nine receipts take three calls, not nine', async () => {
+    const zip = makeZip(Array.from({ length: 9 }, (_, i) => ({ name: `c/${i}.png`, data: JPEG })));
+    const parseReceipts = jest.fn(async (u, imgs) => imgs.map((_, i) => ({ merchant: 'M' + i, date: '2026-02-23', total: i + 1 })));
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] },
+      { waitMs: 0, batch: 4, parseReceipts, storeReceipt: async () => 'f.jpg', createRecord: async () => ({ id: 'r' }), suggest: async () => [] });
+    await settle(job);
+
+    expect(parseReceipts).toHaveBeenCalledTimes(3);      // 4 + 4 + 1
+    expect(parseReceipts.mock.calls[0][1]).toHaveLength(4);
+    expect(parseReceipts.mock.calls[2][1]).toHaveLength(1);
+    expect(job.receiptsRead).toBe(9);
+  });
+
+  test('a whole batch failing loses none of its receipts', async () => {
+    const zip = makeZip(Array.from({ length: 4 }, (_, i) => ({ name: `c/${i}.png`, data: JPEG })));
+    const created = [];
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] },
+      { waitMs: 0, batch: 4,
+        parseReceipts: jest.fn(async () => { throw new Error('quota'); }),
+        storeReceipt: async () => 'f.jpg',
+        createRecord: async ({ row }) => { created.push(row.description); return { id: 'r' + created.length }; },
+        suggest: async () => [] });
+    await settle(job);
+
+    expect(job.stage).toBe('done');
+    expect(job.result.summary.unreadable).toBe(4);
+    expect(created).toHaveLength(4);                     // still four claims to type by hand
+  });
+
+  test('progress advances by batch, and lands exactly on the total', async () => {
+    const zip = makeZip(Array.from({ length: 7 }, (_, i) => ({ name: `c/${i}.png`, data: JPEG })));
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] },
+      { waitMs: 0, batch: 3,
+        parseReceipts: jest.fn(async (u, imgs) => imgs.map(() => ({ merchant: 'x', date: '2026-01-01', total: 1 }))),
+        storeReceipt: async () => 'f.jpg', createRecord: async () => ({ id: 'r' }), suggest: async () => [] });
+    await settle(job);
+    // 3 + 3 + 1: the last partial batch must not report 9 of 7.
+    expect(job.receiptsRead).toBe(7);
+    expect(job.receiptsTotal).toBe(7);
   });
 });

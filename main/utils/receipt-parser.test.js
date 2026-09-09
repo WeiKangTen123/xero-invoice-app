@@ -277,3 +277,86 @@ describe('receipt-parser — when a photo may be split', () => {
     });
   });
 });
+
+// ── Batched reading ─────────────────────────────────────────────────────────
+// One call per receipt makes a nine-receipt claim nine throttled round trips.
+// Batching is faster, and its risk is attribution — the right figures against
+// the wrong image — so a reply that cannot be attributed is discarded rather
+// than trusted.
+describe('receipt-parser — reading several at once', () => {
+  const img = n => ({ buffer: Buffer.from([0xff, 0xd8, n]), mime: 'image/jpeg' });
+  const read = (index, merchant, total) =>
+    ({ index, merchant, date: '2026-02-23', currency: 'SGD', total, tax: null, subTotal: null, description: null, confidence: 'high' });
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('reads a batch in one call and keeps the order', async () => {
+    callGemini.mockResolvedValue(JSON.stringify([read(1, 'Grab', 15.8), read(2, 'Gojek', 25), read(3, 'CDG', 30.6)]));
+    const out = await parser.parseReceiptBatch('u1', [img(1), img(2), img(3)]);
+    expect(callGemini).toHaveBeenCalledTimes(1);
+    expect(out.map(r => r.merchant)).toEqual(['Grab', 'Gojek', 'CDG']);
+    expect(out.map(r => r.total)).toEqual([15.8, 25, 30.6]);
+  });
+
+  test('the index decides placement, not the order the model replied in', async () => {
+    // A model that answers out of order must not silently transpose figures.
+    callGemini.mockResolvedValue(JSON.stringify([read(3, 'CDG', 30.6), read(1, 'Grab', 15.8), read(2, 'Gojek', 25)]));
+    const out = await parser.parseReceiptBatch('u1', [img(1), img(2), img(3)]);
+    expect(out.map(r => r.merchant)).toEqual(['Grab', 'Gojek', 'CDG']);
+  });
+
+  test('a reply that does not account for every image is DISCARDED and re-read singly', async () => {
+    // The attribution guard. Two answers for three images could be attributed
+    // three ways, so none of them is trusted.
+    callGemini
+      .mockResolvedValueOnce(JSON.stringify([read(1, 'Grab', 15.8), read(2, 'Gojek', 25)]))   // 2 for 3
+      .mockResolvedValue(JSON.stringify({ receipts: [read(1, 'Single', 9.9)] }));
+    const out = await parser.parseReceiptBatch('u1', [img(1), img(2), img(3)]);
+    expect(callGemini).toHaveBeenCalledTimes(4);          // 1 failed batch + 3 singles
+    expect(out.every(r => r.merchant === 'Single')).toBe(true);
+  });
+
+  test('a batch that throws falls back rather than losing the receipts', async () => {
+    callGemini
+      .mockRejectedValueOnce(new Error('quota'))
+      .mockResolvedValue(JSON.stringify({ receipts: [read(1, 'Fallback', 5)] }));
+    const out = await parser.parseReceiptBatch('u1', [img(1), img(2)]);
+    expect(out.filter(Boolean)).toHaveLength(2);
+    expect(out[0].merchant).toBe('Fallback');
+  });
+
+  test('splits into batches of the configured size', async () => {
+    callGemini.mockResolvedValue(JSON.stringify([read(1, 'A', 1), read(2, 'B', 2)]));
+    await parser.parseReceiptBatch('u1', [img(1), img(2), img(3), img(4)], { batchSize: 2 });
+    expect(callGemini).toHaveBeenCalledTimes(2);
+  });
+
+  test('a single receipt does not use the batch path at all', async () => {
+    callGemini.mockResolvedValue(JSON.stringify({ receipts: [read(1, 'Only', 12)] }));
+    const out = await parser.parseReceiptBatch('u1', [img(1)]);
+    expect(out[0].merchant).toBe('Only');
+    const prompt = JSON.stringify(callGemini.mock.calls[0][1]);
+    expect(prompt).not.toContain('SEPARATE receipts');
+  });
+
+  test('progress is reported as results land', async () => {
+    callGemini.mockResolvedValue(JSON.stringify([read(1, 'A', 1), read(2, 'B', 2)]));
+    const seen = [];
+    await parser.parseReceiptBatch('u1', [img(1), img(2), img(3), img(4)], { batchSize: 2, onProgress: n => seen.push(n) });
+    expect(seen).toEqual([2, 4]);
+  });
+
+  test('every image is sent, each labelled with its number', async () => {
+    callGemini.mockResolvedValue(JSON.stringify([read(1, 'A', 1), read(2, 'B', 2)]));
+    await parser.parseReceiptBatch('u1', [img(1), img(2)]);
+    const content = callGemini.mock.calls[0][1].find(m => m.role === 'user').content;
+    expect(content.filter(c => c.type === 'image_url')).toHaveLength(2);
+    expect(JSON.stringify(content)).toContain('Receipt 1:');
+    expect(JSON.stringify(content)).toContain('Receipt 2:');
+  });
+
+  test('an empty list does no work', async () => {
+    expect(await parser.parseReceiptBatch('u1', [])).toEqual([]);
+    expect(callGemini).not.toHaveBeenCalled();
+  });
+});

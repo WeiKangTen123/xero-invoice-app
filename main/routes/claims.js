@@ -4,7 +4,7 @@ const { requireAuth } = require('../middleware/auth-middleware');
 const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
 const claimImport  = require('../claims/claim-import');
-const { parseReceiptImage } = require('../utils/receipt-parser');
+const { parseReceiptBatch } = require('../utils/receipt-parser');
 const { suggestCategories } = require('../claims/claim-categories');
 const logger       = require('../utils/logger');
 
@@ -63,7 +63,9 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
     // A discrepancy is recorded on the row so it survives the job expiring.
     errorMsg: match && match.discrepancy
       ? `Claimed ${match.discrepancy.claimed} but the receipt says ${match.discrepancy.onReceipt}`
-      : (receipt ? null : 'No receipt found for this claim line'),
+      // A receipt with no claim line is not an error — it is simply a claim that
+      // arrived without a form. Only a line MISSING its receipt is a problem.
+      : (!receipt && row.no ? 'No receipt found for this claim line' : null),
   });
 }
 
@@ -96,7 +98,7 @@ router.post('/import', requireAuth, async (req, res) => {
     const job = claimImport.startImport(
       { userId: req.user.id, archives: a.out, forms: f.out, label: label || 'Expense claim' },
       {
-        parseReceipt: parseReceiptImage,
+        parseReceipts: (userId, images) => parseReceiptBatch(userId, images),
         storeReceipt: (userId, id, buffer, mime) => receiptStore.forUser(userId).save(id, buffer, mime),
         createRecord: createClaimRecord,
         suggest: (userId, matches, categories) => suggestCategories(userId, matches, categories),
