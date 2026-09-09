@@ -15,6 +15,11 @@ describe('routes/receipts', () => {
 
   // A 6-byte buffer is a perfectly good stand-in: nothing here inspects pixels.
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+  // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
+  // has to send a second image. jpeg() gives each one a distinct tail byte;
+  // JPEG_B64 stays for the tests that mean the same file twice.
+  let _n = 0;
+  const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
 
   beforeEach(async () => {
     jest.resetModules();
@@ -46,11 +51,11 @@ describe('routes/receipts', () => {
 
   describe('POST /', () => {
     test('requires authentication', async () => {
-      await request(app).post('/api/receipts').send({ mime: 'image/jpeg', data: JPEG_B64 }).expect(401);
+      await request(app).post('/api/receipts').send({ mime: 'image/jpeg', data: jpeg() }).expect(401);
     });
 
     test('stores the file and creates an EXPENSE row awaiting review', async () => {
-      const res = await upload({ mime: 'image/jpeg', data: JPEG_B64, filename: 'grab.jpg' }).expect(201);
+      const res = await upload({ mime: 'image/jpeg', data: jpeg(), filename: 'grab.jpg' }).expect(201);
       expect(res.body.receipt.invoiceType).toBe('EXPENSE');
       // Nothing is known about the receipt until it is read or typed, so it
       // must not land in a state that looks ready to post.
@@ -61,14 +66,14 @@ describe('routes/receipts', () => {
     });
 
     test('records how the receipt arrived, defaulting to upload', async () => {
-      expect((await upload({ mime: 'image/jpeg', data: JPEG_B64, source: 'phone' })).body.receipt.source).toBe('phone');
-      expect((await upload({ mime: 'image/jpeg', data: JPEG_B64 })).body.receipt.source).toBe('upload');
+      expect((await upload({ mime: 'image/jpeg', data: jpeg(), source: 'phone' })).body.receipt.source).toBe('phone');
+      expect((await upload({ mime: 'image/jpeg', data: jpeg() })).body.receipt.source).toBe('upload');
       // An unrecognised source must not be stored verbatim.
-      expect((await upload({ mime: 'image/jpeg', data: JPEG_B64, source: 'x' })).body.receipt.source).toBe('upload');
+      expect((await upload({ mime: 'image/jpeg', data: jpeg(), source: 'x' })).body.receipt.source).toBe('upload');
     });
 
     test('rejects a type Xero cannot attach, and names what is accepted', async () => {
-      const res = await upload({ mime: 'image/heic', data: JPEG_B64 }).expect(400);
+      const res = await upload({ mime: 'image/heic', data: jpeg() }).expect(400);
       expect(res.body.error).toMatch(/image\/jpeg/);
       expect(res.body.error).toMatch(/heic/);
     });
@@ -86,25 +91,25 @@ describe('routes/receipts', () => {
     });
 
     test('accepts a data: URI prefix, which is what a canvas produces', async () => {
-      await upload({ mime: 'image/jpeg', data: `data:image/jpeg;base64,${JPEG_B64}` }).expect(201);
+      await upload({ mime: 'image/jpeg', data: `data:image/jpeg;base64,${jpeg()}` }).expect(201);
     });
 
     test('no row is created when the file is rejected', async () => {
       const before = invoiceStore.forUser(testUser.id).getAll().length;
-      await upload({ mime: 'image/heic', data: JPEG_B64 }).expect(400);
+      await upload({ mime: 'image/heic', data: jpeg() }).expect(400);
       expect(invoiceStore.forUser(testUser.id).getAll().length).toBe(before);
     });
   });
 
   describe('GET /:id/image', () => {
     test('serves the image to a valid scoped token', async () => {
-      const { body } = await upload({ mime: 'image/jpeg', data: JPEG_B64 });
+      const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
       await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${body.imageToken}`)
         .expect(200).expect('Content-Type', /image\/jpeg/);
     });
 
     test('rejects a missing, garbage or expired token', async () => {
-      const { body } = await upload({ mime: 'image/jpeg', data: JPEG_B64 });
+      const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
       await request(app).get(`/api/receipts/${body.receipt.id}/image`).expect(401);
       await request(app).get(`/api/receipts/${body.receipt.id}/image?token=garbage`).expect(401);
       const expired = jwt.sign({ userId: testUser.id, invoiceId: body.receipt.id, purpose: 'receipt' }, jwtSecret(), { expiresIn: '-1s' });
@@ -112,15 +117,15 @@ describe('routes/receipts', () => {
     });
 
     test('a token for one receipt cannot open another', async () => {
-      const a = (await upload({ mime: 'image/jpeg', data: JPEG_B64 })).body;
-      const b = (await upload({ mime: 'image/jpeg', data: JPEG_B64 })).body;
+      const a = (await upload({ mime: 'image/jpeg', data: jpeg() })).body;
+      const b = (await upload({ mime: 'image/jpeg', data: jpeg() })).body;
       await request(app).get(`/api/receipts/${b.receipt.id}/image?token=${a.imageToken}`).expect(401);
     });
 
     test('a PDF token cannot be reused to open a receipt', async () => {
       // Both routes mint short-lived tokens against the same secret; only the
       // purpose claim keeps them apart.
-      const { body } = await upload({ mime: 'image/jpeg', data: JPEG_B64 });
+      const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
       const pdfToken = jwt.sign({ userId: testUser.id, invoiceId: body.receipt.id, purpose: 'pdf' }, jwtSecret(), { expiresIn: '5m' });
       await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${pdfToken}`).expect(401);
     });
@@ -128,7 +133,7 @@ describe('routes/receipts', () => {
 
   describe('DELETE /:id', () => {
     test('removes the row and the file together', async () => {
-      const { body } = await upload({ mime: 'image/jpeg', data: JPEG_B64 });
+      const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
       await request(app).delete(`/api/receipts/${body.receipt.id}`).set('Authorization', auth()).expect(200);
       expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id)).toBeFalsy();
       expect(receiptStore.forUser(testUser.id).exists(body.receipt.receiptFile)).toBe(false);
@@ -155,6 +160,11 @@ describe('routes/receipts — phone pairing', () => {
   let app, users, jwtSecret, testUser, otherUser, pairing, invoiceStore;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+  // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
+  // has to send a second image. jpeg() gives each one a distinct tail byte;
+  // JPEG_B64 stays for the tests that mean the same file twice.
+  let _n = 0;
+  const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
 
   beforeEach(async () => {
     jest.resetModules();
@@ -227,7 +237,7 @@ describe('routes/receipts — phone pairing', () => {
     test('stores against the pairing owner and marks the source as phone', async () => {
       const { body } = await pair();
       const res = await request(app).post(`/api/receipts/capture/${body.token}`)
-        .send({ mime: 'image/jpeg', data: JPEG_B64 }).expect(201);
+        .send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       expect(res.body.receipt.source).toBe('phone');
       expect(res.body.receipt.invoiceType).toBe('EXPENSE');
       // It landed in the OWNER's account, not nobody's.
@@ -239,7 +249,7 @@ describe('routes/receipts — phone pairing', () => {
       // Upload-only is the whole basis for putting this credential in a URL.
       const { body } = await pair();
       const res = await request(app).post(`/api/receipts/capture/${body.token}`)
-        .send({ mime: 'image/jpeg', data: JPEG_B64 }).expect(201);
+        .send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       expect(res.body.imageToken).toBeUndefined();
     });
 
@@ -247,7 +257,7 @@ describe('routes/receipts — phone pairing', () => {
       const { body } = await pair();
       for (let i = 0; i < 4; i++) {
         await request(app).post(`/api/receipts/capture/${body.token}`)
-          .send({ mime: 'image/jpeg', data: JPEG_B64 }).expect(201);
+          .send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       }
       expect(invoiceStore.forUser(testUser.id).getAll().length).toBe(4);
     });
@@ -255,7 +265,7 @@ describe('routes/receipts — phone pairing', () => {
     test('a rejected file does not burn one of the allowed uploads', async () => {
       const { body } = await pair();
       await request(app).post(`/api/receipts/capture/${body.token}`)
-        .send({ mime: 'image/heic', data: JPEG_B64 }).expect(400);
+        .send({ mime: 'image/heic', data: jpeg() }).expect(400);
       const status = await request(app).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
       expect(status.body.uploads).toBe(0);
     });
@@ -263,20 +273,20 @@ describe('routes/receipts — phone pairing', () => {
     test('the token stops working once its upload budget is spent', async () => {
       const { body } = await pair();
       for (let i = 0; i < pairing.MAX_USES; i++) {
-        await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: JPEG_B64 }).expect(201);
+        await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       }
-      await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: JPEG_B64 }).expect(401);
+      await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(401);
     });
 
     test('an expired or revoked token cannot upload', async () => {
       const { body } = await pair();
       pairing.revoke(body.token);
-      await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: JPEG_B64 }).expect(401);
+      await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(401);
     });
 
     test('the capture token grants ONLY upload — not listing, reading or deleting', async () => {
       const { body } = await pair();
-      const up = await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: JPEG_B64 }).expect(201);
+      const up = await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       const id = up.body.receipt.id;
       // No route accepts it as a bearer credential for anything else.
       await request(app).get(`/api/receipts/${id}/token`).set('Authorization', `Bearer ${body.token}`).expect(401);
@@ -296,7 +306,7 @@ describe('routes/receipts — phone pairing', () => {
 
     test('the owner sees arrivals, which is how the desktop knows to refresh', async () => {
       const { body } = await pair();
-      await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: JPEG_B64 }).expect(201);
+      await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       const res = await request(app).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
       expect(res.body.alive).toBe(true);
       expect(res.body.uploads).toBe(1);
@@ -311,6 +321,11 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
   let app, users, jwtSecret, testUser, invoiceStore, parser;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+  // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
+  // has to send a second image. jpeg() gives each one a distinct tail byte;
+  // JPEG_B64 stays for the tests that mean the same file twice.
+  let _n = 0;
+  const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
 
   // The parse runs in setImmediate so the upload response is not held open;
   // let the queue drain before asserting on the row.
@@ -343,7 +358,7 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
   });
 
   const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
-  const upload = () => request(app).post('/api/receipts').set('Authorization', auth()).send({ mime: 'image/jpeg', data: JPEG_B64 });
+  const upload = () => request(app).post('/api/receipts').set('Authorization', auth()).send({ mime: 'image/jpeg', data: jpeg() });
 
   test('a successful read populates the row the user reviews', async () => {
     parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [{
@@ -426,6 +441,11 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
   let app, users, jwtSecret, testUser, otherUser, pairing, invoiceStore, parser;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+  // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
+  // has to send a second image. jpeg() gives each one a distinct tail byte;
+  // JPEG_B64 stays for the tests that mean the same file twice.
+  let _n = 0;
+  const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
   const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
 
   beforeEach(async () => {
@@ -458,7 +478,7 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
 
   const tokenFor = u => `Bearer ${jwt.sign({ id: u.id, email: u.email, role: u.role }, jwtSecret())}`;
   const pair = (u = testUser) => request(app).post('/api/receipts/pair').set('Authorization', tokenFor(u));
-  const send = tok => request(app).post(`/api/receipts/capture/${tok}`).send({ mime: 'image/jpeg', data: JPEG_B64 });
+  const send = tok => request(app).post(`/api/receipts/capture/${tok}`).send({ mime: 'image/jpeg', data: jpeg() });
 
   test('returns the parsed fields for what this token uploaded', async () => {
     parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [{
@@ -550,6 +570,11 @@ describe('routes/receipts — one upload, several records', () => {
   let app, users, jwtSecret, testUser, invoiceStore, receiptStore, parser, pdfPages;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+  // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
+  // has to send a second image. jpeg() gives each one a distinct tail byte;
+  // JPEG_B64 stays for the tests that mean the same file twice.
+  let _n = 0;
+  const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
   const PDF_B64  = Buffer.from('%PDF-1.4 fake').toString('base64');
   const settle = () => new Promise(r => setImmediate(() => setImmediate(() => setImmediate(r))));
 
@@ -733,6 +758,11 @@ describe('routes/receipts — reading a receipt again', () => {
   let app, users, jwtSecret, testUser, invoiceStore, parser;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
+  // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
+  // has to send a second image. jpeg() gives each one a distinct tail byte;
+  // JPEG_B64 stays for the tests that mean the same file twice.
+  let _n = 0;
+  const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
   const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
 
   const read = (merchant, total, box = null) => ({
@@ -766,7 +796,7 @@ describe('routes/receipts — reading a receipt again', () => {
   });
 
   const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
-  const upload = (mime = 'image/jpeg') => request(app).post('/api/receipts').set('Authorization', auth()).send({ mime, data: JPEG_B64 });
+  const upload = (mime = 'image/jpeg') => request(app).post('/api/receipts').set('Authorization', auth()).send({ mime, data: jpeg() });
   const reread = id => request(app).post(`/api/receipts/${id}/reread`).set('Authorization', auth());
 
   test('fills in a receipt that failed to read the first time', async () => {
@@ -850,5 +880,116 @@ describe('routes/receipts — reading a receipt again', () => {
   test('requires auth, and 404s for something that does not exist', async () => {
     await request(app).post('/api/receipts/whatever/reread').expect(401);
     await reread('nope').expect(404);
+  });
+});
+
+// ── Not uploading the same receipt twice ────────────────────────────────────
+// Two signals, and they deliberately do different things. The same bytes is a
+// fact and is refused outright; the same vendor, date and amount is a suspicion
+// and only earns a note, because 'duplicate' is a status nothing can undo.
+describe('routes/receipts — duplicate receipts', () => {
+  let app, users, jwtSecret, testUser, invoiceStore, parser;
+  const created = [];
+  const SAME = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x42]).toString('base64');
+  let _n = 100;
+  const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
+  const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users = require('../utils/users');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    invoiceStore = require('../utils/invoice-store');
+    parser = require('../utils/receipt-parser');
+    parser.parseReceiptImage.mockReset();
+    parser.parseReceiptImage.mockResolvedValue(null);
+    require('../utils/pairing')._reset();
+    const receiptRoutes = require('./receipts');
+
+    testUser = await users.createUser(`d${Date.now()}@test.com`, 'password123', 'user');
+    created.push(testUser.id);
+
+    app = express();
+    app.use(express.json({ limit: '10mb' }));
+    app.use('/api/receipts', receiptRoutes);
+  });
+
+  afterAll(() => {
+    for (const id of created) {
+      try { fs.rmSync(path.join(__dirname, '../data/users', String(id)), { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
+  const upload = (data) => request(app).post('/api/receipts').set('Authorization', auth())
+    .send({ mime: 'image/jpeg', data });
+
+  test('the same file twice is refused, and points at the one already held', async () => {
+    const first = (await upload(SAME).expect(201)).body.receipt;
+    const res = await upload(SAME).expect(409);
+    expect(res.body.duplicateOf).toBe(first.id);
+    expect(res.body.reason).toMatch(/same receipt image/);
+    // The one they already have comes back, so the UI can show it rather than
+    // just saying no.
+    expect(res.body.receipt.id).toBe(first.id);
+  });
+
+  test('the refusal creates no second row and no second file', async () => {
+    await upload(SAME).expect(201);
+    const after = invoiceStore.forUser(testUser.id).getAll().length;
+    await upload(SAME).expect(409);
+    expect(invoiceStore.forUser(testUser.id).getAll().length).toBe(after);
+  });
+
+  test('a different photo of the same day is not the same file', async () => {
+    await upload(jpeg()).expect(201);
+    await upload(jpeg()).expect(201);
+  });
+
+  test('a rejected earlier attempt does not block a genuine re-upload', async () => {
+    // findByReceiptHash skips duplicate and error rows on purpose: a receipt
+    // that failed the first time must be allowed a second go.
+    const first = (await upload(SAME).expect(201)).body.receipt;
+    invoiceStore.forUser(testUser.id).update(first.id, { status: 'error' });
+    await upload(SAME).expect(201);
+  });
+
+  test('matching vendor, date and amount only earns a note — the row stays open', async () => {
+    parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [{
+      merchant: 'Grab', date: '2026-08-24', currency: 'SGD', total: 18.4, box: null,
+    }] });
+    const a = (await upload(jpeg()).expect(201)).body.receipt;
+    await settle();
+    const b = (await upload(jpeg()).expect(201)).body.receipt;
+    await settle();
+
+    const row = invoiceStore.forUser(testUser.id).getById(b.id);
+    // Flagged, NOT marked: 'duplicate' is locked by PATCH /:id/status, so
+    // auto-applying it on a guess would bury a real expense for good.
+    expect(row.status).toBe('review-needed');
+    expect(row.errorMsg).toMatch(/Possible duplicate/);
+    expect(row.errorMsg).toContain(a.id);
+  });
+
+  test('a different amount on the same day is a different expense', async () => {
+    parser.parseReceiptImage.mockResolvedValueOnce({ split: false, receipts: [{
+      merchant: 'Grab', date: '2026-08-24', total: 18.4, box: null }] });
+    await upload(jpeg()).expect(201);
+    await settle();
+    parser.parseReceiptImage.mockResolvedValueOnce({ split: false, receipts: [{
+      merchant: 'Grab', date: '2026-08-24', total: 21.0, box: null }] });
+    const b = (await upload(jpeg()).expect(201)).body.receipt;
+    await settle();
+    expect(invoiceStore.forUser(testUser.id).getById(b.id).errorMsg).toBeFalsy();
+  });
+
+  test('another user\'s identical receipt is not mine', async () => {
+    const other = await users.createUser(`d${Date.now()}x@test.com`, 'password123', 'user');
+    created.push(other.id);
+    await upload(SAME).expect(201);
+    await request(app).post('/api/receipts')
+      .set('Authorization', `Bearer ${jwt.sign({ id: other.id, email: other.email, role: other.role }, jwtSecret())}`)
+      .send({ mime: 'image/jpeg', data: SAME }).expect(201);
   });
 });

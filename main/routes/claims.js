@@ -4,8 +4,11 @@ const { requireAuth } = require('../middleware/auth-middleware');
 const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
 const claimImport  = require('../claims/claim-import');
+const claimQueue   = require('../claims/claim-queue');
+const claimWorker  = require('../claims/claim-worker');
 const { parseReceiptBatch } = require('../utils/receipt-parser');
 const { suggestCategories } = require('../claims/claim-categories');
+const { hashBuffer, findDuplicate } = require('../claims/claim-dedup');
 const logger       = require('../utils/logger');
 
 // Importing a batch expense claim: a zip of receipts plus the claim form.
@@ -28,12 +31,37 @@ function decodeBase64(data) {
 
 // Turns one matched claim line into a local record. Injected into the job so the
 // job itself stays testable without a database.
+//
+// Dedup happens HERE rather than earlier because it needs the finished figures —
+// the claimant's amount and date, not the model's guess — and because doing it
+// one record at a time means a repeat inside a single archive is caught too: the
+// first row is committed before the second is checked.
 async function createClaimRecord({ userId, groupId, row, receipt, match, category, categorySuggested, store }) {
   const id = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+  const invStore = invoiceStore.forUser(userId);
+
+  const hash = receipt && receipt.buffer ? hashBuffer(receipt.buffer) : null;
+  const dup = findDuplicate({
+    store: invStore,
+    hash,
+    vendorName: (receipt && receipt.merchant) || null,
+    // The claim line's own date and amount, falling back to the receipt for a
+    // loose receipt with no line.
+    date:   row.date ?? (receipt && receipt.date) ?? null,
+    amount: row.amount ?? (receipt && receipt.total) ?? null,
+  });
+
   let storedName = null;
   let mime = null;
 
-  if (receipt && receipt.buffer) {
+  if (dup && dup.certain) {
+    // Byte-identical to something already held, so writing the file again would
+    // put a second identical copy on disk for no gain. Point at the original's
+    // file instead; countByReceiptFile already refuses to delete a file another
+    // row still references, so neither record can orphan the other's image.
+    storedName = dup.match.receiptFile || null;
+    mime = dup.match.receiptMime || (receipt && receipt.mime) || null;
+  } else if (receipt && receipt.buffer) {
     try {
       mime = receipt.mime;
       storedName = await store(userId, id, receipt.buffer, receipt.mime);
@@ -43,9 +71,26 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
     }
   }
 
-  return invoiceStore.forUser(userId).add({
+  // A discrepancy is recorded on the row so it survives the job expiring. A
+  // suspected duplicate is recorded the same way, and takes precedence: it is
+  // the more urgent of the two things to look at.
+  const note =
+    dup && !dup.certain
+      ? `Possible duplicate of ${dup.match.id} — ${dup.reason}. Check before approving.`
+    : dup
+      ? `Already imported — ${dup.reason} as ${dup.match.id}`
+    : match && match.discrepancy
+      ? `Claimed ${match.discrepancy.claimed} but the receipt says ${match.discrepancy.onReceipt}`
+      // A receipt with no claim line is not an error — it is simply a claim that
+      // arrived without a form. Only a line MISSING its receipt is a problem.
+      : (!receipt && row.no ? 'No receipt found for this claim line' : null);
+
+  return invStore.add({
     id,
-    status: 'review-needed',
+    // Only an exact image match is auto-marked. A fields match is a suspicion,
+    // and 'duplicate' is a locked status — see claim-dedup.js.
+    status: dup && dup.certain ? 'duplicate' : 'review-needed',
+    duplicateOf: dup && dup.certain ? dup.match.id : null,
     invoiceType: 'EXPENSE',
     source: 'claim',
     // The claimant's own figures are what is recorded. The receipt read is
@@ -57,15 +102,11 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
     description: [row.description, category ? `[${category}]` : null].filter(Boolean).join(' ').slice(0, 200) || null,
     receiptFile: storedName,
     receiptMime: mime,
+    receiptHash: hash,
     receiptGroup: groupId,
     processedAt: new Date().toISOString(),
     receivedAt:  new Date().toISOString(),
-    // A discrepancy is recorded on the row so it survives the job expiring.
-    errorMsg: match && match.discrepancy
-      ? `Claimed ${match.discrepancy.claimed} but the receipt says ${match.discrepancy.onReceipt}`
-      // A receipt with no claim line is not an error — it is simply a claim that
-      // arrived without a form. Only a line MISSING its receipt is a problem.
-      : (!receipt && row.no ? 'No receipt found for this claim line' : null),
+    errorMsg: note,
   });
 }
 
@@ -95,17 +136,25 @@ router.post('/import', requireAuth, async (req, res) => {
       return res.status(413).json({ error: `That is ${(bytes / 1048576).toFixed(1)}MB; the limit is ${MAX_UPLOAD_BYTES / 1048576}MB.` });
     }
 
-    const job = claimImport.startImport(
-      { userId: req.user.id, archives: a.out, forms: f.out, label: label || 'Expense claim' },
-      {
-        parseReceipts: (userId, images) => parseReceiptBatch(userId, images),
-        storeReceipt: (userId, id, buffer, mime) => receiptStore.forUser(userId).save(id, buffer, mime),
-        createRecord: createClaimRecord,
-        suggest: (userId, matches, categories) => suggestCategories(userId, matches, categories),
-      },
-    );
+    const enq = claimQueue.enqueue(req.user.id, {
+      archives: a.out,
+      forms: f.out,
+      label: label || 'Expense claim',
+    });
+    if (enq.error) {
+      return res.status(429).json({ error: enq.error });
+    }
+    const job = enq.job;
 
-    logger.info('Claim import started', { userId: req.user.id, jobId: job.id, archives: a.out.length, forms: f.out.length });
+    claimWorker.startWorker(req.user.id, {
+      parseReceipts: (userId, images) => parseReceiptBatch(userId, images),
+      storeReceipt: (userId, id, buffer, mime) => receiptStore.forUser(userId).save(id, buffer, mime),
+      createRecord: createClaimRecord,
+      suggest: (userId, matches, categories) => suggestCategories(userId, matches, categories),
+    });
+    claimWorker.kickWorker(req.user.id);
+
+    logger.info('Claim import enqueued', { userId: req.user.id, jobId: job.id, archives: a.out.length, forms: f.out.length });
     // 202: accepted and running. The client polls; closing the tab is fine.
     res.status(202).json({ jobId: job.id, stage: job.stage });
   } catch (err) {
@@ -116,21 +165,25 @@ router.post('/import', requireAuth, async (req, res) => {
 
 // GET /api/claims/import/:jobId — progress, then the reconciliation
 router.get('/import/:jobId', requireAuth, (req, res) => {
-  const job = claimImport.getJob(req.params.jobId, req.user.id);
+  const memJob = claimImport.getJob(req.params.jobId, req.user.id);
+  const diskJob = claimQueue.get(req.user.id, req.params.jobId);
+  const job = memJob || diskJob;
   if (!job) return res.status(404).json({ error: 'Import not found — it may have expired' });
+  const startedAt = job.startedAt ? new Date(job.startedAt).toISOString() : (job.createdAt || new Date().toISOString());
   res.json({
     id: job.id, label: job.label, stage: job.stage,
     receiptsTotal: job.receiptsTotal, receiptsRead: job.receiptsRead, rowsTotal: job.rowsTotal,
     error: job.error, result: job.result,
-    startedAt: new Date(job.startedAt).toISOString(),
+    startedAt,
   });
 });
 
 // DELETE /api/claims/import/:jobId — stop a run in progress
 router.delete('/import/:jobId', requireAuth, (req, res) => {
-  const job = claimImport.cancel(req.params.jobId, req.user.id);
-  if (!job) return res.status(404).json({ error: 'Import not found' });
-  res.json({ stage: job.stage });
+  const memJob = claimImport.cancel(req.params.jobId, req.user.id);
+  const diskJob = claimQueue.markCancelled(req.user.id, req.params.jobId);
+  if (!memJob && !diskJob) return res.status(404).json({ error: 'Import not found' });
+  res.json({ stage: (memJob && memJob.stage) || (diskJob && diskJob.stage) || 'cancelled' });
 });
 
 // DELETE /api/claims/group/:groupId — undo a whole import.

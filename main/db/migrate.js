@@ -39,6 +39,10 @@ function run() {
   // showed "received today" — turning on the watcher made three months of mail
   // all look like it arrived at once.
   _ensureColumn('invoices', 'received_at', 'received_at TEXT');
+  // SHA-256 of the receipt image. The same photograph uploaded twice, or a claim
+  // archive imported twice, is the commonest duplicate here — and content is an
+  // exact signal where vendor-and-amount is only a guess.
+  _ensureColumn('invoices', 'receipt_hash', 'receipt_hash TEXT');
 
   // Rebuilds user_settings so a NEW account starts with auto-submit off.
   // Idempotent and value-preserving — see the migration for why.

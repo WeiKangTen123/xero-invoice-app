@@ -10,6 +10,7 @@ const { parseReceiptImage } = require('../utils/receipt-parser');
 // at call time — a destructured import captures the original reference and can
 // never be substituted in a test.
 const pdfPages = require('../utils/pdf-pages');
+const { hashBuffer, findDuplicate } = require('../claims/claim-dedup');
 const QRCode       = require('qrcode');
 const logger       = require('../utils/logger');
 
@@ -72,6 +73,26 @@ function storeReceipt(userId, { mime, data, filename, source }) {
     } };
   }
 
+  // Already here?
+  //
+  // The batch importer MARKS a duplicate and carries on, because nobody is
+  // watching it and a silently dropped receipt is how the "imported 0 claims"
+  // bug happened. A hand upload is the opposite: somebody is standing there, so
+  // the useful answer is to say so and point at the one they already have,
+  // rather than leave them a second row to tidy up. Same signal, different
+  // response, because the audience is different.
+  const hash = hashBuffer(buffer);
+  const dup = findDuplicate({ store: invoiceStore.forUser(userId), hash });
+  if (dup) {
+    logger.info('Receipt already uploaded', { userId, existingId: dup.match.id, source: source || 'upload' });
+    return { status: 409, body: {
+      error: 'You have already uploaded this receipt.',
+      reason: dup.reason,
+      duplicateOf: dup.match.id,
+      receipt: dup.match,
+    } };
+  }
+
   const id = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
   // Store the file BEFORE the row. A failed write must not leave a record
   // pointing at an image that was never saved.
@@ -84,6 +105,7 @@ function storeReceipt(userId, { mime, data, filename, source }) {
     source:      source === 'phone' ? 'phone' : 'upload',
     receiptFile: storedName,
     receiptMime: mime,
+    receiptHash: hash,
     description: filename ? String(filename).slice(0, 200) : null,
     processedAt: new Date().toISOString(),
     receivedAt:  new Date().toISOString(),   // an upload arrives when it is uploaded
@@ -101,11 +123,34 @@ function storeReceipt(userId, { mime, data, filename, source }) {
   // Parsing is an enhancement, never a gate: if it fails the receipt stays
   // exactly where it is, at review-needed, for the user to type by hand.
   setImmediate(() => {
-    readAndMaybeSplit(userId, id, buffer, mime, storedName)
+    readAndMaybeSplit(userId, id, buffer, mime, storedName, hash)
       .catch(err => logger.warn('Receipt read failed', { userId, id, error: err.message }));
   });
 
   return { status: 201, body: { receipt: record, imageToken: issueImageToken(userId, id) } };
+}
+
+// Once a receipt has been READ, there is a second thing to check: an upload that
+// is not the same file can still be the same expense — a photo of a receipt
+// already claimed from a scan, say, or the same taxi ride snapped twice.
+//
+// This one only ever leaves a NOTE. Vendor, date and amount agreeing is strong
+// evidence but not proof, 'duplicate' is a locked status, and two identical
+// coffees on one afternoon are unusual rather than impossible. The person
+// holding the receipts decides; this just makes sure they are asked.
+function _flagIfSuspected(userId, id) {
+  const store = invoiceStore.forUser(userId);
+  const rec = store.getById(id);
+  if (!rec || rec.status === 'duplicate') return;
+
+  const dup = findDuplicate({
+    store, vendorName: rec.vendorName, date: rec.invoiceDate, amount: rec.totalAmount,
+    excludeId: id,
+  });
+  if (!dup) return;
+
+  logger.info('Possible duplicate receipt', { userId, id, of: dup.match.id });
+  store.update(id, { errorMsg: `Possible duplicate of ${dup.match.id} — ${dup.reason}. Check before approving.` });
 }
 
 // Applies one receipt's fields to a record.
@@ -136,7 +181,7 @@ function _applyFields(userId, id, r, extra = {}) {
 // splittablePages() says the evidence is clean. Anything doubtful stays as one
 // record holding the whole upload, because inventing a second receipt is worse
 // than failing to split a real one.
-async function readAndMaybeSplit(userId, id, buffer, mime, storedName) {
+async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = null) {
   const store = invoiceStore.forUser(userId);
 
   // ── PDF: one record per page ──────────────────────────────────────────────
@@ -160,6 +205,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName) {
         source: 'upload',
         receiptFile: storedName,      // the SAME file
         receiptMime: mime,
+        receiptHash: hash,            // ...so the same bytes, and the same hash
         receiptPage: page,
         receiptGroup: group,
         processedAt: new Date().toISOString(),
@@ -180,6 +226,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName) {
     // One receipt, or evidence too weak to split on. Either way the whole image
     // stays on one record.
     _applyFields(userId, id, receipts[0]);
+    _flagIfSuspected(userId, id);
     logger.info('Receipt read', { userId, id, receipts: receipts.length, split: false, reason });
     return;
   }
@@ -187,6 +234,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName) {
   const group = id;
   const [first, ...rest] = receipts;
   _applyFields(userId, id, first, { receiptBox: JSON.stringify(first.box), receiptGroup: group });
+  _flagIfSuspected(userId, id);
   for (const r of rest) {
     const sibId = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
     store.add({
@@ -196,11 +244,13 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName) {
       source: 'upload',
       receiptFile: storedName,        // the SAME file
       receiptMime: mime,
+      receiptHash: hash,              // ...so the same bytes, and the same hash
       receiptBox: JSON.stringify(r.box),
       receiptGroup: group,
       processedAt: new Date().toISOString(),
     });
     _applyFields(userId, sibId, r);
+    _flagIfSuspected(userId, sibId);
   }
   logger.info('Photo split into separate receipts', { userId, id, count: receipts.length });
 }
