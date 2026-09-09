@@ -25,10 +25,19 @@ Per-user Xero Custom Connection
   └── Currency-first: tries PDF currency, auto-detects org base currency as fallback
   └── Attaches original PDF and email body to each Xero invoice
 
+Per-user claims queue & worker (main/claims/)
+  └── Disk-backed queue (.que + .bin) for batch claims (.zip receipts + .xlsx claim forms)
+  └── Crash-loop & poison guard (max 3 retries), concurrency cap (10 jobs/user)
+  └── Automatic recovery across server reboots (recoverPendingJobs)
+  └── Tier 1 SHA-256 image dedup + Tier 2 vendor/date/amount suspicion flags
+  └── Reconciles form items against receipts; zero writes to Xero (local review only)
+
 Per-user file storage
   data/users/{userId}/invoices.json      — invoice history
   data/users/{userId}/pdfs/             — PDF files
+  data/users/{userId}/receipts/         — receipt image files
   data/users/{userId}/email-queue/      — disk-based email processing queue
+  data/users/{userId}/claim-queue/      — disk-based batch claim processing queue
   data/users/{userId}/settings.json     — autoProcess toggle
   data/users/{userId}/config.json       — IMAP + Xero + LLM credentials
 ```
@@ -44,7 +53,9 @@ The server binary and LLM infrastructure are shared; everything else is per-user
 |---|---|
 | Invoice history | Per-user |
 | PDF files | Per-user |
+| Receipt image files | Per-user |
 | Email processing queue | Per-user |
+| Claim processing queue | Per-user |
 | IMAP account | Per-user |
 | Xero org | Per-user |
 | LLM API key | Per-user |

@@ -35,6 +35,7 @@ const { jwtSecret }             = require('./middleware/auth-middleware');
 require('./db/migrate').run();
 const { ensureUserDirectories, getAllUsers } = require('./utils/users');
 const emailWorker               = require('./queue/email-worker');
+const claimWorker               = require('./claims/claim-worker');
 const { createHandler, submitInvoiceToXero } = require('./utils/invoice-handler');
 const { xeroErrMsg }            = require('./xero/xero-utils');
 const invoiceStore              = require('./utils/invoice-store');
@@ -148,6 +149,10 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   // Jobs are persisted to disk by the IMAP watcher so they survive crashes and nodemon restarts.
   emailWorker.recoverPendingJobs(userId => Promise.resolve(createHandler(userId).onInvoiceEmail));
   logger.info('Email queue recovery check complete');
+
+  // Recover any in-flight claim import jobs persisted to disk.
+  claimWorker.recoverPendingJobs();
+  logger.info('Claim queue recovery check complete');
 
   // Retry any invoices stuck in 'pending' or 'submitting' from a previous run.
   // The Xero submission chain lives in-memory, so any restart orphans pending invoices.

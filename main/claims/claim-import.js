@@ -38,6 +38,11 @@ const MAX_RECEIPTS = 100;
 const JOB_TTL_MS = 60 * 60 * 1000;   // an hour is long enough to read the result
 
 const _jobs = new Map();   // jobId -> job
+// jobId -> a function called on every state change. This is how the durable
+// queue mirrors progress to disk without the engine knowing a disk exists —
+// kept out of the job object itself so nothing here has to think about what is
+// safe to serialise.
+const _hooks = new Map();
 
 function _sweep() {
   const now = Date.now();
@@ -57,8 +62,16 @@ function listJobs(userId) {
   return [..._jobs.values()].filter(j => j.userId === String(userId)).sort((a, b) => b.startedAt - a.startedAt);
 }
 
+function _notify(job) {
+  const hook = _hooks.get(job.id);
+  if (!hook) return;
+  // A failing mirror must never take the import down with it.
+  try { hook(job); } catch (err) { logger.warn('Claim import progress not persisted', { jobId: job.id, error: err.message }); }
+}
+
 function _update(job, patch) {
   Object.assign(job, patch, { updatedAt: Date.now() });
+  _notify(job);
   return job;
 }
 
@@ -68,6 +81,7 @@ function _stage(job, stage, detail = {}) {
   job.stage = stage;
   Object.assign(job, detail);
   job.updatedAt = Date.now();
+  _notify(job);
   logger.info('Claim import stage', { jobId: job.id, userId: job.userId, stage, ...detail });
 }
 
@@ -75,9 +89,11 @@ function _stage(job, stage, detail = {}) {
 //
 // `deps` is injected so the whole flow can be tested without a model or a
 // database: everything slow or stateful arrives through it.
-function startImport({ userId, archives = [], forms = [], label = 'Expense claim' }, deps) {
+// `id` lets the caller name the job — the durable queue passes the id it already
+// wrote to disk so the two halves refer to the same thing.
+function startImport({ userId, archives = [], forms = [], label = 'Expense claim', id }, deps) {
   const job = {
-    id: crypto.randomBytes(9).toString('hex'),
+    id: id || crypto.randomBytes(9).toString('hex'),
     userId: String(userId),
     label,
     stage: 'queued',
@@ -91,12 +107,22 @@ function startImport({ userId, archives = [], forms = [], label = 'Expense claim
     cancelled: false,
   };
   _jobs.set(job.id, job);
+  if (deps.onUpdate) _hooks.set(job.id, deps.onUpdate);
 
   // Deliberately not awaited: the caller gets an id and polls.
-  _run(job, { archives, forms }, deps).catch(err => {
-    logger.error('Claim import failed', { jobId: job.id, error: err.message });
-    _update(job, { stage: 'failed', error: err.message });
-  });
+  _run(job, { archives, forms }, deps)
+    .catch(err => {
+      logger.error('Claim import failed', { jobId: job.id, error: err.message });
+      _update(job, { stage: 'failed', error: err.message });
+    })
+    // onSettle runs after the final _update, so whatever released the slot sees
+    // the finished job rather than the one before last.
+    .then(() => {
+      _hooks.delete(job.id);
+      if (deps.onSettle) {
+        try { deps.onSettle(job); } catch (err) { logger.warn('Claim import settle hook failed', { jobId: job.id, error: err.message }); }
+      }
+    });
 
   return job;
 }
@@ -196,6 +222,17 @@ async function _run(job, { archives, forms }, deps) {
   _stage(job, 'saving');
   const groupId = job.id;
   const created = [];
+  // Duplicates are counted as they are created rather than re-queried, because
+  // createRecord is the only place that knows what the store said.
+  const duplicates = [];
+  const suspected = [];
+  const note = rec => {
+    if (!rec) return;
+    created.push(rec.id);
+    if (rec.status === 'duplicate') duplicates.push({ id: rec.id, of: rec.duplicateOf, why: rec.errorMsg });
+    else if (rec.errorMsg && /^Possible duplicate/.test(rec.errorMsg)) suspected.push({ id: rec.id, why: rec.errorMsg });
+  };
+
   for (const m of matched.matches) {
     const suggestion = suggestions.find(s => s.rowNo === m.row.no) || null;
     const rec = await createRecord({
@@ -205,13 +242,13 @@ async function _run(job, { archives, forms }, deps) {
       categorySuggested: !m.row.category && !!suggestion,
       store: storeReceipt,
     });
-    if (rec) created.push(rec.id);
+    note(rec);
   }
   // Claim lines with no receipt still become records — they are part of the
   // claim and somebody has to resolve them.
   for (const row of matched.unmatchedRows) {
     const rec = await createRecord({ userId: job.userId, groupId, row, receipt: null, match: null, category: row.category || null, store: storeReceipt });
-    if (rec) created.push(rec.id);
+    note(rec);
   }
 
   // And a receipt with no claim line becomes one too. This was missing, and it
@@ -234,7 +271,7 @@ async function _run(job, { archives, forms }, deps) {
       },
       receipt, match: null, category: null, store: storeReceipt,
     });
-    if (rec) created.push(rec.id);
+    note(rec);
   }
 
   return _update(job, {
@@ -242,13 +279,23 @@ async function _run(job, { archives, forms }, deps) {
     result: {
       groupId,
       created,
-      summary: { ...matched.summary, unreadable: reads.filter(r => !r.readable).length, skippedFiles: skipped.length },
+      summary: {
+        ...matched.summary,
+        unreadable: reads.filter(r => !r.readable).length,
+        skippedFiles: skipped.length,
+        // Split on purpose: `duplicates` were marked and need no action,
+        // `suspected` are the ones a person still has to settle.
+        duplicates: duplicates.length,
+        suspectedDuplicates: suspected.length,
+      },
       discrepancies: matched.matches.filter(m => m.discrepancy).map(m => ({
         rowNo: m.row.no, date: m.row.date, description: m.row.description, ...m.discrepancy,
       })),
       missingReceipts: matched.unmatchedRows.map(r => ({ rowNo: r.no, date: r.date, description: r.description, amount: r.amount })),
       extraReceipts: matched.unmatchedReceipts.map(r => ({ file: r.file, merchant: r.merchant, total: r.total, date: r.date })),
       unreadable: reads.filter(r => !r.readable).map(r => ({ file: r.file })),
+      duplicates,
+      suspectedDuplicates: suspected,
       skipped,
       formErrors,
       categoriesSuggested: suggestions.length,
@@ -263,6 +310,6 @@ function cancel(jobId, userId) {
   return _update(job, { stage: job.stage === 'done' ? 'done' : 'cancelling' });
 }
 
-function _reset() { _jobs.clear(); }
+function _reset() { _jobs.clear(); _hooks.clear(); }
 
 module.exports = { startImport, getJob, listJobs, cancel, READ_INTERVAL_MS, BATCH_SIZE, MAX_RECEIPTS, _reset };

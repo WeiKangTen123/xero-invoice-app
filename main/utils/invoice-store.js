@@ -44,7 +44,7 @@ const FIELD_TO_COLUMN = {
   // and a single field would hide which one a row actually has.
   receiptFile: 'receipt_file', receiptMime: 'receipt_mime',
   receiptBox: 'receipt_box', receiptPage: 'receipt_page', receiptGroup: 'receipt_group',
-  receivedAt: 'received_at',
+  receivedAt: 'received_at', receiptHash: 'receipt_hash',
 };
 
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
@@ -102,6 +102,7 @@ function _rowToRecord(row, reports, lineItems) {
     receiptBox:        row.receipt_box,
     receiptPage:       row.receipt_page,
     receiptGroup:      row.receipt_group,
+    receiptHash:       row.receipt_hash,
     // When the document arrived. Falls back to processedAt for rows created
     // before this existed — approximate for those, exact from here on.
     receivedAt:        row.received_at || row.processed_at,
@@ -350,6 +351,16 @@ function forUser(userId) {
 
   // Split siblings share one stored file, so it may only be deleted once nothing
   // references it. A count answers that without loading anything.
+  // The same image, byte for byte. Duplicates and errors are excluded so a
+  // rejected earlier attempt does not block a genuine re-import.
+  function findByReceiptHash(hash) {
+    if (!hash) return null;
+    const row = db.prepare(
+      "SELECT * FROM invoices WHERE user_id = ? AND receipt_hash = ? AND status NOT IN ('duplicate', 'error') ORDER BY rowid ASC LIMIT 1"
+    ).get(userId, hash);
+    return _hydrate(row);
+  }
+
   function countByReceiptFile(filename) {
     if (!filename) return 0;
     return db.prepare('SELECT COUNT(*) AS n FROM invoices WHERE user_id = ? AND receipt_file = ?')
@@ -357,7 +368,7 @@ function forUser(userId) {
   }
 
   return { getAll, getById, add, update, addReport, getReported, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
-           count, getRecent, getReceiptGroup, countByReceiptFile };
+           count, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash };
 }
 
 module.exports = { forUser, FIELD_TO_COLUMN, _toBindable }; // exposed for the one-time JSON->SQLite importer
