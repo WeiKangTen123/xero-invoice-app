@@ -84,8 +84,34 @@ fi
 echo
 echo "Deploying"
 if [ -n "$DIRTY" ]; then
+  # `git checkout -- .` rather than a computed file list: the list has to survive
+  # three shell layers (local -> gcloud ssh -> bash -lc) and the quoting silently
+  # mangled, so the discard reported success and changed nothing. A deploy target
+  # should never carry local edits, so discarding all of them is both simpler and
+  # more correct than reconstructing which ones.
   info "discarding the server's local edits to tracked files"
-  remote "git checkout -- \$(git status --porcelain --untracked-files=no | awk '{print \$2}' | tr '\n' ' ')" >/dev/null || true
+  remote 'git checkout -- .' >/dev/null || true
+  STILL=$(remote 'git status --porcelain --untracked-files=no' || true)
+  [ -n "$STILL" ] && die "could not discard the server's local edits: $STILL"
+fi
+
+# Untracked files are NOT removed automatically. main/.env.bak lives there, and a
+# deploy script that deletes untracked files on a production box is one bad glob
+# away from taking the environment with it. Report and stop instead.
+UNTRACKED_BLOCKERS=$(remote 'git fetch -q origin 2>/dev/null; git diff --name-only HEAD origin/master 2>/dev/null' || true)
+if [ -n "$UNTRACKED_BLOCKERS" ]; then
+  CLASH=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if remote "test -f '$f' && git ls-files --error-unmatch '$f' >/dev/null 2>&1 || echo MISSING" | grep -q MISSING; then
+      remote "test -f '$f' && echo UNTRACKED" | grep -q UNTRACKED && CLASH="$CLASH $f"
+    fi
+  done <<< "$UNTRACKED_BLOCKERS"
+  if [ -n "$CLASH" ]; then
+    red "  ✗ untracked files on the server are in the way of the incoming commit:"
+    for f in $CLASH; do info "      $f"; done
+    die "remove them on the server, then run again"
+  fi
 fi
 
 PULL=$(remote 'git pull --ff-only origin master 2>&1 | tail -3' || true)
