@@ -8,6 +8,10 @@ export function PipelineProvider({ children }) {
   const statusRef = useRef(null);
 
   const refresh = useCallback(async () => {
+    // Only poll when authenticated; avoid triggering 401s on public routes like /capture/:token
+    if (!localStorage.getItem('token') || window.location.pathname.startsWith('/capture')) {
+      return null;
+    }
     try {
       const s = await api.get('/process/status');
       setStatus(s);

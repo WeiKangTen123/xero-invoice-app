@@ -269,12 +269,23 @@ router.patch('/:id/status', requireAuth, async (req, res, next) => {
     const inv = invoiceStore.forUser(req.user.id).getById(req.params.id);
     if (!inv) return res.status(404).json({ error: 'Invoice not found' });
 
-    const LOCKED = new Set(['posted', 'duplicate']);
+    const LOCKED = new Set(['posted']);
     if (LOCKED.has(inv.status)) {
       return res.status(409).json({ error: `Cannot change status of a "${inv.status}" invoice` });
     }
+    if (inv.status === 'duplicate' && !req.body.force) {
+      return res.status(409).json({ error: 'This invoice is marked as a duplicate. Confirm to keep it anyway.' });
+    }
 
-    const updated = await invoiceStore.forUser(req.user.id).update(req.params.id, { status });
+    const patch = { status };
+    if (inv.status === 'duplicate' || req.body.force || req.body.clearDuplicate) {
+      patch.duplicateOf = null;
+      if (inv.errorMsg && /duplicate/i.test(inv.errorMsg)) {
+        patch.errorMsg = null;
+      }
+    }
+
+    const updated = await invoiceStore.forUser(req.user.id).update(req.params.id, patch);
     res.json({ success: true, invoice: updated });
   } catch (err) { next(err); }
 });

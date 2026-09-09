@@ -44,6 +44,25 @@ function run() {
   // exact signal where vendor-and-amount is only a guess.
   _ensureColumn('invoices', 'receipt_hash', 'receipt_hash TEXT');
 
+  // Backfill receipt_hash for any existing records where receipt_file exists on disk
+  try {
+    const unhashed = db.prepare("SELECT id, user_id, receipt_file FROM invoices WHERE receipt_file IS NOT NULL AND (receipt_hash IS NULL OR receipt_hash = '')").all();
+    if (unhashed.length > 0) {
+      const crypto = require('crypto');
+      const hashStmt = db.prepare('UPDATE invoices SET receipt_hash = ? WHERE id = ?');
+      for (const r of unhashed) {
+        const p = path.join(__dirname, '../data/users', String(r.user_id), 'receipts', r.receipt_file);
+        if (fs.existsSync(p)) {
+          const buf = fs.readFileSync(p);
+          const h = crypto.createHash('sha256').update(buf).digest('hex');
+          hashStmt.run(h, r.id);
+        }
+      }
+    }
+  } catch (err) {
+    require('../utils/logger').warn('receipt_hash backfill skipped', { error: err.message });
+  }
+
   // Rebuilds user_settings so a NEW account starts with auto-submit off.
   // Idempotent and value-preserving — see the migration for why.
   try {

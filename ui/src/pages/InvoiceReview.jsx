@@ -691,8 +691,62 @@ export default function InvoiceReview() {
           </div>
         )}
 
-        {/* Parsing / general warning error (when not a standard discrepancy) */}
-        {!discrepancyMatch && inv.errorMsg && !submitErr && (
+        {/* Dedicated Duplicate Receipt Detected Banner */}
+        {(inv.status === 'duplicate' || inv.duplicateOf || (inv.errorMsg && /duplicate/i.test(inv.errorMsg))) && (
+          <div className="alert" style={{ marginBottom: 14, background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: 12, padding: '14px 18px' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <span style={{ fontSize: 24, lineHeight: 1 }}>⚠</span>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--danger)' }}>
+                    Duplicate Receipt Detected
+                  </div>
+                  <div style={{ fontSize: 12.5, color: 'var(--text-primary)', marginTop: 4, lineHeight: 1.5 }}>
+                    {inv.errorMsg || 'This claim matches an existing receipt already in your system.'}
+                  </div>
+                  {inv.duplicateOf && (
+                    <div style={{ marginTop: 8 }}>
+                      <button
+                        className="btn btn-outline btn-sm"
+                        onClick={() => navigate(`/invoices/${inv.duplicateOf}`)}
+                        style={{ padding: '4px 10px', fontSize: 11.5, background: 'var(--bg-card)' }}
+                      >
+                        View Original Receipt (#{inv.duplicateOf.slice(-6)}) →
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginLeft: 'auto' }}>
+                {(inv.status === 'duplicate' || inv.duplicateOf) && (
+                  <button
+                    className="btn btn-outline btn-sm"
+                    onClick={async () => {
+                      if (!confirm('Keep this receipt as a separate expense and mark it for review?')) return;
+                      try {
+                        await api.patch(`/invoices/${id}/status`, { status: 'review-needed', force: true, clearDuplicate: true });
+                        fetchInvoice();
+                      } catch (err) { alert(err.message); }
+                    }}
+                    style={{ fontSize: 12 }}
+                  >
+                    Keep Anyway (Not a duplicate)
+                  </button>
+                )}
+                <button
+                  className="btn btn-sm"
+                  onClick={() => setShowDeleteModal(true)}
+                  style={{ fontSize: 12, background: 'var(--danger)', color: '#fff', border: 'none' }}
+                >
+                  🗑 Delete Duplicate
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Parsing / general warning error (when not a standard discrepancy and not duplicate) */}
+        {!discrepancyMatch && inv.errorMsg && !submitErr && !(/duplicate/i.test(inv.errorMsg)) && (
           <div className="alert alert-warning" style={{ marginBottom: 12 }}>
             <span className="alert-icon">⚠</span>
             <div>

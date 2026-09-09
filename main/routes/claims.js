@@ -74,11 +74,12 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
   // A discrepancy is recorded on the row so it survives the job expiring. A
   // suspected duplicate is recorded the same way, and takes precedence: it is
   // the more urgent of the two things to look at.
+  const matchRef = dup ? (dup.match.invoiceNumber || dup.match.id) : null;
   const note =
     dup && !dup.certain
-      ? `Possible duplicate of ${dup.match.id} — ${dup.reason}. Check before approving.`
+      ? `Possible duplicate of ${matchRef} — ${dup.reason}. Check before approving.`
     : dup
-      ? `Already imported — ${dup.reason} as ${dup.match.id}`
+      ? `Duplicate of ${matchRef} — ${dup.reason}`
     : match && match.discrepancy
       ? `Claimed ${match.discrepancy.claimed} but the receipt says ${match.discrepancy.onReceipt}`
       // A receipt with no claim line is not an error — it is simply a claim that
@@ -94,10 +95,10 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
 
   return invStore.add({
     id,
-    // Only an exact image match is auto-marked. A fields match is a suspicion,
-    // and 'duplicate' is a locked status — see claim-dedup.js.
+    // Exact image match is auto-marked 'duplicate'. Field match stays 'review-needed'
+    // with duplicateOf linked so the reviewer can see and settle it.
     status: dup && dup.certain ? 'duplicate' : 'review-needed',
-    duplicateOf: dup && dup.certain ? dup.match.id : null,
+    duplicateOf: dup ? dup.match.id : null,
     invoiceType: 'EXPENSE',
     source: 'claim',
     invoiceNumber: claimNum,

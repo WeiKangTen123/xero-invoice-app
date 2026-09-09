@@ -14,7 +14,7 @@ const STATUS_MAP = {
   reviewed:       { cls: 'badge-blue',   label: '● Ready to Post' },
   reported:       { cls: 'badge-red',    label: '⚠ Reported' },
   error:          { cls: 'badge-red',    label: '✕ Error' },
-  duplicate:      { cls: 'badge-gray',   label: 'Duplicate' },
+  duplicate:      { cls: 'badge-purple', label: '⚠ Duplicate' },
   'review-needed': { cls: 'badge-yellow', label: '⚠ Needs Review' },
 };
 
@@ -269,6 +269,8 @@ export default function Invoices() {
   const filtered = invoices.filter(inv => {
     if (statusFilter === 'needs-action') {
       if (!['review-needed', 'error'].includes(inv.status)) return false;
+    } else if (statusFilter === 'duplicate') {
+      if (inv.status !== 'duplicate' && !inv.duplicateOf && !(inv.errorMsg && /duplicate/i.test(inv.errorMsg))) return false;
     } else if (statusFilter !== 'all' && inv.status !== statusFilter) {
       return false;
     }
@@ -350,6 +352,7 @@ export default function Invoices() {
   const reviewed    = invoices.filter(i => i.status === 'reviewed').length;
   const reported    = invoices.filter(i => i.status === 'reported').length;
   const needsAction = invoices.filter(i => ['review-needed', 'error'].includes(i.status)).length;
+  const duplicates  = invoices.filter(i => i.status === 'duplicate' || i.duplicateOf || (i.errorMsg && /duplicate/i.test(i.errorMsg))).length;
 
   return (
     <div>
@@ -526,6 +529,7 @@ export default function Invoices() {
           { key: 'reviewed',     label: '● Ready to Post',  count: reviewed },
           { key: 'pending',      label: 'Pending',          count: pending },
           { key: 'needs-action', label: '⚠ Needs Review',   count: needsAction },
+          ...(duplicates > 0 ? [{ key: 'duplicate', label: '⚠ Duplicate', count: duplicates }] : []),
           { key: 'reported',     label: 'Reported',         count: reported },
         ].map(t => (
           <FilterPill key={t.key} active={statusFilter === t.key} onClick={() => setStatusFilter(t.key)} label={t.label} count={t.count} />
@@ -685,6 +689,7 @@ export default function Invoices() {
                   const isSelected    = selected.has(inv.id);
                   const isDeleting    = deleting.has(inv.id);
                   const needsAttention = ['review-needed', 'error'].includes(inv.status);
+                  const isDup         = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
                   return (
                     <tr
                       key={inv.id}
@@ -693,7 +698,7 @@ export default function Invoices() {
                         animation: `fadeUp 0.2s ease ${i * 25}ms both`,
                         background: isSelected
                           ? 'var(--accent-subtle)'
-                          : needsAttention ? 'rgba(245,158,11,0.04)' : undefined,
+                          : isDup ? 'rgba(239,68,68,0.04)' : needsAttention ? 'rgba(245,158,11,0.04)' : undefined,
                         opacity: isDeleting ? 0.4 : 1,
                         transition: 'background 0.15s, opacity 0.2s',
                       }}
@@ -711,15 +716,20 @@ export default function Invoices() {
                         <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
                           <div style={{
                             width: 28, height: 28, borderRadius: 7, flexShrink: 0,
-                            background: needsAttention ? 'rgba(245,158,11,0.12)' : 'var(--accent-subtle)',
+                            background: isDup ? 'rgba(239,68,68,0.12)' : needsAttention ? 'rgba(245,158,11,0.12)' : 'var(--accent-subtle)',
                             display: 'flex', alignItems: 'center', justifyContent: 'center',
                             fontSize: 11, fontWeight: 700,
-                            color: needsAttention ? 'var(--warning)' : 'var(--accent)',
+                            color: isDup ? 'var(--danger)' : needsAttention ? 'var(--warning)' : 'var(--accent)',
                           }}>
-                            {(inv.vendorName || '?').slice(0, 2).toUpperCase()}
+                            {isDup ? '⚠' : (inv.vendorName || '?').slice(0, 2).toUpperCase()}
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                             <span style={{ fontWeight: 500 }}>{inv.vendorName || '—'}</span>
+                            {isDup && (
+                              <span style={{ fontSize: 10.5, color: 'var(--danger)', fontWeight: 600, marginTop: 1 }}>
+                                ↳ ⚠ Duplicate {inv.duplicateOf ? `of #${inv.duplicateOf.slice(-6)}` : 'detected'}
+                              </span>
+                            )}
                             {inv.description && inv.description !== inv.vendorName && (
                               <span style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={inv.description}>
                                 {inv.description}
@@ -767,23 +777,35 @@ export default function Invoices() {
                             ? <span className="badge badge-green">📄 PDF</span>
                             : <span className="badge badge-gray">✉ Email</span>}
                       </td>
-                      <td><span className={`badge ${cls}`}>{label}</span></td>
+                      <td>
+                        {isDup && inv.status !== 'duplicate' ? (
+                          <span className="badge badge-purple" title={inv.errorMsg || 'Possible duplicate'}>
+                            ⚠ Suspected Dup
+                          </span>
+                        ) : (
+                          <span className={`badge ${cls}`}>{label}</span>
+                        )}
+                      </td>
                       <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
                         <div style={{ display: 'flex', gap: 6 }}>
                           <button
                             className="btn btn-outline btn-sm"
                             onClick={() => navigate(`/invoices/${inv.id}`)}
-                            style={inv.status === 'reviewed'
-                              ? { background: 'var(--info-subtle)', color: 'var(--info)', borderColor: 'rgba(59,130,246,0.3)' }
-                              : undefined}
-                          >
-                            {needsAttention
-                              ? 'Fix & Post →'
+                            style={isDup
+                              ? { background: 'rgba(239,68,68,0.08)', color: 'var(--danger)', borderColor: 'rgba(239,68,68,0.3)' }
                               : inv.status === 'reviewed'
-                                ? 'Post to Xero →'
-                                : inv.status === 'posted' || inv.status === 'duplicate'
-                                  ? 'View →'
-                                  : 'Review →'}
+                                ? { background: 'var(--info-subtle)', color: 'var(--info)', borderColor: 'rgba(59,130,246,0.3)' }
+                                : undefined}
+                          >
+                            {inv.status === 'duplicate' || isDup
+                              ? 'Review Duplicate →'
+                              : inv.status === 'review-needed' || inv.status === 'error'
+                                ? 'Fix & Post →'
+                                : inv.status === 'reviewed'
+                                  ? 'Post to Xero →'
+                                  : inv.status === 'posted'
+                                    ? 'View →'
+                                    : 'Review →'}
                           </button>
                           <button
                             className="btn btn-sm"
