@@ -290,10 +290,10 @@ function _batchPrompt(count) {
   return `You are reading ${count} SEPARATE receipts. They are unrelated to each other.
 
 Return ONLY a JSON array with exactly ${count} entries, one per image, in the order given:
-[{"index": 1, "merchant": ..., "date": ..., "currency": ..., "total": ..., "tax": ..., "subTotal": ..., "description": ..., "confidence": ...}]
+[{"index": 1, "merchant": ..., "date": ..., "time": ..., "category": ..., "currency": ..., "total": ..., "tax": ..., "subTotal": ..., "description": ..., "lineItems": [...], "confidence": ...}]
 
 "index" is the image's position, starting at 1. Every image must appear exactly once.
-Apply the field rules to each receipt independently — never carry a figure from one receipt to another.`;
+Apply the field rules and corporate description formatting from the system prompt to each receipt independently — never carry a figure from one receipt to another.`;
 }
 
 // Reads a batch. Returns an array the same length as `images`, with null where a
@@ -308,7 +308,7 @@ async function _readBatch(userId, images) {
   const raw = await callGemini(userId, [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content },
-  ], { temperature: 0, maxTokens: 400 * images.length });
+  ], { temperature: 0, maxTokens: Math.max(4000, 800 * images.length) });
 
   const parsed = parseLlmJson(raw);
   const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.receipts) ? parsed.receipts : null);

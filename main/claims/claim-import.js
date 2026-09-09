@@ -195,7 +195,7 @@ async function _run(job, { archives, forms }, deps) {
       const r = parsed && parsed[i];
       // A receipt that cannot be read still takes part: it is stored, and it is
       // reported as unreadable rather than silently dropped.
-      reads.push({ ...(r || { merchant: null, date: null, total: null, currency: null }),
+      reads.push({ ...(r || { merchant: null, date: null, time: null, category: null, total: null, currency: null, description: null }),
                    file: e.name, mime: e.mime, buffer: e.buffer, readable: !!r });
     });
     _update(job, { receiptsRead: Math.min(start + slice.length, entries.length) });
@@ -264,12 +264,12 @@ async function _run(job, { archives, forms }, deps) {
       row: {
         no: null,
         date: receipt.date || null,
-        description: receipt.merchant || (receipt.file ? receipt.file.split('/').pop() : null),
+        description: receipt.description || receipt.merchant || (receipt.file ? receipt.file.split('/').pop() : null),
         currency: receipt.currency || null,
         amount: receipt.total ?? null,
-        category: null,
+        category: receipt.category || null,
       },
-      receipt, match: null, category: null, store: storeReceipt,
+      receipt, match: null, category: receipt.category || null, store: storeReceipt,
     });
     note(rec);
   }
@@ -281,6 +281,7 @@ async function _run(job, { archives, forms }, deps) {
       created,
       summary: {
         ...matched.summary,
+        total: created.length || matched.summary.total,
         unreadable: reads.filter(r => !r.readable).length,
         skippedFiles: skipped.length,
         // Split on purpose: `duplicates` were marked and need no action,
