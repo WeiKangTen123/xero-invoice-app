@@ -111,6 +111,7 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
     totalAmount: row.amount ?? (receipt && receipt.total) ?? null,
     subTotal:    receipt && receipt.subTotal != null ? receipt.subTotal : null,
     taxAmount:   receipt && receipt.tax != null ? receipt.tax : null,
+    lineItems:   (receipt && Array.isArray(receipt.lineItems) && receipt.lineItems.length) ? receipt.lineItems : [],
     description: [row.description, category ? `[${category}]` : null].filter(Boolean).join(' ').slice(0, 200) || null,
     receiptFile: storedName,
     receiptMime: mime,

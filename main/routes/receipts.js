@@ -175,6 +175,7 @@ function _applyFields(userId, id, r, extra = {}) {
     taxAmount:   r.tax         ?? undefined,
     subTotal:    r.subTotal    ?? undefined,
     description: r.description ?? undefined,
+    lineItems:   Array.isArray(r.lineItems) && r.lineItems.length ? r.lineItems : undefined,
     ...extra,
   });
 }
@@ -520,11 +521,13 @@ router.post('/:id/reread', requireAuth, async (req, res) => {
     const updated = store.update(req.params.id, {
       vendorName:  chosen.merchant    ?? undefined,
       invoiceDate: chosen.date        ?? undefined,
+      dueDate:     chosen.date        ?? undefined,
       currency:    chosen.currency    ?? undefined,
       totalAmount: chosen.total       ?? undefined,
       taxAmount:   chosen.tax         ?? undefined,
       subTotal:    chosen.subTotal    ?? undefined,
       description: chosen.description ?? undefined,
+      lineItems:   Array.isArray(chosen.lineItems) && chosen.lineItems.length ? chosen.lineItems : undefined,
     });
 
     logger.info('Receipt re-read', { userId: req.user.id, id: req.params.id, confidence: chosen.confidence, found: parsed.receipts.length });

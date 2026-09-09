@@ -13,7 +13,23 @@ beforeEach(() => jest.clearAllMocks());
 describe('utils/receipt-parser', () => {
   describe('normalise — where a bad model response is made harmless', () => {
     test('passes a clean response through', () => {
-      expect(parser.normalise(good)).toEqual({ ...good, box: null });
+      expect(parser.normalise(good)).toEqual({ ...good, lineItems: [], box: null });
+    });
+
+    test('normalises line items and their prices correctly', () => {
+      const withItems = {
+        ...good,
+        lineItems: [
+          { description: 'Burger', unitAmount: '12.50', quantity: 2 },
+          { description: 'Fries', unitAmount: 4.5, discountRate: 10 },
+          { invalid: true },
+        ],
+      };
+      const res = parser.normalise(withItems);
+      expect(res.lineItems).toEqual([
+        { description: 'Burger', unitAmount: 12.5, discountRate: 0 },
+        { description: 'Fries', unitAmount: 4.5, discountRate: 10 },
+      ]);
     });
 
     test('rejects a non-object outright', () => {

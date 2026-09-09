@@ -34,6 +34,15 @@ Per receipt, extract:
 - tax: the GST/VAT/service-tax amount as a plain number, only if the receipt states it separately. null if not shown. 0 if the receipt says no tax applies.
 - subTotal: the pre-tax amount as a plain number, only if explicitly printed. null otherwise.
 - description: a short phrase describing what was bought, at most 60 characters.
+- lineItems: array of each individual item or service listed on the receipt with its price:
+    [
+      {
+        "description": "item description or dish name",
+        "unitAmount": item price as a plain number (e.g. 12.50),
+        "quantity": item quantity if shown (e.g. 1, 2), default 1,
+        "discountRate": discount percent if shown, default 0
+      }
+    ]
 - confidence: "high" if the total and merchant are clearly legible, "low" if the photo is blurred, cropped, or you are guessing any of them.
 
 Rules:
@@ -85,6 +94,24 @@ function normalise(parsed) {
   // total tells the user nothing. Both are treated as "not read".
   const usableTotal = total !== null && total > 0 ? total : null;
 
+  const lineItems = Array.isArray(parsed.lineItems)
+    ? parsed.lineItems
+        .map(li => {
+          if (!li || typeof li !== 'object') return null;
+          const desc = typeof li.description === 'string' && li.description.trim()
+            ? li.description.trim().slice(0, 200)
+            : (typeof li.name === 'string' && li.name.trim() ? li.name.trim().slice(0, 200) : null);
+          const price = _num(li.unitAmount ?? li.price ?? li.amount ?? li.total);
+          if (!desc && price === null) return null;
+          return {
+            description:  desc || 'Item',
+            unitAmount:   price !== null && price >= 0 ? price : 0,
+            discountRate: typeof li.discountRate === 'number' && li.discountRate >= 0 ? li.discountRate : 0,
+          };
+        })
+        .filter(Boolean)
+    : [];
+
   return {
     merchant:    typeof parsed.merchant === 'string' && parsed.merchant.trim() ? parsed.merchant.trim().slice(0, 120) : null,
     date:        _isoDate(parsed.date),
@@ -95,6 +122,7 @@ function normalise(parsed) {
     tax:         tax !== null && tax >= 0 && (usableTotal === null || tax <= usableTotal) ? tax : null,
     subTotal:    sub !== null && sub >= 0 && (usableTotal === null || sub <= usableTotal) ? sub : null,
     description: typeof parsed.description === 'string' && parsed.description.trim() ? parsed.description.trim().slice(0, 200) : null,
+    lineItems,
     confidence:  parsed.confidence === 'high' ? 'high' : 'low',
     box:         _box(parsed.box_2d),
   };
