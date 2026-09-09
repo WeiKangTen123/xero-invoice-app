@@ -211,7 +211,7 @@ async function parseReceiptImage(userId, buffer, mime, { maxAttempts = 2 } = {})
 // that number back, and a reply whose count does not match the batch is
 // DISCARDED and the batch re-read one at a time. Faster when it works, exactly
 // as accurate as before when it does not.
-const BATCH_SIZE = 4;
+const BATCH_SIZE = 5;
 
 function _batchPrompt(count) {
   return `You are reading ${count} SEPARATE receipts. They are unrelated to each other.
