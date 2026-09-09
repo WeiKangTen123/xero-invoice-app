@@ -19,9 +19,21 @@ const { suggestCategories } = require('./claim-categories');
 // between reads keeps a large claim inside that without the caller having to
 // think about it.
 const READ_INTERVAL_MS = 4000;
-// How many receipts go into one model call. Four keeps the reply small enough
-// to stay reliable while cutting a nine-receipt claim from nine calls to three.
-const BATCH_SIZE = 4;
+// How many receipts go into one model call.
+//
+// Measured on a real nine-receipt claim: batch sizes of 1, 3, 5 and 9 all
+// returned 9/9 amounts correctly, and 3, 5 and 9 took the same wall time. So
+// accuracy did not decide this — failure cost did.
+//
+// A batch whose reply cannot be attributed is discarded and re-read one at a
+// time. At 9 that means one bad reply costs ten calls and the whole claim falls
+// back; at 5 it costs six and the other half is already done. Five turns nine
+// receipts into two calls, which is as few as is worth having.
+//
+// The evidence has a limit worth stating: those nine were homogeneous
+// screenshots. A batch mixing a faint thermal roll, a PDF and an angled photo is
+// a harder ask and has not been measured.
+const BATCH_SIZE = 5;
 const MAX_RECEIPTS = 100;
 const JOB_TTL_MS = 60 * 60 * 1000;   // an hour is long enough to read the result
 
