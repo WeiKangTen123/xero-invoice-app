@@ -31,6 +31,7 @@ Per-user claims queue & worker (main/claims/)
   └── Automatic recovery across server reboots (recoverPendingJobs)
   └── Tier 1 SHA-256 image dedup + Tier 2 vendor/date/amount suspicion flags
   └── Reconciles form items against receipts; zero writes to Xero (local review only)
+  └── Intelligent corporate description synthesis (time-of-day, route, category detection)
 
 Per-user file storage
   data/users/{userId}/invoices.json      — invoice history
@@ -256,6 +257,76 @@ Duplicate protection: invoices are matched on vendor + invoice number + amount (
 ## Pending invoices and bulk Xero submission
 
 If invoices are stuck in **Pending** status (e.g. after a server restart that killed the in-memory submission chain, or a temporary Xero outage), the Invoices page shows a banner with a **Submit all to Xero** button. This fires `POST /api/invoices/submit-all` which submits each pending invoice sequentially (1.5 s gap between calls to stay inside Xero's rate limit). The atomic `claimForSubmit` lock ensures a concurrent boot-time retry cannot double-post the same invoice.
+
+---
+
+## Expense Claims
+
+The app supports a full expense claim workflow — staff submit receipts via ZIP/folder batch import, direct add, or phone camera, and managers review them before posting to Xero.
+
+### Ingestion pathways
+
+| Method | How | Description generated |
+|---|---|---|
+| **Batch import** (ZIP/folder) | Invoices → Import Claims → drag ZIP | AI reads each receipt + synthesises corporate description |
+| **Add Claim** (manual) | Invoices → Add Claim → upload photo | AI reads receipt, applies intelligent description |
+| **Phone capture** | Mobile browser → take photo → submit | Same AI pipeline; receipt processed server-side |
+
+All three pathways use the same **intelligent corporate description** logic — see [`docs/CLAIM_INTELLIGENCE_GUIDELINES.md`](docs/CLAIM_INTELLIGENCE_GUIDELINES.md).
+
+### Intelligent corporate descriptions
+
+The AI synthesises a description that meets corporate finance & tax requirements (IRAS/LHDN/HMRC):
+
+```
+[Category] <Business Purpose> @ <Merchant> (<Time / Route>)
+```
+
+Examples:
+- `[Entertainment/Meals] Business working lunch with client @ Dong Seoul (12:01 PM, Johor)`
+- `[Local Travel] Business transit to client meeting: Home to Apple (CDG Zig, 08:08)`
+- `[Local Travel] Late-night event commute: Esplanade to Home (Gojek, 20:09)`
+- `[Staff Overtime Meal] Overtime dinner while working late @ GrabFood (21:15)`
+
+The time-of-day matrix, route extraction, and category rules are defined in [`docs/CLAIM_INTELLIGENCE_GUIDELINES.md`](docs/CLAIM_INTELLIGENCE_GUIDELINES.md).
+
+### Batch fast-review navigation
+
+When you open any claim from a batch import, a **📁 Batch navigation bar** appears at the bottom of the receipt image:
+
+| Control | Action |
+|---|---|
+| **← Prev / Next →** buttons | Step between claims in the same folder/ZIP — instant SPA navigation, no page reload |
+| **← → keyboard arrows** | Same as buttons; works anywhere on the page (disabled in text inputs) |
+| **Pill filmstrip** | All claims shown as pills; current = blue, reviewed/posted = green ✓, pending = grey |
+| **✓ Approve & Next** | Marks the current claim as reviewed and jumps to the next **unreviewed** claim automatically |
+| **Merge button hidden** | Destructive "Merge back into one" is only shown for genuine single-photo splits, never for batch imports |
+
+The batch panel also shows the **folder/ZIP name** so you always know which batch you are reviewing.
+
+### Claim import — how the count works
+
+The import summary counts **receipts actually parsed**, not rows in an Excel form. If you upload a ZIP with 9 receipts and no spreadsheet attached, the system shows "9 claims imported" (not 0). Each receipt with no matching spreadsheet row is created with the AI-generated description as the claim description.
+
+### Expense claim deduplication
+
+Claims are deduplicated on two tiers:
+
+1. **Tier 1 — SHA-256 image hash**: identical files are blocked immediately.
+2. **Tier 2 — Suspicion flags**: same vendor + date + amount within 1% triggers a warning (stored as a possible duplicate, not silently dropped).
+
+### Claim API endpoints
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/claims/import` | JWT | Start a batch import job (multipart: ZIP + optional XLSX) |
+| GET | `/api/claims/jobs` | JWT | List all import jobs for this user |
+| GET | `/api/claims/jobs/:jobId` | JWT | Poll a specific import job for progress |
+| DELETE | `/api/claims/jobs/:jobId` | JWT | Cancel / delete a job |
+| GET | `/api/receipts/:id/group` | JWT | Returns siblings, `groupType` (`batch`/`split`), `batchLabel`, and `index/total` |
+| GET | `/api/receipts/:id/token` | JWT | Short-lived signed URL token for receipt image |
+| POST | `/api/receipts/:id/reread` | JWT | Re-run AI on this receipt (costs 1 LLM call) |
+| POST | `/api/receipts/:id/merge` | JWT | Undo a genuine photo split (not available for batch imports) |
 
 ---
 

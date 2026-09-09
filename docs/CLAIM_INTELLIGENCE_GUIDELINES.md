@@ -2,6 +2,8 @@
 
 This document specifies the rules, business justifications, and heuristic logic used by the AI to extract, classify, and format corporate expense claims for accounting in Xero.
 
+> **Implementation note**: This logic is automatically applied server-side across all three ingestion pathways (batch ZIP import, Add Claim manual upload, phone camera capture) via `main/claims/claim-import.js` and `main/routes/receipts.js`. No manual input is required from the user — the AI generates a compliant description from each receipt automatically.
+
 ---
 
 ## 1. Core Principle: Business Justification First
