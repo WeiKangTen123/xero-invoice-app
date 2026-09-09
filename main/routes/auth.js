@@ -1,21 +1,32 @@
 const express = require('express');
 const router  = express.Router();
 const jwt     = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const { hasUsers, createUser, validatePassword, getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
 const logger  = require('../utils/logger');
+
+// Strict rate limiter for authentication endpoints: max 10 attempts per 15 minutes per IP
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: process.env.NODE_ENV === 'test' ? 1000 : 10,
+  keyGenerator: req => req.ip,
+  message: { error: 'Too many login or registration attempts from this IP. Please try again in 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Check if any users have been created yet (frontend uses this to show Register vs Login)
 router.get('/status', (_req, res) => {
   res.json({ hasUsers: hasUsers() });
 });
 
-// Self-registration — open to anyone, no auth required.
+// Self-registration — open to anyone by default, or restricted when ALLOW_REGISTRATION=false.
 // First person to register becomes admin automatically.
 // All subsequent registrations get the 'user' role.
 // Admins can promote users via POST /api/admin/users.
 // Returns a JWT immediately so the user lands on Setup without a second login step.
-router.post('/register', async (req, res) => {
+router.post('/register', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -23,6 +34,10 @@ router.post('/register', async (req, res) => {
     }
     if (password.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    if (process.env.ALLOW_REGISTRATION === 'false' && hasUsers()) {
+      return res.status(403).json({ error: 'Public registration is disabled. Contact your administrator.' });
     }
 
     const user  = await createUser(email, password, 'auto');
@@ -39,7 +54,7 @@ router.post('/register', async (req, res) => {
 });
 
 // Login
-router.post('/login', async (req, res) => {
+router.post('/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {

@@ -135,11 +135,12 @@ app.use((err, _req, res, _next) => {
 // catches the ones nobody ever came back to. See email/idle-sweeper.js.
 require('./email/idle-sweeper').start();
 
-const server = app.listen(PORT, '0.0.0.0', () => {
+const HOST = process.env.HOST || (PROD ? '127.0.0.1' : '0.0.0.0');
+const server = app.listen(PORT, HOST, () => {
   console.log('===========================================');
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on ${HOST}:${PORT}`);
   console.log('===========================================');
-  logger.info(`Server running on port ${PORT} [${process.env.NODE_ENV || 'development'}]`);
+  logger.info(`Server running on ${HOST}:${PORT} [${process.env.NODE_ENV || 'development'}]`);
 
   // Ensure every registered user has a data directory and config.json.
   // Safe no-op for users that already have directories.
