@@ -199,4 +199,92 @@ async function parseReceiptImage(userId, buffer, mime, { maxAttempts = 2 } = {})
   return null;
 }
 
-module.exports = { parseReceiptImage, normalise, normaliseMany, splittable, SYSTEM_PROMPT, _num, _isoDate, _currency, _box, _overlapFraction };
+
+// ── Reading several receipts in one call ────────────────────────────────────
+//
+// One call per receipt means a nine-receipt claim is nine round trips, each
+// throttled to stay inside the per-minute quota — minutes of waiting for work
+// the model could do together. Batching sends several images in one request.
+//
+// The risk is attribution: the model returning the right figures against the
+// wrong image. So each image is numbered in the prompt, the reply must carry
+// that number back, and a reply whose count does not match the batch is
+// DISCARDED and the batch re-read one at a time. Faster when it works, exactly
+// as accurate as before when it does not.
+const BATCH_SIZE = 4;
+
+function _batchPrompt(count) {
+  return `You are reading ${count} SEPARATE receipts. They are unrelated to each other.
+
+Return ONLY a JSON array with exactly ${count} entries, one per image, in the order given:
+[{"index": 1, "merchant": ..., "date": ..., "currency": ..., "total": ..., "tax": ..., "subTotal": ..., "description": ..., "confidence": ...}]
+
+"index" is the image's position, starting at 1. Every image must appear exactly once.
+Apply the field rules to each receipt independently — never carry a figure from one receipt to another.`;
+}
+
+// Reads a batch. Returns an array the same length as `images`, with null where a
+// receipt could not be read, or null overall if the reply cannot be trusted.
+async function _readBatch(userId, images) {
+  const content = [{ type: 'text', text: _batchPrompt(images.length) }];
+  images.forEach((img, i) => {
+    content.push({ type: 'text', text: `Receipt ${i + 1}:` });
+    content.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.buffer.toString('base64')}` } });
+  });
+
+  const raw = await callGemini(userId, [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content },
+  ], { temperature: 0, maxTokens: 400 * images.length });
+
+  const parsed = parseLlmJson(raw);
+  const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.receipts) ? parsed.receipts : null);
+  // A reply that does not account for every image cannot be attributed safely.
+  if (!list || list.length !== images.length) return null;
+
+  const out = new Array(images.length).fill(null);
+  for (const item of list) {
+    const idx = Number(item && item.index);
+    // Fall back to position when the model omits the index, but never overwrite.
+    const at = Number.isInteger(idx) && idx >= 1 && idx <= images.length ? idx - 1 : list.indexOf(item);
+    if (at < 0 || at >= images.length || out[at]) continue;
+    out[at] = normalise(item);
+  }
+  return out.some(x => x) ? out : null;
+}
+
+// Reads many receipts, batching where it can and falling back per-image where it
+// cannot. `onProgress(doneCount)` fires as results land so a job can report it.
+async function parseReceiptBatch(userId, images, { batchSize = BATCH_SIZE, onProgress } = {}) {
+  const results = new Array(images.length).fill(null);
+  let done = 0;
+
+  for (let start = 0; start < images.length; start += batchSize) {
+    const slice = images.slice(start, start + batchSize);
+
+    let batch = null;
+    if (slice.length > 1) {
+      try { batch = await _readBatch(userId, slice); }
+      catch (err) { logger.warn('Receipt batch failed, falling back to one at a time', { userId, size: slice.length, error: err.message }); }
+    }
+
+    if (batch) {
+      batch.forEach((r, i) => { results[start + i] = r; });
+      done += slice.length;
+      onProgress && onProgress(done);
+      continue;
+    }
+
+    // Either a single image, or a batch whose reply could not be trusted.
+    for (let i = 0; i < slice.length; i++) {
+      const single = await parseReceiptImage(userId, slice[i].buffer, slice[i].mime);
+      results[start + i] = single && single.receipts ? single.receipts[0] : null;
+      done++;
+      onProgress && onProgress(done);
+    }
+  }
+
+  return results;
+}
+
+module.exports = { parseReceiptImage, parseReceiptBatch, _readBatch, BATCH_SIZE, normalise, normaliseMany, splittable, SYSTEM_PROMPT, _num, _isoDate, _currency, _box, _overlapFraction };

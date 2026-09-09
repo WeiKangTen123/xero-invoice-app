@@ -19,6 +19,9 @@ const { suggestCategories } = require('./claim-categories');
 // between reads keeps a large claim inside that without the caller having to
 // think about it.
 const READ_INTERVAL_MS = 4000;
+// How many receipts go into one model call. Four keeps the reply small enough
+// to stay reliable while cutting a nine-receipt claim from nine calls to three.
+const BATCH_SIZE = 4;
 const MAX_RECEIPTS = 100;
 const JOB_TTL_MS = 60 * 60 * 1000;   // an hour is long enough to read the result
 
@@ -87,7 +90,8 @@ function startImport({ userId, archives = [], forms = [], label = 'Expense claim
 }
 
 async function _run(job, { archives, forms }, deps) {
-  const { parseReceipt, storeReceipt, createRecord, suggest, waitMs = READ_INTERVAL_MS } = deps;
+  const { parseReceipts, storeReceipt, createRecord, suggest,
+          waitMs = READ_INTERVAL_MS, batch = BATCH_SIZE } = deps;
 
   // ── 1. Unpack ────────────────────────────────────────────────────────────
   _stage(job, 'unpacking');
@@ -127,26 +131,41 @@ async function _run(job, { archives, forms }, deps) {
 
   // ── 3. Read every receipt ────────────────────────────────────────────────
   // The slow phase, and the only one worth a progress bar.
+  //
+  // Read in BATCHES: nine receipts one at a time is nine round trips, each
+  // throttled to stay inside the per-minute quota. Four per call turns that into
+  // three, and the parser falls back to reading singly whenever a batch reply
+  // cannot be attributed image-for-image.
   _stage(job, 'reading receipts');
   const reads = [];
-  for (let i = 0; i < entries.length; i++) {
+  const batchSize = Math.max(1, batch || 1);
+
+  for (let start = 0; start < entries.length; start += batchSize) {
     if (job.cancelled) return _update(job, { stage: 'cancelled' });
-    const e = entries[i];
+    const slice = entries.slice(start, start + batchSize);
+
+    let parsed;
     try {
-      const parsed = await parseReceipt(job.userId, e.buffer, e.mime);
-      const first = parsed && parsed.receipts && parsed.receipts[0];
+      parsed = await parseReceipts(job.userId, slice.map(e => ({ buffer: e.buffer, mime: e.mime })));
+    } catch (err) {
+      // A whole batch failing must not lose the receipts in it.
+      logger.warn('Claim receipt batch unreadable', { jobId: job.id, size: slice.length, error: err.message });
+      parsed = new Array(slice.length).fill(null);
+    }
+
+    slice.forEach((e, i) => {
+      const r = parsed && parsed[i];
       // A receipt that cannot be read still takes part: it is stored, and it is
       // reported as unreadable rather than silently dropped.
-      reads.push({ ...(first || { merchant: null, date: null, total: null, currency: null }),
-                   file: e.name, mime: e.mime, buffer: e.buffer, readable: !!first });
-    } catch (err) {
-      logger.warn('Claim receipt unreadable', { jobId: job.id, file: e.name, error: err.message });
-      reads.push({ merchant: null, date: null, total: null, currency: null, file: e.name, mime: e.mime, buffer: e.buffer, readable: false });
-    }
-    _update(job, { receiptsRead: i + 1 });
-    // Throttled to stay inside the model's per-minute quota. Skipped after the
-    // last one so a single-receipt claim is not made to wait for nothing.
-    if (i < entries.length - 1 && waitMs) await new Promise(r => setTimeout(r, waitMs));
+      reads.push({ ...(r || { merchant: null, date: null, total: null, currency: null }),
+                   file: e.name, mime: e.mime, buffer: e.buffer, readable: !!r });
+    });
+    _update(job, { receiptsRead: Math.min(start + slice.length, entries.length) });
+
+    // Throttled between BATCHES rather than between receipts — the quota counts
+    // requests, and batching is what makes a large claim finish in a minute
+    // instead of ten. Skipped after the last batch.
+    if (start + batchSize < entries.length && waitMs) await new Promise(r => setTimeout(r, waitMs));
   }
 
   // ── 4. Match ─────────────────────────────────────────────────────────────
@@ -183,6 +202,29 @@ async function _run(job, { archives, forms }, deps) {
     if (rec) created.push(rec.id);
   }
 
+  // And a receipt with no claim line becomes one too. This was missing, and it
+  // meant the commonest case of all produced NOTHING: a zip of nine receipts
+  // with no spreadsheet matched nothing, so nothing was created, and the import
+  // reported success having imported zero claims. A claim form is a convenience,
+  // not a requirement — the receipts are the claim.
+  for (const receipt of matched.unmatchedReceipts) {
+    const rec = await createRecord({
+      userId: job.userId, groupId,
+      // Synthesised from what the model read, so the record carries the figures
+      // it found rather than being blank.
+      row: {
+        no: null,
+        date: receipt.date || null,
+        description: receipt.merchant || (receipt.file ? receipt.file.split('/').pop() : null),
+        currency: receipt.currency || null,
+        amount: receipt.total ?? null,
+        category: null,
+      },
+      receipt, match: null, category: null, store: storeReceipt,
+    });
+    if (rec) created.push(rec.id);
+  }
+
   return _update(job, {
     stage: 'done',
     result: {
@@ -211,4 +253,4 @@ function cancel(jobId, userId) {
 
 function _reset() { _jobs.clear(); }
 
-module.exports = { startImport, getJob, listJobs, cancel, READ_INTERVAL_MS, MAX_RECEIPTS, _reset };
+module.exports = { startImport, getJob, listJobs, cancel, READ_INTERVAL_MS, BATCH_SIZE, MAX_RECEIPTS, _reset };
