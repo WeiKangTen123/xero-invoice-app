@@ -1478,35 +1478,45 @@ describe('xero/reports — period resolution (pure)', () => {
 
 // ── Cache lifetime and fetch concurrency ────────────────────────────────────
 describe('xero/reports — period cache tiering (pure)', () => {
-  const { _periodCacheTtl } = require('./reports');
+  // Asserted against the tier constants rather than their current values: these
+  // tests are about which tier a period lands in, and pinning literals here
+  // meant that retuning a TTL failed them for a reason none of them are about.
+  const { _periodCacheTtl, TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS } = require('./reports');
   const TODAY = { year: 2026, month: 8, day: 25 };
   const upTo  = endISO => [{ endISO }];
-  const MIN = 60000, HOUR = 3600000;
+
+  test('the tiers stay ordered: open is shortest, long-closed is longest', () => {
+    // The tiering only means anything if this holds, and it is the one property
+    // that must survive any future retuning of the individual values.
+    expect(TTL_OPEN_MS).toBeLessThan(TTL_RECENT_MS);
+    expect(TTL_RECENT_MS).toBeLessThan(TTL_CLOSED_MS);
+  });
 
   test('a period still running keeps the short TTL', () => {
-    expect(_periodCacheTtl(upTo('2026-08-31'), TODAY)).toBe(90 * 1000);   // current month
-    expect(_periodCacheTtl(upTo('2027-03-31'), TODAY)).toBe(90 * 1000);   // future
-    expect(_periodCacheTtl(upTo('2026-08-25'), TODAY)).toBe(90 * 1000);   // ends today
+    expect(_periodCacheTtl(upTo('2026-08-31'), TODAY)).toBe(TTL_OPEN_MS);   // current month
+    expect(_periodCacheTtl(upTo('2027-03-31'), TODAY)).toBe(TTL_OPEN_MS);   // future
+    expect(_periodCacheTtl(upTo('2026-08-25'), TODAY)).toBe(TTL_OPEN_MS);   // ends today
   });
 
   test('a recently closed period gets a SHORT life, because back-dating happens', () => {
     // Month-end close means late invoices and adjustments still land here — this
     // must not be cached for hours.
-    expect(_periodCacheTtl(upTo('2026-07-31'), TODAY)).toBe(10 * MIN);
-    expect(_periodCacheTtl(upTo('2026-08-24'), TODAY)).toBe(10 * MIN);
+    expect(_periodCacheTtl(upTo('2026-07-31'), TODAY)).toBe(TTL_RECENT_MS);
+    expect(_periodCacheTtl(upTo('2026-08-24'), TODAY)).toBe(TTL_RECENT_MS);
+    expect(TTL_RECENT_MS).toBeLessThanOrEqual(30 * 60 * 1000);
   });
 
   test('a long-closed period is cached for hours — it cannot meaningfully change', () => {
-    expect(_periodCacheTtl(upTo('2026-06-30'), TODAY)).toBe(6 * HOUR);
-    expect(_periodCacheTtl(upTo('2024-12-31'), TODAY)).toBe(6 * HOUR);
+    expect(_periodCacheTtl(upTo('2026-06-30'), TODAY)).toBe(TTL_CLOSED_MS);
+    expect(_periodCacheTtl(upTo('2024-12-31'), TODAY)).toBe(TTL_CLOSED_MS);
   });
 
   test('missing or unparseable months fall back to the short TTL, never a long one', () => {
     // Caching something we cannot date for six hours would be the dangerous
     // direction to fail in.
-    expect(_periodCacheTtl([], TODAY)).toBe(90 * 1000);
-    expect(_periodCacheTtl(null, TODAY)).toBe(90 * 1000);
-    expect(_periodCacheTtl(upTo('nonsense'), TODAY)).toBe(90 * 1000);
+    expect(_periodCacheTtl([], TODAY)).toBe(TTL_OPEN_MS);
+    expect(_periodCacheTtl(null, TODAY)).toBe(TTL_OPEN_MS);
+    expect(_periodCacheTtl(upTo('nonsense'), TODAY)).toBe(TTL_OPEN_MS);
   });
 });
 

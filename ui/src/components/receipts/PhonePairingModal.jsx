@@ -140,8 +140,15 @@ export default function PhonePairingModal({ onClose, onArrived }) {
                   <div key={r.id} style={{ width: 76 }}>
                     <div style={{ width: 76, height: 76, borderRadius: 8, overflow: 'hidden', background: 'var(--bg-secondary)',
                                   border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {/* These are 76px thumbnails of full-resolution phone
+                          photos — several megabytes each, served at original
+                          size because nothing resizes them server-side yet.
+                          Lazy + async at least keeps the ones below the fold
+                          out of the way and decoding off the main thread while
+                          receipts are still streaming in. */}
                       <img src={`/api/receipts/${r.id}/image?token=${encodeURIComponent(r.imageToken)}`}
-                           alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                           alt="" loading="lazy" decoding="async" width={76} height={76}
+                           style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     </div>
                     {/* Fills in a poll or two later, once the image has been read. */}
                     <div style={{ fontSize: 9.5, color: 'var(--text-muted)', marginTop: 4, textAlign: 'center',

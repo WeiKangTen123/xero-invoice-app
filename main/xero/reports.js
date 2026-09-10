@@ -7,11 +7,18 @@ const logger             = require('../utils/logger');
 // is the thin cached-fetch wrapper around it — same split as the rest of this
 // file's original summary logic.
 //
-// Cached in-memory per user+tenant(+range), same short-TTL philosophy as
-// token-cache.js — Xero's 60-calls/minute budget is shared with real invoice
-// submission, so a dashboard nobody's actively watching shouldn't refetch on
-// every page view.
-const CACHE_TTL_MS = 90 * 1000;
+// Cached in-memory per user+tenant(+range), same philosophy as token-cache.js.
+// Two reasons, and the second now dominates: Xero's 60-calls/minute budget is
+// shared with real invoice submission, and since March 2026 Xero bills on the
+// data volume of GET requests, so a dashboard nobody is actively watching is a
+// line item rather than merely rude.
+//
+// Held at 90s while rate limiting was the only concern. Raised because these
+// figures move on the order of a day, not a minute, and because the cost of
+// being wrong is visible and self-correcting: the page renders "Synced Xs ago"
+// from fetchedAt, and the refresh control passes force=true to bypass this
+// entirely. Turn it back down here if you would rather pay for fresher numbers.
+const CACHE_TTL_MS = 5 * 60 * 1000;
 const _cache = new Map(); // arbitrary string key -> { data, fetchedAt }
 
 function _cacheGet(key, force) {
@@ -1572,7 +1579,7 @@ module.exports = {
   _mergeChunks, _buildCustomerRevenue, _buildInvoiceHygiene, _buildQuotePipeline, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
   _toBase, _foreignCurrency, _closedCount, _growthPct, _buildGrowth, _buildRunway, _buildCashWaterfall,
   _buildAlerts, ALERT_THRESHOLDS,
-  _isTransfer, _isReceiptPayment, _periodCacheTtl, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
+  _isTransfer, _isReceiptPayment, _periodCacheTtl, TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights, _buildCategoryVariances,
   _narrativeFacts, _groundNarrative, _narrativePrompt, _narrateFrom,
 };
