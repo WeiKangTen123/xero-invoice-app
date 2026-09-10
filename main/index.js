@@ -114,6 +114,9 @@ app.get('/dashboard/health', dashRoutes.health);
 const UI_DIST = path.join(__dirname, '../ui/dist');
 if (PROD) {
   app.use(express.static(UI_DIST));
+  // Clean 404 for missing static assets — prevents browser from receiving index.html
+  // for a missing .css or .js file and throwing a strict MIME type error.
+  app.use('/assets', (_req, res) => res.status(404).type('text/plain').send('Asset not found'));
   app.get('*', (_req, res) => res.sendFile(path.join(UI_DIST, 'index.html')));
 } else {
   app.get('/', (_req, res) => res.json({
