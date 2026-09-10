@@ -162,7 +162,7 @@ export default function Capture() {
           {sent.map((s, i) => (
             <div key={s.id || i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 0', borderTop: '1px solid var(--border)', textAlign: 'left' }}>
               <div style={{ width: 46, height: 46, flexShrink: 0, borderRadius: 8, overflow: 'hidden', background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
-                {s.preview && <img src={s.preview} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+                {s.preview && <img src={s.preview} alt="" decoding="async" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
               </div>
               <div style={{ minWidth: 0, flex: 1 }}>
                 {/* Confirms the RECEIPT was captured, not just that a file moved. */}
