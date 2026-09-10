@@ -1,5 +1,26 @@
 @import './theme.css';
 
+/* ── Layout constants ────────────────────────────── */
+/* Theme-independent, so they live here rather than being duplicated into both
+   palettes in theme.css.
+
+   --safe-bottom is the home indicator on an iPhone (and equivalents elsewhere):
+   0px on hardware that has none, which is why every use below can be
+   unconditional. It only reports a real value when index.html asks for
+   viewport-fit=cover — without that the browser letterboxes the page and
+   env() stays 0, so the two go together.
+
+   Anything pinned to the bottom on mobile offsets from --bottom-nav-total
+   rather than carrying its own copy of 60. Before this, the nav's height was
+   independently spelled 60, 68, 74 and 76 across four files, none of which
+   left room for the home indicator — so the nav sat under the system gesture
+   area and everything stacked above it inherited the same error. */
+:root {
+  --bottom-nav-height: 60px;
+  --safe-bottom:       env(safe-area-inset-bottom, 0px);
+  --bottom-nav-total:  calc(var(--bottom-nav-height) + var(--safe-bottom));
+}
+
 /* ── Reset ───────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body, #root { height: 100%; }
@@ -614,7 +635,8 @@ body {
 }
 
 .mobile-mode .page-body {
-  padding: 14px 12px 76px !important;
+  /* 16px of breathing room above the bottom nav, plus the nav itself. */
+  padding: 14px 12px calc(var(--bottom-nav-total) + 16px) !important;
 }
 
 .mobile-mode .card {
@@ -633,6 +655,18 @@ body {
 
 .mobile-mode .page-header h1 {
   font-size: 20px !important;
+}
+
+/* Fixed 320px second track; unusable beside it on a phone. */
+.mobile-mode .admin-users-grid {
+  grid-template-columns: 1fr !important;
+}
+
+/* Sticky inside .page-body, whose scrollport extends to the viewport bottom
+   beneath the fixed nav — so bottom:0 would park the Save button behind it.
+   !important because the base value is an inline style. */
+.mobile-mode .setup-save-bar {
+  bottom: var(--bottom-nav-total) !important;
 }
 
 .mobile-scroll-x {

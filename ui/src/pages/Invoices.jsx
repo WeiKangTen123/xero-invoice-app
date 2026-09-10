@@ -1040,7 +1040,7 @@ export default function Invoices() {
       {isMobile && selected.size > 0 && (
         <div style={{
           position: 'fixed',
-          bottom: 68,
+          bottom: 'calc(var(--bottom-nav-total) + 8px)',
           left: 12,
           right: 12,
           background: 'var(--bg-card)',

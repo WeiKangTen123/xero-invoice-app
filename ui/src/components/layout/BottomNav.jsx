@@ -22,7 +22,7 @@ export default function BottomNav() {
       bottom: 0,
       left: 0,
       right: 0,
-      height: 60,
+      height: 'var(--bottom-nav-total)',
       background: isDark ? 'rgba(12, 12, 18, 0.95)' : 'rgba(255, 255, 255, 0.95)',
       backdropFilter: 'blur(12px)',
       WebkitBackdropFilter: 'blur(12px)',
@@ -31,7 +31,9 @@ export default function BottomNav() {
       alignItems: 'center',
       justifyContent: 'space-around',
       zIndex: 90,
-      padding: '0 8px',
+      // Icons occupy the top --bottom-nav-height; the padding below is the
+      // home indicator's strip, which must stay clear of anything tappable.
+      padding: '0 8px var(--safe-bottom)',
       boxShadow: '0 -2px 10px rgba(0,0,0,0.06)',
     }}>
       {NAV_ITEMS.map(item => (
