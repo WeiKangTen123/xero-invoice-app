@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import CroppedImage from '../components/receipts/CroppedImage';
 import AccountCodeSelect, { useAccountName } from '../components/AccountCodeSelect';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
+import { useViewMode } from '../context/ViewModeContext';
 
 // Statuses that allow the user to trigger a Xero submission.
 // 'posted' is included so a correction can be re-posted — this updates the existing
@@ -143,6 +144,7 @@ function Spinner() {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function InvoiceReview() {
+  const { isMobile } = useViewMode();
   const { id }   = useParams();
   const navigate = useNavigate();
 
@@ -533,11 +535,18 @@ export default function InvoiceReview() {
       <div style={{ animation: 'fadeUp 0.3s ease' }}>
 
         {/* Top bar */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+        <div style={{
+          display: 'flex',
+          alignItems: isMobile ? 'stretch' : 'center',
+          justifyContent: 'space-between',
+          marginBottom: 16,
+          flexDirection: isMobile ? 'column' : 'row',
+          gap: 12
+        }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <button className="btn btn-ghost btn-sm" onClick={() => navigate('/invoices')} style={{ gap: 6 }}>← Back</button>
             <div>
-              <h1 style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.4px' }}>
+              <h1 style={{ fontSize: isMobile ? 18 : 20, fontWeight: 700, letterSpacing: '-0.4px' }}>
                 {inv.vendorName || 'Unknown Vendor'}
               </h1>
               <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 2 }}>
@@ -546,7 +555,7 @@ export default function InvoiceReview() {
             </div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', width: isMobile ? '100%' : 'auto' }}>
             <StatusPill status={inv.status} />
 
             {/* Post to Xero — creates a new draft, or (for an already-posted invoice)
@@ -781,7 +790,7 @@ export default function InvoiceReview() {
         )}
 
         {/* Main layout: PDF left, info panel right (sticky — stays in view while the PDF scrolls) */}
-        <div style={{ display: 'grid', gridTemplateColumns: (inv.hasPdf || inv.receiptFile) ? '1fr 500px' : '1fr', gap: 20, alignItems: 'start' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: (inv.hasPdf || inv.receiptFile) ? (isMobile ? '1fr' : '1fr 500px') : '1fr', gap: 20, alignItems: 'start' }}>
 
           {/* PDF Viewer — fills its full grid column; the #zoom=page-width fragment on
               the iframe src (below) tells the native PDF viewer to fit-scale itself,
@@ -813,21 +822,21 @@ export default function InvoiceReview() {
                 </div>
               </div>
               {receiptUrl ? (
-                <div style={{ background: '#1b1b1f', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14, minHeight: 420, maxHeight: 'calc(100vh - 240px)', overflow: 'auto' }}>
+                <div style={{ background: '#1b1b1f', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: isMobile ? 8 : 14, minHeight: isMobile ? 260 : 420, maxHeight: isMobile ? 360 : 'calc(100vh - 240px)', overflow: 'auto' }}>
                   {/* A split record owns one region of a shared photo, so only
                       that region is drawn. The file itself was never cut. */}
                   {inv.receiptMime === 'application/pdf' ? (
                     <iframe
                       src={`${receiptUrl}#page=${inv.receiptPage || 1}&zoom=page-width`}
                       title="Receipt PDF"
-                      style={{ width: '100%', height: 'calc(100vh - 300px)', minHeight: 420, border: 'none', background: '#525659' }}
+                      style={{ width: '100%', height: isMobile ? 340 : 'calc(100vh - 300px)', minHeight: isMobile ? 260 : 420, border: 'none', background: '#525659' }}
                     />
                   ) : (
                     <CroppedImage
                       src={receiptUrl}
                       box={receiptBox}
                       alt="Receipt"
-                      style={{ maxWidth: '100%', maxHeight: 'calc(100vh - 280px)', objectFit: 'contain',
+                      style={{ maxWidth: '100%', maxHeight: isMobile ? 340 : 'calc(100vh - 280px)', objectFit: 'contain',
                                transform: `rotate(${receiptRot}deg)`, transition: 'transform .2s ease' }}
                     />
                   )}
@@ -872,7 +881,7 @@ export default function InvoiceReview() {
                       </div>
 
                       {/* Pill filmstrip — click navigates instantly via SPA */}
-                      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', padding: '8px 14px' }}>
+                      <div className={isMobile ? "mobile-scroll-x" : ""} style={{ display: 'flex', gap: 5, flexWrap: isMobile ? 'nowrap' : 'wrap', padding: '8px 14px' }}>
                         {group.siblings.map((sib, i) => {
                           const isCurrent = sib.id === id;
                           const isDone    = sib.status === 'reviewed' || sib.status === 'posted';
@@ -885,6 +894,8 @@ export default function InvoiceReview() {
                                 color: isCurrent ? '#fff' : isDone ? 'var(--success, #1a7f37)' : 'var(--text-secondary)',
                                 outline: isCurrent ? 'none' : '1px solid var(--border)',
                                 fontWeight: isCurrent ? 700 : 400,
+                                flexShrink: 0,
+                                whiteSpace: 'nowrap',
                               }}
                               title={sib.vendorName || `Claim ${i + 1}`}
                             >
@@ -969,7 +980,7 @@ export default function InvoiceReview() {
                 <iframe
                   src={`${pdfUrl}#zoom=page-width`}
                   title="Invoice PDF"
-                  style={{ width: '100%', height: 'calc(100vh - 240px)', minHeight: 500, border: 'none', display: 'block', background: '#525659' }}
+                  style={{ width: '100%', height: isMobile ? 360 : 'calc(100vh - 240px)', minHeight: isMobile ? 300 : 500, border: 'none', display: 'block', background: '#525659' }}
                 />
               ) : pdfErr ? (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 300, gap: 14, padding: 24 }}>
@@ -1009,10 +1020,10 @@ export default function InvoiceReview() {
               you scroll a multi-page PDF, instead of scrolling away with the page */}
           <div style={{
             display: 'flex', flexDirection: 'column', gap: 16,
-            position: inv.hasPdf ? 'sticky' : 'static', top: 0,
-            maxHeight: inv.hasPdf ? 'calc(100vh - 88px)' : 'none',
-            overflowY: inv.hasPdf ? 'auto' : 'visible',
-            paddingRight: inv.hasPdf ? 4 : 0,
+            position: (inv.hasPdf && !isMobile) ? 'sticky' : 'static', top: 0,
+            maxHeight: (inv.hasPdf && !isMobile) ? 'calc(100vh - 88px)' : 'none',
+            overflowY: (inv.hasPdf && !isMobile) ? 'auto' : 'visible',
+            paddingRight: (inv.hasPdf && !isMobile) ? 4 : 0,
           }}>
 
             {/* Summary card */}
@@ -1326,6 +1337,61 @@ export default function InvoiceReview() {
             </div>
           </div>
         </div>
+        {isMobile && <div style={{ height: 24 }} />}
+
+        {/* Sticky action bar on mobile */}
+        {isMobile && (
+          <div style={{
+            position: 'sticky',
+            bottom: 60,
+            margin: '16px -14px -76px -14px',
+            padding: '10px 14px',
+            background: 'var(--bg-card)',
+            borderTop: '1px solid var(--border)',
+            boxShadow: '0 -4px 16px rgba(0,0,0,0.1)',
+            display: 'flex',
+            gap: 8,
+            zIndex: 40,
+            backdropFilter: 'blur(8px)',
+            alignItems: 'center',
+          }}>
+            {canSubmit && (
+              <button
+                className="btn btn-primary btn-sm"
+                style={{ flex: 1, padding: '8px 10px', fontSize: 12 }}
+                onClick={submitToXero}
+                disabled={submitting}
+              >
+                {submitting ? 'Posting...' : inv.status === 'posted' ? '↻ Re-post' : '→ Post to Xero'}
+              </button>
+            )}
+            {canReview && (
+              <button
+                className="btn btn-success btn-sm"
+                style={{ flex: 1, padding: '8px 10px', fontSize: 12 }}
+                onClick={markReviewed}
+                disabled={marking}
+              >
+                {marking ? '...' : '✓ Reviewed'}
+              </button>
+            )}
+            {!editing && canEdit && (
+              <button className="btn btn-outline btn-sm" style={{ padding: '8px 12px', fontSize: 12 }} onClick={startEdit}>
+                ✎ Edit
+              </button>
+            )}
+            {editing && (
+              <>
+                <button className="btn btn-outline btn-sm" onClick={cancelEdit} disabled={saving}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary btn-sm" style={{ flex: 1, padding: '8px 10px', fontSize: 12 }} onClick={saveEdit} disabled={saving}>
+                  {saving ? 'Saving...' : '✓ Save'}
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <DeleteConfirmModal

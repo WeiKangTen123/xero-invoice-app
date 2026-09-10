@@ -545,7 +545,7 @@ export default function XeroInsights() {
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 20 }}>
+      <div className="grid-3" style={{ marginBottom: 20 }}>
         <div className="card" style={{ display: 'flex', gap: 13 }}>
           <div style={{ width: 40, height: 40, borderRadius: 10, background: 'var(--success-subtle)', color: 'var(--success)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, flexShrink: 0 }}>↗</div>
           <div>
@@ -572,12 +572,13 @@ export default function XeroInsights() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, marginBottom: 18, width: 'fit-content', flexWrap: 'wrap' }}>
+      <div className="mobile-scroll-x" style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, marginBottom: 18, maxWidth: '100%', overflowX: 'auto' }}>
         {TABS.map(t => (
           <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{
             padding: '7px 16px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 600,
             background: tab === t.key ? 'var(--accent-gradient)' : 'transparent',
             color: tab === t.key ? '#fff' : 'var(--text-muted)',
+            whiteSpace: 'nowrap', flexShrink: 0,
           }}>{t.label}</button>
         ))}
         {PHASE2_TABS.map(t => (

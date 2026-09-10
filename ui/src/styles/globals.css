@@ -601,3 +601,71 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Mobile Mode & Responsive Breakpoints ────────── */
+.mobile-mode .main-content {
+  margin-left: 0 !important;
+}
+
+.mobile-mode .page-body {
+  padding: 14px 12px 76px !important;
+}
+
+.mobile-mode .card {
+  padding: 16px 14px !important;
+  border-radius: var(--radius-md) !important;
+}
+
+.mobile-mode .stat-card {
+  padding: 14px !important;
+}
+
+.mobile-mode .grid-2,
+.mobile-mode .grid-3 {
+  grid-template-columns: 1fr !important;
+}
+
+.mobile-mode .page-header h1 {
+  font-size: 20px !important;
+}
+
+.mobile-scroll-x {
+  display: flex;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  gap: 8px;
+  align-items: center;
+}
+
+.mobile-scroll-x::-webkit-scrollbar {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .main-content {
+    margin-left: 0 !important;
+  }
+
+  .page-body {
+    padding: 14px 12px 76px !important;
+  }
+
+  .card {
+    padding: 16px 14px;
+    border-radius: var(--radius-md);
+  }
+
+  .stat-card {
+    padding: 14px;
+  }
+
+  .grid-2, .grid-3 {
+    grid-template-columns: 1fr;
+  }
+
+  .page-header h1 {
+    font-size: 20px;
+  }
+}
+

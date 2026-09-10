@@ -361,7 +361,7 @@ export default function Dashboard() {
       {/* Pipeline status — always visible */}
       <PipelinePanel queue={status?.queue} xero={status?.xero} />
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+      <div className="grid-2" style={{ marginBottom: 20 }}>
 
         {/* Watcher control */}
         <div className="card">

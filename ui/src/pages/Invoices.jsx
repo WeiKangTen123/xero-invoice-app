@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import ReceiptUpload from '../components/receipts/ReceiptUpload';
 import ClaimImport from '../components/receipts/ClaimImport';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
+import { useViewMode } from '../context/ViewModeContext';
 
 // reviewed is blue (not yet in Xero), posted is green (done).
 // Keeping them visually distinct prevents the "I clicked Reviewed and it looked
@@ -100,6 +101,7 @@ function TypeBadge({ type }) {
 }
 
 export default function Invoices() {
+  const { isMobile } = useViewMode();
   const navigate = useNavigate();
   const [invoices,     setInvoices]     = useState([]);
   const [loading,      setLoading]      = useState(true);
@@ -510,9 +512,23 @@ export default function Invoices() {
         </div>
       )}
 
+      {/* On mobile: Dedicated action bar for claim uploading / adding */}
+      {isMobile && (
+        <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 12, overflowX: 'auto', paddingBottom: 2 }}>
+          <ReceiptUpload onUploaded={() => { setTypeFilter('EXPENSE'); fetchInvoices(); }} />
+        </div>
+      )}
+
       {/* Type + Status filter pills */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 2 }}>Type:</span>
+      <div className={isMobile ? "mobile-scroll-x" : ""} style={{
+        display: 'flex',
+        gap: 8,
+        marginBottom: 10,
+        flexWrap: isMobile ? 'nowrap' : 'wrap',
+        alignItems: 'center',
+        paddingBottom: isMobile ? 4 : 0,
+      }}>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 2, flexShrink: 0 }}>Type:</span>
         {[
           { key: 'all',    label: 'All',      count: invoices.length },
           { key: 'ACCPAY', label: 'Bills',    count: bills },
@@ -522,7 +538,7 @@ export default function Invoices() {
           <FilterPill key={t.key} active={typeFilter === t.key} onClick={() => setTypeFilter(t.key)} label={t.label} count={t.count} />
         ))}
 
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginLeft: 8, marginRight: 2 }}>Status:</span>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginLeft: 8, marginRight: 2, flexShrink: 0 }}>Status:</span>
         {[
           { key: 'all',          label: 'All',              count: invoices.length },
           { key: 'posted',       label: '✓ Posted',         count: posted },
@@ -537,16 +553,25 @@ export default function Invoices() {
 
         {/* Expense claims are the only type the user creates by hand — bills and
             invoices arrive by email — so the input lives with the filters. */}
-        <div style={{ marginLeft: 'auto' }}>
-          <ReceiptUpload onUploaded={() => { setTypeFilter('EXPENSE'); fetchInvoices(); }} />
-        </div>
+        {!isMobile && (
+          <div style={{ marginLeft: 'auto', flexShrink: 0 }}>
+            <ReceiptUpload onUploaded={() => { setTypeFilter('EXPENSE'); fetchInvoices(); }} />
+          </div>
+        )}
       </div>
 
       {/* Received — WHEN IT ARRIVED here, not the date printed on the document.
           Applies to all three types: "what came in this week" is the same
           bookkeeping question for an emailed bill and a photographed receipt. */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 2 }}>Received:</span>
+      <div className={isMobile ? "mobile-scroll-x" : ""} style={{
+        display: 'flex',
+        gap: 8,
+        marginBottom: 10,
+        flexWrap: isMobile ? 'nowrap' : 'wrap',
+        alignItems: 'center',
+        paddingBottom: isMobile ? 4 : 0,
+      }}>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 2, flexShrink: 0 }}>Received:</span>
         {[
           { key: 'all',    label: 'All time' },
           { key: 'today',  label: 'Today' },
@@ -571,7 +596,7 @@ export default function Invoices() {
         ))}
 
         {receivedFilter === 'custom' && (
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 4 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 4, flexShrink: 0 }}>
             <input type="date" className="form-input" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
                    style={{ padding: '4px 8px', fontSize: 12, width: 140 }} aria-label="Received from" />
             <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>to</span>
@@ -637,6 +662,189 @@ export default function Invoices() {
                 ? 'Processed invoices will appear here once the watcher is running'
                 : 'Try adjusting the filters or search term'}
             </div>
+          </div>
+        ) : isMobile ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {/* Mobile Select-all row if items exist */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 4px 6px', borderBottom: '1px solid var(--border)' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer', color: 'var(--text-muted)' }}>
+                <input
+                  type="checkbox"
+                  checked={allFilteredSelected}
+                  onChange={toggleSelectAll}
+                  style={{ cursor: 'pointer', accentColor: 'var(--accent)', width: 16, height: 16 }}
+                />
+                <span>Select all visible ({filtered.length})</span>
+              </label>
+            </div>
+
+            {groups.map(g => (
+              <div key={`g-m-${g.key}`} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {/* Group heading */}
+                <div
+                  onClick={() => toggleGroup(g.key)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '8px 10px',
+                    background: 'var(--bg-secondary)',
+                    borderRadius: 8,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{isOpen(g) ? '▼' : '▶'}</span>
+                    <span style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: '.04em', textTransform: 'uppercase' }}>{g.label}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {g.rows.length}</span>
+                  </div>
+                  {g.total ? (
+                    <span style={{ fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+                      {invoices[0]?.currency || ''} {g.total.toLocaleString('en', { minimumFractionDigits: 2 })}
+                    </span>
+                  ) : null}
+                </div>
+
+                {isOpen(g) && g.rows.map((inv) => {
+                  const { cls, label } = STATUS_MAP[inv.status] || { cls: 'badge-gray', label: inv.status };
+                  const isSelected = selected.has(inv.id);
+                  const isDeleting = deleting.has(inv.id);
+                  const needsAttention = ['review-needed', 'error'].includes(inv.status);
+                  const isDup = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
+
+                  return (
+                    <div
+                      key={inv.id}
+                      onClick={() => navigate(`/invoices/${inv.id}`)}
+                      style={{
+                        padding: '12px 14px',
+                        borderRadius: 12,
+                        background: isSelected ? 'var(--accent-subtle)' : 'var(--bg-secondary)',
+                        border: `1px solid ${isSelected ? 'var(--accent)' : isDup ? 'rgba(239,68,68,0.3)' : 'var(--border)'}`,
+                        opacity: isDeleting ? 0.4 : 1,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 10,
+                        transition: 'all 0.18s ease',
+                      }}
+                    >
+                      {/* Top Row: Checkbox, Vendor info & Amount */}
+                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {}}
+                            onClick={e => toggleSelect(inv.id, e)}
+                            style={{ cursor: 'pointer', accentColor: 'var(--accent)', width: 17, height: 17, flexShrink: 0 }}
+                          />
+                          <div style={{
+                            width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+                            background: isDup ? 'rgba(239,68,68,0.12)' : needsAttention ? 'rgba(245,158,11,0.12)' : 'var(--accent-subtle)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 12, fontWeight: 700,
+                            color: isDup ? 'var(--danger)' : needsAttention ? 'var(--warning)' : 'var(--accent)',
+                          }}>
+                            {isDup ? '⚠' : (inv.vendorName || '?').slice(0, 2).toUpperCase()}
+                          </div>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {inv.vendorName || '—'}
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                              <code style={{ fontSize: 11, background: 'var(--bg-card)', padding: '1px 6px', borderRadius: 4, color: 'var(--text-secondary)' }}>
+                                #{inv.invoiceNumber || '—'}
+                              </code>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Amount */}
+                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                          <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
+                            {inv.totalAmount != null
+                              ? `${inv.currency || ''} ${Number(inv.totalAmount).toLocaleString('en', { minimumFractionDigits: 2 })}`
+                              : '—'}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                            {inv.invoiceDate || '—'}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Duplicate warning callout if duplicate */}
+                      {isDup && (
+                        <div style={{
+                          padding: '6px 10px',
+                          background: 'rgba(239,68,68,0.08)',
+                          border: '1px solid rgba(239,68,68,0.22)',
+                          borderRadius: 6,
+                          fontSize: 11,
+                          color: 'var(--danger)',
+                          fontWeight: 600,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                        }}>
+                          <span>⚠ Duplicate {inv.duplicateOf ? `of #${inv.duplicateOf.slice(-6)}` : 'detected'}</span>
+                        </div>
+                      )}
+
+                      {/* Bottom row: badges + Review action */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingTop: 4, borderTop: '1px solid var(--border)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <TypeBadge type={inv.invoiceType} />
+                          {inv.receiptFile
+                            ? <span className="badge badge-yellow">{inv.source === 'phone' ? '📱' : '🧾'}</span>
+                            : inv.hasPdf
+                              ? <span className="badge badge-green">📄</span>
+                              : <span className="badge badge-gray">✉</span>}
+                          {isDup && inv.status !== 'duplicate' ? (
+                            <span className="badge badge-purple">⚠ Suspected Dup</span>
+                          ) : (
+                            <span className={`badge ${cls}`}>{label}</span>
+                          )}
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                          <button
+                            className="btn btn-outline btn-sm"
+                            onClick={() => navigate(`/invoices/${inv.id}`)}
+                            style={{
+                              fontSize: 11.5,
+                              padding: '4px 10px',
+                              ...(isDup
+                                ? { background: 'rgba(239,68,68,0.08)', color: 'var(--danger)', borderColor: 'rgba(239,68,68,0.3)' }
+                                : inv.status === 'reviewed'
+                                  ? { background: 'var(--info-subtle)', color: 'var(--info)', borderColor: 'rgba(59,130,246,0.3)' }
+                                  : {})
+                            }}
+                          >
+                            {inv.status === 'duplicate' || isDup
+                              ? 'Review Dup →'
+                              : inv.status === 'review-needed' || inv.status === 'error'
+                                ? 'Fix →'
+                                : inv.status === 'reviewed'
+                                  ? 'Post →'
+                                  : 'Review →'}
+                          </button>
+                          <button
+                            className="btn btn-sm"
+                            disabled={deleteLoading && deleteTarget?.invoice?.id === inv.id}
+                            onClick={e => promptDeleteOne(inv, e)}
+                            style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)', padding: '4px 8px', fontSize: 12 }}
+                            title="Delete"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>

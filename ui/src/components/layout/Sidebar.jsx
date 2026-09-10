@@ -2,6 +2,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { usePipeline } from '../../context/PipelineContext';
+import { useViewMode } from '../../context/ViewModeContext';
 
 const NAV = [
   { to: '/dashboard',  label: 'Dashboard',  icon: '▦',  desc: 'Financial reports' },
@@ -19,10 +20,11 @@ const ADMIN_NAV = [
   { to: '/admin', label: 'Users', icon: '◉', desc: 'Admin' },
 ];
 
-function NavItem({ to, label, icon, desc, isDark }) {
+function NavItem({ to, label, icon, desc, isDark, onClick }) {
   return (
     <NavLink
       to={to}
+      onClick={onClick}
       style={({ isActive }) => ({
         display:        'flex',
         alignItems:     'center',
@@ -175,13 +177,19 @@ function PipelineWidget({ isDark }) {
 export default function Sidebar() {
   const { user, logout } = useAuth();
   const { theme }        = useTheme();
+  const { isMobile, mobileDrawerOpen, setMobileDrawerOpen } = useViewMode();
   const navigate         = useNavigate();
   const isDark           = theme === 'dark';
 
   function handleLogout() {
+    if (isMobile) setMobileDrawerOpen(false);
     logout();
     navigate('/login');
   }
+
+  const handleNavClick = () => {
+    if (isMobile) setMobileDrawerOpen(false);
+  };
 
   const initials = user?.email?.slice(0, 2).toUpperCase() || '?';
 
@@ -191,15 +199,17 @@ export default function Sidebar() {
       top:        0,
       left:       0,
       bottom:     0,
-      width:      'var(--sidebar-width)',
+      width:      isMobile ? 'min(290px, 82vw)' : 'var(--sidebar-width)',
       background: isDark ? '#0c0c12' : '#ffffff',
       display:    'flex',
       flexDirection: 'column',
       zIndex:     100,
       borderRight: isDark
-        ? '1px solid rgba(255,255,255,0.04)'
+        ? '1px solid rgba(255,255,255,0.06)'
         : '1px solid #e2e2f0',
-      transition: 'background 0.2s ease, border-color 0.2s ease',
+      transform:  isMobile ? (mobileDrawerOpen ? 'translateX(0)' : 'translateX(-100%)') : 'none',
+      boxShadow:  isMobile && mobileDrawerOpen ? '8px 0 36px rgba(0,0,0,0.45)' : 'none',
+      transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s ease, border-color 0.2s ease',
     }}>
 
       {/* Brand */}
@@ -239,21 +249,41 @@ export default function Sidebar() {
             Invoice Pipeline
           </div>
         </div>
+
+        {isMobile && (
+          <button
+            onClick={() => setMobileDrawerOpen(false)}
+            aria-label="Close menu"
+            style={{
+              marginLeft: 'auto',
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              color: 'var(--text-muted)',
+              fontSize: 18,
+              padding: '4px 8px',
+              lineHeight: 1,
+              borderRadius: 6,
+            }}
+          >
+            ✕
+          </button>
+        )}
       </div>
 
       <SectionLabel isDark={isDark} first>Navigation</SectionLabel>
 
       {/* Nav */}
       <nav style={{ flex: 1, padding: '0 8px', overflow: 'auto' }}>
-        {NAV.map(item => <NavItem key={item.to} {...item} isDark={isDark} />)}
+        {NAV.map(item => <NavItem key={item.to} {...item} isDark={isDark} onClick={handleNavClick} />)}
 
         <SectionLabel isDark={isDark}>Settings</SectionLabel>
-        {SETTINGS_NAV.map(item => <NavItem key={item.to} {...item} isDark={isDark} />)}
+        {SETTINGS_NAV.map(item => <NavItem key={item.to} {...item} isDark={isDark} onClick={handleNavClick} />)}
 
         {user?.role === 'admin' && (
           <>
             <SectionLabel isDark={isDark}>Admin</SectionLabel>
-            {ADMIN_NAV.map(item => <NavItem key={item.to} {...item} isDark={isDark} />)}
+            {ADMIN_NAV.map(item => <NavItem key={item.to} {...item} isDark={isDark} onClick={handleNavClick} />)}
           </>
         )}
       </nav>
