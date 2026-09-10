@@ -602,7 +602,13 @@ body {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
-/* ── Mobile Mode & Responsive Breakpoints ────────── */
+/* ── Mobile Mode ─────────────────────────────────── */
+/* Deliberately class-driven, not a media query. ViewModeContext derives
+   isMobile from the view-mode setting (auto: width <= 768px, or a forced
+   choice) and Layout puts .mobile-mode on .app-layout. A bare
+   `@media (max-width: 768px)` block would fire on a phone even when the
+   user has explicitly picked Web view, making that half of the switcher a
+   no-op — so the breakpoint is owned in one place, in JS. */
 .mobile-mode .main-content {
   margin-left: 0 !important;
 }
@@ -641,31 +647,3 @@ body {
 .mobile-scroll-x::-webkit-scrollbar {
   display: none;
 }
-
-@media (max-width: 768px) {
-  .main-content {
-    margin-left: 0 !important;
-  }
-
-  .page-body {
-    padding: 14px 12px 76px !important;
-  }
-
-  .card {
-    padding: 16px 14px;
-    border-radius: var(--radius-md);
-  }
-
-  .stat-card {
-    padding: 14px;
-  }
-
-  .grid-2, .grid-3 {
-    grid-template-columns: 1fr;
-  }
-
-  .page-header h1 {
-    font-size: 20px;
-  }
-}
-

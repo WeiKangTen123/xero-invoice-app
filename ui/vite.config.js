@@ -14,6 +14,12 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    emptyOutDir: false,
+    // A clean dist every build. Keeping stale bundles was tried as a fix for
+    // "refused to apply style ... MIME type ('text/html')", but the cause of
+    // that was a cached index.html pointing at a fingerprint that no longer
+    // existed, not the sweep itself — that is handled by the no-store header on
+    // index.html in main/index.js. Retaining them only grew ~640KB of dead JS
+    // per deploy on a box nothing ever cleans.
+    emptyOutDir: true,
   },
 });

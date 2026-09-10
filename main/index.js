@@ -113,11 +113,29 @@ app.get('/dashboard/health', dashRoutes.health);
 // ── Serve React UI ───────────────────────────────────────────────────────────
 const UI_DIST = path.join(__dirname, '../ui/dist');
 if (PROD) {
-  app.use(express.static(UI_DIST));
+  // Vite fingerprints everything under /assets, so a given URL's bytes never
+  // change — cache it for a year and skip the revalidation round-trip that
+  // otherwise costs a mobile connection an RTT per asset per navigation.
+  // index.html is the opposite: it is the document that *names* the current
+  // fingerprints, so a cached copy is exactly how a browser ends up asking for
+  // a bundle that no longer exists. It must never be stored.
+  app.use(express.static(UI_DIST, {
+    etag: true,
+    setHeaders(res, filePath) {
+      if (filePath.endsWith(path.sep + 'index.html')) {
+        res.setHeader('Cache-Control', 'no-store, must-revalidate');
+      } else if (filePath.includes(path.sep + 'assets' + path.sep)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  }));
   // Clean 404 for missing static assets — prevents browser from receiving index.html
   // for a missing .css or .js file and throwing a strict MIME type error.
   app.use('/assets', (_req, res) => res.status(404).type('text/plain').send('Asset not found'));
-  app.get('*', (_req, res) => res.sendFile(path.join(UI_DIST, 'index.html')));
+  app.get('*', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store, must-revalidate');
+    res.sendFile(path.join(UI_DIST, 'index.html'));
+  });
 } else {
   app.get('/', (_req, res) => res.json({
     app:    'Xero Invoice Automation API',
