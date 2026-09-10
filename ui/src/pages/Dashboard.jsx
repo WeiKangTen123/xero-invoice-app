@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import { usePipeline } from '../context/PipelineContext';
+import { useVisiblePolling } from '../utils/useVisiblePolling';
 import ProcessToggle from '../components/ProcessToggle';
 import InvoiceTable from '../components/InvoiceTable';
 
@@ -257,11 +258,11 @@ export default function Dashboard() {
 
   useEffect(() => {
     Promise.all([fetchInvoices(), fetchSettings()]).finally(() => setLoading(false));
-
-    // Poll invoices every 15 s (the queue/xero counts come from PipelineContext).
-    const id = setInterval(fetchInvoices, 15000);
-    return () => clearInterval(id);
   }, [fetchInvoices, fetchSettings]);
+
+  // Poll invoices every 15 s (the queue/xero counts come from PipelineContext),
+  // pausing while the tab is hidden the way PipelineContext already does.
+  useVisiblePolling(fetchInvoices, 15000);
 
   async function handleAutoProcessToggle(val) {
     setTogglingAP(true);

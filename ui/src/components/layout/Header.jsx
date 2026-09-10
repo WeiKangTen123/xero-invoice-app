@@ -17,8 +17,7 @@ function getBreadcrumbs(pathname) {
 
 export default function Header() {
   const { theme, toggle } = useTheme();
-  const { isMobile, toggleViewMode } = useViewMode();
-  const { setMobileDrawerOpen } = useViewMode();
+  const { isMobile, toggleViewMode, setMobileDrawerOpen } = useViewMode();
   const { pathname } = useLocation();
   const crumbs = getBreadcrumbs(pathname);
 
