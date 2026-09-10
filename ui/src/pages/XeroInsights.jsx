@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef, useMemo, Fragment } from 'react';
+import { useState, useEffect, useMemo, Fragment } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney, fmtCell } from '../utils/format';
+import { useVisiblePolling } from '../utils/useVisiblePolling';
 import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPanel, AnalysisPanel, BarList, GroupedMonthlyBars } from '../components/performance/PerformancePanels';
 
 const TABS = [
@@ -229,7 +230,6 @@ export default function XeroInsights() {
   const [tab,       setTab]       = useState('overview');
   const [activeTenantId, setActiveTenantId] = useState(null);
   const [, forceTick] = useState(0); // re-render every 15s so "synced Xs ago" stays live
-  const tickRef = useRef(null);
 
 
   // Lazily-loaded directory tabs — fetched once, the first time each is opened.
@@ -311,10 +311,10 @@ export default function XeroInsights() {
     else setPerf({ status: 'idle', data: null, error: '' });
   }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    tickRef.current = setInterval(() => forceTick(t => t + 1), 15000);
-    return () => clearInterval(tickRef.current);
-  }, []);
+  // Only to keep the "synced Xs ago" labels honest — no fetching. It still
+  // re-rendered this whole page every 15 s in a backgrounded tab, and the
+  // labels are recomputed on return anyway, so it pauses while hidden.
+  useVisiblePolling(() => forceTick(t => t + 1), 15000);
 
   // Lazy tab loaders — only fire the first time a tab is opened.
   useEffect(() => {
