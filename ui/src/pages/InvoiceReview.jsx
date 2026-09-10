@@ -1343,8 +1343,11 @@ export default function InvoiceReview() {
         {isMobile && (
           <div style={{
             position: 'sticky',
-            bottom: 60,
-            margin: '16px -14px -76px -14px',
+            bottom: 'var(--bottom-nav-total)',
+            // Negative bottom margin cancels .page-body's bottom padding so the
+            // bar can sit flush on the nav; it has to track that padding, which
+            // is now derived from the same variable.
+            margin: '16px -14px calc(-1 * (var(--bottom-nav-total) + 16px)) -14px',
             padding: '10px 14px',
             background: 'var(--bg-card)',
             borderTop: '1px solid var(--border)',

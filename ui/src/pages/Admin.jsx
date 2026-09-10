@@ -106,7 +106,11 @@ export default function Admin() {
       {tab === 'monitoring' && <MonitoringPanel timezone={me?.timezone} onViewLogs={viewUserLogs} />}
       {tab === 'logs'       && <LogsPanel timezone={me?.timezone} initialUserId={logsUserId} initialUserEmail={logsUserEmail} />}
 
-      {tab === 'users' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20, alignItems: 'start' }}>
+      {/* The 320px side panel is a fixed track, so on a phone it took almost the
+          whole viewport and left the users list with the remainder. Collapses to
+          one column via .mobile-mode (see globals.css) rather than reading the
+          view mode here. */}
+      {tab === 'users' && <div className="admin-users-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20, alignItems: 'start' }}>
 
         {/* Users list */}
         <div className="card">

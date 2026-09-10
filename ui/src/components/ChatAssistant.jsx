@@ -268,7 +268,7 @@ export default function ChatAssistant() {
         style={{
           position: 'fixed',
           right: isMobile ? 16 : 26,
-          bottom: isMobile ? 74 : 26,
+          bottom: isMobile ? 'calc(var(--bottom-nav-total) + 14px)' : 26,
           width: isMobile ? 48 : 54,
           height: isMobile ? 48 : 54,
           borderRadius: '50%',
@@ -362,7 +362,13 @@ export default function ChatAssistant() {
           {error && <div className="alert alert-error" style={{ fontSize: 12 }}><span className="alert-icon">✕</span>{error}</div>}
         </div>
 
-        <div style={{ padding: '10px 12px', borderTop: '1px solid var(--border)' }}>
+        {/* The panel is fixed to bottom:0 and sits above the bottom nav, so the
+            composer only has to clear the home indicator — not the nav too. */}
+        <div style={{
+          padding: '10px 12px',
+          paddingBottom: isMobile ? 'calc(10px + var(--safe-bottom))' : 10,
+          borderTop: '1px solid var(--border)',
+        }}>
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, background: 'var(--bg-input)', border: '1px solid var(--border)', borderRadius: 12, padding: '7px 7px 7px 12px' }}>
             <textarea
               ref={taRef}

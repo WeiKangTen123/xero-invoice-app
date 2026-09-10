@@ -675,7 +675,7 @@ export default function Setup() {
         })}
 
         {/* Save bar */}
-        <div style={{
+        <div className="setup-save-bar" style={{
           display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12,
           padding: '16px 0',
           position: 'sticky', bottom: 0,
