@@ -647,7 +647,7 @@ export default function XeroInsights() {
         )}
         <div ref={tabsRef} className="mobile-scroll-x" style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, maxWidth: '100%', overflowX: 'auto' }}>
           {TABS.map(t => (
-            <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{
+            <button key={t.key} type="button" className="tab-pill" onClick={() => setTab(t.key)} style={{
               padding: '7px 16px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 600,
               background: tab === t.key ? 'var(--accent-gradient)' : 'transparent',
               color: tab === t.key ? '#fff' : 'var(--text-muted)',
@@ -919,7 +919,15 @@ export default function XeroInsights() {
               ) : statement.data.length === 0 ? (
                 <div className="empty-state" style={{ padding: '30px 0' }}><div className="empty-state-icon">📄</div><div>No transactions found for this account</div></div>
               ) : (
-                <div style={{ overflowX: 'auto', maxHeight: 480, overflowY: 'auto' }}>
+                <div style={{
+                  overflowX: 'auto',
+                  // A 480px scroll region inside a page that already scrolls
+                  // takes ~75% of a phone viewport and captures the thumb, so
+                  // getting past the table means finding the margin beside it.
+                  // On a phone the list just runs and the page scrolls as one.
+                  maxHeight: isMobile ? 'none' : 480,
+                  overflowY: isMobile ? 'visible' : 'auto',
+                }}>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
                     <thead><tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
                       <th style={{ padding: '6px 10px' }}>Date</th><th style={{ padding: '6px 10px' }}>Type</th>
@@ -967,7 +975,15 @@ export default function XeroInsights() {
           ) : filteredContacts.length === 0 ? (
             <div className="empty-state" style={{ padding: '30px 0' }}><div className="empty-state-icon">👥</div><div>No contacts match</div></div>
           ) : (
-            <div style={{ overflowX: 'auto', maxHeight: 480, overflowY: 'auto' }}>
+            <div style={{
+                  overflowX: 'auto',
+                  // A 480px scroll region inside a page that already scrolls
+                  // takes ~75% of a phone viewport and captures the thumb, so
+                  // getting past the table means finding the margin beside it.
+                  // On a phone the list just runs and the page scrolls as one.
+                  maxHeight: isMobile ? 'none' : 480,
+                  overflowY: isMobile ? 'visible' : 'auto',
+                }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
                 <thead><tr style={{ textAlign: 'left', color: 'var(--text-muted)', fontSize: 11 }}>
                   <th style={{ padding: '6px 10px' }}>Name</th><th style={{ padding: '6px 10px' }}>Email</th>
@@ -1024,7 +1040,7 @@ export default function XeroInsights() {
               <>
                 <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', margin: '18px 0 4px' }}>
                   {tiles.map(t => (
-                    <div key={t.label} className="card" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
+                    <div key={t.label} className="card budget-tile" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
                       <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>{t.label}</div>
                       <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: t.value < 0 ? 'var(--danger)' : 'var(--success)' }}>
                         {fmtMoney(t.value, cur)}
@@ -1032,7 +1048,7 @@ export default function XeroInsights() {
                       <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>{t.hint}</div>
                     </div>
                   ))}
-                  <div className="card" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
+                  <div className="card budget-tile" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
                     <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Progress</div>
                     <div style={{ fontSize: 21, fontWeight: 800 }}>{k.monthsElapsed} <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>of {k.monthsTotal} months</span></div>
                     <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>
