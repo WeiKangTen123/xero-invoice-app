@@ -3,8 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
-import { fmtMoney, fmtCell } from '../utils/format';
+import { fmtMoney, fmtMoneyShort, fmtCell } from '../utils/format';
 import { useVisiblePolling } from '../utils/useVisiblePolling';
+import { useEdgeFade } from '../utils/useEdgeFade';
+import { useViewMode } from '../context/ViewModeContext';
 import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPanel, AnalysisPanel, BarList, GroupedMonthlyBars } from '../components/performance/PerformancePanels';
 
 const TABS = [
@@ -221,9 +223,38 @@ function balanceFor(map, account) {
   return map.get(String(account?.name || '').trim().toLowerCase()) || null;
 }
 
+// One headline figure. The three at the top of the page were identical but for
+// their colour, icon and wording, and the phone treatment has to apply to all
+// three the same way — so it lives in one place now.
+//
+// On a phone these sit three-across at roughly 118px each, which is why the
+// caller passes already-shortened text: "SGD 48.1K" rather than "SGD 48,120.55",
+// and "12 invoices" rather than "12 sales invoices awaiting payment". The icon
+// is dropped there by CSS (see .mobile-mode .kpi-card-icon) because a 40px
+// square leaves too little beside it to read.
+function KpiCard({ icon, tone, label, value, sub }) {
+  return (
+    <div className="card kpi-card" style={{ display: 'flex', gap: 13 }}>
+      <div className="kpi-card-icon" style={{
+        width: 40, height: 40, borderRadius: 10,
+        background: `var(--${tone}-subtle)`, color: `var(--${tone})`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 17, flexShrink: 0,
+      }}>{icon}</div>
+      <div style={{ minWidth: 0 }}>
+        <div className="kpi-card-label" style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600 }}>{label}</div>
+        <div className="kpi-card-value" style={{ fontSize: 20, fontWeight: 800, margin: '3px 0 2px' }}>{value}</div>
+        <div className="kpi-card-sub" style={{ fontSize: 11, color: 'var(--text-muted)' }}>{sub}</div>
+      </div>
+    </div>
+  );
+}
+
 export default function XeroInsights() {
   const { user }   = useAuth();
   const navigate   = useNavigate();
+  const { isMobile } = useViewMode();
+  const [tabsRef, tabEdges] = useEdgeFade();
   const [data,      setData]      = useState(null); // null = loading
   const [error,     setError]     = useState('');
   const [refreshing,setRefreshing]= useState(false);
@@ -258,7 +289,19 @@ export default function XeroInsights() {
   // The period is now server-resolved: either a named preset, or an explicit
   // from/to span of any length. Month range and preset are independent — picking
   // a range simply switches the preset to 'custom'.
-  const [perfPreset, setPerfPreset] = useState('fy-ytd');
+  // Phones open on six months, desktops on financial-year-to-date. The charts
+  // switch to a 520px minimum once a period exceeds six months (see
+  // PerformancePanels), which on a 390px screen means every trend chart has to
+  // be scrolled sideways to read — and fy-ytd passes six months for half the
+  // year. Six also roughly halves the payload, which Xero now bills by volume.
+  //
+  // Read once, at mount, and deliberately not persisted: the period control is
+  // right there, a choice made during a session is respected, and the next
+  // visit starts from the default again rather than silently reintroducing the
+  // side-scrolling. Note this means a phone and a desktop show different
+  // default trend windows for the same page — the period label above the charts
+  // always says which, so it reads as a choice rather than a discrepancy.
+  const [perfPreset, setPerfPreset] = useState(() => (isMobile ? 'last-6' : 'fy-ytd'));
   const [perfRange,  setPerfRange]  = useState(null); // { from, to } when custom
   const [revenueLine, setRevenueLine] = useState('overall');
   // Fetched separately from the figures so an LLM outage or a missing API key
@@ -505,7 +548,14 @@ export default function XeroInsights() {
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
         <div className="page-header" style={{ marginBottom: 0 }}>
           <h1>Dashboard</h1>
-          <p>Live financial data pulled read-only from your connected Xero organisation.</p>
+          {/* The org card below is hidden on a phone, so the one thing worth
+              keeping from it — which organisation these figures belong to —
+              moves up here. Its other contents (country, year end) are setup
+              facts available in Settings, and the currency still rides along on
+              every figure. */}
+          <p>{isMobile
+            ? `${organisation.name} · Connected via Xero`
+            : 'Live financial data pulled read-only from your connected Xero organisation.'}</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {tenants?.length > 1 && (
@@ -530,7 +580,7 @@ export default function XeroInsights() {
 
       {error && <div className="alert alert-error" style={{ marginTop: 14 }}><span className="alert-icon">✕</span>{error}</div>}
 
-      <div className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 14, margin: '18px 0' }}>
+      <div className="card org-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 14, margin: '18px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <div style={{ width: 44, height: 44, borderRadius: 11, background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 19 }}>🏢</div>
           <div>
@@ -545,51 +595,75 @@ export default function XeroInsights() {
         </div>
       </div>
 
-      <div className="grid-3" style={{ marginBottom: 20 }}>
-        <div className="card" style={{ display: 'flex', gap: 13 }}>
-          <div style={{ width: 40, height: 40, borderRadius: 10, background: 'var(--success-subtle)', color: 'var(--success)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, flexShrink: 0 }}>↗</div>
-          <div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600 }}>Total Receivables</div>
-            <div style={{ fontSize: 20, fontWeight: 800, margin: '3px 0 2px' }}>{fmtMoney(kpis.totalReceivables, currency)}</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{kpis.receivablesCount} sales invoice{kpis.receivablesCount !== 1 ? 's' : ''} awaiting payment</div>
-          </div>
-        </div>
-        <div className="card" style={{ display: 'flex', gap: 13 }}>
-          <div style={{ width: 40, height: 40, borderRadius: 10, background: 'var(--danger-subtle)', color: 'var(--danger)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, flexShrink: 0 }}>▣</div>
-          <div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600 }}>Total Payables</div>
-            <div style={{ fontSize: 20, fontWeight: 800, margin: '3px 0 2px' }}>{fmtMoney(kpis.totalPayables, currency)}</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{kpis.payablesCount} bill{kpis.payablesCount !== 1 ? 's' : ''} awaiting payment</div>
-          </div>
-        </div>
-        <div className="card" style={{ display: 'flex', gap: 13 }}>
-          <div style={{ width: 40, height: 40, borderRadius: 10, background: 'var(--warning-subtle)', color: 'var(--warning)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17, flexShrink: 0 }}>⏱</div>
-          <div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600 }}>Overdue Amount</div>
-            <div style={{ fontSize: 20, fontWeight: 800, margin: '3px 0 2px' }}>{fmtMoney(kpis.overdueAmount, currency)}</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{kpis.statusBreakdown.overdue} invoice{kpis.statusBreakdown.overdue !== 1 ? 's' : ''} past due</div>
-          </div>
-        </div>
+      {/* Three-across and abbreviated on a phone (see .mobile-mode .kpi-row).
+          Stacked full-width, these three cards ran to about 270px — so the tab
+          strip and every chart began below the fold, and the page opened on
+          nothing but summary. */}
+      <div className="grid-3 kpi-row" style={{ marginBottom: 20 }}>
+        <KpiCard
+          icon="↗" tone="success"
+          label={isMobile ? 'Receivables' : 'Total Receivables'}
+          value={isMobile ? fmtMoneyShort(kpis.totalReceivables, currency) : fmtMoney(kpis.totalReceivables, currency)}
+          sub={isMobile
+            ? `${kpis.receivablesCount} invoice${kpis.receivablesCount !== 1 ? 's' : ''}`
+            : `${kpis.receivablesCount} sales invoice${kpis.receivablesCount !== 1 ? 's' : ''} awaiting payment`}
+        />
+        <KpiCard
+          icon="▣" tone="danger"
+          label={isMobile ? 'Payables' : 'Total Payables'}
+          value={isMobile ? fmtMoneyShort(kpis.totalPayables, currency) : fmtMoney(kpis.totalPayables, currency)}
+          sub={isMobile
+            ? `${kpis.payablesCount} bill${kpis.payablesCount !== 1 ? 's' : ''}`
+            : `${kpis.payablesCount} bill${kpis.payablesCount !== 1 ? 's' : ''} awaiting payment`}
+        />
+        <KpiCard
+          icon="⏱" tone="warning"
+          label={isMobile ? 'Overdue' : 'Overdue Amount'}
+          value={isMobile ? fmtMoneyShort(kpis.overdueAmount, currency) : fmtMoney(kpis.overdueAmount, currency)}
+          sub={isMobile
+            ? `${kpis.statusBreakdown.overdue} past due`
+            : `${kpis.statusBreakdown.overdue} invoice${kpis.statusBreakdown.overdue !== 1 ? 's' : ''} past due`}
+        />
       </div>
 
-      <div className="mobile-scroll-x" style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, marginBottom: 18, maxWidth: '100%', overflowX: 'auto' }}>
-        {TABS.map(t => (
-          <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{
-            padding: '7px 16px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 600,
-            background: tab === t.key ? 'var(--accent-gradient)' : 'transparent',
-            color: tab === t.key ? '#fff' : 'var(--text-muted)',
-            whiteSpace: 'nowrap', flexShrink: 0,
-          }}>{t.label}</button>
-        ))}
-        {PHASE2_TABS.map(t => (
-          <span key={t.key} title="Coming later — needs a wider Xero connection scope" style={{
-            padding: '7px 16px', borderRadius: 7, fontSize: 12.5, fontWeight: 600, color: 'var(--text-muted)', opacity: 0.5,
-            display: 'flex', alignItems: 'center', gap: 6, cursor: 'not-allowed',
-          }}>
-            {t.label}
-            <span style={{ fontSize: 8.5, fontWeight: 800, background: 'var(--bg-secondary)', padding: '1px 5px', borderRadius: 5 }}>PHASE 2</span>
-          </span>
-        ))}
+      {/* Gradient overlays rather than a CSS mask on the strip itself: a mask
+          would fade the strip's own background and border at the edge, leaving
+          the rounded outline looking broken. Each only renders when there is
+          actually more to scroll to on that side. */}
+      <div style={{ position: 'relative', marginBottom: 18 }}>
+        {tabEdges.start && (
+          <div aria-hidden="true" style={{
+            position: 'absolute', left: 1, top: 1, bottom: 1, width: 36, zIndex: 1,
+            borderRadius: '9px 0 0 9px', pointerEvents: 'none',
+            background: 'linear-gradient(to left, transparent, var(--bg-card))',
+          }} />
+        )}
+        {tabEdges.end && (
+          <div aria-hidden="true" style={{
+            position: 'absolute', right: 1, top: 1, bottom: 1, width: 36, zIndex: 1,
+            borderRadius: '0 9px 9px 0', pointerEvents: 'none',
+            background: 'linear-gradient(to right, transparent, var(--bg-card))',
+          }} />
+        )}
+        <div ref={tabsRef} className="mobile-scroll-x" style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, maxWidth: '100%', overflowX: 'auto' }}>
+          {TABS.map(t => (
+            <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{
+              padding: '7px 16px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 600,
+              background: tab === t.key ? 'var(--accent-gradient)' : 'transparent',
+              color: tab === t.key ? '#fff' : 'var(--text-muted)',
+              whiteSpace: 'nowrap', flexShrink: 0,
+            }}>{t.label}</button>
+          ))}
+          {PHASE2_TABS.map(t => (
+            <span key={t.key} title="Coming later — needs a wider Xero connection scope" style={{
+              padding: '7px 16px', borderRadius: 7, fontSize: 12.5, fontWeight: 600, color: 'var(--text-muted)', opacity: 0.5,
+              display: 'flex', alignItems: 'center', gap: 6, cursor: 'not-allowed',
+            }}>
+              {t.label}
+              <span style={{ fontSize: 8.5, fontWeight: 800, background: 'var(--bg-secondary)', padding: '1px 5px', borderRadius: 5 }}>PHASE 2</span>
+            </span>
+          ))}
+        </div>
       </div>
 
       {['overview', 'revenue', 'cashflow', 'profit', 'analysis'].includes(tab) && perf.data && !perf.error && (

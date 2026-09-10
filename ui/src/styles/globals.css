@@ -657,6 +657,33 @@ body {
   font-size: 20px !important;
 }
 
+/* The dashboard's three headline figures. Stacked full-width they ran to about
+   270px, which pushed the tab strip and every chart below the fold — the page
+   opened on nothing but summary. Three-across costs ~75px and gets the first
+   chart onto the first screen.
+
+   These override .mobile-mode .grid-3's single column above, and !important is
+   needed throughout because the base values are inline styles on the cards. */
+.mobile-mode .kpi-row {
+  grid-template-columns: repeat(3, 1fr) !important;
+  gap: 8px !important;
+  margin-bottom: 14px !important;
+}
+.mobile-mode .kpi-row .card {
+  padding: 10px 8px !important;
+}
+/* ~118px per tile leaves too little beside a 40px square to read. */
+.mobile-mode .kpi-card-icon  { display: none !important; }
+.mobile-mode .kpi-card-label { font-size: 9.5px !important; line-height: 1.3 !important; text-transform: uppercase; letter-spacing: .03em; }
+.mobile-mode .kpi-card-value { font-size: 15px !important; margin: 2px 0 1px !important; }
+.mobile-mode .kpi-card-sub   { font-size: 9.5px !important; line-height: 1.3 !important; }
+
+/* Its one useful fact — which organisation — moves into the page subtitle on a
+   phone; country and year end are setup facts that live in Settings. */
+.mobile-mode .org-card {
+  display: none !important;
+}
+
 /* Fixed 320px second track; unusable beside it on a phone. */
 .mobile-mode .admin-users-grid {
   grid-template-columns: 1fr !important;
