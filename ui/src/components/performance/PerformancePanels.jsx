@@ -101,13 +101,23 @@ export function MonthRange({ months, from, to, onChange, label, preset, onPreset
 // The reference dashboard's signature card: label, big value, a thin meter, and
 // two footnotes. `meter` is a 0-100 fill, or null when there's nothing sensible
 // to measure against — an unfilled bar reads as "zero", which would be a lie.
+// minWidth 190 is what kept these from pairing up on a phone: two need 394px of
+// a 366px content width, so every panel opened with a full-height column of
+// tiles and no chart above the fold. .mobile-mode drops it to 170 (see
+// globals.css) — the classNames below exist for that rule to reach.
+//
+// The figure shrinks there rather than being abbreviated. At 2-up a tile is
+// ~176px wide, which fits "SGD 128,400.00" at 15px on one line, and an exact
+// figure is worth more in an accounting tool than "128.4K". The three-across
+// KPI row at the top of the page does abbreviate, because ~118px leaves no
+// choice.
 function Metric({ label, value, meter, footLeft, footRight, tone }) {
   const width = meter === null || meter === undefined ? null : Math.max(0, Math.min(100, meter));
   return (
-    <div className="card" style={{ flex: 1, minWidth: 190, background: 'var(--bg-secondary)', display: 'flex', flexDirection: 'column', gap: 9 }}>
-      <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>{label}</div>
+    <div className="card metric" style={{ flex: 1, minWidth: 190, background: 'var(--bg-secondary)', display: 'flex', flexDirection: 'column', gap: 9 }}>
+      <div className="metric-label" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>{label}</div>
       <div>
-        <div style={{ fontSize: 23, fontWeight: 800, fontVariantNumeric: 'tabular-nums', lineHeight: 1.15, color: tone }}>{value}</div>
+        <div className="metric-value" style={{ fontSize: 23, fontWeight: 800, fontVariantNumeric: 'tabular-nums', lineHeight: 1.15, color: tone }}>{value}</div>
         {width !== null && (
           <div style={{ height: 3, borderRadius: 2, background: 'var(--bg-hover)', marginTop: 8, overflow: 'hidden' }}>
             <div style={{ height: '100%', width: `${width}%`, background: tone || 'var(--accent)', borderRadius: 2, transition: 'width .4s ease' }} />

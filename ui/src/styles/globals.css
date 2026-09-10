@@ -657,6 +657,44 @@ body {
   font-size: 20px !important;
 }
 
+/* ── Touch targets ──────────────────────────────────────
+   Everything interactive gets a 44px minimum on a phone — Apple's floor, and
+   Android's 48dp comes from the same measurement: the contact patch of an adult
+   fingertip. .btn-sm shipped at roughly 31px across 79 uses, so a fingertip
+   covered its button and both neighbours.
+
+   Scoped to .mobile-mode on purpose. The desktop dashboard is dense by design
+   and you aim it with a cursor, so it keeps the sizing it has.
+
+   min-height alone is enough for a native <button>: it centres its own content
+   vertically, so nothing needs its display changed — which would break the many
+   buttons here that set their own flex layout inline. */
+.mobile-mode button,
+.mobile-mode .btn,
+.mobile-mode .btn-sm,
+.mobile-mode .tab-pill,
+.mobile-mode select,
+.mobile-mode .form-input {
+  min-height: 44px;
+}
+/* No exceptions needed, having checked the two candidates: the bottom nav is
+   built from NavLinks (anchors, not buttons) and the chat bubble sets an inline
+   height of 48, which already clears the floor. */
+
+/* Figure tiles across the five chart tabs. The inline minWidth of 190 meant two
+   needed 394px of a 366px content width and missed by 24px, so every panel
+   opened with a full-height column of tiles and pushed its chart below the fold.
+   170 pairs them up; the figure drops to 15px so an exact amount still sits on
+   one line at half width. Budget's own tiles have the same problem at 180. */
+.mobile-mode .metric,
+.mobile-mode .budget-tile {
+  min-width: 170px !important;
+}
+.mobile-mode .metric-value {
+  font-size: 15px !important;
+  line-height: 1.25 !important;
+}
+
 /* The dashboard's three headline figures. Stacked full-width they ran to about
    270px, which pushed the tab strip and every chart below the fold — the page
    opened on nothing but summary. Three-across costs ~75px and gets the first
