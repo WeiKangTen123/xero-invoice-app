@@ -17,7 +17,7 @@ function getBreadcrumbs(pathname) {
 
 export default function Header() {
   const { theme, toggle } = useTheme();
-  const { isMobile, toggleViewMode, setMobileDrawerOpen } = useViewMode();
+  const { mode, isMobile, toggleViewMode, setMobileDrawerOpen } = useViewMode();
   const { pathname } = useLocation();
   const crumbs = getBreadcrumbs(pathname);
 
@@ -74,10 +74,17 @@ export default function Header() {
 
       {/* Right actions: View Mode Switcher + Theme toggle */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        {/* Web / Mobile Mode Toggle Button */}
+        {/* Web / Mobile layout toggle.
+            Kept despite every browser having its own desktop-site control,
+            because Safari on iOS backs that control with a user-agent change
+            only — the viewport stays put, so a layout that switches on
+            matchMedia never sees it. On an iPhone this button is the only route
+            to the Web layout. */}
         <button
           onClick={toggleViewMode}
-          title={`Switch between Mobile and Web layout (Currently: ${isMobile ? 'Mobile' : 'Web'})`}
+          title={mode === 'auto'
+            ? `Following your screen size (${isMobile ? 'Mobile' : 'Web'}). Tap to force ${isMobile ? 'Web' : 'Mobile'}.`
+            : `${isMobile ? 'Mobile' : 'Web'} layout, set by you. Tap to go back to following your screen size.`}
           style={{
             height: 32,
             padding: '0 10px',
@@ -96,6 +103,15 @@ export default function Header() {
         >
           <span>{isMobile ? '📱' : '💻'}</span>
           <span style={{ fontSize: 11 }}>{isMobile ? 'Mobile' : 'Web'}</span>
+          {/* A dot when the layout was chosen rather than detected — otherwise
+              a pinned layout is indistinguishable from the natural one, which
+              is how someone ends up thinking the app itself is broken. */}
+          {mode !== 'auto' && (
+            <span aria-hidden="true" style={{
+              width: 5, height: 5, borderRadius: '50%',
+              background: 'var(--accent)', flexShrink: 0,
+            }} />
+          )}
         </button>
 
         {/* Theme toggle */}

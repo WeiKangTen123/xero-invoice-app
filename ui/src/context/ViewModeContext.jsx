@@ -50,9 +50,27 @@ export function ViewModeProvider({ children }) {
   // already rendering mobile — the first press set mode to 'mobile' and changed
   // nothing visible, so the button looked dead until pressed twice. That dead
   // press only ever hit phone users, who are the point of the mobile view.
+  //
+  // Toggling back to whatever this screen would have chosen on its own returns
+  // to 'auto' rather than pinning that layout explicitly. Nothing in the UI ever
+  // set 'auto', so the button was a one-way door: one press and the device was
+  // fixed to a layout in localStorage for good, on every later visit and every
+  // screen size. The failure was silent — someone pressing it on a phone got a
+  // squeezed desktop layout, never connected it to the button, and concluded the
+  // app was broken. This also un-pins anyone already stuck, since their next
+  // press lands on the natural choice and stores 'auto'.
+  //
+  // Worth keeping rather than deferring to the browser: Chrome on Android backs
+  // "Request desktop site" with a ~980px virtual viewport, so media queries see
+  // it and a responsive layout follows — but Safari on iOS changes only the
+  // user-agent string, leaving the viewport alone. Layout here switches on
+  // matchMedia, not the UA, so on an iPhone the browser's own control cannot
+  // reach it. This button is the only way there.
   const toggleViewMode = useCallback(() => {
-    setViewMode(isMobile ? 'desktop' : 'mobile');
-  }, [isMobile, setViewMode]);
+    const next    = isMobile ? 'desktop' : 'mobile';
+    const natural = narrow ? 'mobile' : 'desktop';
+    setViewMode(next === natural ? 'auto' : next);
+  }, [isMobile, narrow, setViewMode]);
 
   return (
     <ViewModeContext.Provider value={{
