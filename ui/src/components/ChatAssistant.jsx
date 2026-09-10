@@ -3,6 +3,7 @@ import { useLocation, useParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../api/client';
+import { useViewMode } from '../context/ViewModeContext';
 
 // Assistant replies are markdown (the model is asked to use tables for multi-field
 // summaries) — render it properly instead of showing literal ** and | characters.
@@ -182,6 +183,7 @@ function ActionCard({ proposal, invoiceId }) {
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
 export default function ChatAssistant() {
+  const { isMobile } = useViewMode();
   const location = useLocation();
   const params   = useParams();
   const pinnedId = location.pathname.startsWith('/invoices/') ? params.id : null;
@@ -271,10 +273,21 @@ export default function ChatAssistant() {
         title="Ask about your invoices"
         aria-hidden={open}
         style={{
-          position: 'fixed', right: 26, bottom: 26, width: 54, height: 54, borderRadius: '50%',
-          background: 'var(--accent-gradient)', border: 'none',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          boxShadow: 'var(--shadow-lg)', color: '#fff', fontSize: 21, zIndex: 200,
+          position: 'fixed',
+          right: isMobile ? 16 : 26,
+          bottom: isMobile ? 74 : 26,
+          width: isMobile ? 48 : 54,
+          height: isMobile ? 48 : 54,
+          borderRadius: '50%',
+          background: 'var(--accent-gradient)',
+          border: 'none',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          boxShadow: 'var(--shadow-lg)',
+          color: '#fff',
+          fontSize: isMobile ? 19 : 21,
+          zIndex: 200,
           cursor: open ? 'default' : 'pointer',
           opacity: open ? 0 : 1,
           pointerEvents: open ? 'none' : 'auto',
@@ -288,13 +301,20 @@ export default function ChatAssistant() {
       <div
         ref={panelRef}
         style={{
-        position: 'fixed', top: 0, right: 0, bottom: 0, width: 400, maxWidth: '92vw',
-        background: 'var(--bg-card)', borderLeft: '1px solid var(--border)',
-        boxShadow: '-12px 0 40px rgba(0,0,0,0.18)',
-        display: 'flex', flexDirection: 'column',
+        position: 'fixed',
+        top: 0,
+        right: 0,
+        bottom: 0,
+        width: isMobile ? '100vw' : 400,
+        maxWidth: isMobile ? '100vw' : '92vw',
+        background: 'var(--bg-card)',
+        borderLeft: isMobile ? 'none' : '1px solid var(--border)',
+        boxShadow: '-12px 0 40px rgba(0,0,0,0.25)',
+        display: 'flex',
+        flexDirection: 'column',
         transform: open ? 'translateX(0)' : 'translateX(100%)',
         transition: 'transform 0.25s cubic-bezier(0.4,0,0.2,1)',
-        zIndex: 199,
+        zIndex: 201,
       }}>
         <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

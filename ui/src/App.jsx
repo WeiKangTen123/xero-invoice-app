@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
+import { ViewModeProvider } from './context/ViewModeContext';
 import { PipelineProvider } from './context/PipelineContext';
 import Layout from './components/layout/Layout';
 import Login from './pages/Login';
@@ -68,13 +69,15 @@ function AppRoutes() {
 export default function App() {
   return (
     <ThemeProvider>
-      <AuthProvider>
-        <PipelineProvider>
-          <BrowserRouter>
-            <AppRoutes />
-          </BrowserRouter>
-        </PipelineProvider>
-      </AuthProvider>
+      <ViewModeProvider>
+        <AuthProvider>
+          <PipelineProvider>
+            <BrowserRouter>
+              <AppRoutes />
+            </BrowserRouter>
+          </PipelineProvider>
+        </AuthProvider>
+      </ViewModeProvider>
     </ThemeProvider>
   );
 }
