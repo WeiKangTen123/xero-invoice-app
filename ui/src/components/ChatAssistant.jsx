@@ -1,21 +1,14 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, lazy, Suspense } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { api } from '../api/client';
 import { useViewMode } from '../context/ViewModeContext';
 
-// Assistant replies are markdown (the model is asked to use tables for multi-field
-// summaries) — render it properly instead of showing literal ** and | characters.
-// User messages are NOT rendered as markdown — a user's own words should show up
-// exactly as typed, not be reinterpreted as formatting.
-function MarkdownMessage({ content }) {
-  return (
-    <div className="chat-md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-    </div>
-  );
-}
+// react-markdown + remark-gfm are the heaviest dependency in the bundle and are
+// only needed once an assistant reply is on screen, so the renderer loads on
+// demand rather than shipping with the entry chunk. The fallback prints the raw
+// reply, which is already readable text — the chunk only upgrades it to tables
+// and emphasis, so there is nothing to hide behind a spinner.
+const MarkdownMessage = lazy(() => import('./MarkdownMessage'));
 
 // Fired after a chat-confirmed action changes an invoice, so InvoiceReview (if open
 // on that invoice) can refetch without ChatAssistant needing to know about it directly.
@@ -347,7 +340,9 @@ export default function ChatAssistant() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: '100%' }}>
                   {m.content && (
                     <div style={{ maxWidth: '94%', padding: '8px 12px', borderRadius: 14, borderBottomLeftRadius: 4, fontSize: 13, lineHeight: 1.5, background: 'var(--bg-hover)', color: 'var(--text-primary)' }}>
-                      <MarkdownMessage content={m.content} />
+                      <Suspense fallback={<div className="chat-md" style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>}>
+                        <MarkdownMessage content={m.content} />
+                      </Suspense>
                     </div>
                   )}
                   {(m.proposals || []).map((p, pi) => (
