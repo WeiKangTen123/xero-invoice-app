@@ -59,7 +59,42 @@ const PORT = process.env.PORT || 4000;
 const PROD = process.env.NODE_ENV === 'production';
 
 // ── Security & middleware ────────────────────────────────────────────────────
-app.use(helmet({ contentSecurityPolicy: false }));  // CSP off for React SPA
+// A Content-Security-Policy written to what this app actually loads, rather
+// than switched off. It was off with the note "CSP off for React SPA", but a
+// Vite-built SPA needs no concessions here: the page pulls one module script
+// and one stylesheet, both same-origin, and there is no CDN anywhere in it.
+//
+// Directives are listed in full with useDefaults:false so this is the whole
+// policy, not a merge with whatever the library ships this version.
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'self'"],
+      // No inline scripts — Vite emits <script type="module" src>. No eval
+      // either, so 'unsafe-eval' stays off and string-to-code is blocked.
+      scriptSrc:  ["'self'"],
+      // 'unsafe-inline' covers exactly one <style> element, the chat markdown
+      // rules in ChatAssistant. React's style={{}} props are not inline
+      // stylesheets — they are set as DOM properties and CSP never sees them —
+      // so this is not the blanket it looks like. Moving that block into
+      // globals.css would let it go.
+      styleSrc:   ["'self'", "'unsafe-inline'"],
+      // blob: for the camera preview on the capture page, data: for inline SVG.
+      imgSrc:     ["'self'", 'data:', 'blob:'],
+      fontSrc:    ["'self'"],
+      connectSrc: ["'self'"],
+      // Invoice PDFs are shown in an iframe, served from this origin.
+      frameSrc:   ["'self'"],
+      objectSrc:  ["'none'"],
+      baseUri:    ["'self'"],
+      formAction: ["'self'"],
+      // Nothing should ever frame this app — the clickjacking counterpart to
+      // the X-Frame-Options header helmet also sets.
+      frameAncestors: ["'none'"],
+    },
+  },
+}));
 app.use(compression());
 app.set('trust proxy', 1);
 app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));

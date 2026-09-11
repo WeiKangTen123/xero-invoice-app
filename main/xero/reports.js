@@ -21,17 +21,54 @@ const logger             = require('../utils/logger');
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const _cache = new Map(); // arbitrary string key -> { data, fetchedAt }
 
+// Expiry alone never freed anything: a stale entry failed the TTL check on read
+// and was then left in place, so the map only ever grew. Every distinct
+// user + tenant + range + report combination stayed resident with its full
+// payload, on a process that runs for days at a time.
+//
+// Two mechanisms, because either alone leaves a hole. Dropping an entry when a
+// read finds it stale costs nothing and handles anything still being looked at;
+// the sweep handles what nobody reads again — a tenant disconnected, a date
+// range visited once. The cap is the backstop for a burst of distinct keys
+// arriving faster than they expire.
+const CACHE_MAX_ENTRIES = 500;
+
+function _isStale(entry, now) {
+  return now - entry.fetchedAt >= (entry.ttl || CACHE_TTL_MS);
+}
+
+function _pruneCache() {
+  const now = Date.now();
+  for (const [k, v] of _cache) {
+    if (_isStale(v, now)) _cache.delete(k);
+  }
+  if (_cache.size > CACHE_MAX_ENTRIES) {
+    // Still over after dropping every stale entry: evict oldest first, which is
+    // the least likely to be read again.
+    const byAge = [..._cache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+    for (let i = 0, drop = _cache.size - CACHE_MAX_ENTRIES; i < drop; i++) _cache.delete(byAge[i][0]);
+  }
+}
+
 function _cacheGet(key, force) {
   const cached = _cache.get(key);
+  if (!cached) return null;
   // Per-entry TTL, defaulting to the short one. Report data is cheap to refetch
   // and should stay near-live; generated commentary costs an LLM call, so it
   // opts into a much longer life via _cacheSet's third argument.
-  if (!force && cached && Date.now() - cached.fetchedAt < (cached.ttl || CACHE_TTL_MS)) {
-    return { ...cached.data, cached: true, fetchedAt: cached.fetchedAt };
+  if (_isStale(cached, Date.now())) {
+    _cache.delete(key);
+    return null;
   }
-  return null;
+  if (force) return null;
+  return { ...cached.data, cached: true, fetchedAt: cached.fetchedAt };
 }
+
 function _cacheSet(key, data, ttl) {
+  // Swept on write rather than on a timer: a timer on a module that may never be
+  // used keeps a handle alive for nothing, and writes are exactly when the map
+  // grows.
+  if (_cache.size >= CACHE_MAX_ENTRIES) _pruneCache();
   _cache.set(key, { data, fetchedAt: Date.now(), ttl });
   return { ...data, cached: false, fetchedAt: Date.now() };
 }
@@ -1579,7 +1616,7 @@ module.exports = {
   _mergeChunks, _buildCustomerRevenue, _buildInvoiceHygiene, _buildQuotePipeline, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
   _toBase, _foreignCurrency, _closedCount, _growthPct, _buildGrowth, _buildRunway, _buildCashWaterfall,
   _buildAlerts, ALERT_THRESHOLDS,
-  _isTransfer, _isReceiptPayment, _periodCacheTtl, TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
+  _isTransfer, _isReceiptPayment, _periodCacheTtl, _pruneCache, _cache, CACHE_MAX_ENTRIES, TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights, _buildCategoryVariances,
   _narrativeFacts, _groundNarrative, _narrativePrompt, _narrateFrom,
 };
