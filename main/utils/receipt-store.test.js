@@ -125,6 +125,43 @@ describe('utils/receipt-store', () => {
       expect(fs.existsSync(s.dir)).toBe(true);
     });
 
+    // Thumbnails are cached beside the original as "<filename>.w<width>.jpg".
+    // Nothing indexes them, so the only thing keeping them from accumulating
+    // forever is that remove() sweeps by prefix.
+    test('removing a receipt takes its cached thumbnails with it', () => {
+      const { s } = userStore();
+      const name = s.save('r1', JPEG, 'image/jpeg');
+      fs.writeFileSync(path.join(s.dir, `${name}.w160.jpg`), JPEG);
+      fs.writeFileSync(path.join(s.dir, `${name}.w480.jpg`), JPEG);
+
+      expect(s.remove(name)).toBe(true);
+      expect(fs.existsSync(path.join(s.dir, `${name}.w160.jpg`))).toBe(false);
+      expect(fs.existsSync(path.join(s.dir, `${name}.w480.jpg`))).toBe(false);
+    });
+
+    test('thumbnails of a receipt whose original is already gone are still swept', () => {
+      // A receipt deleted before thumbnails were swept would otherwise keep them
+      // on disk permanently, with nothing left to attribute them to.
+      const { s } = userStore();
+      const name = s.save('r1', JPEG, 'image/jpeg');
+      fs.writeFileSync(path.join(s.dir, `${name}.w160.jpg`), JPEG);
+      fs.unlinkSync(path.join(s.dir, name));
+
+      expect(s.remove(name)).toBe(false);   // the original really was gone
+      expect(fs.existsSync(path.join(s.dir, `${name}.w160.jpg`))).toBe(false);
+    });
+
+    test('one receipt\'s thumbnails are not swept by deleting another', () => {
+      const { s } = userStore();
+      const a = s.save('r1', JPEG, 'image/jpeg');
+      const b = s.save('r2', JPEG, 'image/jpeg');
+      fs.writeFileSync(path.join(s.dir, `${a}.w160.jpg`), JPEG);
+      fs.writeFileSync(path.join(s.dir, `${b}.w160.jpg`), JPEG);
+
+      s.remove(a);
+      expect(fs.existsSync(path.join(s.dir, `${b}.w160.jpg`))).toBe(true);
+    });
+
     test('the same user gets the same store instance back', () => {
       const id = uid(); created.push(id);
       expect(store.forUser(id)).toBe(store.forUser(id));

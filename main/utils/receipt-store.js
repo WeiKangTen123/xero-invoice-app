@@ -63,8 +63,27 @@ function forUser(userId) {
 
   function exists(filename) { return getPath(filename) !== null; }
 
+  // Cached thumbnails sit beside the original as "<filename>.w<width>.jpg", so
+  // they are swept by prefix here rather than tracked in an index that could
+  // drift out of step with the files themselves.
+  function removeDerivatives(filename) {
+    if (!filename) return 0;
+    let n = 0;
+    try {
+      for (const f of fs.readdirSync(DIR)) {
+        if (f.startsWith(`${filename}.w`) && f.endsWith('.jpg')) {
+          try { fs.unlinkSync(path.join(DIR, f)); n++; } catch (_) { /* already gone */ }
+        }
+      }
+    } catch (_) { /* no directory yet */ }
+    return n;
+  }
+
   function remove(filename) {
     const p = getPath(filename);
+    // Swept whether or not the original is still present, so a receipt that was
+    // half-deleted earlier cannot leave thumbnails behind for good.
+    removeDerivatives(filename);
     if (!p) return false;
     fs.unlinkSync(p);
     return true;
@@ -77,7 +96,7 @@ function forUser(userId) {
     }
   }
 
-  const store = { save, getPath, read, exists, remove, clearAll, dir: DIR };
+  const store = { save, getPath, read, exists, remove, removeDerivatives, clearAll, dir: DIR };
   _stores.set(userId, store);
   return store;
 }

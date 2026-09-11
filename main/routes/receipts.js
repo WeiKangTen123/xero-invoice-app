@@ -10,6 +10,7 @@ const { parseReceiptImage } = require('../utils/receipt-parser');
 // at call time — a destructured import captures the original reference and can
 // never be substituted in a test.
 const pdfPages = require('../utils/pdf-pages');
+const thumbnailer = require('../utils/thumbnailer');
 const { hashBuffer, findDuplicate } = require('../claims/claim-dedup');
 const QRCode       = require('qrcode');
 const logger       = require('../utils/logger');
@@ -429,7 +430,7 @@ router.get('/:id/token', requireAuth, (req, res) => {
 });
 
 // GET /api/receipts/:id/image?token=... — no requireAuth; the token IS the auth
-router.get('/:id/image', (req, res) => {
+router.get('/:id/image', async (req, res) => {
   let payload;
   try {
     payload = verifyImageToken(req.query.token, req.params.id);
@@ -440,8 +441,29 @@ router.get('/:id/image', (req, res) => {
   const record = invoiceStore.forUser(payload.userId).getById(req.params.id);
   if (!record || !record.receiptFile) return res.status(404).json({ error: 'Receipt not found' });
 
-  const filePath = receiptStore.forUser(payload.userId).getPath(record.receiptFile);
+  const store    = receiptStore.forUser(payload.userId);
+  const filePath = store.getPath(record.receiptFile);
   if (!filePath) return res.status(404).json({ error: 'Receipt file is missing' });
+
+  // ?w= asks for a scaled copy. Callers that render small — the pairing modal's
+  // 76px tiles — ask for one; the review screen does not, because it draws the
+  // photo to a canvas and crops it by pixel box, which needs the original.
+  //
+  // Anything that cannot be scaled (a PDF, an unknown width, an image library
+  // that failed to load) falls through to the original rather than erroring. A
+  // heavier image is a far better outcome than a broken one.
+  if (req.query.w) {
+    const thumb = await thumbnailer.thumbnailPath(
+      filePath, store.dir, record.receiptFile, req.query.w, record.receiptMime,
+    );
+    if (thumb) {
+      res.type('image/jpeg');
+      // Derived from an immutable original at a fixed width, and the URL is
+      // already scoped by a short-lived token, so it is private to this viewer.
+      res.setHeader('Cache-Control', 'private, max-age=86400');
+      return res.sendFile(thumb);
+    }
+  }
 
   res.type(record.receiptMime || 'application/octet-stream');
   res.sendFile(filePath);
