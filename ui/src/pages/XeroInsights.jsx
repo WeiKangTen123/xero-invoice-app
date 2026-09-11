@@ -255,6 +255,7 @@ export default function XeroInsights() {
   const navigate   = useNavigate();
   const { isMobile } = useViewMode();
   const [tabsRef, tabEdges] = useEdgeFade();
+  const [monthsRef, monthEdges] = useEdgeFade();
   const [data,      setData]      = useState(null); // null = loading
   const [error,     setError]     = useState('');
   const [refreshing,setRefreshing]= useState(false);
@@ -1040,17 +1041,17 @@ export default function XeroInsights() {
               <>
                 <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', margin: '18px 0 4px' }}>
                   {tiles.map(t => (
-                    <div key={t.label} className="card budget-tile" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
-                      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>{t.label}</div>
-                      <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: t.value < 0 ? 'var(--danger)' : 'var(--success)' }}>
+                    <div key={t.label} className="card figure-tile" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
+                      <div className="figure-label" style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>{t.label}</div>
+                      <div className="figure-value" style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: t.value < 0 ? 'var(--danger)' : 'var(--success)' }}>
                         {fmtMoney(t.value, cur)}
                       </div>
                       <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>{t.hint}</div>
                     </div>
                   ))}
-                  <div className="card budget-tile" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
-                    <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Progress</div>
-                    <div style={{ fontSize: 21, fontWeight: 800 }}>{k.monthsElapsed} <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>of {k.monthsTotal} months</span></div>
+                  <div className="card figure-tile" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
+                    <div className="figure-label" style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Progress</div>
+                    <div className="figure-value" style={{ fontSize: 21, fontWeight: 800 }}>{k.monthsElapsed} <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>of {k.monthsTotal} months</span></div>
                     <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>
                       {d.months.find(m => m.source === 'budget')?.label || '—'} onward is budget
                     </div>
@@ -1109,10 +1110,24 @@ export default function XeroInsights() {
 
             return (
               <>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '14px 0 4px' }}>
+                <div style={{ position: 'relative', margin: '14px 0 4px' }}>
+                  {isMobile && monthEdges.start && (
+                    <div aria-hidden="true" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 28, zIndex: 1,
+                      pointerEvents: 'none', background: 'linear-gradient(to left, transparent, var(--bg-card))' }} />
+                  )}
+                  {isMobile && monthEdges.end && (
+                    <div aria-hidden="true" style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 28, zIndex: 1,
+                      pointerEvents: 'none', background: 'linear-gradient(to right, transparent, var(--bg-card))' }} />
+                  )}
+                <div
+                  ref={monthsRef}
+                  className={isMobile ? 'mobile-scroll-x' : undefined}
+                  style={{ display: 'flex', gap: 6, flexWrap: isMobile ? 'nowrap' : 'wrap' }}
+                >
                   {d.months.map(m => (
                     <button key={m.key} type="button" onClick={() => setVarianceMonth(m.key)} style={{
                       padding: '5px 10px', fontSize: 11.5, fontWeight: 600, borderRadius: 7, cursor: 'pointer',
+                      flexShrink: 0, whiteSpace: 'nowrap',
                       border: `1px solid ${varianceMonth === m.key ? 'transparent' : 'var(--border)'}`,
                       background: varianceMonth === m.key ? 'var(--accent-gradient)' : 'transparent',
                       color: varianceMonth === m.key ? '#fff' : (m.source === 'actual' ? 'var(--text-secondary)' : 'var(--text-muted)'),
@@ -1120,10 +1135,12 @@ export default function XeroInsights() {
                   ))}
                   <button type="button" onClick={() => setVarianceMonth('ytd')} style={{
                     padding: '5px 10px', fontSize: 11.5, fontWeight: 700, borderRadius: 7, cursor: 'pointer',
+                    flexShrink: 0, whiteSpace: 'nowrap',
                     border: `1px solid ${varianceMonth === 'ytd' ? 'transparent' : 'var(--border)'}`,
                     background: varianceMonth === 'ytd' ? 'var(--accent-gradient)' : 'transparent',
                     color: varianceMonth === 'ytd' ? '#fff' : 'var(--text-muted)',
                   }}>Year to date</button>
+                </div>
                 </div>
 
                 {nv && (
@@ -1136,9 +1153,9 @@ export default function XeroInsights() {
                       { label: 'Variance %', value: nv.variance === 0 || nv.variancePct === null ? '—' : `${(nv.variancePct * 100).toFixed(2)}%`,
                         color: nv.variance === 0 ? undefined : nv.variance > 0 ? 'var(--success)' : 'var(--danger)' },
                     ].map(t => (
-                      <div key={t.label} className="card" style={{ flex: 1, minWidth: 165, background: 'var(--bg-secondary)' }}>
-                        <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>{t.label}</div>
-                        <div style={{ fontSize: 20, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: t.color }}>{t.value}</div>
+                      <div key={t.label} className="card figure-tile" style={{ flex: 1, minWidth: 165, background: 'var(--bg-secondary)' }}>
+                        <div className="figure-label" style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>{t.label}</div>
+                        <div className="figure-value" style={{ fontSize: 20, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: t.color }}>{t.value}</div>
                       </div>
                     ))}
                   </div>
