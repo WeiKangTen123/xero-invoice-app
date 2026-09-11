@@ -149,7 +149,7 @@ export default function PhonePairingModal({ onClose, onArrived }) {
                            style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     </div>
                     {/* Fills in a poll or two later, once the image has been read. */}
-                    <div style={{ fontSize: 9.5, color: 'var(--text-muted)', marginTop: 4, textAlign: 'center',
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, textAlign: 'center',
                                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {r.totalAmount ? fmtMoney(r.totalAmount, r.currency || '') : (r.vendorName || 'Reading…')}
                     </div>

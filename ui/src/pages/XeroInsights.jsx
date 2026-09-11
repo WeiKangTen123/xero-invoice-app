@@ -26,7 +26,6 @@ const TABS = [
 ];
 // Nothing left here for now — kept as an array (rather than removed outright)
 // since it's the natural place to list whatever needs the next scope widening.
-const PHASE2_TABS = [];
 
 
 
@@ -756,15 +755,6 @@ export default function XeroInsights() {
               whiteSpace: 'nowrap', flexShrink: 0,
             }}>{t.label}</button>
           ))}
-          {PHASE2_TABS.map(t => (
-            <span key={t.key} title="Coming later — needs a wider Xero connection scope" style={{
-              padding: '7px 16px', borderRadius: 7, fontSize: 12.5, fontWeight: 600, color: 'var(--text-muted)', opacity: 0.5,
-              display: 'flex', alignItems: 'center', gap: 6, cursor: 'not-allowed',
-            }}>
-              {t.label}
-              <span style={{ fontSize: 8.5, fontWeight: 800, background: 'var(--bg-secondary)', padding: '1px 5px', borderRadius: 5 }}>PHASE 2</span>
-            </span>
-          ))}
         </div>
       </div>
 
@@ -1047,7 +1037,7 @@ export default function XeroInsights() {
                         <td style={{ padding: '9px 10px' }}>
                           {t.isReconciled
                             ? <span style={{ color: 'var(--success)' }}>✓</span>
-                            : <span className="badge badge-yellow" style={{ fontSize: 9.5 }}>not matched</span>}
+                            : <span className="badge badge-yellow" style={{ fontSize: 11 }}>not matched</span>}
                         </td>
                         <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: t.type === 'Money In' ? 'var(--success)' : 'var(--danger)' }}>
                           {t.type === 'Money In' ? '+' : '−'}{fmtMoney(t.total, currency)}

@@ -960,7 +960,7 @@ export default function Invoices() {
                         <TypeBadge type={inv.invoiceType} />
                         {/* Two rows from one upload look identical otherwise. */}
                         {inv.receiptGroup && (
-                          <span className="badge badge-gray" style={{ marginLeft: 4, fontSize: 9.5 }}
+                          <span className="badge badge-gray" style={{ marginLeft: 4, fontSize: 11 }}
                                 title="One of several receipts found in a single upload">
                             {inv.receiptPage ? `p${inv.receiptPage}` : 'split'}
                           </span>
