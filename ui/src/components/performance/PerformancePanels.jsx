@@ -163,7 +163,7 @@ export function BarList({ items, currency, showPctOfTotal }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, marginBottom: 4 }}>
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {it.label}
-                {it.tag && <span style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 700, letterSpacing: '.05em', textTransform: 'uppercase', color: 'var(--accent)' }}>{it.tag}</span>}
+                {it.tag && <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 700, letterSpacing: '.05em', textTransform: 'uppercase', color: 'var(--accent)' }}>{it.tag}</span>}
               </span>
               <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 700, color: neg ? 'var(--danger)' : undefined, flexShrink: 0 }}>
                 {fmtMoney(it.value, currency)}
@@ -451,6 +451,12 @@ function Waterfall({ steps, currency, height = 240 }) {
                 background: colorOf(s.kind), borderRadius: 3,
                 opacity: s.kind === 'total' ? 1 : 0.85,
               }} />
+              {/* Chart labels, not body text: this one is absolutely positioned
+                  with nowrap and negative insets, so it already runs past its
+                  own bar — and the one under the axis lives in a 38px column.
+                  Both stay at 9.5 deliberately. Sizing them up collides them
+                  with the neighbouring bar's label instead of making the chart
+                  easier to read. */}
               <div style={{
                 position: 'absolute', left: -4, right: -4, bottom: `calc(${pct(top)}% + 5px)`,
                 textAlign: 'center', fontSize: 9.5, fontWeight: 700,
@@ -520,7 +526,7 @@ function ScoreCard({ items }) {
         <div key={it.label} style={{ background: 'var(--bg-secondary)', borderRadius: 9, padding: '11px 13px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
             <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.05em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>{it.label}</span>
-            <span style={{ fontSize: 9.5, color: 'var(--text-muted)' }}>{it.target}</span>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{it.target}</span>
           </div>
           <div style={{ fontSize: 18, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: it.tone }}>{it.value}</div>
           {it.note && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3 }}>{it.note}</div>}
@@ -904,7 +910,7 @@ export function ExecutiveActionChecklist({ data, from, to, insights, currency })
               </span>
               <span
                 style={{
-                  fontSize: 9.5,
+                  fontSize: 11,
                   fontWeight: 700,
                   padding: '2px 7px',
                   borderRadius: 10,
