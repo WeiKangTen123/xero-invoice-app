@@ -153,13 +153,28 @@ describe('routes/claims', () => {
       const idleRes = await request(app).get('/api/claims/active').set('Authorization', auth()).expect(200);
       expect(idleRes.body.job).toBeNull();
 
-      // When an import is enqueued
+      // When an import is enqueued.
+      //
+      // The job is held open rather than queried the instant after it is
+      // enqueued. An import of one small receipt can finish before the next
+      // request is serviced — more often under parallel load — and then
+      // /active correctly reports null and this fails for a reason it is not
+      // testing. Gating the parser makes "while running" a fact instead of a
+      // bet on the scheduler.
+      let release;
+      const holdOpen = new Promise(resolve => { release = resolve; });
+      parser.parseReceiptBatch.mockImplementationOnce(async (userId, images) => {
+        await holdOpen;
+        return images.map(() => null);
+      });
+
       const zip = makeZip([{ name: 'a.jpg', data: jpegBytes(3) }]);
       const { body } = await start({ archives: [{ name: 'c.zip', data: b64(zip) }] }).expect(202);
       const activeRes = await request(app).get('/api/claims/active').set('Authorization', auth()).expect(200);
       expect(activeRes.body.job).toBeTruthy();
       expect(activeRes.body.job.id).toBe(body.jobId);
 
+      release();
       await finish(body.jobId);
       const afterRes = await request(app).get('/api/claims/active').set('Authorization', auth()).expect(200);
       expect(afterRes.body.job).toBeNull();
