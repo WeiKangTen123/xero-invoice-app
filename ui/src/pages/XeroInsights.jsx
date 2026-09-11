@@ -135,9 +135,62 @@ function BudgetGrid({ months, rows }) {
 //
 // A zero variance prints as a dash, not "0.00%" — matched against the org's own
 // Budget Variance report, where an on-budget line shows "-" in both columns.
+// One account as a card, for phones.
+//
+// The table is five columns and about 1.4 screens wide, so Variance % — the
+// rightmost column — was the one nobody ever scrolled to see. Stacked, all four
+// figures are visible at once and nothing scrolls sideways. Same substitution
+// the AR & AP list already makes on mobile.
+function VarianceCard({ row, period, currency }) {
+  const v      = period.of(row);
+  const strong = row.kind === 'subtotal' || row.kind === 'summary';
+  // Direction only, never a verdict: under budget is good on an expense and bad
+  // on income, and the row does not carry its own sign convention.
+  const col    = v.variance === 0 ? undefined : v.variance > 0 ? 'var(--success)' : 'var(--danger)';
+  const pct    = v.variance === 0 || v.variancePct === null ? null : `${v.variance > 0 ? '+' : ''}${(v.variancePct * 100).toFixed(1)}%`;
+
+  const pair = (label, value, style) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12.5 }}>
+      <span style={{ color: 'var(--text-muted)' }}>{label}</span>
+      <span style={{ fontVariantNumeric: 'tabular-nums', ...style }}>{value}</span>
+    </div>
+  );
+
+  return (
+    <div style={{
+      background: strong ? 'var(--bg-secondary)' : 'var(--bg-card)',
+      border: '1px solid var(--border)', borderRadius: 10,
+      padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 4,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, marginBottom: 2 }}>
+        <span style={{ fontWeight: strong ? 700 : 600, fontSize: 13 }}>{row.label}</span>
+        {pct && <span style={{ fontSize: 12, fontWeight: 700, color: col, whiteSpace: 'nowrap' }}>{pct}</span>}
+      </div>
+      {pair('Actual',   v.actual === 0 ? '-' : fmtMoney(v.actual, currency))}
+      {pair('Budget',   v.budget === 0 ? '-' : fmtMoney(v.budget, currency), { color: 'var(--text-muted)' })}
+      {pair('Variance', v.variance === 0 ? '-' : fmtCell(v.variance), { color: col, fontWeight: 700 })}
+    </div>
+  );
+}
+
 function VarianceTable({ rows, periods, currency }) {
+  const { isMobile } = useViewMode();
   const numeric = { textAlign: 'right', padding: '7px 10px', whiteSpace: 'nowrap' };
   const dash    = <span style={{ color: 'var(--text-muted)' }}>-</span>;
+
+  // Cards only make sense against a single period; comparing two side by side is
+  // inherently a table, so a multi-period view keeps scrolling even on a phone.
+  if (isMobile && periods.length === 1) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 14 }}>
+        {rows.map((r, idx) => (r.kind === 'section' ? (
+          <div key={`s-${idx}`} style={{ fontWeight: 700, fontSize: 12, marginTop: idx === 0 ? 0 : 8 }}>{r.label}</div>
+        ) : (
+          <VarianceCard key={`r-${idx}`} row={r} period={periods[0]} currency={currency} />
+        )))}
+      </div>
+    );
+  }
 
   return (
     <div style={{ overflowX: 'auto', marginTop: 14 }}>
