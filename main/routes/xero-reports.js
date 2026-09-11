@@ -1,6 +1,9 @@
 const express          = require('express');
 const router           = express.Router();
-const { requireAuth }  = require('../middleware/auth-middleware');
+const jwt              = require('jsonwebtoken');
+const { requireAuth, jwtSecret }  = require('../middleware/auth-middleware');
+const budgetDoc        = require('../reports/budget-doc');
+const budgetRender     = require('../reports/budget-render');
 const tokenCache        = require('../utils/token-cache');
 const reports           = require('../xero/reports');
 const { xeroErrMsg, isScopeError } = require('../xero/xero-utils');
@@ -163,6 +166,97 @@ router.get('/budget-variance', requireAuth, async (req, res) => {
 // GET /api/xero-reports/performance?force=
 // Powers Dashboard -> Overview and Revenue. Composed from the budget-variance
 // fetch plus a bank summary, so it needs no scope those two don't already have.
+// ── Budget exports ───────────────────────────────────────────────────────────
+// Two steps, the same shape as /api/invoices/:id/pdf-url: the browser cannot put
+// an Authorization header on a plain navigation, so the authed call hands back a
+// short-lived signed URL and the browser opens that.
+//
+// The token carries the whole request — tenant, report, period, format — rather
+// than leaving them in the query where they could be edited to point at another
+// organisation's figures after the token was issued.
+const EXPORT_TOKEN_TTL = '5m';
+const EXPORT_KINDS   = new Set(['grid', 'variance']);
+const EXPORT_FORMATS = new Set(['pdf', 'xlsx']);
+
+function issueExportToken(userId, spec) {
+  return jwt.sign({ userId, ...spec, purpose: 'budget-export' }, jwtSecret(), { expiresIn: EXPORT_TOKEN_TTL });
+}
+
+function verifyExportToken(token) {
+  const payload = jwt.verify(token, jwtSecret());
+  if (payload.purpose !== 'budget-export') throw new Error('Token scope mismatch');
+  return payload;
+}
+
+// Filenames must survive a Content-Disposition header, which cannot carry bytes
+// above 0x7f, while still reading correctly for an organisation named in any
+// script. Same both-forms approach as the invoice PDF route (RFC 5987).
+function setDownloadName(res, base, ext) {
+  const raw   = `${base}.${ext}`;
+  const ascii = raw.replace(/[^\x20-\x7e]/g, '').replace(/"/g, "'").trim() || `export.${ext}`;
+  res.setHeader('Content-Disposition',
+    `inline; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(raw)}`);
+}
+
+router.get('/budget/export-url', requireAuth, async (req, res) => {
+  try {
+    const { tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.status(400).json({ error: 'No Xero organisation connected' });
+
+    const kind   = String(req.query.kind || 'grid');
+    const format = String(req.query.format || 'pdf');
+    if (!EXPORT_KINDS.has(kind))     return res.status(400).json({ error: 'kind must be grid or variance' });
+    if (!EXPORT_FORMATS.has(format)) return res.status(400).json({ error: 'format must be pdf or xlsx' });
+
+    const month = kind === 'variance' ? String(req.query.month || 'ytd') : undefined;
+    const token = issueExportToken(req.user.id, { tenantId, kind, format, month });
+    res.json({ url: `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`, expiresIn: EXPORT_TOKEN_TTL });
+  } catch (err) {
+    logger.error('Budget export URL failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.status(500).json({ error: xeroErrMsg(err) });
+  }
+});
+
+router.get('/budget/export', async (req, res) => {
+  let spec;
+  try {
+    spec = verifyExportToken(String(req.query.token || ''));
+  } catch (_) {
+    return res.status(401).type('text/plain').send('This export link has expired. Please generate it again.');
+  }
+
+  try {
+    const timezone = getUserConfig(spec.userId).TIMEZONE || DEFAULT_TIMEZONE;
+    // Reads the same cached payload the screen renders, so an exported figure
+    // and an on-screen one cannot disagree — and because it is already cached,
+    // an export costs no additional Xero call.
+    const data = await reports.getBudgetVariance(spec.userId, spec.tenantId, { timezone });
+
+    const opts = { month: spec.month, generatedAt: Date.now() };
+    const base = budgetDoc.exportFilename(spec.kind === 'variance' ? 'variance' : 'grid', data, opts);
+
+    if (spec.format === 'xlsx') {
+      const wb = spec.kind === 'variance'
+        ? budgetRender.budgetVarianceWorkbook(data, opts)
+        : budgetRender.budgetVsActualWorkbook(data, opts);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      setDownloadName(res, base, 'xlsx');
+      await wb.xlsx.write(res);
+      return res.end();
+    }
+
+    const definition = spec.kind === 'variance'
+      ? budgetDoc.budgetVarianceDoc(data, opts)
+      : budgetDoc.budgetVsActualDoc(data, opts);
+    res.setHeader('Content-Type', 'application/pdf');
+    setDownloadName(res, base, 'pdf');
+    return budgetRender.streamPdf(definition, res);
+  } catch (err) {
+    logger.error('Budget export failed', { error: xeroErrMsg(err), userId: spec.userId, kind: spec.kind });
+    if (!res.headersSent) res.status(500).type('text/plain').send('Could not build the export.');
+  }
+});
+
 router.get('/performance', requireAuth, async (req, res) => {
   try {
     const { tenants, tenantId } = _resolveTenant(req);
