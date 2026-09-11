@@ -129,6 +129,48 @@ describe('routes/receipts', () => {
       const pdfToken = jwt.sign({ userId: testUser.id, invoiceId: body.receipt.id, purpose: 'pdf' }, jwtSecret(), { expiresIn: '5m' });
       await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${pdfToken}`).expect(401);
     });
+
+    // ?w= asks for a scaled copy, for callers that render small — the pairing
+    // modal shows 76px tiles of receipts that can be 3MB. Every way of not
+    // being able to scale has to end in the original, never in an error: a
+    // heavier image is a far better outcome than a broken one.
+    describe('?w= scaled copies', () => {
+      const sharp = require('sharp');
+      sharp.concurrency(1);
+      const realJpeg = (w = 240, h = 320) => sharp({ create: { width: w, height: h, channels: 3, background: '#888' } })
+        .jpeg({ quality: 90 }).toBuffer().then(b => b.toString('base64'));
+
+      test('returns a smaller image than the original', async () => {
+        const data = await realJpeg();
+        const { body } = await upload({ mime: 'image/jpeg', data });
+        const full  = await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${body.imageToken}`).expect(200);
+        const small = await request(app).get(`/api/receipts/${body.receipt.id}/image?w=160&token=${body.imageToken}`)
+          .expect(200).expect('Content-Type', /image\/jpeg/);
+        expect(small.body.length).toBeLessThan(full.body.length);
+        expect((await sharp(small.body).metadata()).width).toBe(160);
+      });
+
+      test('an unrecognised width serves the original rather than erroring', async () => {
+        const data = await realJpeg();
+        const { body } = await upload({ mime: 'image/jpeg', data });
+        const full = await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${body.imageToken}`).expect(200);
+        const odd  = await request(app).get(`/api/receipts/${body.receipt.id}/image?w=137&token=${body.imageToken}`).expect(200);
+        expect(odd.body.length).toBe(full.body.length);
+      });
+
+      test('an image sharp cannot decode still serves — it does not 500', async () => {
+        // jpeg() here is a seven-byte stand-in, not a decodable image.
+        const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
+        await request(app).get(`/api/receipts/${body.receipt.id}/image?w=160&token=${body.imageToken}`)
+          .expect(200).expect('Content-Type', /image\/jpeg/);
+      });
+
+      test('a PDF receipt is served as a PDF, not scaled', async () => {
+        const { body } = await upload({ mime: 'application/pdf', data: Buffer.from('%PDF-1.4 x').toString('base64') });
+        await request(app).get(`/api/receipts/${body.receipt.id}/image?w=160&token=${body.imageToken}`)
+          .expect(200).expect('Content-Type', /application\/pdf/);
+      });
+    });
   });
 
   describe('DELETE /:id', () => {
