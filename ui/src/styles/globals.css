@@ -681,16 +681,22 @@ body {
    built from NavLinks (anchors, not buttons) and the chat bubble sets an inline
    height of 48, which already clears the floor. */
 
-/* Figure tiles across the five chart tabs. The inline minWidth of 190 meant two
-   needed 394px of a 366px content width and missed by 24px, so every panel
-   opened with a full-height column of tiles and pushed its chart below the fold.
-   170 pairs them up; the figure drops to 15px so an exact amount still sits on
-   one line at half width. Budget's own tiles have the same problem at 180. */
-.mobile-mode .metric,
-.mobile-mode .budget-tile {
+/* Headline figure tiles — the Metric cards on the five chart tabs, Budget vs
+   Actual's four, and Budget Variance's four. One class pair for all of them
+   deliberately: they were three near-identical tiles under three different
+   sets of markup, and pairing them up without shrinking the figure to match is
+   exactly the half-change that broke Budget. A new tile that wants this
+   behaviour takes both classes or neither.
+
+   Inline minWidths of 190/180 each needed ~394px of a 366px content width, so
+   panels opened with a full-height column of tiles and pushed the chart below
+   the fold. 170 pairs them up. The figure then has ~148px to live in, where
+   21px overflows and 15px fits an exact amount on one line — Variance's tiles
+   were already pairing up at 165 and had been overflowing at 20px all along. */
+.mobile-mode .figure-tile {
   min-width: 170px !important;
 }
-.mobile-mode .metric-value {
+.mobile-mode .figure-value {
   font-size: 15px !important;
   line-height: 1.25 !important;
 }
