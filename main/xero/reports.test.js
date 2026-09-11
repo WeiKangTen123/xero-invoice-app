@@ -1476,6 +1476,48 @@ describe('xero/reports — period resolution (pure)', () => {
   });
 });
 
+describe('xero/reports — the cache does not grow forever', () => {
+  // Expiry used to be checked on read and nothing was ever removed, so every
+  // user + tenant + range + report combination stayed resident with its whole
+  // payload on a process that runs for days.
+  const { _pruneCache, _cache, CACHE_MAX_ENTRIES } = require('./reports');
+
+  beforeEach(() => _cache.clear());
+  afterAll(() => _cache.clear());
+
+  const put = (key, ageMs, ttl) => _cache.set(key, { data: { v: key }, fetchedAt: Date.now() - ageMs, ttl });
+
+  test('a sweep drops entries past their own TTL and keeps the rest', () => {
+    put('fresh', 1000, 60000);
+    put('stale', 90000, 60000);
+    _pruneCache();
+    expect([..._cache.keys()]).toEqual(['fresh']);
+  });
+
+  test('per-entry TTLs are respected, not a single global one', () => {
+    // Generated commentary opts into a much longer life because it costs an LLM
+    // call; a sweep must not treat it as stale on the short default.
+    put('short', 120000, 60000);
+    put('long',  120000, 30 * 60 * 1000);
+    _pruneCache();
+    expect([..._cache.keys()]).toEqual(['long']);
+  });
+
+  test('when nothing is stale it still falls back to a cap, oldest first', () => {
+    for (let i = 0; i < CACHE_MAX_ENTRIES + 25; i++) put(`k${i}`, CACHE_MAX_ENTRIES + 25 - i, 3600000);
+    _pruneCache();
+    expect(_cache.size).toBe(CACHE_MAX_ENTRIES);
+    // k0 was the oldest, so it goes; the newest must survive.
+    expect(_cache.has('k0')).toBe(false);
+    expect(_cache.has(`k${CACHE_MAX_ENTRIES + 24}`)).toBe(true);
+  });
+
+  test('an empty cache sweeps without complaint', () => {
+    expect(() => _pruneCache()).not.toThrow();
+    expect(_cache.size).toBe(0);
+  });
+});
+
 // ── Cache lifetime and fetch concurrency ────────────────────────────────────
 describe('xero/reports — period cache tiering (pure)', () => {
   // Asserted against the tier constants rather than their current values: these
