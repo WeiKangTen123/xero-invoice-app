@@ -65,7 +65,7 @@ function BudgetGrid({ months, rows }) {
   const actualCount    = firstBudgetIdx === -1 ? months.length : firstBudgetIdx;
 
   const labelCell = (extra = {}) => ({
-    position: 'sticky', left: 0, zIndex: 1, background: 'var(--bg-primary)',
+    position: 'sticky', left: 0, zIndex: 1, background: 'var(--bg-card)',
     textAlign: 'left', padding: '7px 12px 7px 0', whiteSpace: 'nowrap', ...extra,
   });
   // The seam between the last actual month and the first budget month. Xero's own
@@ -153,7 +153,7 @@ function VarianceTable({ rows, periods, currency }) {
             </tr>
           )}
           <tr style={{ borderBottom: '1px solid var(--border)' }}>
-            <th style={{ position: 'sticky', left: 0, background: 'var(--bg-primary)', textAlign: 'left', padding: '8px 12px 8px 0',
+            <th style={{ position: 'sticky', left: 0, background: 'var(--bg-card)', textAlign: 'left', padding: '8px 12px 8px 0',
                          fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Account</th>
             {periods.map((p, pi) => ['Actual', 'Budget', 'Variance', 'Variance %'].map((h, hi) => (
               <th key={`${p.label}-${h}`} style={{ ...numeric, padding: '8px 10px', fontSize: 11, color: 'var(--text-muted)', fontWeight: 600,
@@ -171,7 +171,7 @@ function VarianceTable({ rows, periods, currency }) {
             const strong = r.kind === 'subtotal' || r.kind === 'summary';
             return (
               <tr key={`r-${idx}`} style={{ borderTop: r.kind === 'summary' ? '1px solid var(--border)' : undefined }}>
-                <td style={{ position: 'sticky', left: 0, background: 'var(--bg-primary)', padding: '7px 12px 7px 0',
+                <td style={{ position: 'sticky', left: 0, background: 'var(--bg-card)', padding: '7px 12px 7px 0',
                              paddingLeft: r.kind === 'account' ? 14 : 0, fontWeight: strong ? 700 : 400, whiteSpace: 'nowrap' }}>{r.label}</td>
                 {periods.map((p, pi) => {
                   const v = p.of(r);
