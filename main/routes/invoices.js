@@ -49,8 +49,10 @@ const SUBMITTABLE_STATUSES = new Set(['pending', 'review-needed', 'error', 'revi
 // Everything above this comment arrives by email. These are the two ways a
 // bill gets in without one: a single PDF, or a batch as a background job.
 // Declared before the /:id routes so "/import" is never read as an id.
-const billIntake = require('../intake/bill-intake');
-const jobs       = require('../jobs');
+const billIntake    = require('../intake/bill-intake');
+const invoiceIntake = require('../intake/invoice-intake');
+const jobs          = require('../jobs');
+const IMPORT_TYPES  = new Set(['bill-import', 'invoice-import']);
 
 function _decodeBase64(data) {
   if (typeof data !== 'string' || !data) return null;
@@ -85,13 +87,38 @@ router.post('/', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/invoices/import  { pdfs: [{name, data}], archives: [{name, data}], label }
+// POST /api/invoices/compose  { contactName, contactEmail, contactAddress, invoiceNumber,
+//   invoiceDate, dueDate | termsDays, currency, lineItems: [{ description, unitAmount, discountRate, taxPercent }], description }
+// An invoice typed in. No file, no model: validated, checked against what is
+// already stored, and kept for review. Never sent to Xero on its own.
+router.post('/compose', requireAuth, (req, res) => {
+  try {
+    const r = invoiceIntake.intakeInvoice(req.user.id, req.body || {}, { source: 'form' });
+    if (r.errors) return res.status(400).json({ error: r.errors[0].error, errors: r.errors });
+    if (r.duplicate) return res.status(409).json({ error: `An invoice with ${r.reason} is already in the system`, duplicateOf: r.id });
+    res.status(201).json({ id: r.id, status: r.status, invoice: invoiceStore.forUser(req.user.id).getById(r.id) });
+  } catch (err) {
+    logger.error('Invoice compose failed', { userId: req.user.id, error: err.message });
+    res.status(500).json({ error: err.message || 'Could not save the invoice' });
+  }
+});
+
+// POST /api/invoices/import
+//   bills:    { pdfs: [{name, data}], archives: [{name, data}], label }
+//   invoices: { sheets: [{name, data}], label }   (.xlsx or .csv, one row per line item)
 // Several bills, as a background job — a PDF each is a model call, and a
 // batch of thirty is minutes, far past what a request can hold open.
 router.post('/import', requireAuth, (req, res) => {
-  const { pdfs = [], archives = [], label } = req.body || {};
-  if (!Array.isArray(pdfs) || !Array.isArray(archives) || (!pdfs.length && !archives.length)) {
-    return res.status(400).json({ error: 'Attach at least one PDF or a zip of PDFs' });
+  const { pdfs = [], archives = [], sheets = [], label } = req.body || {};
+  if (!Array.isArray(pdfs) || !Array.isArray(archives) || !Array.isArray(sheets)) {
+    return res.status(400).json({ error: 'Attachments must be lists' });
+  }
+  const isInvoiceImport = sheets.length > 0;
+  if (isInvoiceImport && (pdfs.length || archives.length)) {
+    return res.status(400).json({ error: 'Import bills (PDFs) and invoices (a spreadsheet) separately' });
+  }
+  if (!pdfs.length && !archives.length && !sheets.length) {
+    return res.status(400).json({ error: 'Attach at least one PDF or a zip of PDFs, or a spreadsheet of invoices' });
   }
   const decode = (list, kind) => {
     const out = [];
@@ -105,14 +132,13 @@ router.post('/import', requireAuth, (req, res) => {
   };
   const p = decode(pdfs, 'pdf');      if (p.error) return res.status(400).json({ error: p.error });
   const a = decode(archives, 'zip');  if (a.error) return res.status(400).json({ error: a.error });
-  const bytes = [...p.out, ...a.out].reduce((s, f) => s + f.buffer.length, 0);
+  const sh = decode(sheets, 'sheet'); if (sh.error) return res.status(400).json({ error: sh.error });
+  const bytes = [...p.out, ...a.out, ...sh.out].reduce((s, f) => s + f.buffer.length, 0);
   if (bytes > 7 * 1024 * 1024) return res.status(413).json({ error: `That is ${(bytes / 1048576).toFixed(1)}MB; the limit for one import is 7MB.` });
 
-  const enq = jobs.enqueue(req.user.id, {
-    type: 'bill-import',
-    label: label || (p.out[0] || a.out[0]).name || 'Bill import',
-    payload: { pdfs: p.out, archives: a.out },
-  });
+  const enq = isInvoiceImport
+    ? jobs.enqueue(req.user.id, { type: 'invoice-import', label: label || sh.out[0].name || 'Invoice import', payload: { sheets: sh.out } })
+    : jobs.enqueue(req.user.id, { type: 'bill-import',    label: label || (p.out[0] || a.out[0]).name || 'Bill import', payload: { pdfs: p.out, archives: a.out } });
   if (enq.error) return res.status(429).json({ error: enq.error });
   jobs.startWorker(req.user.id);
   jobs.kickWorker(req.user.id);
@@ -126,13 +152,13 @@ const _jobView = j => ({
 });
 
 router.get('/import/active', requireAuth, (req, res) => {
-  const active = jobs.getPending(req.user.id).find(j => j.type === 'bill-import');
+  const active = jobs.getPending(req.user.id).find(j => IMPORT_TYPES.has(j.type));
   res.json({ job: active ? _jobView(active) : null });
 });
 
 router.get('/import/:jobId', requireAuth, (req, res) => {
   const job = jobs.get(req.user.id, req.params.jobId);
-  if (!job || job.type !== 'bill-import') return res.status(404).json({ error: 'Import not found — it may have expired' });
+  if (!job || !IMPORT_TYPES.has(job.type)) return res.status(404).json({ error: 'Import not found — it may have expired' });
   res.json(_jobView(job));
 });
 
