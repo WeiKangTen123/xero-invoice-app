@@ -148,6 +148,17 @@ function createHandler(userId) {
       return;
     }
 
+    // The template verifier read the document differently from the parser on
+    // something that affects money. The parser's figures were kept; a person
+    // decides which reading is right before anything reaches Xero.
+    if (invoiceData.reviewReason) {
+      logger.warn('Invoice flagged by template verification — skipping Xero submit', {
+        id, vendor: record.vendorName, userId, reason: invoiceData.reviewReason,
+      });
+      await invStore.update(id, { status: 'review-needed', errorMsg: `Please check: ${invoiceData.reviewReason}` });
+      return;
+    }
+
     if (settingsUser.get('autoProcess')) {
       // Strip the binary PDF buffer before passing into the queue closure — the PDF
       // is already saved to disk and will be read back via pdfStore when attaching to Xero.

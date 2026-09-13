@@ -1,5 +1,6 @@
 const pdfParse             = require('pdf-parse');
 const path                 = require('path');
+const { verifyTemplateExtraction } = require('./template-verifier');
 const logger               = require('../utils/logger');
 const { extractWithRetry } = require('./llm-parser');
 
@@ -482,9 +483,16 @@ async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email
   }
 
   let parsed;
+  let reviewReason = null;
   if (isTemplate) {
     logger.info('Template format detected', { userId });
     parsed = parseTemplateFormat(text, email, defaults);
+    // Second reading. Corrects names, addresses and descriptions in place;
+    // flags — never overwrites — any disagreement about money. On any failure
+    // the regex result stands, so this cannot make an email worse than before.
+    const check = await verifyTemplateExtraction(text, parsed, userId);
+    parsed = check.parsed;
+    reviewReason = check.reviewReason;
   } else if (noText) {
     // Image-based or corrupt PDF — no usable text for the LLM.
     // Fall back to generic regex (will extract what it can from email headers/subject)
@@ -502,6 +510,9 @@ async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email
     ...parsed,
     invoiceType,
     source,
+    // Set only by the template verifier. invoice-handler turns it into a
+    // review-needed status rather than sending the record on to Xero.
+    reviewReason,
     pdfBuffer:     pdfBuffer   || null,
     pdfFilename:   pdfFilename || null,
     emailBodyText: text.slice(0, 50000),
