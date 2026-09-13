@@ -143,6 +143,16 @@ function Spinner() {
 }
 
 // ── Main page ─────────────────────────────────────────────────────────────────
+// Back to the list, on the tab this document belongs to. Returning to a bare
+// /invoices dropped you on the default tab, so reviewing an expense claim and
+// pressing Back showed you payables instead of where you had been.
+function listPathFor(inv) {
+  const tab = inv?.invoiceType === 'ACCREC' ? 'ar'
+            : inv?.invoiceType === 'EXPENSE' ? 'claims'
+            : 'ap';
+  return tab === 'ap' ? '/invoices' : `/invoices?tab=${tab}`;
+}
+
 export default function InvoiceReview() {
   const { isMobile } = useViewMode();
   const { id }   = useParams();
@@ -366,7 +376,7 @@ export default function InvoiceReview() {
     setDeleteErr('');
     try {
       await api.delete(`/invoices/${id}`);
-      navigate('/invoices', { replace: true });
+      navigate(listPathFor(inv), { replace: true });
     } catch (err) {
       setDeleteErr(err.message || 'Failed to delete');
       setDeleting(false);
@@ -507,7 +517,7 @@ export default function InvoiceReview() {
     return (
       <div style={{ padding: 32 }}>
         <div className="alert alert-error"><span className="alert-icon">✕</span>{fetchErr || 'Invoice not found'}</div>
-        <button className="btn btn-outline" onClick={() => navigate('/invoices')}>← Back to Invoices</button>
+        <button className="btn btn-outline" onClick={() => navigate(listPathFor(inv))}>← Back to Invoices</button>
       </div>
     );
   }
@@ -544,7 +554,7 @@ export default function InvoiceReview() {
           gap: 12
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button className="btn btn-ghost btn-sm" onClick={() => navigate('/invoices')} style={{ gap: 6 }}>← Back</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => navigate(listPathFor(inv))} style={{ gap: 6 }}>← Back</button>
             <div>
               <h1 style={{ fontSize: isMobile ? 18 : 20, fontWeight: 700, letterSpacing: '-0.4px' }}>
                 {inv.vendorName || 'Unknown Vendor'}

@@ -1,10 +1,28 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import ReceiptUpload from '../components/receipts/ReceiptUpload';
 import ClaimImport from '../components/receipts/ClaimImport';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
 import { useViewMode } from '../context/ViewModeContext';
+
+// The three kinds of document this page holds, in the order they are shown.
+//
+// One array drives the tab strip, the count on each tab, which rows the list
+// shows, and the empty state — so a count can never disagree with what is under
+// it. Adding a fourth kind means adding one entry here and nothing else.
+//
+// invoiceType already stores exactly these three values, so this is a view over
+// data that was always shaped this way; nothing was migrated to make it work.
+const TABS = [
+  { key: 'ar',     label: 'AR',             long: 'Receivables',    match: i => i.invoiceType === 'ACCREC'  },
+  { key: 'ap',     label: 'AP',             long: 'Payables',       match: i => i.invoiceType === 'ACCPAY'  },
+  { key: 'claims', label: 'Expense Claims', long: 'Expense Claims', match: i => i.invoiceType === 'EXPENSE' },
+];
+// Bills are the volume in an email-ingesting system; AR is usually near empty,
+// and opening on an empty tab reads as a broken page.
+const DEFAULT_TAB = 'ap';
+const tabByKey = key => TABS.find(t => t.key === key) || TABS.find(t => t.key === DEFAULT_TAB);
 
 // reviewed is blue (not yet in Xero), posted is green (done).
 // Keeping them visually distinct prevents the "I clicked Reviewed and it looked
@@ -114,7 +132,20 @@ export default function Invoices() {
   const [deleteTarget,  setDeleteTarget]  = useState(null); // { type: 'single', invoice } | { type: 'bulk', count, ids } | { type: 'clear' }
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [filter,       setFilter]       = useState('');
-  const [typeFilter,   setTypeFilter]   = useState('all');
+  // The tab lives in the URL so Back from a review lands where you left, and so
+  // a link can point at one. A query param rather than /invoices/claims because
+  // /invoices/:id already exists and a path segment invites a collision there
+  // for no gain.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab    = tabByKey(searchParams.get('tab')).key;
+  const setTab = (key) => {
+    // Selection is a set of ids from the tab you were on. Carrying it across
+    // would let a bulk delete on AP remove the AR rows you ticked earlier.
+    setSelected(new Set());
+    const next = new URLSearchParams(searchParams);
+    if (key === DEFAULT_TAB) next.delete('tab'); else next.set('tab', key);
+    setSearchParams(next, { replace: true });
+  };
   const [receivedFilter, setReceivedFilter] = useState('all');
   const [customFrom,   setCustomFrom]   = useState('');
   const [customTo,     setCustomTo]     = useState('');
@@ -267,8 +298,14 @@ export default function Invoices() {
     }
   }
 
+  const activeTab = tabByKey(tab);
+  // Everything belonging to this tab, before status / search / date narrow it.
+  // Both the status counts and the visible rows derive from this, which is what
+  // stops a tab claiming "8 posted" while showing three.
+  const tabRows = invoices.filter(activeTab.match);
+
   // 'needs-action' is a virtual filter covering review-needed + error
-  const filtered = invoices.filter(inv => {
+  const filtered = tabRows.filter(inv => {
     if (statusFilter === 'needs-action') {
       if (!['review-needed', 'error'].includes(inv.status)) return false;
     } else if (statusFilter === 'duplicate') {
@@ -276,8 +313,6 @@ export default function Invoices() {
     } else if (statusFilter !== 'all' && inv.status !== statusFilter) {
       return false;
     }
-    if (typeFilter !== 'all' && inv.invoiceType !== typeFilter) return false;
-
     // Filters on WHEN IT ARRIVED, not the date on the document.
     if (receivedFilter !== 'all') {
       const at = (inv.receivedAt || inv.processedAt) ? new Date(inv.receivedAt || inv.processedAt) : null;
@@ -346,20 +381,24 @@ export default function Invoices() {
     return next;
   });
 
-  const bills       = invoices.filter(i => i.invoiceType === 'ACCPAY').length;
-  const invCount    = invoices.filter(i => i.invoiceType === 'ACCREC').length;
-  const receipts    = invoices.filter(i => i.invoiceType === 'EXPENSE').length;
-  const pending     = invoices.filter(i => i.status === 'pending').length;
-  const posted      = invoices.filter(i => i.status === 'posted').length;
-  const reviewed    = invoices.filter(i => i.status === 'reviewed').length;
-  const reported    = invoices.filter(i => i.status === 'reported').length;
-  const needsAction = invoices.filter(i => ['review-needed', 'error'].includes(i.status)).length;
-  const duplicates  = invoices.filter(i => i.status === 'duplicate' || i.duplicateOf || (i.errorMsg && /duplicate/i.test(i.errorMsg))).length;
+  // A tab's own count spans every document of that kind, so the strip reads as a
+  // map of the whole workspace regardless of which tab is open.
+  const tabCounts = Object.fromEntries(TABS.map(t => [t.key, invoices.filter(t.match).length]));
+
+  // Status counts are scoped to the open tab. Counting across all three would
+  // put "✓ Posted 48" above a list of three receivables.
+  const isDuplicate = i => i.status === 'duplicate' || i.duplicateOf || (i.errorMsg && /duplicate/i.test(i.errorMsg));
+  const pending     = tabRows.filter(i => i.status === 'pending').length;
+  const posted      = tabRows.filter(i => i.status === 'posted').length;
+  const reviewed    = tabRows.filter(i => i.status === 'reviewed').length;
+  const reported    = tabRows.filter(i => i.status === 'reported').length;
+  const needsAction = tabRows.filter(i => ['review-needed', 'error'].includes(i.status)).length;
+  const duplicates  = tabRows.filter(isDuplicate).length;
 
   return (
     <div>
       <div className="page-header">
-        <h1>AR &amp; AP</h1>
+        <h1>AR, AP &amp; Claims</h1>
         <p>Persisted across restarts — up to 500 records stored. Click any row to review.</p>
       </div>
 
@@ -512,14 +551,68 @@ export default function Invoices() {
         </div>
       )}
 
-      {/* On mobile: Dedicated action bar for claim uploading / adding */}
-      {isMobile && (
-        <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 12, overflowX: 'auto', paddingBottom: 2 }}>
-          <ReceiptUpload onUploaded={() => { setTypeFilter('EXPENSE'); fetchInvoices(); }} />
+      {/* AR / AP / Expense Claims. These are three kinds of document, not three
+          filters over one kind, so they read as tabs rather than pills — the
+          status pills below then narrow whichever kind is open. */}
+      <div
+        role="tablist"
+        aria-label="Document type"
+        className={isMobile ? 'mobile-scroll-x' : ''}
+        style={{
+          display: 'flex', gap: 4, alignItems: 'center',
+          borderBottom: '1px solid var(--border)',
+          marginBottom: 14, paddingBottom: 0,
+          flexWrap: isMobile ? 'nowrap' : 'wrap',
+        }}
+      >
+        {TABS.map(t => {
+          const active = tab === t.key;
+          return (
+            <button
+              key={t.key}
+              role="tab"
+              type="button"
+              aria-selected={active}
+              onClick={() => setTab(t.key)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7,
+                padding: isMobile ? '9px 12px' : '9px 16px',
+                border: 'none', background: 'none', cursor: 'pointer',
+                whiteSpace: 'nowrap', flexShrink: 0,
+                fontSize: 13.5, fontWeight: active ? 700 : 500,
+                color: active ? 'var(--accent)' : 'var(--text-secondary)',
+                // The underline sits on the container's border, so the active
+                // tab reads as joined to the list beneath it.
+                boxShadow: active ? 'inset 0 -2px 0 var(--accent)' : 'none',
+                transition: 'color .15s ease',
+              }}
+            >
+              {isMobile ? t.label : t.long}
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: '1px 7px', borderRadius: 9,
+                background: active ? 'var(--accent-subtle)' : 'var(--bg-secondary)',
+                color: active ? 'var(--accent)' : 'var(--text-muted)',
+                fontVariantNumeric: 'tabular-nums',
+              }}>{tabCounts[t.key]}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Bills and invoices arrive by email; an expense claim is the only kind
+          anyone creates by hand. The controls that create one therefore belong
+          to that tab and nowhere else. */}
+      {tab === 'claims' && (
+        <div style={{
+          display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12,
+          flexWrap: isMobile ? 'nowrap' : 'wrap',
+          overflowX: isMobile ? 'auto' : 'visible', paddingBottom: isMobile ? 2 : 0,
+        }}>
+          <ReceiptUpload onUploaded={fetchInvoices} />
         </div>
       )}
 
-      {/* Type + Status filter pills */}
+      {/* Status pills, scoped to the open tab */}
       <div className={isMobile ? "mobile-scroll-x" : ""} style={{
         display: 'flex',
         gap: 8,
@@ -528,19 +621,9 @@ export default function Invoices() {
         alignItems: 'center',
         paddingBottom: isMobile ? 4 : 0,
       }}>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 2, flexShrink: 0 }}>Type:</span>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginRight: 2, flexShrink: 0 }}>Status:</span>
         {[
-          { key: 'all',    label: 'All',      count: invoices.length },
-          { key: 'ACCPAY', label: 'Bills',    count: bills },
-          { key: 'ACCREC', label: 'Invoices', count: invCount },
-          { key: 'EXPENSE', label: 'Expense Claims', count: receipts },
-        ].map(t => (
-          <FilterPill key={t.key} active={typeFilter === t.key} onClick={() => setTypeFilter(t.key)} label={t.label} count={t.count} />
-        ))}
-
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', marginLeft: 8, marginRight: 2, flexShrink: 0 }}>Status:</span>
-        {[
-          { key: 'all',          label: 'All',              count: invoices.length },
+          { key: 'all',          label: 'All',              count: tabRows.length },
           { key: 'posted',       label: '✓ Posted',         count: posted },
           { key: 'reviewed',     label: '● Ready to Post',  count: reviewed },
           { key: 'pending',      label: 'Pending',          count: pending },
@@ -550,14 +633,6 @@ export default function Invoices() {
         ].map(t => (
           <FilterPill key={t.key} active={statusFilter === t.key} onClick={() => setStatusFilter(t.key)} label={t.label} count={t.count} />
         ))}
-
-        {/* Expense claims are the only type the user creates by hand — bills and
-            invoices arrive by email — so the input lives with the filters. */}
-        {!isMobile && (
-          <div style={{ marginLeft: 'auto', flexShrink: 0 }}>
-            <ReceiptUpload onUploaded={() => { setTypeFilter('EXPENSE'); fetchInvoices(); }} />
-          </div>
-        )}
       </div>
 
       {/* Received — WHEN IT ARRIVED here, not the date printed on the document.
@@ -654,13 +729,22 @@ export default function Invoices() {
             Loading invoices...
           </div>
         ) : filtered.length === 0 ? (
+          // Three different situations read very differently, and lumping them
+          // under "No invoices found" leaves someone on an empty Claims tab
+          // waiting for a watcher that is never going to produce one.
           <div className="empty-state">
-            <div className="empty-state-icon">📭</div>
-            <div style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: 14 }}>No invoices found</div>
+            <div className="empty-state-icon">{tab === 'claims' ? '🧾' : '📭'}</div>
+            <div style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: 14 }}>
+              {tabRows.length > 0
+                ? `No ${activeTab.long.toLowerCase()} match these filters`
+                : `No ${activeTab.long.toLowerCase()} yet`}
+            </div>
             <div style={{ fontSize: 13 }}>
-              {invoices.length === 0
-                ? 'Processed invoices will appear here once the watcher is running'
-                : 'Try adjusting the filters or search term'}
+              {tabRows.length > 0
+                ? 'Try adjusting the status filter or search term'
+                : tab === 'claims'
+                  ? 'Add one above, import a claim form, or photograph receipts with your phone'
+                  : 'These arrive by email — they will appear here once the watcher is running'}
             </div>
           </div>
         ) : isMobile ? (
@@ -1102,8 +1186,8 @@ export default function Invoices() {
       {claimModalJobId && (
         <ClaimImport
           initialJobId={claimModalJobId}
-          onClose={() => { setClaimModalJobId(null); setTypeFilter('EXPENSE'); fetchInvoices(); }}
-          onImported={() => { setClaimModalJobId(null); setTypeFilter('EXPENSE'); fetchInvoices(); }}
+          onClose={() => { setClaimModalJobId(null); setTab('claims'); fetchInvoices(); }}
+          onImported={() => { setClaimModalJobId(null); setTab('claims'); fetchInvoices(); }}
         />
       )}
     </div>
