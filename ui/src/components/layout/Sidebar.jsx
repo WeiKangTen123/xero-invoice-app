@@ -6,7 +6,7 @@ import { useViewMode } from '../../context/ViewModeContext';
 
 const NAV = [
   { to: '/dashboard',  label: 'Dashboard',  icon: '▦',  desc: 'Financial reports' },
-  { to: '/invoices',   label: 'AR & AP',    icon: '◧',  desc: 'Invoices & bills' },
+  { to: '/invoices',   label: 'AR & AP',    icon: '◧',  desc: 'Invoices, bills & claims' },
   { to: '/automation', label: 'Automation', icon: '◆',  desc: 'Pipeline & controls' },
 ];
 
