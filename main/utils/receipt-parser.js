@@ -77,29 +77,11 @@ Rules:
 - A card slip or payment terminal stub belonging to a receipt beside it is NOT a separate receipt.
 - If you are unsure whether something is a second receipt, return one entry rather than two.`;
 
-// The parser must never widen a number. A receipt total is the one field a user
-// is least likely to re-check, so a value that isn't a clean finite number is
-// dropped rather than coerced.
-function _num(value) {
-  if (value === null || value === undefined || value === '') return null;
-  const n = typeof value === 'number' ? value : Number(String(value).replace(/[^0-9.-]/g, ''));
-  return Number.isFinite(n) ? n : null;
-}
-
-function _isoDate(value) {
-  if (!value || typeof value !== 'string') return null;
-  const m = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const [, y, mo, d] = m.map(Number);
-  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
-  // A receipt dated in the future is a misread year far more often than a real
-  // pre-dated purchase, so it is dropped rather than shown as fact.
-  const parsed = new Date(Date.UTC(y, mo - 1, d));
-  if (parsed.getUTCFullYear() !== y || parsed.getUTCMonth() !== mo - 1 || parsed.getUTCDate() !== d) return null;
-  if (parsed.getTime() > Date.now() + 86400000) return null;
-  return value.trim();
-}
-
+// Number, date and currency cleaning are shared with every other intake path;
+// see intake/document.js for why a value is dropped rather than coerced.
+const _intake = require('../intake/document');
+const _num     = _intake.num;
+const _isoDate = _intake.isoDate;
 function _time(value) {
   if (!value || typeof value !== 'string') return null;
   const m = value.trim().match(/^([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?\s*(AM|PM)?$/i);
@@ -112,12 +94,7 @@ function _time(value) {
   return `${String(hours).padStart(2, '0')}:${minutes}`;
 }
 
-function _currency(value) {
-  if (!value || typeof value !== 'string') return null;
-  const code = value.trim().toUpperCase();
-  return /^[A-Z]{3}$/.test(code) ? code : null;
-}
-
+const _currency = _intake.currencyCode;
 // Normalises whatever the model returned into the shape the invoice store uses.
 // Exported for testing: this is where a bad model response is made harmless.
 function normalise(parsed) {
