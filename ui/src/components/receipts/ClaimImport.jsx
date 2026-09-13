@@ -50,6 +50,14 @@ export default function ClaimImport({ onClose, onImported, initialJobId = null }
 
   const archives = files.filter(f => /\.zip$/i.test(f.name));
   const forms    = files.filter(f => /\.xlsx?$/i.test(f.name));
+  // Only those two extensions are sent. Anything else used to sit in the list
+  // looking attached and then go nowhere — the request carried neither, and the
+  // server answered "attach at least a claim archive or a claim form" while the
+  // file was plainly on screen. It is now marked, and an empty file is marked
+  // too, since that fails on the server rather than here.
+  const unsupported = files.filter(f => !/\.(zip|xlsx?)$/i.test(f.name));
+  const emptyFiles  = files.filter(f => f.size === 0);
+  const sendable    = archives.length + forms.length;
 
   // Poll only while the job is actually running.
   useEffect(() => {
@@ -124,24 +132,45 @@ export default function ClaimImport({ onClose, onImported, initialJobId = null }
 
             {files.length > 0 && (
               <div style={{ marginBottom: 14 }}>
-                {files.map(f => (
-                  <div key={f.name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '6px 0', borderTop: '1px solid var(--border)' }}>
-                    <span>{/\.zip$/i.test(f.name) ? '🗜' : '📊'} {f.name}</span>
-                    <span style={{ color: 'var(--text-muted)' }}>{Math.round(f.size / 1024)} KB</span>
-                  </div>
-                ))}
+                {files.map(f => {
+                  const bad = !/\.(zip|xlsx?)$/i.test(f.name) || f.size === 0;
+                  return (
+                    <div key={f.name} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12, padding: '6px 0', borderTop: '1px solid var(--border)', opacity: bad ? 0.6 : 1 }}>
+                      <span style={{ color: bad ? 'var(--danger)' : undefined }}>
+                        {bad ? '⚠' : /\.zip$/i.test(f.name) ? '🗜' : '📊'} {f.name}
+                      </span>
+                      <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                        {f.size === 0 ? 'empty' : `${Math.round(f.size / 1024)} KB`}
+                      </span>
+                    </div>
+                  );
+                })}
                 {/* Reading receipts costs a model call each, so the size of the
                     job is stated before anyone commits to it. */}
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
                   {archives.length} archive{archives.length === 1 ? '' : 's'} · {forms.length} form{forms.length === 1 ? '' : 's'}.
                   Every receipt is read by AI, which takes a few seconds each — a large claim can take a couple of minutes.
                 </div>
+
+                {/* Said here rather than after a failed round trip: these are the
+                    two reasons a file on this list would not have been sent. */}
+                {(unsupported.length > 0 || emptyFiles.length > 0) && (
+                  <div style={{ fontSize: 11, color: 'var(--warning)', marginTop: 8, lineHeight: 1.5 }}>
+                    {unsupported.length > 0 && (
+                      <div>⚠ {unsupported.map(f => f.name).join(', ')} will not be sent — only .zip archives and .xlsx/.xls claim forms are read.</div>
+                    )}
+                    {emptyFiles.length > 0 && (
+                      <div>⚠ {emptyFiles.map(f => f.name).join(', ')} is empty. If it lives in iCloud Drive or a network folder, open it once so it downloads.</div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
             <button className="btn btn-primary" style={{ width: '100%' }}
-                    disabled={!files.length || starting} onClick={start}>
-              {starting ? <><span className="btn-spinner" /> Starting…</> : 'Import claim'}
+                    disabled={!sendable || starting} onClick={start}>
+              {starting ? <><span className="btn-spinner" /> Starting…</>
+                : sendable ? 'Import claim' : 'Attach a .zip or .xlsx to continue'}
             </button>
           </>
         )}

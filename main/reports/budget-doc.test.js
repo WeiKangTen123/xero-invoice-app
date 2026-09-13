@@ -85,10 +85,18 @@ describe('reports/budget-doc — Budget vs Actual grid', () => {
     expect(tableOf(d).body[0].find(c => c && c.text === 'OVERALL BUDGET')).toBeUndefined();
   });
 
-  test('a section heading spans the full width, so adding a month cannot strand it', () => {
+  test('a section heading occupies the full width as real cells, not a span', () => {
     const body = tableOf(doc.budgetVsActualDoc(payload)).body;
     const section = body.find(r => r[0] && r[0].text === 'Revenue');
-    expect(section[0].colSpan).toBe(14);
+
+    // Full width, so adding a month cannot strand the heading.
+    expect(section).toHaveLength(14);
+
+    // And specifically NOT via colSpan, which is what it used to do. A spanned
+    // cell has no internal column boundaries, so the actual/budget seam and the
+    // rule before Total broke at every heading and resumed underneath it —
+    // visible in the rendered PDF as a dashed-looking line.
+    expect(section[0].colSpan).toBeUndefined();
   });
 });
 
