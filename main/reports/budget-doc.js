@@ -15,6 +15,10 @@ const ACCENT  = '#6366f1';
 const MUTED   = '#6b7280';
 const RULE    = '#d8d8e4';
 const NEGATIVE = '#b42318';
+// A tint light enough to survive a monochrome printer without turning into a
+// grey block, but visible enough to follow one account across fourteen columns
+// — which is the hardest thing to do in the landscape report.
+const BAND     = '#f5f5fa';
 
 // Mirrors fmtCell in the UI: a dash for zero (matching Xero's own reports, where
 // nothing and nil look the same), parentheses for negatives.
@@ -101,8 +105,10 @@ function pageFooter(note) {
 }
 
 const STYLES = {
-  org:      { fontSize: 12, bold: true },
-  title:    { fontSize: 12, bold: true },
+  // The report title leads; the organisation is context beneath it. Both at
+  // 12pt bold made them compete for the same job.
+  org:      { fontSize: 10.5, bold: true },
+  title:    { fontSize: 14, bold: true },
   sub:      { fontSize: 7.5, color: MUTED },
   foot:     { fontSize: 6.5, color: MUTED },
   band:     { fontSize: 6.5, bold: true, characterSpacing: 0.6 },
@@ -124,6 +130,8 @@ function budgetVsActualDoc(payload, opts = {}) {
   const actualCount    = firstBudgetIdx === -1 ? months.length : firstBudgetIdx;
   // Column 0 is the account label, so a month at index i is table column i + 1.
   const seamColumn     = firstBudgetIdx === -1 ? -1 : firstBudgetIdx + 1;
+  // Account + one per month; the line before it is at that index.
+  const totalColumn    = months.length + 1;
 
   const band = [{ text: '', border: [false, false, false, false] }];
   if (actualCount > 0) {
@@ -144,15 +152,29 @@ function budgetVsActualDoc(payload, opts = {}) {
   ];
 
   const body = [band, head];
+  // Banding and rules need to know what each row is, and the only place that is
+  // known is here, while it is being built. Collected rather than re-derived in
+  // the layout callbacks, which only receive an index.
+  const sectionRows = new Set();
+  const bandedRows  = new Set();
+  const summaryRows = new Set();
+  let banded = false;
+
   for (const r of rows) {
     if (r.kind === 'section') {
+      sectionRows.add(body.length);
+      banded = false;          // each section restarts the stripe
+      // Deliberately not colSpan: see the note above the layout.
       body.push([
-        { text: latin1(r.label), style: 'section', colSpan: months.length + 2, margin: [0, 5, 0, 1] },
-        ...new Array(months.length + 1).fill({}),
+        { text: latin1(r.label), style: 'section', margin: [0, 7, 0, 2] },
+        ...new Array(months.length + 1).fill({ text: '' }),
       ]);
       continue;
     }
     const strong = r.kind === 'subtotal' || r.kind === 'summary';
+    if (r.kind === 'summary') summaryRows.add(body.length);
+    banded = !banded;
+    if (banded) bandedRows.add(body.length);
     const style  = strong ? 'strong' : 'account';
     body.push([
       { text: latin1(r.label), style, margin: [r.kind === 'account' ? 8 : 0, 0, 0, 0] },
@@ -184,13 +206,21 @@ function budgetVsActualDoc(payload, opts = {}) {
         body,
       },
       layout: {
-        // The seam between the last actual month and the first budget month.
+        // Section headings deliberately avoid colSpan, because a spanned cell
+        // has no internal column boundaries and these two rules would break at
+        // every heading and resume below it.
+        //
+        // The seam between the last actual month and the first budget month —
         // Xero's own PDF signals this only in the column headers, which is easy
-        // to miss, so it gets a rule here exactly as it does on screen.
-        vLineWidth: i => (i === seamColumn ? 1.2 : 0),
-        vLineColor: () => ACCENT,
-        hLineWidth: i => (i === 2 ? 0.7 : 0),
+        // to miss — and a rule before Total, which is the most-read column and
+        // otherwise runs straight on from the last budget month.
+        vLineWidth: i => (i === seamColumn ? 1.2 : i === totalColumn ? 0.7 : 0),
+        vLineColor: i => (i === seamColumn ? ACCENT : RULE),
+        // Under the header, and above each summary line so the figure the report
+        // exists to deliver is not just another bold row.
+        hLineWidth: i => (i === 2 || summaryRows.has(i) ? 0.7 : 0),
         hLineColor: () => RULE,
+        fillColor: i => (bandedRows.has(i) ? BAND : null),
         paddingLeft:   () => 4,
         paddingRight:  () => 4,
         paddingTop:    () => 2.5,
@@ -225,15 +255,23 @@ function budgetVarianceDoc(payload, opts = {}) {
     { text: 'Variance %',  style: 'colHead', alignment: 'right' },
   ]];
 
+  const summaryRows = new Set();
+  const bandedRows  = new Set();
+  let banded = false;
+
   for (const r of rows) {
     if (r.kind === 'section') {
+      banded = false;
       body.push([
-        { text: latin1(r.label), style: 'section', colSpan: 5, margin: [0, 5, 0, 1] },
-        {}, {}, {}, {},
+        { text: latin1(r.label), style: 'section', margin: [0, 7, 0, 2] },
+        { text: '' }, { text: '' }, { text: '' }, { text: '' },
       ]);
       continue;
     }
     const strong = r.kind === 'subtotal' || r.kind === 'summary';
+    if (r.kind === 'summary') summaryRows.add(body.length);
+    banded = !banded;
+    if (banded) bandedRows.add(body.length);
     const style  = strong ? 'strong' : 'account';
     const v      = figuresFor(r);
     // Favourability is not the sign of the variance — over budget is good on
@@ -271,8 +309,9 @@ function budgetVarianceDoc(payload, opts = {}) {
       },
       layout: {
         vLineWidth: () => 0,
-        hLineWidth: i => (i === 1 ? 0.7 : 0),
+        hLineWidth: i => (i === 1 || summaryRows.has(i) ? 0.7 : 0),
         hLineColor: () => RULE,
+        fillColor: i => (bandedRows.has(i) ? BAND : null),
         paddingLeft:   () => 5,
         paddingRight:  () => 5,
         paddingTop:    () => 3,

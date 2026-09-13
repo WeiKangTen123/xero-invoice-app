@@ -19,7 +19,22 @@ const logger       = require('../utils/logger');
 // Uploads arrive as base64 JSON, same as single receipts — express.json is
 // already mounted at 10mb and this needs no new dependency. A claim archive is
 // larger than one receipt, so the cap is checked explicitly.
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+// What can actually get here, not what we would like to allow.
+//
+// Three limits sit in front of this and only the smallest one matters:
+//   nginx  client_max_body_size  10M   (sites-available/xero-app)
+//   express.json limit           10mb  (main/index.js)
+//   this                                <- must be the smallest of the three
+//
+// Files arrive base64-encoded inside JSON, which inflates them by 4/3, so a
+// 10MB body carries at most ~7.5MB of actual files. This was 25MB, which would
+// have needed a 33MB body — unreachable, so the friendly message below never
+// fired and users got nginx's raw HTML error page instead.
+//
+// 7MB leaves room for the JSON envelope and keeps the rejection ours: anything
+// larger than this but still under nginx's gate is answered by the 413 below,
+// which says what the limit is. Raising it means raising all three together.
+const MAX_UPLOAD_BYTES = 7 * 1024 * 1024;
 
 function decodeBase64(data) {
   if (typeof data !== 'string' || !data) return null;
@@ -150,11 +165,21 @@ router.post('/import', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Attach at least a claim archive or a claim form' });
     }
 
+    // "could not be read" said nothing about what to do next. The two causes
+    // need different actions from the user, and the server can tell them apart:
+    // an empty payload means the browser got nothing from the file (a cloud file
+    // that was never downloaded locally is the usual reason), while a payload
+    // that will not decode means it arrived damaged.
     const decode = list => {
       const out = [];
       for (const f of list) {
-        const buffer = decodeBase64(f && f.data);
-        if (!buffer) return { error: `${(f && f.name) || 'a file'} could not be read` };
+        const name = (f && f.name) || 'a file';
+        const data = f && f.data;
+        if (typeof data !== 'string' || !data) {
+          return { error: `${name} came through empty. If it lives in iCloud Drive or a network folder, open it once so it downloads, then try again.` };
+        }
+        const buffer = decodeBase64(data);
+        if (!buffer) return { error: `${name} arrived damaged and could not be decoded. Try attaching it again.` };
         out.push({ name: f.name || 'file', buffer });
       }
       return { out };

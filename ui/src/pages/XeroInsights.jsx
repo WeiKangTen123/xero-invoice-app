@@ -419,7 +419,15 @@ export default function XeroInsights() {
   // Which month the Budget Variance tab compares — a month key, or 'ytd'. Defaults
   // to the current month on load (see fetchBudget), matching Xero's own report,
   // which is titled "For the month ended <current month>".
-  const [varianceMonth, setVarianceMonth] = useState('');
+  // 'ytd', not '', and the empty default was doing real damage. Nothing matched
+  // '' so the table fell through to index 0 — April, the first month of the
+  // financial year, which has no actuals — while the heading above it rendered
+  // "For the month ended —", and the PDF export read the same '' as falsy and
+  // reported Year to date. Three different answers to which period this is.
+  //
+  // Year to date is also simply the right thing to open on: it rolls up the
+  // completed months, where a single unelapsed month is a wall of -100%.
+  const [varianceMonth, setVarianceMonth] = useState('ytd');
 
   async function fetchSummary(opts = {}) {
     if (opts.force) setRefreshing(true);
