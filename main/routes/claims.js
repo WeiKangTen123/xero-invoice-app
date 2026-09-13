@@ -162,6 +162,7 @@ router.post('/import', requireAuth, async (req, res) => {
   try {
     const { archives = [], forms = [], label } = req.body || {};
     if (!Array.isArray(archives) || !Array.isArray(forms) || (!archives.length && !forms.length)) {
+      logger.warn('Claim import rejected', { userId: req.user.id, reason: 'nothing sendable was attached' });
       return res.status(400).json({ error: 'Attach at least a claim archive or a claim form' });
     }
 
@@ -185,8 +186,21 @@ router.post('/import', requireAuth, async (req, res) => {
       return { out };
     };
 
-    const a = decode(archives); if (a.error) return res.status(400).json({ error: a.error });
-    const f = decode(forms);    if (f.error) return res.status(400).json({ error: f.error });
+    // Logged as well as returned. A rejected import previously left nothing
+    // behind but a status code and a byte count in the access log, which is not
+    // enough to tell afterwards which file failed or why — the request body is
+    // never logged, and by the time anyone asks, the attempt is gone.
+    const reject = (why) => {
+      logger.warn('Claim import rejected', {
+        userId: req.user.id, reason: why,
+        archives: archives.map(x => (x && x.name) || '(unnamed)'),
+        forms:    forms.map(x => (x && x.name) || '(unnamed)'),
+      });
+      return res.status(400).json({ error: why });
+    };
+
+    const a = decode(archives); if (a.error) return reject(a.error);
+    const f = decode(forms);    if (f.error) return reject(f.error);
 
     const bytes = [...a.out, ...f.out].reduce((s, x) => s + x.buffer.length, 0);
     if (bytes > MAX_UPLOAD_BYTES) {
