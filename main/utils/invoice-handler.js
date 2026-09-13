@@ -3,6 +3,7 @@ const { reconnectXero }   = require('../xero/reconnect');
 const { xeroErrMsg }      = require('../xero/xero-utils');
 const { notifyError }     = require('./notify');
 const { buildRecord } = require('../intake/record');
+const { profileFor } = require('../intake/profiles');
 const { normaliseDocument } = require('../intake/document');
 const logger              = require('./logger');
 const invoiceStore        = require('./invoice-store');
@@ -80,14 +81,14 @@ function createHandler(userId) {
       invoiceData.totalAmount
     );
     if (existing) {
-      logger.info('Invoice already stored — skipping duplicate', {
+            logger.info('Invoice already stored — skipping duplicate', {
         vendor:        invoiceData.vendorName,
         invoiceNumber: invoiceData.invoiceNumber,
         existingId:    existing.id,
         existingStatus: existing.status,
         userId,
       });
-      return;
+      return { id: existing.id, status: existing.status, duplicate: true };
     }
 
     const id = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
@@ -150,8 +151,8 @@ function createHandler(userId) {
       logger.warn('Invoice has no amount and no invoice number — skipping Xero submit', {
         id, vendor: record.vendorName, userId,
       });
-      await invStore.update(id, { status: 'review-needed', errorMsg: 'Could not extract invoice number or amount from PDF' });
-      return;
+            await invStore.update(id, { status: 'review-needed', errorMsg: 'Could not extract invoice number or amount from PDF' });
+      return { id, status: 'review-needed' };
     }
 
     // The template verifier read the document differently from the parser on
@@ -161,22 +162,29 @@ function createHandler(userId) {
       logger.warn('Invoice flagged by template verification — skipping Xero submit', {
         id, vendor: record.vendorName, userId, reason: invoiceData.reviewReason,
       });
-      await invStore.update(id, { status: 'review-needed', errorMsg: `Please check: ${invoiceData.reviewReason}` });
-      return;
+            await invStore.update(id, { status: 'review-needed', errorMsg: `Please check: ${invoiceData.reviewReason}` });
+      return { id, status: 'review-needed' };
     }
 
-    if (settingsUser.get('autoProcess')) {
+        // Whether this document may go to Xero without a person looking at it is
+    // decided by the intake profile, not only by the auto-process switch: an
+    // emailed bill may, a bill someone uploaded by hand never does — they have
+    // it in front of them and will review it (intake/profiles.js).
+    const mayAutoPost = profileFor(record.invoiceType).autoPost(record.source);
+    if (settingsUser.get('autoProcess') && mayAutoPost) {
       // Strip the binary PDF buffer before passing into the queue closure — the PDF
       // is already saved to disk and will be read back via pdfStore when attaching to Xero.
       // eslint-disable-next-line no-unused-vars
       const { pdfBuffer: _buf, ...invoiceDataClean } = invoiceData;
       scheduleXeroSubmit(invoiceDataClean, id);
       logger.info('Invoice queued for Xero submission', { id, vendor: record.vendorName, userId });
+    } else if (!mayAutoPost) {
+      logger.info('Stored for review — this source never auto-posts', { id, source: record.source, userId });
     } else {
       logger.info('Auto-process disabled — invoice stored for manual review', { id, userId });
     }
+    return { id, status: record.status };
   }
-
   return { onInvoiceEmail };
 }
 
