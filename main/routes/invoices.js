@@ -45,6 +45,103 @@ const EDITABLE_STATUSES    = new Set(['pending', 'review-needed', 'error', 'revi
 const SUBMITTABLE_STATUSES = new Set(['pending', 'review-needed', 'error', 'reviewed', 'posted']);
 
 // ── GET /api/invoices ─────────────────────────────────────────────────────────
+// ── Adding bills by hand ─────────────────────────────────────────────────────
+// Everything above this comment arrives by email. These are the two ways a
+// bill gets in without one: a single PDF, or a batch as a background job.
+// Declared before the /:id routes so "/import" is never read as an id.
+const billIntake = require('../intake/bill-intake');
+const jobs       = require('../jobs');
+
+function _decodeBase64(data) {
+  if (typeof data !== 'string' || !data) return null;
+  const raw = data.includes(',') ? data.slice(data.indexOf(',') + 1) : data;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw.replace(/\s/g, ''))) return null;
+  const buf = Buffer.from(raw, 'base64');
+  return buf.length ? buf : null;
+}
+
+// POST /api/invoices  { name, data (base64 PDF) }
+// One uploaded bill. Stored as review-needed; never sent to Xero on its own.
+router.post('/', requireAuth, async (req, res) => {
+  const { name, data } = req.body || {};
+  const buffer = _decodeBase64(data);
+  if (!buffer) return res.status(400).json({ error: `${name || 'The file'} came through empty or unreadable. Try attaching it again.` });
+  if (!billIntake.looksLikePdf(buffer)) return res.status(400).json({ error: `${name || 'The file'} is not a PDF. Bills are added as PDF files.` });
+  if (buffer.length > billIntake.MAX_PDF_BYTES) {
+    return res.status(413).json({ error: `That is ${(buffer.length / 1048576).toFixed(1)}MB; Xero accepts at most 3MB for an attachment.` });
+  }
+  try {
+    const r = await billIntake.intakeBillPdf(req.user.id, { name: name || 'bill.pdf', buffer });
+    if (r.outcome !== 'stored') return res.status(422).json({ error: r.error });
+    const dup = r.records.find(x => x.duplicate);
+    if (dup && r.records.every(x => x.duplicate)) {
+      return res.status(409).json({ error: 'This bill is already in the system', duplicateOf: dup.id, records: r.records });
+    }
+    const store = invoiceStore.forUser(req.user.id);
+    res.status(201).json({ records: r.records, invoices: r.records.map(x => store.getById(x.id)).filter(Boolean) });
+  } catch (err) {
+    logger.error('Bill upload failed', { userId: req.user.id, error: err.message });
+    res.status(500).json({ error: err.message || 'Upload failed' });
+  }
+});
+
+// POST /api/invoices/import  { pdfs: [{name, data}], archives: [{name, data}], label }
+// Several bills, as a background job — a PDF each is a model call, and a
+// batch of thirty is minutes, far past what a request can hold open.
+router.post('/import', requireAuth, (req, res) => {
+  const { pdfs = [], archives = [], label } = req.body || {};
+  if (!Array.isArray(pdfs) || !Array.isArray(archives) || (!pdfs.length && !archives.length)) {
+    return res.status(400).json({ error: 'Attach at least one PDF or a zip of PDFs' });
+  }
+  const decode = (list, kind) => {
+    const out = [];
+    for (const f of list) {
+      const buffer = _decodeBase64(f && f.data);
+      if (!buffer) return { error: `${(f && f.name) || 'a file'} came through empty or unreadable. Try attaching it again.` };
+      if (kind === 'pdf' && !billIntake.looksLikePdf(buffer)) return { error: `${f.name || 'a file'} is not a PDF.` };
+      out.push({ name: f.name || `${kind}-${out.length + 1}`, buffer });
+    }
+    return { out };
+  };
+  const p = decode(pdfs, 'pdf');      if (p.error) return res.status(400).json({ error: p.error });
+  const a = decode(archives, 'zip');  if (a.error) return res.status(400).json({ error: a.error });
+  const bytes = [...p.out, ...a.out].reduce((s, f) => s + f.buffer.length, 0);
+  if (bytes > 7 * 1024 * 1024) return res.status(413).json({ error: `That is ${(bytes / 1048576).toFixed(1)}MB; the limit for one import is 7MB.` });
+
+  const enq = jobs.enqueue(req.user.id, {
+    type: 'bill-import',
+    label: label || (p.out[0] || a.out[0]).name || 'Bill import',
+    payload: { pdfs: p.out, archives: a.out },
+  });
+  if (enq.error) return res.status(429).json({ error: enq.error });
+  jobs.startWorker(req.user.id);
+  jobs.kickWorker(req.user.id);
+  res.status(202).json({ jobId: enq.job.id, stage: enq.job.stage });
+});
+
+const _jobView = j => ({
+  id: j.id, type: j.type, label: j.label, stage: j.stage,
+  filesTotal: j.receiptsTotal, filesRead: j.receiptsRead, rowsTotal: j.rowsTotal,
+  error: j.error, result: j.result, startedAt: j.startedAt || j.createdAt,
+});
+
+router.get('/import/active', requireAuth, (req, res) => {
+  const active = jobs.getPending(req.user.id).find(j => j.type === 'bill-import');
+  res.json({ job: active ? _jobView(active) : null });
+});
+
+router.get('/import/:jobId', requireAuth, (req, res) => {
+  const job = jobs.get(req.user.id, req.params.jobId);
+  if (!job || job.type !== 'bill-import') return res.status(404).json({ error: 'Import not found — it may have expired' });
+  res.json(_jobView(job));
+});
+
+router.delete('/import/:jobId', requireAuth, (req, res) => {
+  const job = jobs.markCancelled(req.user.id, req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Import not found' });
+  res.json({ stage: job.stage });
+});
+
 router.get('/', requireAuth, (req, res) => {
   const invoices = invoiceStore.forUser(req.user.id).getAll().map(inv => ({
     id:            inv.id,
