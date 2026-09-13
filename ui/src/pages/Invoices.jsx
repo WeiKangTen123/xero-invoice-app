@@ -398,8 +398,14 @@ export default function Invoices() {
   return (
     <div>
       <div className="page-header">
-        <h1>AR, AP &amp; Claims</h1>
-        <p>Persisted across restarts — up to 500 records stored. Click any row to review.</p>
+        {/* "AR & AP" covers all three tabs, despite the third being named
+            separately. An expense claim posts to Xero as an ACCPAY bill (see
+            xero/invoices.js) — EXPENSE is this app's note about how the document
+            arrived, photographed by an employee rather than emailed by a
+            supplier, not a different kind of Xero document. Naming the heading
+            "AR, AP & Claims" implied a third category that does not exist. */}
+        <h1>AR &amp; AP</h1>
+        <p>Receivables, payables and expense claims on their way to Xero. Click any row to review.</p>
       </div>
 
       {/* Active background claim import banner */}
