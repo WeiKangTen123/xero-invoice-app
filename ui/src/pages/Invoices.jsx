@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import ReceiptUpload from '../components/receipts/ReceiptUpload';
 import BillIntake from '../components/bills/BillIntake';
+import InvoiceIntake from '../components/invoices/InvoiceIntake';
 import ClaimImport from '../components/receipts/ClaimImport';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
 import { useViewMode } from '../context/ViewModeContext';
@@ -620,9 +621,18 @@ export default function Invoices() {
 
       {/* Each kind of document has its own ways in, and the controls for them
           sit on that kind's tab and nowhere else. Bills: a PDF, or a batch of
-          them. Claims: a photo, a claim form, or the phone. Invoices arrive by
-          email (or will be composed here, later) — no upload makes sense for a
-          document we produce. */}
+          them. Claims: a photo, a claim form, or the phone. Invoices: a form,
+          or a spreadsheet — there is no file to upload for a document we
+          produce ourselves. */}
+      {tab === 'ar' && (
+        <div style={{
+          display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12,
+          flexWrap: isMobile ? 'nowrap' : 'wrap',
+          overflowX: isMobile ? 'auto' : 'visible', paddingBottom: isMobile ? 2 : 0,
+        }}>
+          <InvoiceIntake onUploaded={fetchInvoices} />
+        </div>
+      )}
       {tab === 'ap' && (
         <div style={{
           display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12,
@@ -776,7 +786,7 @@ export default function Invoices() {
                   ? 'Add one above, import a claim form, or photograph receipts with your phone'
                   : tab === 'ap'
                     ? 'They arrive by email once the watcher is running — or add a PDF above'
-                    : 'These arrive by email — they will appear here once the watcher is running'}
+                    : 'They arrive as the emailed template — or type one in, or import a spreadsheet, above'}
             </div>
           </div>
         ) : isMobile ? (
