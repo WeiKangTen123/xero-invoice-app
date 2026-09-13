@@ -133,6 +133,25 @@ describe('AR / AP / Claims tabs — claim controls live only on the claims tab',
     expect(s.slice(gate, use)).not.toContain('</div>\n\n      {');
   });
 
+  // The same rule for bills: their controls exist, exactly once, on the Bills
+  // tab and nowhere else — and no bill control has a phone button.
+  test('BillIntake is rendered exactly once, inside the bills-only gate', () => {
+    const s = src();
+    expect((s.match(/<BillIntake/g) || []).length).toBe(1);
+    const gate = s.indexOf("{tab === 'ap' && (");
+    const use  = s.indexOf('<BillIntake');
+    expect(gate).toBeGreaterThan(-1);
+    expect(use).toBeGreaterThan(gate);
+    expect(s.slice(gate, use)).not.toContain('</div>\n\n      {');
+  });
+
+  test('bills have Add and Import, and deliberately no phone', () => {
+    const bills = fs.readFileSync(path.join(ROOT, 'ui/src/components/bills/BillIntake.jsx'), 'utf8');
+    expect(bills).toContain('Add bill');
+    expect(bills).toContain('Import bills');
+    expect(bills).not.toMatch(/Use my phone|PhonePairing/);
+  });
+
   test('ReceiptUpload owns all three creation controls', () => {
     const upload = fs.readFileSync(path.join(ROOT, 'ui/src/components/receipts/ReceiptUpload.jsx'), 'utf8');
     expect(upload).toContain('Add claim');
