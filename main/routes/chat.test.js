@@ -3,6 +3,7 @@ jest.mock('../utils/chat-agent', () => ({
 }));
 
 const request = require('supertest');
+const { serverFor } = require('../scripts/test-server'); // one server per test, not per request
 const express = require('express');
 const jwt     = require('jsonwebtoken');
 
@@ -26,15 +27,15 @@ describe('POST /api/chat', () => {
   });
 
   test('rejects without auth', async () => {
-    await request(app).post('/api/chat').send({ message: 'hi' }).expect(401);
+    await request(serverFor(app)).post('/api/chat').send({ message: 'hi' }).expect(401);
   });
 
   test('rejects an empty message', async () => {
-    await request(app).post('/api/chat').set('Authorization', `Bearer ${token}`).send({ message: '' }).expect(400);
+    await request(serverFor(app)).post('/api/chat').set('Authorization', `Bearer ${token}`).send({ message: '' }).expect(400);
   });
 
   test('returns the agent response for a normal message', async () => {
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .post('/api/chat').set('Authorization', `Bearer ${token}`)
       .send({ message: 'hello' }).expect(200);
     expect(res.body).toEqual({ reply: 'ok', proposals: [] });
@@ -46,7 +47,7 @@ describe('POST /api/chat', () => {
   // window slides and the 13th never gets blocked), so this checks the config
   // deterministically instead of relying on wall-clock timing in the test itself.
   test('is configured with the intended 12/min cap (protects the shared Gemini quota)', async () => {
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .post('/api/chat').set('Authorization', `Bearer ${token}`)
       .send({ message: 'hello' }).expect(200);
     expect(res.headers['ratelimit-limit']).toBe('12');

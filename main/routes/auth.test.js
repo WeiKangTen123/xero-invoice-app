@@ -1,4 +1,5 @@
 const request = require('supertest');
+const { serverFor } = require('../scripts/test-server'); // one server per test, not per request
 const express = require('express');
 const jwt     = require('jsonwebtoken');
 
@@ -24,7 +25,7 @@ describe('routes/auth', () => {
   describe('GET /me', () => {
     test('defaults timezone to Asia/Singapore when the user has never set one', async () => {
       const u = await users.createUser('notz@test.com', 'password123', 'user');
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/auth/me')
         .set('Authorization', `Bearer ${tokenFor(u)}`)
         .expect(200);
@@ -34,7 +35,7 @@ describe('routes/auth', () => {
     test('returns the user-configured timezone once set', async () => {
       const u = await users.createUser('withtz@test.com', 'password123', 'user');
       users.saveUserConfig(u.id, { TIMEZONE: 'America/New_York' });
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/auth/me')
         .set('Authorization', `Bearer ${tokenFor(u)}`)
         .expect(200);
@@ -49,7 +50,7 @@ describe('routes/auth', () => {
     const u = await users.createUser('presence@test.com', 'password123', 'user');
     expect(users.findById(u.id).last_seen_at).toBeFalsy();
 
-    await request(app)
+    await request(serverFor(app))
       .get('/api/auth/me')
       .set('Authorization', `Bearer ${tokenFor(u)}`)
       .expect(200);
@@ -61,7 +62,7 @@ describe('routes/auth', () => {
 
   test('an invalid token does not touch last_seen_at and is rejected', async () => {
     const u = await users.createUser('badtoken@test.com', 'password123', 'user');
-    await request(app)
+    await request(serverFor(app))
       .get('/api/auth/me')
       .set('Authorization', 'Bearer not-a-real-token')
       .expect(401);
@@ -70,7 +71,7 @@ describe('routes/auth', () => {
 
   describe('POST /register security controls', () => {
     test('enforces minimum 8 character password', async () => {
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .post('/api/auth/register')
         .send({ email: 'short@test.com', password: 'short' })
         .expect(400);
@@ -82,7 +83,7 @@ describe('routes/auth', () => {
       const prevEnv = process.env.ALLOW_REGISTRATION;
       try {
         process.env.ALLOW_REGISTRATION = 'false';
-        const res = await request(app)
+        const res = await request(serverFor(app))
           .post('/api/auth/register')
           .send({ email: 'stranger@test.com', password: 'password123' })
           .expect(403);

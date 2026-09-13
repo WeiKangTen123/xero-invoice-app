@@ -1,4 +1,5 @@
 const request = require('supertest');
+const { serverFor } = require('../scripts/test-server'); // one server per test, not per request
 const express = require('express');
 const jwt     = require('jsonwebtoken');
 
@@ -30,12 +31,12 @@ describe('routes/xero-reports', () => {
   }
 
   test('requires authentication', async () => {
-    await request(app).get('/api/xero-reports/summary').expect(401);
+    await request(serverFor(app)).get('/api/xero-reports/summary').expect(401);
   });
 
   test('returns connected:false when the user has no persisted tenant, without calling reports.getSummary', async () => {
     tokenCache.getPersistedTenants.mockReturnValue([]);
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .get('/api/xero-reports/summary')
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(200);
@@ -50,7 +51,7 @@ describe('routes/xero-reports', () => {
     ]);
     reports.getSummary.mockResolvedValue({ connected: true, organisation: {}, kpis: {}, invoices: [] });
 
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .get('/api/xero-reports/summary')
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(200);
@@ -67,7 +68,7 @@ describe('routes/xero-reports', () => {
     ]);
     reports.getSummary.mockResolvedValue({ connected: true, organisation: {}, kpis: {}, invoices: [] });
 
-    await request(app)
+    await request(serverFor(app))
       .get('/api/xero-reports/summary?tenantId=t2')
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(200);
@@ -79,7 +80,7 @@ describe('routes/xero-reports', () => {
     tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1', tenantName: 'Org One' }]);
     reports.getSummary.mockResolvedValue({ connected: true, organisation: {}, kpis: {}, invoices: [] });
 
-    await request(app)
+    await request(serverFor(app))
       .get('/api/xero-reports/summary?tenantId=someone-elses-tenant')
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(200);
@@ -91,7 +92,7 @@ describe('routes/xero-reports', () => {
     tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
     reports.getSummary.mockResolvedValue({ connected: true, organisation: {}, kpis: {}, invoices: [] });
 
-    await request(app)
+    await request(serverFor(app))
       .get('/api/xero-reports/summary?force=true')
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(200);
@@ -103,7 +104,7 @@ describe('routes/xero-reports', () => {
     tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
     reports.getSummary.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
 
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .get('/api/xero-reports/summary')
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(500);
@@ -113,7 +114,7 @@ describe('routes/xero-reports', () => {
   describe('GET /period', () => {
     test('returns connected:false with no tenant, without calling reports.getPeriod', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([]);
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero-reports/period')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -125,7 +126,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getPeriod.mockResolvedValue({ range: {}, totals: {}, granularity: 'day', trend: [] });
 
-      await request(app)
+      await request(serverFor(app))
         .get('/api/xero-reports/period?preset=custom&from=2026-01-01&to=2026-01-31&force=true')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -140,7 +141,7 @@ describe('routes/xero-reports', () => {
       reports.getPeriod.mockResolvedValue({ range: {}, totals: {}, granularity: 'day', trend: [] });
       users.saveUserConfig(testUser.id, { TIMEZONE: 'America/New_York' });
 
-      await request(app)
+      await request(serverFor(app))
         .get('/api/xero-reports/period')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -152,7 +153,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getPeriod.mockRejectedValue(new Error('Custom range requires valid "from" and "to" dates (YYYY-MM-DD)'));
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero-reports/period?preset=custom')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(400);
@@ -163,7 +164,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getPeriod.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
 
-      await request(app)
+      await request(serverFor(app))
         .get('/api/xero-reports/period')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(500);
@@ -172,15 +173,15 @@ describe('routes/xero-reports', () => {
 
   describe('GET /accounts, /bank-accounts, /contacts', () => {
     test('all three require authentication', async () => {
-      await request(app).get('/api/xero-reports/accounts').expect(401);
-      await request(app).get('/api/xero-reports/bank-accounts').expect(401);
-      await request(app).get('/api/xero-reports/contacts').expect(401);
+      await request(serverFor(app)).get('/api/xero-reports/accounts').expect(401);
+      await request(serverFor(app)).get('/api/xero-reports/bank-accounts').expect(401);
+      await request(serverFor(app)).get('/api/xero-reports/contacts').expect(401);
     });
 
     test('all three return connected:false with no tenant', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([]);
       for (const path of ['accounts', 'bank-accounts', 'contacts']) {
-        const res = await request(app)
+        const res = await request(serverFor(app))
           .get(`/api/xero-reports/${path}`)
           .set('Authorization', `Bearer ${tokenFor(testUser)}`)
           .expect(200);
@@ -192,7 +193,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getAccounts.mockResolvedValue({ accounts: [{ code: '200', name: 'Sales' }] });
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero-reports/accounts')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -205,7 +206,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getBankAccounts.mockResolvedValue({ bankAccounts: [] });
 
-      await request(app)
+      await request(serverFor(app))
         .get('/api/xero-reports/bank-accounts?force=true')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -217,7 +218,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getContacts.mockResolvedValue({ contacts: [] });
 
-      await request(app)
+      await request(serverFor(app))
         .get('/api/xero-reports/contacts')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -229,7 +230,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getContacts.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero-reports/contacts')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(500);
@@ -239,14 +240,14 @@ describe('routes/xero-reports', () => {
 
   describe('GET /bank-transactions, /profit-loss, /bank-summary', () => {
     test('all three require authentication', async () => {
-      await request(app).get('/api/xero-reports/bank-transactions?accountId=a1').expect(401);
-      await request(app).get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31').expect(401);
-      await request(app).get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31').expect(401);
+      await request(serverFor(app)).get('/api/xero-reports/bank-transactions?accountId=a1').expect(401);
+      await request(serverFor(app)).get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31').expect(401);
+      await request(serverFor(app)).get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31').expect(401);
     });
 
     test('/bank-transactions requires accountId', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero-reports/bank-transactions')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(400);
@@ -258,7 +259,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getBankTransactions.mockResolvedValue({ transactions: [] });
 
-      await request(app)
+      await request(serverFor(app))
         .get('/api/xero-reports/bank-transactions?accountId=acct-1')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -268,9 +269,9 @@ describe('routes/xero-reports', () => {
 
     test('/profit-loss and /bank-summary require from and to', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      const res1 = await request(app).get('/api/xero-reports/profit-loss').set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(400);
+      const res1 = await request(serverFor(app)).get('/api/xero-reports/profit-loss').set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(400);
       expect(res1.body.error).toMatch(/from and to/i);
-      const res2 = await request(app).get('/api/xero-reports/bank-summary?from=2026-01-01').set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(400);
+      const res2 = await request(serverFor(app)).get('/api/xero-reports/bank-summary?from=2026-01-01').set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(400);
       expect(res2.body.error).toMatch(/from and to/i);
     });
 
@@ -278,7 +279,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getProfitAndLoss.mockResolvedValue({ income: 0, expenses: 0, netProfit: 0 });
 
-      await request(app)
+      await request(serverFor(app))
         .get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -290,7 +291,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getBankSummary.mockResolvedValue({ accounts: [], cashIn: 0, cashOut: 0, net: 0 });
 
-      await request(app)
+      await request(serverFor(app))
         .get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -306,7 +307,7 @@ describe('routes/xero-reports', () => {
       const scopeErr = new Error(JSON.stringify({ response: { statusCode: 403 }, body: { Detail: 'Forbidden resource' } }));
       reports.getProfitAndLoss.mockRejectedValue(scopeErr);
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(403);
@@ -321,7 +322,7 @@ describe('routes/xero-reports', () => {
       const scopeErr = new Error(JSON.stringify({ response: { statusCode: 401, headers: { 'www-authenticate': 'insufficient_scope' } }, body: {} }));
       reports.getBankSummary.mockRejectedValue(scopeErr);
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(403);
@@ -332,7 +333,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       reports.getBankSummary.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(500);
