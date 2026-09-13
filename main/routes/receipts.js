@@ -57,6 +57,11 @@ function decodeBase64(data) {
 // Shared by the authenticated desktop upload and the paired phone upload, so
 // the two cannot drift apart on validation, ordering or the state a new receipt
 // lands in. Returns { status, body }.
+// Background reads still running. Production never waits on these — the whole
+// point is that an upload returns before the read finishes — but tests must,
+// or they read the row before it has been filled in.
+const _inflight = new Set();
+
 function storeReceipt(userId, { mime, data, filename, source }) {
   if (!receiptStore.isAcceptedMime(mime)) {
     return { status: 400, body: {
@@ -134,10 +139,16 @@ function storeReceipt(userId, { mime, data, filename, source }) {
   //
   // Parsing is an enhancement, never a gate: if it fails the receipt stays
   // exactly where it is, at review-needed, for the user to type by hand.
-  setImmediate(() => {
+  // Tracked so a test can wait for it. Guessing at how many event-loop ticks
+  // the read takes (the old settle() helper) was wrong often enough that one
+  // describe block had grown to three nested setImmediates, and still flaked.
+  const done = new Promise(resolve => setImmediate(() => {
     readAndMaybeSplit(userId, id, buffer, mime, storedName, hash)
-      .catch(err => logger.warn('Receipt read failed', { userId, id, error: err.message }));
-  });
+      .catch(err => logger.warn('Receipt read failed', { userId, id, error: err.message }))
+      .finally(resolve);
+  }));
+  _inflight.add(done);
+  done.finally(() => _inflight.delete(done));
 
   return { status: 201, body: { receipt: record, imageToken: issueImageToken(userId, id) } };
 }
@@ -625,3 +636,8 @@ router.post('/:id/merge', requireAuth, (req, res) => {
 
 module.exports = router;
 module.exports._decodeBase64 = decodeBase64;
+// Resolves once every background read started so far has finished, however it
+// finished. Reads started while draining are waited for too.
+module.exports._drain = async function _drain() {
+  while (_inflight.size) await Promise.allSettled([..._inflight]);
+};

@@ -9,8 +9,23 @@ const jwt     = require('jsonwebtoken');
 const fs      = require('fs');
 const path    = require('path');
 
+// One HTTP server per test, not one per request.
+//
+// supertest's default — request(app) — starts a fresh server on a fresh
+// ephemeral port for every single request and tears it down afterwards. Across
+// ~170 requests a run that churn produced responses that did not belong to the
+// request: "socket hang up", parser-level 400s, and 401/404s for state written
+// a moment earlier, roughly one run in four, never the same test twice. Handing
+// supertest an already-listening server (request(server)) makes it reuse it,
+// and the server is closed once per test here.
+const _srv = { current: null };
+afterEach(() => new Promise(resolve => {
+  const s = _srv.current; _srv.current = null;
+  if (s && s.listening) s.close(() => resolve()); else resolve();
+}));
+
 describe('routes/receipts', () => {
-  let app, users, jwtSecret, testUser, receiptStore, invoiceStore, pairing;
+  let app, server, users, jwtSecret, testUser, receiptStore, invoiceStore, pairing;
   const created = [];
 
   // A 6-byte buffer is a perfectly good stand-in: nothing here inspects pixels.
@@ -38,6 +53,7 @@ describe('routes/receipts', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    server = _srv.current = app.listen(0);
   });
 
   afterAll(() => {
@@ -47,11 +63,11 @@ describe('routes/receipts', () => {
   });
 
   const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
-  const upload = (body) => request(app).post('/api/receipts').set('Authorization', auth()).send(body);
+  const upload = (body) => request(server).post('/api/receipts').set('Authorization', auth()).send(body);
 
   describe('POST /', () => {
     test('requires authentication', async () => {
-      await request(app).post('/api/receipts').send({ mime: 'image/jpeg', data: jpeg() }).expect(401);
+      await request(server).post('/api/receipts').send({ mime: 'image/jpeg', data: jpeg() }).expect(401);
     });
 
     test('stores the file and creates an EXPENSE row awaiting review', async () => {
@@ -104,22 +120,22 @@ describe('routes/receipts', () => {
   describe('GET /:id/image', () => {
     test('serves the image to a valid scoped token', async () => {
       const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
-      await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${body.imageToken}`)
+      await request(server).get(`/api/receipts/${body.receipt.id}/image?token=${body.imageToken}`)
         .expect(200).expect('Content-Type', /image\/jpeg/);
     });
 
     test('rejects a missing, garbage or expired token', async () => {
       const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
-      await request(app).get(`/api/receipts/${body.receipt.id}/image`).expect(401);
-      await request(app).get(`/api/receipts/${body.receipt.id}/image?token=garbage`).expect(401);
+      await request(server).get(`/api/receipts/${body.receipt.id}/image`).expect(401);
+      await request(server).get(`/api/receipts/${body.receipt.id}/image?token=garbage`).expect(401);
       const expired = jwt.sign({ userId: testUser.id, invoiceId: body.receipt.id, purpose: 'receipt' }, jwtSecret(), { expiresIn: '-1s' });
-      await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${expired}`).expect(401);
+      await request(server).get(`/api/receipts/${body.receipt.id}/image?token=${expired}`).expect(401);
     });
 
     test('a token for one receipt cannot open another', async () => {
       const a = (await upload({ mime: 'image/jpeg', data: jpeg() })).body;
       const b = (await upload({ mime: 'image/jpeg', data: jpeg() })).body;
-      await request(app).get(`/api/receipts/${b.receipt.id}/image?token=${a.imageToken}`).expect(401);
+      await request(server).get(`/api/receipts/${b.receipt.id}/image?token=${a.imageToken}`).expect(401);
     });
 
     test('a PDF token cannot be reused to open a receipt', async () => {
@@ -127,7 +143,7 @@ describe('routes/receipts', () => {
       // purpose claim keeps them apart.
       const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
       const pdfToken = jwt.sign({ userId: testUser.id, invoiceId: body.receipt.id, purpose: 'pdf' }, jwtSecret(), { expiresIn: '5m' });
-      await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${pdfToken}`).expect(401);
+      await request(server).get(`/api/receipts/${body.receipt.id}/image?token=${pdfToken}`).expect(401);
     });
 
     // ?w= asks for a scaled copy, for callers that render small — the pairing
@@ -143,8 +159,8 @@ describe('routes/receipts', () => {
       test('returns a smaller image than the original', async () => {
         const data = await realJpeg();
         const { body } = await upload({ mime: 'image/jpeg', data });
-        const full  = await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${body.imageToken}`).expect(200);
-        const small = await request(app).get(`/api/receipts/${body.receipt.id}/image?w=160&token=${body.imageToken}`)
+        const full  = await request(server).get(`/api/receipts/${body.receipt.id}/image?token=${body.imageToken}`).expect(200);
+        const small = await request(server).get(`/api/receipts/${body.receipt.id}/image?w=160&token=${body.imageToken}`)
           .expect(200).expect('Content-Type', /image\/jpeg/);
         expect(small.body.length).toBeLessThan(full.body.length);
         expect((await sharp(small.body).metadata()).width).toBe(160);
@@ -153,21 +169,21 @@ describe('routes/receipts', () => {
       test('an unrecognised width serves the original rather than erroring', async () => {
         const data = await realJpeg();
         const { body } = await upload({ mime: 'image/jpeg', data });
-        const full = await request(app).get(`/api/receipts/${body.receipt.id}/image?token=${body.imageToken}`).expect(200);
-        const odd  = await request(app).get(`/api/receipts/${body.receipt.id}/image?w=137&token=${body.imageToken}`).expect(200);
+        const full = await request(server).get(`/api/receipts/${body.receipt.id}/image?token=${body.imageToken}`).expect(200);
+        const odd  = await request(server).get(`/api/receipts/${body.receipt.id}/image?w=137&token=${body.imageToken}`).expect(200);
         expect(odd.body.length).toBe(full.body.length);
       });
 
       test('an image sharp cannot decode still serves — it does not 500', async () => {
         // jpeg() here is a seven-byte stand-in, not a decodable image.
         const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
-        await request(app).get(`/api/receipts/${body.receipt.id}/image?w=160&token=${body.imageToken}`)
+        await request(server).get(`/api/receipts/${body.receipt.id}/image?w=160&token=${body.imageToken}`)
           .expect(200).expect('Content-Type', /image\/jpeg/);
       });
 
       test('a PDF receipt is served as a PDF, not scaled', async () => {
         const { body } = await upload({ mime: 'application/pdf', data: Buffer.from('%PDF-1.4 x').toString('base64') });
-        await request(app).get(`/api/receipts/${body.receipt.id}/image?w=160&token=${body.imageToken}`)
+        await request(server).get(`/api/receipts/${body.receipt.id}/image?w=160&token=${body.imageToken}`)
           .expect(200).expect('Content-Type', /application\/pdf/);
       });
     });
@@ -176,7 +192,7 @@ describe('routes/receipts', () => {
   describe('DELETE /:id', () => {
     test('removes the row and the file together', async () => {
       const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
-      await request(app).delete(`/api/receipts/${body.receipt.id}`).set('Authorization', auth()).expect(200);
+      await request(server).delete(`/api/receipts/${body.receipt.id}`).set('Authorization', auth()).expect(200);
       expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id)).toBeFalsy();
       expect(receiptStore.forUser(testUser.id).exists(body.receipt.receiptFile)).toBe(false);
     });
@@ -184,12 +200,12 @@ describe('routes/receipts', () => {
     test('refuses to delete a bill through the receipts route', async () => {
       const bill = invoiceStore.forUser(testUser.id).add({ id: 'bill-1', status: 'pending', invoiceType: 'ACCPAY', processedAt: new Date().toISOString() });
       expect(bill).toBeTruthy();
-      await request(app).delete('/api/receipts/bill-1').set('Authorization', auth()).expect(400);
+      await request(server).delete('/api/receipts/bill-1').set('Authorization', auth()).expect(400);
       expect(invoiceStore.forUser(testUser.id).getById('bill-1')).toBeTruthy();
     });
 
     test('404s for something that does not exist', async () => {
-      await request(app).delete('/api/receipts/nope').set('Authorization', auth()).expect(404);
+      await request(server).delete('/api/receipts/nope').set('Authorization', auth()).expect(404);
     });
   });
 });
@@ -199,7 +215,7 @@ describe('routes/receipts', () => {
 // what it can and cannot do, because it is displayed on screen as a QR code and
 // travels in a URL where it will end up in browser history.
 describe('routes/receipts — phone pairing', () => {
-  let app, users, jwtSecret, testUser, otherUser, pairing, invoiceStore;
+  let app, server, users, jwtSecret, testUser, otherUser, pairing, invoiceStore;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
   // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
@@ -225,6 +241,7 @@ describe('routes/receipts — phone pairing', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    server = _srv.current = app.listen(0);
   });
 
   afterAll(() => {
@@ -234,11 +251,11 @@ describe('routes/receipts — phone pairing', () => {
   });
 
   const tokenFor = u => `Bearer ${jwt.sign({ id: u.id, email: u.email, role: u.role }, jwtSecret())}`;
-  const pair = (u = testUser) => request(app).post('/api/receipts/pair').set('Authorization', tokenFor(u));
+  const pair = (u = testUser) => request(server).post('/api/receipts/pair').set('Authorization', tokenFor(u));
 
   describe('POST /pair', () => {
     test('requires authentication', async () => {
-      await request(app).post('/api/receipts/pair').expect(401);
+      await request(server).post('/api/receipts/pair').expect(401);
     });
 
     test('returns a scannable QR and the URL it encodes', async () => {
@@ -253,23 +270,23 @@ describe('routes/receipts — phone pairing', () => {
   describe('GET /capture/:token — what the phone sees', () => {
     test('a live token validates without spending an upload', async () => {
       const { body } = await pair();
-      const a = await request(app).get(`/api/receipts/capture/${body.token}`).expect(200);
-      const b = await request(app).get(`/api/receipts/capture/${body.token}`).expect(200);
+      const a = await request(server).get(`/api/receipts/capture/${body.token}`).expect(200);
+      const b = await request(server).get(`/api/receipts/capture/${body.token}`).expect(200);
       expect(a.body.ok).toBe(true);
       expect(b.body.usesLeft).toBe(a.body.usesLeft);   // checking is free
     });
 
     test('an unknown or revoked token is refused with instructions, not a stack trace', async () => {
       const { body } = await pair();
-      await request(app).delete(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
-      const res = await request(app).get(`/api/receipts/capture/${body.token}`).expect(401);
+      await request(server).delete(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
+      const res = await request(server).get(`/api/receipts/capture/${body.token}`).expect(401);
       expect(res.body.error).toMatch(/new QR code/i);
-      await request(app).get('/api/receipts/capture/garbage').expect(401);
+      await request(server).get('/api/receipts/capture/garbage').expect(401);
     });
 
     test('reveals nothing about who the pairing belongs to', async () => {
       const { body } = await pair();
-      const res = await request(app).get(`/api/receipts/capture/${body.token}`).expect(200);
+      const res = await request(server).get(`/api/receipts/capture/${body.token}`).expect(200);
       expect(JSON.stringify(res.body)).not.toContain(String(testUser.id));
       expect(JSON.stringify(res.body)).not.toContain(testUser.email);
     });
@@ -278,7 +295,7 @@ describe('routes/receipts — phone pairing', () => {
   describe('POST /capture/:token — the phone uploads', () => {
     test('stores against the pairing owner and marks the source as phone', async () => {
       const { body } = await pair();
-      const res = await request(app).post(`/api/receipts/capture/${body.token}`)
+      const res = await request(server).post(`/api/receipts/capture/${body.token}`)
         .send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       expect(res.body.receipt.source).toBe('phone');
       expect(res.body.receipt.invoiceType).toBe('EXPENSE');
@@ -290,7 +307,7 @@ describe('routes/receipts — phone pairing', () => {
     test('the phone is never handed a token that can read the image back', async () => {
       // Upload-only is the whole basis for putting this credential in a URL.
       const { body } = await pair();
-      const res = await request(app).post(`/api/receipts/capture/${body.token}`)
+      const res = await request(server).post(`/api/receipts/capture/${body.token}`)
         .send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       expect(res.body.imageToken).toBeUndefined();
     });
@@ -298,7 +315,7 @@ describe('routes/receipts — phone pairing', () => {
     test('one scan covers a stack of receipts', async () => {
       const { body } = await pair();
       for (let i = 0; i < 4; i++) {
-        await request(app).post(`/api/receipts/capture/${body.token}`)
+        await request(server).post(`/api/receipts/capture/${body.token}`)
           .send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       }
       expect(invoiceStore.forUser(testUser.id).getAll().length).toBe(4);
@@ -306,50 +323,50 @@ describe('routes/receipts — phone pairing', () => {
 
     test('a rejected file does not burn one of the allowed uploads', async () => {
       const { body } = await pair();
-      await request(app).post(`/api/receipts/capture/${body.token}`)
+      await request(server).post(`/api/receipts/capture/${body.token}`)
         .send({ mime: 'image/heic', data: jpeg() }).expect(400);
-      const status = await request(app).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
+      const status = await request(server).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
       expect(status.body.uploads).toBe(0);
     });
 
     test('the token stops working once its upload budget is spent', async () => {
       const { body } = await pair();
       for (let i = 0; i < pairing.MAX_USES; i++) {
-        await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
+        await request(server).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       }
-      await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(401);
+      await request(server).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(401);
     });
 
     test('an expired or revoked token cannot upload', async () => {
       const { body } = await pair();
       pairing.revoke(body.token);
-      await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(401);
+      await request(server).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(401);
     });
 
     test('the capture token grants ONLY upload — not listing, reading or deleting', async () => {
       const { body } = await pair();
-      const up = await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
+      const up = await request(server).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
       const id = up.body.receipt.id;
       // No route accepts it as a bearer credential for anything else.
-      await request(app).get(`/api/receipts/${id}/token`).set('Authorization', `Bearer ${body.token}`).expect(401);
-      await request(app).delete(`/api/receipts/${id}`).set('Authorization', `Bearer ${body.token}`).expect(401);
-      await request(app).get(`/api/receipts/${id}/image?token=${body.token}`).expect(401);
+      await request(server).get(`/api/receipts/${id}/token`).set('Authorization', `Bearer ${body.token}`).expect(401);
+      await request(server).delete(`/api/receipts/${id}`).set('Authorization', `Bearer ${body.token}`).expect(401);
+      await request(server).get(`/api/receipts/${id}/image?token=${body.token}`).expect(401);
     });
   });
 
   describe('pairing ownership', () => {
     test('another user cannot poll or revoke a pairing that is not theirs', async () => {
       const { body } = await pair(testUser);
-      await request(app).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(otherUser)).expect(404);
-      await request(app).delete(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(otherUser)).expect(404);
+      await request(server).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(otherUser)).expect(404);
+      await request(server).delete(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(otherUser)).expect(404);
       // Still alive for its owner.
-      await request(app).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
+      await request(server).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
     });
 
     test('the owner sees arrivals, which is how the desktop knows to refresh', async () => {
       const { body } = await pair();
-      await request(app).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
-      const res = await request(app).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
+      await request(server).post(`/api/receipts/capture/${body.token}`).send({ mime: 'image/jpeg', data: jpeg() }).expect(201);
+      const res = await request(server).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
       expect(res.body.alive).toBe(true);
       expect(res.body.uploads).toBe(1);
     });
@@ -360,7 +377,7 @@ describe('routes/receipts — phone pairing', () => {
 // The rule the whole feature rests on: the image is stored first, and parsing
 // only fills it in. A parse failure must leave a usable receipt behind.
 describe('routes/receipts — parsing fills in a stored receipt', () => {
-  let app, users, jwtSecret, testUser, invoiceStore, parser;
+  let app, server, users, jwtSecret, testUser, invoiceStore, parser;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
   // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
@@ -371,7 +388,7 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
 
   // The parse runs in setImmediate so the upload response is not held open;
   // let the queue drain before asserting on the row.
-  const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
+  const settle = () => require('./receipts')._drain(); // waits for the background read, not a guessed number of ticks
 
   beforeEach(async () => {
     jest.resetModules();
@@ -391,6 +408,7 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    server = _srv.current = app.listen(0);
   });
 
   afterAll(() => {
@@ -400,7 +418,7 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
   });
 
   const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
-  const upload = () => request(app).post('/api/receipts').set('Authorization', auth()).send({ mime: 'image/jpeg', data: jpeg() });
+  const upload = () => request(server).post('/api/receipts').set('Authorization', auth()).send({ mime: 'image/jpeg', data: jpeg() });
 
   test('a successful read populates the row the user reviews', async () => {
     parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [{
@@ -480,7 +498,7 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
 // The phone token was upload-only. Showing "Grab · SGD 18.40" instead of
 // "IMG_2841.jpg" widens it, so these tests pin exactly how far.
 describe('routes/receipts — phone read-back is narrowly scoped', () => {
-  let app, users, jwtSecret, testUser, otherUser, pairing, invoiceStore, parser;
+  let app, server, users, jwtSecret, testUser, otherUser, pairing, invoiceStore, parser;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
   // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
@@ -488,7 +506,7 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
   // JPEG_B64 stays for the tests that mean the same file twice.
   let _n = 0;
   const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
-  const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
+  const settle = () => require('./receipts')._drain(); // waits for the background read, not a guessed number of ticks
 
   beforeEach(async () => {
     jest.resetModules();
@@ -510,6 +528,7 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    server = _srv.current = app.listen(0);
   });
 
   afterAll(() => {
@@ -519,8 +538,8 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
   });
 
   const tokenFor = u => `Bearer ${jwt.sign({ id: u.id, email: u.email, role: u.role }, jwtSecret())}`;
-  const pair = (u = testUser) => request(app).post('/api/receipts/pair').set('Authorization', tokenFor(u));
-  const send = tok => request(app).post(`/api/receipts/capture/${tok}`).send({ mime: 'image/jpeg', data: jpeg() });
+  const pair = (u = testUser) => request(server).post('/api/receipts/pair').set('Authorization', tokenFor(u));
+  const send = tok => request(server).post(`/api/receipts/capture/${tok}`).send({ mime: 'image/jpeg', data: jpeg() });
 
   test('returns the parsed fields for what this token uploaded', async () => {
     parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [{
@@ -531,7 +550,7 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     await send(body.token).expect(201);
     await settle();
 
-    const res = await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    const res = await request(server).get(`/api/receipts/capture/${body.token}/status`).expect(200);
     expect(res.body.receipts).toHaveLength(1);
     expect(res.body.receipts[0]).toMatchObject({ vendorName: 'Grab', totalAmount: 18.4, currency: 'SGD', parsed: true });
   });
@@ -542,7 +561,7 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     await send(body.token).expect(201);
     await settle();
 
-    const res = await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    const res = await request(server).get(`/api/receipts/capture/${body.token}/status`).expect(200);
     expect(res.body.receipts[0].parsed).toBe(false);
     expect(res.body.receipts[0].vendorName).toBeNull();
   });
@@ -551,12 +570,12 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     // The whole reason the widening stays small: the phone took the photo.
     const { body } = await pair();
     const up = await send(body.token).expect(201);
-    const res = await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    const res = await request(server).get(`/api/receipts/capture/${body.token}/status`).expect(200);
 
     expect(JSON.stringify(res.body)).not.toMatch(/imageToken/);
     expect(JSON.stringify(res.body)).not.toMatch(/receiptFile/);
     // And the image route still refuses the pairing token outright.
-    await request(app).get(`/api/receipts/${up.body.receipt.id}/image?token=${body.token}`).expect(401);
+    await request(server).get(`/api/receipts/${up.body.receipt.id}/image?token=${body.token}`).expect(401);
   });
 
   test('it cannot reach a receipt from a different pairing', async () => {
@@ -565,7 +584,7 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     await send(a.token).expect(201);
 
     // b uploaded nothing, so b sees nothing — even for the same owner.
-    const res = await request(app).get(`/api/receipts/capture/${b.token}/status`).expect(200);
+    const res = await request(server).get(`/api/receipts/capture/${b.token}/status`).expect(200);
     expect(res.body.receipts).toEqual([]);
   });
 
@@ -574,14 +593,14 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     await send(mine.token).expect(201);
     // A pairing belonging to someone else lists only its own, which is nothing.
     const theirs = (await pair(otherUser)).body;
-    const res = await request(app).get(`/api/receipts/capture/${theirs.token}/status`).expect(200);
+    const res = await request(server).get(`/api/receipts/capture/${theirs.token}/status`).expect(200);
     expect(res.body.receipts).toEqual([]);
   });
 
   test('it reveals nothing identifying about the account', async () => {
     const { body } = await pair();
     await send(body.token).expect(201);
-    const res = await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    const res = await request(server).get(`/api/receipts/capture/${body.token}/status`).expect(200);
     const dump = JSON.stringify(res.body);
     expect(dump).not.toContain(testUser.email);
     expect(dump).not.toContain(String(testUser.id));
@@ -591,15 +610,15 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     const { body } = await pair();
     await send(body.token).expect(201);
     pairing.revoke(body.token);
-    await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(401);
-    await request(app).get('/api/receipts/capture/garbage/status').expect(401);
+    await request(server).get(`/api/receipts/capture/${body.token}/status`).expect(401);
+    await request(server).get('/api/receipts/capture/garbage/status').expect(401);
   });
 
   test('reading back does not spend an upload', async () => {
     const { body } = await pair();
     await send(body.token).expect(201);
-    for (let i = 0; i < 5; i++) await request(app).get(`/api/receipts/capture/${body.token}/status`).expect(200);
-    const st = await request(app).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
+    for (let i = 0; i < 5; i++) await request(server).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    const st = await request(server).get(`/api/receipts/pair/${body.token}`).set('Authorization', tokenFor(testUser)).expect(200);
     expect(st.body.uploads).toBe(1);
   });
 });
@@ -609,7 +628,7 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
 // share one stored file and carry the region they own, so the original is always
 // intact and merging back is just deleting rows.
 describe('routes/receipts — one upload, several records', () => {
-  let app, users, jwtSecret, testUser, invoiceStore, receiptStore, parser, pdfPages;
+  let app, server, users, jwtSecret, testUser, invoiceStore, receiptStore, parser, pdfPages;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
   // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
@@ -618,7 +637,7 @@ describe('routes/receipts — one upload, several records', () => {
   let _n = 0;
   const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
   const PDF_B64  = Buffer.from('%PDF-1.4 fake').toString('base64');
-  const settle = () => new Promise(r => setImmediate(() => setImmediate(() => setImmediate(r))));
+  const settle = () => require('./receipts')._drain(); // waits for the background read, not a guessed number of ticks
 
   const TWO = [
     { merchant: 'Grab',      date: '2026-08-24', currency: 'SGD', total: 18.4, tax: null, subTotal: null, description: 'Ride', confidence: 'high', box: [100, 20, 900, 460] },
@@ -645,6 +664,7 @@ describe('routes/receipts — one upload, several records', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    server = _srv.current = app.listen(0);
   });
 
   afterAll(() => {
@@ -655,7 +675,7 @@ describe('routes/receipts — one upload, several records', () => {
 
   const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
   const upload = (data = JPEG_B64, mime = 'image/jpeg') =>
-    request(app).post('/api/receipts').set('Authorization', auth()).send({ mime, data });
+    request(server).post('/api/receipts').set('Authorization', auth()).send({ mime, data });
   const rows = () => invoiceStore.forUser(testUser.id).getAll();
 
   describe('a photo of two receipts', () => {
@@ -756,7 +776,7 @@ describe('routes/receipts — one upload, several records', () => {
       await settle();
       const keep = rows()[0];
 
-      const res = await request(app).post(`/api/receipts/${keep.id}/merge`).set('Authorization', auth()).expect(200);
+      const res = await request(server).post(`/api/receipts/${keep.id}/merge`).set('Authorization', auth()).expect(200);
       expect(res.body.removed).toBe(1);
 
       const all = rows();
@@ -771,7 +791,7 @@ describe('routes/receipts — one upload, several records', () => {
       parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [TWO[0]] });
       const { body } = await upload().expect(201);
       await settle();
-      await request(app).post(`/api/receipts/${body.receipt.id}/merge`).set('Authorization', auth()).expect(400);
+      await request(server).post(`/api/receipts/${body.receipt.id}/merge`).set('Authorization', auth()).expect(400);
     });
   });
 
@@ -782,11 +802,11 @@ describe('routes/receipts — one upload, several records', () => {
       await settle();
       const [a, b] = rows();
 
-      await request(app).delete(`/api/receipts/${a.id}`).set('Authorization', auth()).expect(200);
+      await request(server).delete(`/api/receipts/${a.id}`).set('Authorization', auth()).expect(200);
       // Deleting the file here would leave the other record pointing at nothing.
       expect(receiptStore.forUser(testUser.id).exists(b.receiptFile)).toBe(true);
 
-      await request(app).delete(`/api/receipts/${b.id}`).set('Authorization', auth()).expect(200);
+      await request(server).delete(`/api/receipts/${b.id}`).set('Authorization', auth()).expect(200);
       expect(receiptStore.forUser(testUser.id).exists(b.receiptFile)).toBe(false);
     });
   });
@@ -797,7 +817,7 @@ describe('routes/receipts — one upload, several records', () => {
 // having a bad moment meant typing every field by hand with no way to retry on
 // a perfectly legible photo.
 describe('routes/receipts — reading a receipt again', () => {
-  let app, users, jwtSecret, testUser, invoiceStore, parser;
+  let app, server, users, jwtSecret, testUser, invoiceStore, parser;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
   // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
@@ -805,7 +825,7 @@ describe('routes/receipts — reading a receipt again', () => {
   // JPEG_B64 stays for the tests that mean the same file twice.
   let _n = 0;
   const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
-  const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
+  const settle = () => require('./receipts')._drain(); // waits for the background read, not a guessed number of ticks
 
   const read = (merchant, total, box = null) => ({
     merchant, date: '2026-08-24', currency: 'SGD', total,
@@ -829,6 +849,7 @@ describe('routes/receipts — reading a receipt again', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    server = _srv.current = app.listen(0);
   });
 
   afterAll(() => {
@@ -838,8 +859,8 @@ describe('routes/receipts — reading a receipt again', () => {
   });
 
   const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
-  const upload = (mime = 'image/jpeg') => request(app).post('/api/receipts').set('Authorization', auth()).send({ mime, data: jpeg() });
-  const reread = id => request(app).post(`/api/receipts/${id}/reread`).set('Authorization', auth());
+  const upload = (mime = 'image/jpeg') => request(server).post('/api/receipts').set('Authorization', auth()).send({ mime, data: jpeg() });
+  const reread = id => request(server).post(`/api/receipts/${id}/reread`).set('Authorization', auth());
 
   test('fills in a receipt that failed to read the first time', async () => {
     parser.parseReceiptImage.mockResolvedValue(null);          // upload: unreadable
@@ -920,7 +941,7 @@ describe('routes/receipts — reading a receipt again', () => {
   });
 
   test('requires auth, and 404s for something that does not exist', async () => {
-    await request(app).post('/api/receipts/whatever/reread').expect(401);
+    await request(server).post('/api/receipts/whatever/reread').expect(401);
     await reread('nope').expect(404);
   });
 });
@@ -930,12 +951,12 @@ describe('routes/receipts — reading a receipt again', () => {
 // fact and is refused outright; the same vendor, date and amount is a suspicion
 // and only earns a note, because 'duplicate' is a status nothing can undo.
 describe('routes/receipts — duplicate receipts', () => {
-  let app, users, jwtSecret, testUser, invoiceStore, parser;
+  let app, server, users, jwtSecret, testUser, invoiceStore, parser;
   const created = [];
   const SAME = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x42]).toString('base64');
   let _n = 100;
   const jpeg = () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, ++_n]).toString('base64');
-  const settle = () => new Promise(r => setImmediate(() => setImmediate(r)));
+  const settle = () => require('./receipts')._drain(); // waits for the background read, not a guessed number of ticks
 
   beforeEach(async () => {
     jest.resetModules();
@@ -955,6 +976,7 @@ describe('routes/receipts — duplicate receipts', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    server = _srv.current = app.listen(0);
   });
 
   afterAll(() => {
@@ -964,7 +986,7 @@ describe('routes/receipts — duplicate receipts', () => {
   });
 
   const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
-  const upload = (data) => request(app).post('/api/receipts').set('Authorization', auth())
+  const upload = (data) => request(server).post('/api/receipts').set('Authorization', auth())
     .send({ mime: 'image/jpeg', data });
 
   test('the same file twice is refused, and points at the one already held', async () => {
@@ -1030,7 +1052,7 @@ describe('routes/receipts — duplicate receipts', () => {
     const other = await users.createUser(`d${Date.now()}x@test.com`, 'password123', 'user');
     created.push(other.id);
     await upload(SAME).expect(201);
-    await request(app).post('/api/receipts')
+    await request(server).post('/api/receipts')
       .set('Authorization', `Bearer ${jwt.sign({ id: other.id, email: other.email, role: other.role }, jwtSecret())}`)
       .send({ mime: 'image/jpeg', data: SAME }).expect(201);
   });
