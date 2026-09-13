@@ -145,6 +145,29 @@ describe('AR / AP / Claims tabs — claim controls live only on the claims tab',
     expect(s.slice(gate, use)).not.toContain('</div>\n\n      {');
   });
 
+  test('InvoiceIntake is rendered exactly once, inside the invoices-only gate', () => {
+    const s = src();
+    expect((s.match(/<InvoiceIntake/g) || []).length).toBe(1);
+    const gate = s.indexOf("{tab === 'ar' && (");
+    const use  = s.indexOf('<InvoiceIntake');
+    expect(gate).toBeGreaterThan(-1);
+    expect(use).toBeGreaterThan(gate);
+    expect(s.slice(gate, use)).not.toContain('</div>\n\n      {');
+  });
+
+  test('invoices have New and Import — no upload, no phone', () => {
+    const inv = fs.readFileSync(path.join(ROOT, 'ui/src/components/invoices/InvoiceIntake.jsx'), 'utf8');
+    expect(inv).toContain('New invoice');
+    expect(inv).toContain('Import invoices');
+    expect(inv).not.toMatch(/Use my phone|PhonePairing|Add bill/);
+  });
+
+  test('both import dialogs are the one shared component', () => {
+    for (const f of ['bills/BillIntake.jsx', 'invoices/InvoiceIntake.jsx']) {
+      expect(fs.readFileSync(path.join(ROOT, 'ui/src/components', f), 'utf8')).toContain("from '../intake/ImportDialog'");
+    }
+  });
+
   test('bills have Add and Import, and deliberately no phone', () => {
     const bills = fs.readFileSync(path.join(ROOT, 'ui/src/components/bills/BillIntake.jsx'), 'utf8');
     expect(bills).toContain('Add bill');
