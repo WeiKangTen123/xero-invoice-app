@@ -14,10 +14,22 @@ import { useViewMode } from '../context/ViewModeContext';
 //
 // invoiceType already stores exactly these three values, so this is a view over
 // data that was always shaped this way; nothing was migrated to make it work.
+// Xero's own vocabulary, which is also what this page used before the tabs were
+// added: an invoice goes to a customer (ACCREC creates isCustomer), a bill comes
+// from a supplier (ACCPAY creates isSupplier). Matching Xero's menu — Invoices
+// and Bills to pay — means the label here and the label in the system it posts
+// to are the same word.
+//
+// Expense claims post as ACCPAY bills too; the tab is separate because of how
+// the document arrives, photographed by an employee rather than emailed by a
+// supplier, not because Xero files it differently.
+//
+// `label` is the phone version. Invoices and Bills are short enough to keep
+// their real names there; only Expense Claims needs shortening.
 const TABS = [
-  { key: 'ar',     label: 'AR',             long: 'Receivables',    match: i => i.invoiceType === 'ACCREC'  },
-  { key: 'ap',     label: 'AP',             long: 'Payables',       match: i => i.invoiceType === 'ACCPAY'  },
-  { key: 'claims', label: 'Expense Claims', long: 'Expense Claims', match: i => i.invoiceType === 'EXPENSE' },
+  { key: 'ar',     label: 'Invoices', long: 'Invoices',       match: i => i.invoiceType === 'ACCREC'  },
+  { key: 'ap',     label: 'Bills',    long: 'Bills',          match: i => i.invoiceType === 'ACCPAY'  },
+  { key: 'claims', label: 'Claims',   long: 'Expense Claims', match: i => i.invoiceType === 'EXPENSE' },
 ];
 // Bills are the volume in an email-ingesting system; AR is usually near empty,
 // and opening on an empty tab reads as a broken page.

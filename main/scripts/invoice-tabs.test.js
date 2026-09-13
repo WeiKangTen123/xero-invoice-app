@@ -61,6 +61,39 @@ describe('AR / AP / Claims tabs — every record has somewhere to be', () => {
   });
 });
 
+describe('AR / AP / Claims tabs — the labels match what Xero calls them', () => {
+  // Getting these two the wrong way round is not a cosmetic slip: it presents
+  // money owed TO the business as money owed BY it. The mapping is fixed by
+  // Xero — ACCREC creates a customer contact and appears under Invoices,
+  // ACCPAY creates a supplier contact and appears under Bills to pay — so it
+  // is pinned here rather than left to whoever edits the array next. It has
+  // already been renamed once by accident.
+  const tabBlock = () => {
+    const s = fs.readFileSync(INVOICES, 'utf8');
+    return s.slice(s.indexOf('const TABS'), s.indexOf('const DEFAULT_TAB'));
+  };
+  const longFor = type => {
+    const row = tabBlock().split('\n').find(l => l.includes(`'${type}'`));
+    return row && row.match(/long:\s*'([^']+)'/)?.[1];
+  };
+
+  test('ACCREC is Invoices — raised for a customer, money coming in', () => {
+    expect(longFor('ACCREC')).toBe('Invoices');
+  });
+
+  test('ACCPAY is Bills — received from a supplier, money going out', () => {
+    expect(longFor('ACCPAY')).toBe('Bills');
+  });
+
+  test('the server agrees which side each type sits on', () => {
+    // contacts.js is the independent check: it decides customer vs supplier from
+    // the same flag, so if these ever disagree one of them is wrong.
+    const contacts = fs.readFileSync(path.join(ROOT, 'main/xero/contacts.js'), 'utf8');
+    expect(contacts).toMatch(/isSupplier:\s*!isACCREC/);
+    expect(contacts).toMatch(/isCustomer:\s*isACCREC/);
+  });
+});
+
 describe('AR / AP / Claims tabs — counts belong to the tab that shows them', () => {
   // Left over the whole list, the AR tab reads "✓ Posted 48" above three rows,
   // because it is counting posted payables too.
