@@ -238,9 +238,17 @@ function parseTemplateFormat(text, email, defaults) {
     ? addrMatch[1].replace(/\n/g, ', ').replace(/,\s*,/g, ',').trim()
     : '';
 
-  const invoiceDate = email.date
-    ? new Date(email.date).toISOString().split('T')[0]
-    : new Date().toISOString().split('T')[0];
+  // "Invoice Date :" is optional on the template. When it is there it is the
+  // invoice's date; when it is not, the email's arrival date stands in, which
+  // is what every AR invoice was dated by until this field existed. The digit
+  // check is because toISODate answers "today" for anything it cannot read,
+  // and "TBC" should fall through to the email date rather than become today.
+  const statedDate  = getMatch(text, /^Invoice\s*Date\s*:\s*([^\n]+)/im);
+  const invoiceDate = (statedDate && /\d/.test(statedDate))
+    ? toISODate(statedDate)
+    : email.date
+      ? new Date(email.date).toISOString().split('T')[0]
+      : new Date().toISOString().split('T')[0];
 
   const rawPaymentField = getMatch(text, /Payment\s+Terms?\s*\/\s*Payment\s+Date\s*:\s*([^\n]+)/i);
   let dueDate;
@@ -312,7 +320,13 @@ function parseTemplateFormat(text, email, defaults) {
     sum + item.unitAmount * (1 - (item.discountRate || 0) / 100), 0);
   const totalAmount = subTotal + taxAmount;
 
+  // "Invoice Number :" is optional on the template and wins when present. The
+  // loose pattern beneath it predates the field and can match prose ("invoice
+  // number will follow" → "will"), so it is only consulted when the label is
+  // absent. INV-<timestamp> is the last resort, and invoice-handler treats that
+  // shape as "no number" when deciding whether an invoice is worth submitting.
   const invoiceNumber =
+    getMatch(text, /^Invoice\s*(?:Number|No\.?|#)\s*:\s*([A-Za-z0-9][A-Za-z0-9\-\/_.]{0,60})/im) ||
     getMatch(text, /invoice\s*(?:no|number|#|num)[.:\s]*([A-Z0-9][A-Z0-9\-\/]{1,30})/i) ||
     'INV-' + Date.now();
 

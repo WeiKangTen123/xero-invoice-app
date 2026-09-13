@@ -215,6 +215,7 @@ describe('invoice-template — the declaration matches what the regex parser rea
       contactName: 'Drift Guard Pte Ltd', contactEmail: 'ops@driftguard.example',
       contactAddress: '1 Test Street, Singapore 000001', currency: 'SGD, Standard',
       paymentTerms: '14 days', lineAmountTypes: 'Exclusive',
+      invoiceNumber: 'DG-0001', invoiceDate: '2026-01-10',
     };
     const header = tpl.HEADER_FIELDS.map(f => `${f.label} : ${value[f.key]}`).join('\n');
     const item = [
@@ -231,6 +232,8 @@ describe('invoice-template — the declaration matches what the regex parser rea
     expect(p.contactAddress).toBe('1 Test Street, Singapore 000001');
     expect(p.currency).toBe('SGD');
     expect(p.brandingThemeName).toBe('Standard');
+    expect(p.invoiceNumber).toBe('DG-0001');
+    expect(p.invoiceDate).toBe('2026-01-10');
     expect(p.dueDate).toBe('2026-01-24');
     expect(p.lineAmountTypes).toBe('Exclusive');
     expect(p.lineItems).toEqual([{ description: 'Something billable', unitAmount: 1234.5, discountRate: 0 }]);

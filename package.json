@@ -57,6 +57,9 @@
   },
   "jest": {
     "testTimeout": 20000,
-    "maxWorkers": 1
+    "maxWorkers": 1,
+    "setupFiles": [
+      "<rootDir>/main/scripts/jest.setup.js"
+    ]
   }
 }
