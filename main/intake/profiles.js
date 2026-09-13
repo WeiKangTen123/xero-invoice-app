@@ -27,8 +27,11 @@ const PROFILES = {
     label:       'Invoice',
     xeroType:    'ACCREC',
     contactRole: 'customer',
-    initialStatus: () => 'pending',
-    autoPost:      () => true,
+    // The AR template arriving by email is the automated path. One composed in
+    // the form or read from a spreadsheet was typed by a person moments ago and
+    // waits for that person's review, exactly as an uploaded bill does.
+    initialStatus: source => (source === 'email' ? 'pending' : 'review-needed'),
+    autoPost:      source => source === 'email',
     dedup:         { byHash: false, byNumber: true, byFields: true },
     canSplit:      false,
   },

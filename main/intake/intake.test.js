@@ -125,6 +125,15 @@ describe('intake/profiles — where the three kinds differ', () => {
     expect(PROFILES.ACCPAY.initialStatus('upload')).toBe('review-needed');
     expect(PROFILES.ACCPAY.autoPost('upload')).toBe(false);
   });
+  test('an emailed invoice is pending; a composed or imported one waits for a person', () => {
+    expect(PROFILES.ACCREC.initialStatus('email')).toBe('pending');
+    expect(PROFILES.ACCREC.autoPost('email')).toBe(true);
+    for (const s of ['form', 'spreadsheet']) {
+      expect(PROFILES.ACCREC.initialStatus(s)).toBe('review-needed');
+      expect(PROFILES.ACCREC.autoPost(s)).toBe(false);
+    }
+  });
+
   test('a claim never auto-posts, whatever the source', () => {
     for (const s of ['upload', 'phone', 'claim']) {
       expect(PROFILES.EXPENSE.initialStatus(s)).toBe('review-needed');

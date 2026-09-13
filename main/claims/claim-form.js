@@ -84,7 +84,7 @@ function isFieldHeader(norm) {
 // Finds the header row: the first row carrying at least three known field
 // headings. Forms carry a title, a company name and a claim period above it, so
 // the header is never row 1.
-function locateHeader(sheet) {
+function locateHeader(sheet, headers = FIELD_HEADERS, minHits = 3) {
   let best = null;
   sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
     if (best || rowNumber > 30) return;
@@ -94,12 +94,12 @@ function locateHeader(sheet) {
     row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
       const norm = normaliseHeader(cellText(cell.value));
       if (!norm) return;
-      for (const [field, names] of Object.entries(FIELD_HEADERS)) {
+      for (const [field, names] of Object.entries(headers)) {
         if (names.includes(norm) && cols[field] === undefined) { cols[field] = colNumber; hits++; return; }
       }
-      if (!isFieldHeader(norm)) categories.push({ col: colNumber, label: cellText(cell.value).replace(/\s+/g, ' ').trim() });
+      if (!Object.values(headers).some(list => list.includes(norm))) categories.push({ col: colNumber, label: cellText(cell.value).replace(/\s+/g, ' ').trim() });
     });
-    if (hits >= 3) best = { rowNumber, cols, categories };
+    if (hits >= minHits) best = { rowNumber, cols, categories };
   });
   return best;
 }
@@ -169,4 +169,4 @@ async function parseClaimForm(buffer) {
   return { rows, categories: header.categories.map(c => c.label), title, error: null };
 }
 
-module.exports = { parseClaimForm, excelSerialToISO, cellText, cellDate, cellNumber, normaliseHeader };
+module.exports = { parseClaimForm, locateHeader, excelSerialToISO, cellText, cellDate, cellNumber, normaliseHeader };
