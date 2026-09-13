@@ -80,7 +80,12 @@ function _all(userId) {
 
 // Writes the payload and the job. Returns { job } or { error } — a full queue is
 // a normal answer, not an exception.
-function enqueue(userId, { archives = [], forms = [], label = 'Expense claim', id }) {
+// `type` names the handler that will run the job (claim-worker's registry).
+// `payload` is any set of named file lists — { archives, forms } for a claim,
+// { pdfs } for a bill import — each written to disk before the job is. The
+// older { archives, forms } arguments still work and mean a claim import, so
+// nothing that enqueues today has to change.
+function enqueue(userId, { type = 'claim-import', label = 'Expense claim', id, payload = null, archives = [], forms = [] }) {
   const waiting = _all(userId).filter(j => !TERMINAL.has(j.stage)).length;
   if (waiting >= MAX_QUEUED_PER_USER) {
     return { error: `You already have ${waiting} imports queued. Wait for those to finish before starting another.` };
@@ -97,8 +102,11 @@ function enqueue(userId, { archives = [], forms = [], label = 'Expense claim', i
     return { name: f.name || `${prefix}${i}`, ref };
   });
 
+  const files = payload || { archives, forms };
+  const stored = Object.fromEntries(Object.entries(files).map(([key, list]) => [key, write(list || [], key)]));
   const job = {
     id: jobId,
+    type,
     userId: String(userId),
     label,
     stage: 'queued',
@@ -110,7 +118,7 @@ function enqueue(userId, { archives = [], forms = [], label = 'Expense claim', i
     rowsTotal: 0,
     error: null,
     result: null,
-    payload: { archives: write(archives, 'a'), forms: write(forms, 'f') },
+    payload: stored,
   };
 
   return { job: _write(userId, job) };
@@ -124,14 +132,17 @@ function readPayload(userId, job) {
     if (!fs.existsSync(p)) throw new Error(`${f.name} is no longer on disk — the import cannot be retried`);
     return { name: f.name, buffer: fs.readFileSync(p) };
   });
-  return { archives: load(job.payload?.archives || []), forms: load(job.payload?.forms || []) };
+  const out = Object.fromEntries(Object.entries(job.payload || {}).map(([key, list]) => [key, load(list || [])]));
+  // A claim job always has both, even if a legacy job on disk only wrote one.
+  if (!job.type || job.type === 'claim-import') { out.archives ||= []; out.forms ||= []; }
+  return out;
 }
 
 function _dropPayload(userId, job) {
-  for (const f of [...(job.payload?.archives || []), ...(job.payload?.forms || [])]) {
-    try { fs.unlinkSync(_blob(userId, f.ref)); } catch {}
+  for (const list of Object.values(job.payload || {})) {
+    for (const f of list || []) { try { fs.unlinkSync(_blob(userId, f.ref)); } catch {} }
   }
-  job.payload = { archives: [], forms: [] };
+  job.payload = Object.fromEntries(Object.keys(job.payload || {}).map(k => [k, []]));
 }
 
 function get(userId, jobId) {

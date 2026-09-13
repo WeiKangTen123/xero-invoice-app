@@ -17,15 +17,39 @@ function _getWorker(userId) {
   return _workers.get(userId);
 }
 
-function _defaultDeps(userId) {
-  const claimsRoute = require('../routes/claims');
-  return {
-    parseReceipts: (uid, images) => parseReceiptBatch(uid, images),
-    storeReceipt: (uid, id, buffer, mime) => receiptStore.forUser(uid).save(id, buffer, mime),
-    createRecord: (params) => claimsRoute._createClaimRecord(params),
-    suggest: (uid, matches, categories) => suggestCategories(uid, matches, categories),
-  };
+// ── Job types ───────────────────────────────────────────────────────────────
+// The worker runs whatever is registered here, keyed by job.type. Each type
+// supplies `run({ userId, job, payload, deps })`, which must eventually call
+// deps.onSettle, and `defaultDeps(userId)` for when the caller passes none.
+// Claim import is the first type; bill and invoice import register their own
+// from their own modules, so this file does not have to know about them.
+const _types = new Map();
+function registerJobType(type, { run, defaultDeps = () => ({}) } = {}) {
+  if (typeof run !== 'function') throw new Error(`Job type "${type}" needs a run function`);
+  _types.set(type, { run, defaultDeps });
 }
+function _handlerFor(job) {
+  // Jobs written before types existed are all claim imports.
+  return _types.get(job.type || 'claim-import') || null;
+}
+
+registerJobType('claim-import', {
+  defaultDeps(userId) {
+    const claimsRoute = require('../routes/claims');
+    return {
+      parseReceipts: (uid, images) => parseReceiptBatch(uid, images),
+      storeReceipt: (uid, id, buffer, mime) => receiptStore.forUser(uid).save(id, buffer, mime),
+      createRecord: (params) => claimsRoute._createClaimRecord(params),
+      suggest: (uid, matches, categories) => suggestCategories(uid, matches, categories),
+    };
+  },
+  run({ userId, job, payload, deps }) {
+    return claimImport.startImport(
+      { userId, archives: payload.archives, forms: payload.forms, label: job.label, id: job.id },
+      deps
+    );
+  },
+});
 
 async function _processNext(userId) {
   const w = _getWorker(userId);
@@ -47,12 +71,18 @@ async function _processNext(userId) {
 
   try {
     logger.info(`[claim-worker:${userId}] Starting job ${job.id} (attempt ${job.attempts + 1})`, { jobId: job.id, label: job.label });
+        const handler = _handlerFor(job);
+    if (!handler) {
+      // Set aside with a reason rather than retried three times into poison.
+      claimQueue.markFailed(userId, job.id, `No handler is registered for job type "${job.type}"`);
+      w.busy = false;
+      if (claimQueue.getPending(userId).length > 0) setImmediate(() => _safeProcessNext(userId));
+      return;
+    }
     claimQueue.markRunning(userId, job.id);
-
     // Read payload buffers back from disk
-    const { archives, forms } = claimQueue.readPayload(userId, job);
-
-    const baseDeps = w.deps || _defaultDeps(userId);
+    const payload = claimQueue.readPayload(userId, job);
+    const baseDeps = w.deps || handler.defaultDeps(userId);
 
     const deps = {
       ...baseDeps,
@@ -84,10 +114,7 @@ async function _processNext(userId) {
       },
     };
 
-    claimImport.startImport(
-      { userId, archives, forms, label: job.label, id: job.id },
-      deps
-    );
+        handler.run({ userId, job, payload, deps });
   } catch (err) {
     logger.error(`[claim-worker:${userId}] Job ${job.id} failed to launch`, { error: err.message });
     claimQueue.markFailed(userId, job.id, err.message);
@@ -155,6 +182,7 @@ function _reset() {
 }
 
 module.exports = {
+  registerJobType,
   startWorker,
   stopWorker,
   kickWorker,
