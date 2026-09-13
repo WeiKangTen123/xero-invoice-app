@@ -226,7 +226,13 @@ function parseTemplateFormat(text, email, defaults) {
                        email.from?.value?.[0]?.address || '')
                        .replace(/<[^>]+>/g, '').trim();
 
-  const addrMatch    = text.match(/Address\s*:\s*([\s\S]+?)(?:\n\s*\n|\nCreate New|\nDate\s*:|\nPayment)/i);
+  // The address runs until a blank line or the next template label. It used to
+  // stop only on three named labels, so with "Currency :" directly beneath it —
+  // which is where the template puts it — the address came through as
+  // "58 Senoko Road, Singapore 758122, Currency : SGD, Standard". Any
+  // "Label :" shaped line ends it now, so reordering the template's header
+  // fields cannot reintroduce this.
+  const addrMatch    = text.match(/Address\s*:\s*([\s\S]+?)(?=\n\s*\n|\n\s*[A-Z][A-Za-z /()]{1,40}\s*:|\n\s*\d+\.\s*Description|$)/i);
   const contactAddress = addrMatch
     ? addrMatch[1].replace(/\n/g, ', ').replace(/,\s*,/g, ',').trim()
     : '';
@@ -262,7 +268,20 @@ function parseTemplateFormat(text, email, defaults) {
 
   const lineItems = [];
   let taxAmount = 0;
-  const lineItemRegex = /[ \t]*(?:\d+\.\s*)?Description\s*\/\s*Details\s*:([\s\S]+?)[ \t]*\nAmount\s*:\s*([\d,]*\.?\d*)[ \t]*\nDiscount\s*:\s*([\d.]*)[ \t]*%?[ \t]*\nTax\s*\(If\s*applicable\)\s*:\s*([^\n]*)/gi;
+  // Two things about this pattern, both learned from production rows:
+  //
+  // "Amount :" is followed by an optional currency token before the number —
+  // the template writes "Amount : SGD1000". The digits class alone stopped at
+  // the S and every AR amount parsed as zero.
+  //
+  // The whitespace after "Discount :" and "Tax (If applicable) :" is [ \t], not
+  // \s. The template leaves both values blank, and a greedy \s* crossed the
+  // newlines so that ([^\n]*) captured the NEXT line — which is the next item's
+  // "2. Description / Details :" header. Item one swallowed item two's opening
+  // label, item two could never match, and stored descriptions carried stray
+  // "Description / Detai" fragments. Neither was caught because nothing tested
+  // this function against the template it exists for. See parser.test.js.
+  const lineItemRegex = /[ \t]*(?:\d+\.\s*)?Description\s*\/\s*Details\s*:([\s\S]+?)[ \t]*\nAmount\s*:\s*(?:[A-Za-z]{3}|[A-Za-z]{0,2}[$£€])?\s*([\d,]*\.?\d*)[ \t]*\nDiscount\s*:[ \t]*([\d.]*)[ \t]*%?[ \t]*\nTax\s*\(If\s*applicable\)\s*:[ \t]*([^\n]*)/gi;
   let match;
   while ((match = lineItemRegex.exec(text)) !== null) {
     const desc = match[1].trim().replace(/[•·]/g, '*');
@@ -283,7 +302,7 @@ function parseTemplateFormat(text, email, defaults) {
     const desc = getMatch(text, /(?:\d+\.\s*)?Description\s*\/\s*Details\s*:\s*([^\n]+)/i) ||
                  cleanSubject(email.subject) || `Invoice from ${contactName}`;
     const amt  = parseFloat(
-      (getMatch(text, /Amount\s*:\s*([\d,]+\.?\d*)/i) || '0').replace(/,/g, '')
+      (getMatch(text, /Amount\s*:\s*(?:[A-Za-z]{3}|[A-Za-z]{0,2}[$£€])?\s*([\d,]+\.?\d*)/i) || '0').replace(/,/g, '')
     );
     lineItems.push({ description: desc, unitAmount: amt, discountRate: 0 });
   }
@@ -532,4 +551,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject }; // helpers exposed for tests
+module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject }; // helpers exposed for tests
