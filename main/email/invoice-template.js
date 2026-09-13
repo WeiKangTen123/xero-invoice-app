@@ -25,6 +25,13 @@ const HEADER_FIELDS = [
     meaning: 'either "N days" (counted from the invoice date) or an explicit due date' },
   { key: 'lineAmountTypes', label: 'Tax inclusive / exclusive',    required: false,
     meaning: 'whether the line amounts already include tax' },
+  // Added after the fact, so optional: older emails do not carry them. When
+  // absent the parser dates the invoice from the email and numbers it
+  // INV-<timestamp>. Put both on the template you send and they are read.
+  { key: 'invoiceNumber',   label: 'Invoice Number',               required: false,
+    meaning: 'your reference for this invoice; if absent one is generated' },
+  { key: 'invoiceDate',     label: 'Invoice Date',                 required: false,
+    meaning: "the invoice's own date; if absent the email's date is used" },
 ];
 
 // One block per charge. The template numbers them ("1. Description / Details :")
@@ -40,11 +47,6 @@ const LINE_ITEM_FIELDS = [
     meaning: 'a tax rate such as "GST 9%"; usually left blank, in which case no tax applies' },
 ];
 
-// Not on the template. The parser dates the invoice from when the email arrived
-// and numbers it INV-<timestamp>. Listed so the verifier knows not to expect
-// them, and so that adding them to the template later is a one-line change.
-const ABSENT_FIELDS = ['invoiceNumber', 'invoiceDate'];
-
 // The template as prose, for the verifier's prompt.
 function describe() {
   const line = f => `  - "${f.label} :" — ${f.meaning}${f.required ? '' : ' (optional)'}`;
@@ -55,8 +57,8 @@ function describe() {
     'Then one or more numbered line items ("1. Description / Details :", "2. …"), each with these four lines in this order:',
     ...LINE_ITEM_FIELDS.map(line),
     '',
-    `The template has no ${ABSENT_FIELDS.join(' or ')} field. A date may still be mentioned in passing.`,
+    'Invoice Number and Invoice Date are optional and may be absent from older emails; a date may still be mentioned in passing.',
   ].join('\n');
 }
 
-module.exports = { HEADER_FIELDS, LINE_ITEM_FIELDS, ABSENT_FIELDS, describe };
+module.exports = { HEADER_FIELDS, LINE_ITEM_FIELDS, describe };

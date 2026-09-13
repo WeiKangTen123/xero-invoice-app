@@ -253,6 +253,26 @@ describe('parseTemplateFormat — the AR template, as actually sent', () => {
     expect(parseTemplateFormat(labelled, email, defaults).taxAmount).toBe(0);
   });
 
+  test('Invoice Number and Invoice Date are read when the template carries them', () => {
+    const withBoth = oneItem.replace('Client / Customer : PereOcean Demo',
+      'Invoice Number : PO-2026-014\nInvoice Date : 10/08/2026\nClient / Customer : PereOcean Demo');
+    const p = parseTemplateFormat(withBoth, email, defaults);
+    expect(p.invoiceNumber).toBe('PO-2026-014');
+    expect(p.invoiceDate).toBe('2026-08-10');          // DD/MM/YYYY, the document's date, not the email's
+    expect(p.dueDate).toBe('2026-09-09');              // and "30 days" counts from it
+  });
+
+  test('without them, the fallbacks are unchanged: email date and a generated number', () => {
+    const p = parseTemplateFormat(oneItem, email, defaults);
+    expect(p.invoiceDate).toBe('2026-08-17');
+    expect(p.invoiceNumber).toMatch(/^INV-\d{12,}$/);
+  });
+
+  test('an Invoice Date with no digits in it falls back to the email date rather than today', () => {
+    const p = parseTemplateFormat(oneItem.replace('Client / Customer', 'Invoice Date : TBC\nClient / Customer'), email, defaults);
+    expect(p.invoiceDate).toBe('2026-08-17');
+  });
+
   test.each([
     ['Amount : SGD1000',      1000],
     ['Amount : SGD 1,250.50', 1250.5],
