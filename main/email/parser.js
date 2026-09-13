@@ -44,114 +44,22 @@ function cleanSubject(subject) {
     .trim();
 }
 
-// ── Date utilities ────────────────────────────────────────────────────────────
-
-function localDateStr(d) {
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-}
-
-function toISODate(raw) {
-  if (!raw) return localDateStr(new Date());
-  try {
-    const trimmed = raw.trim();
-    // Skip JS Date() for slash-delimited strings — the engine assumes MM/DD/YYYY
-    // which is wrong for SG invoices that use DD/MM/YYYY.
-    if (!trimmed.includes('/')) {
-      const direct = new Date(trimmed);
-      if (!isNaN(direct)) return localDateStr(direct);
-    }
-    const parts = trimmed.split(/[\/\-\.]/);
-    let d;
-    if (parts[0].length === 4) {
-      // YYYY-MM-DD (ISO / LLM output)
-      d = new Date(`${parts[0]}-${parts[1].padStart(2,'0')}-${parts[2].padStart(2,'0')}`);
-    } else {
-      // Treat as DD/MM/YYYY — handles both unambiguous (day > 12) and ambiguous
-      // dates, preferring day-first for SG locale
-      d = new Date(`${parts[2]}-${parts[1].padStart(2,'0')}-${parts[0].padStart(2,'0')}`);
-    }
-    return isNaN(d) ? localDateStr(new Date()) : localDateStr(d);
-  } catch {
-    return localDateStr(new Date());
-  }
-}
-
-function addDays(dateStr, days) {
-  const d = new Date(dateStr);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().split('T')[0];
-}
-
-// ── Field helpers ─────────────────────────────────────────────────────────────
-
+// ── Shared helpers ────────────────────────────────────────────────────────────
+// Dates, numbers, currency and the subtotal/tax invariant come from the intake
+// core, so this parser, the receipt parser and the row builder cannot drift
+// apart again. toISODate keeps its old contract — "today" when unreadable —
+// because a due date it cannot read is better dated today than left blank;
+// callers that want null (an invoice date) use intake.parseDate directly.
+const intake = require('../intake/document');
+const { CURRENCY_CODES, addDays } = intake;
+function toISODate(raw) { return intake.parseDate(raw) || intake.today(); }
 function getMatch(text, pattern) {
   const m = text.match(pattern);
   return m ? m[1].trim() : null;
 }
-
-// Currencies this app has actually seen in practice. Not exhaustive — extend as
-// needed, since an unlisted code just falls through to the "not detected" path
-// below rather than being handled incorrectly.
-const CURRENCY_CODES = ['USD', 'SGD', 'AUD', 'GBP', 'EUR', 'MYR', 'NZD', 'CAD', 'JPY', 'CNY', 'HKD', 'INR'];
-
-// Reads the invoice's actual currency from its text instead of assuming the
-// account's configured default applies to every invoice — an invoice's currency
-// is a property of the invoice, not of the account processing it. Returns null
-// (not a guess) when nothing in the text actually says which currency this is;
-// callers fall back to the user's configured default in that case.
-function _detectCurrency(text) {
-  const labeled = getMatch(text, /Currency\s*:\s*([A-Z]{3})\b/i);
-  if (labeled && CURRENCY_CODES.includes(labeled.toUpperCase())) return labeled.toUpperCase();
-
-  // A 3-letter code directly adjacent to a monetary amount, e.g. "SGD 1,090.00"
-  const nearAmount = text.match(new RegExp(`\\b(${CURRENCY_CODES.join('|')})\\b\\s*\\$?\\s*[\\d,]+\\.?\\d*`));
-  if (nearAmount) return nearAmount[1].toUpperCase();
-
-  // Currency-specific symbols, checked before a bare "$" (which is ambiguous —
-  // used by USD, SGD, AUD, CAD, HKD, NZD... — so it deliberately isn't handled here)
-  if (/S\$/.test(text))  return 'SGD';
-  if (/A\$/.test(text))  return 'AUD';
-  if (/£/.test(text))    return 'GBP';
-  if (/€/.test(text))    return 'EUR';
-  if (/¥/.test(text))    return 'JPY';
-  if (/RM\s?\d/.test(text)) return 'MYR';
-
-  return null;
-}
-
-// Extracts a percentage like "9%", "GST 9%", "VAT (20%)" from free text near a line
-// item. Returns null for non-percentage text ("GST", "-", "NONE", blank) — those
-// don't carry a computable dollar amount, so the line contributes no tax rather than
-// guessing one.
-function _parseTaxPercent(raw) {
-  if (!raw) return null;
-  const m = String(raw).match(/(\d+(?:\.\d+)?)\s*%/);
-  return m ? parseFloat(m[1]) : null;
-}
-
-// Guarantees subTotal/taxAmount are always present and consistent, regardless of
-// which of the three parser paths produced `parsed`. Real per-invoice dollar figures
-// (when the source stated them) are always preferred; missing values are derived
-// from whichever of totalAmount/subTotal/taxAmount ARE known, since these three
-// must always satisfy subTotal + taxAmount = totalAmount before the amount reaches
-// Xero — see xero/invoices.js resolveTaxType, which uses subTotal/taxAmount to look
-// up the org's real tax rate.
-function _ensureSubtotalTax(parsed) {
-  const total = Number(parsed.totalAmount) || 0;
-  let sub = parsed.subTotal != null ? Number(parsed.subTotal) : null;
-  let tax = parsed.taxAmount != null ? Number(parsed.taxAmount) : null;
-
-  if (sub == null && tax == null) { sub = total; tax = 0; }
-  else if (sub == null)          { sub = total - tax; }
-  else if (tax == null)          { tax = total - sub; }
-  if (!(sub > 0)) sub = total; // avoid negative/zero subtotal line items
-  if (!(tax >= 0)) tax = 0;    // avoid a negative tax line item from bad extraction
-
-  parsed.subTotal  = parseFloat(sub.toFixed(2));
-  parsed.taxAmount = parseFloat((tax || 0).toFixed(2));
-  return parsed;
-}
-
+const _detectCurrency    = intake.detectCurrency;
+const _parseTaxPercent   = intake.parseTaxPercent;
+const _ensureSubtotalTax = intake.ensureSubtotalTax;
 // Resolve per-user defaults, falling back to .env globals
 function _userDefaults(userId) {
   if (!userId) {

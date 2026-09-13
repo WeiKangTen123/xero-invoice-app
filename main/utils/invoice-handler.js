@@ -2,6 +2,8 @@ const { enqueueInvoice }  = require('../queue/processor');
 const { reconnectXero }   = require('../xero/reconnect');
 const { xeroErrMsg }      = require('../xero/xero-utils');
 const { notifyError }     = require('./notify');
+const { buildRecord } = require('../intake/record');
+const { normaliseDocument } = require('../intake/document');
 const logger              = require('./logger');
 const invoiceStore        = require('./invoice-store');
 const pdfStore            = require('./pdf-store');
@@ -102,35 +104,39 @@ function createHandler(userId) {
       }
     }
 
-    // Build clean record (strip binary buffer before storing)
-    const record = {
+    // The row is built by the shared intake builder; what this path adds is the
+    // PDF it stored and the email it came from. Fields the parser already
+    // decided are passed through as extras so the builder does not re-derive
+    // them and this stays a pure refactor.
+    const record = buildRecord({
       id,
-      status:           'pending',
-      hasPdf,
-      pdfFilename:      invoiceData.pdfFilename    || null,
-      vendorName:       invoiceData.vendorName     || invoiceData.contactName || 'Unknown',
-      contactName:      invoiceData.contactName    || invoiceData.vendorName  || '',
-      contactEmail:     invoiceData.contactEmail   || '',
-      contactAddress:   invoiceData.contactAddress || '',
-      invoiceNumber:    invoiceData.invoiceNumber  || '—',
-      invoiceDate:      invoiceData.invoiceDate    || null,
-      dueDate:          invoiceData.dueDate        || null,
-      totalAmount:      invoiceData.totalAmount    || 0,
-      currency:         invoiceData.currency       || 'USD',
-      invoiceType:      invoiceData.invoiceType    || 'ACCPAY',
-      source:           invoiceData.source         || 'pdf',
-      sourceEmail:      invoiceData.sourceEmail    || '',
-      lineItems:        invoiceData.lineItems      || [],
-      description:      invoiceData.description    || '',
-      accountCode:      invoiceData.accountCode    || '',
-      taxAmount:        invoiceData.taxAmount      || 0,
-      subTotal:         invoiceData.subTotal       || 0,
-      paymentReference: invoiceData.paymentReference || '',
-      processedAt:      new Date().toISOString(),
-      // The email's own date when we have it; otherwise arrival is now.
-      receivedAt:       invoiceData.receivedAt || new Date().toISOString(),
-      reports:          [],
-    };
+      document:    normaliseDocument(invoiceData),
+      invoiceType: invoiceData.invoiceType || 'ACCPAY',
+      source:      invoiceData.source      || 'pdf',
+      defaults:    { accountCode: invoiceData.accountCode || '', currency: invoiceData.currency || 'USD' },
+      extras: {
+        hasPdf,
+        pdfFilename:   invoiceData.pdfFilename    || null,
+        sourceEmail:   invoiceData.sourceEmail    || '',
+        vendorName:    invoiceData.vendorName     || invoiceData.contactName || 'Unknown',
+        contactName:   invoiceData.contactName    || invoiceData.vendorName  || '',
+        contactEmail:  invoiceData.contactEmail   || '',
+        contactAddress: invoiceData.contactAddress || '',
+        invoiceNumber: invoiceData.invoiceNumber  || '—',
+        invoiceDate:   invoiceData.invoiceDate    || null,
+        dueDate:       invoiceData.dueDate        || null,
+        totalAmount:   invoiceData.totalAmount    || 0,
+        currency:      invoiceData.currency       || 'USD',
+        lineItems:     invoiceData.lineItems      || [],
+        description:   invoiceData.description    || '',
+        accountCode:   invoiceData.accountCode    || '',
+        taxAmount:     invoiceData.taxAmount      || 0,
+        subTotal:      invoiceData.subTotal       || 0,
+        paymentReference: invoiceData.paymentReference || '',
+        // The email's own date when we have it; otherwise arrival is now.
+        receivedAt:    invoiceData.receivedAt || new Date().toISOString(),
+      },
+    });
 
     await invStore.add(record);
     procState.addInvoice();
