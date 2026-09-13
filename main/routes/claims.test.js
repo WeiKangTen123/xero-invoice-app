@@ -1,4 +1,5 @@
 const request = require('supertest');
+const { serverFor } = require('../scripts/test-server'); // one server per test, not per request
 const express = require('express');
 const jwt     = require('jsonwebtoken');
 const fs      = require('fs');
@@ -107,7 +108,7 @@ describe('routes/claims', () => {
   async function finish(jobId, u = testUser) {
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
-      const res = await request(app).get(`/api/claims/import/${jobId}`).set('Authorization', auth(u));
+      const res = await request(serverFor(app)).get(`/api/claims/import/${jobId}`).set('Authorization', auth(u));
       if (['done', 'failed', 'cancelled'].includes(res.body.stage)) return res.body;
       await new Promise(r => setTimeout(r, 25));
     }
@@ -115,11 +116,11 @@ describe('routes/claims', () => {
   }
 
   const start = (body, u = testUser) =>
-    request(app).post('/api/claims/import').set('Authorization', auth(u)).send(body);
+    request(serverFor(app)).post('/api/claims/import').set('Authorization', auth(u)).send(body);
 
   describe('POST /import', () => {
     test('requires authentication', async () => {
-      await request(app).post('/api/claims/import').send({ archives: [] }).expect(401);
+      await request(serverFor(app)).post('/api/claims/import').send({ archives: [] }).expect(401);
     });
 
     test('refuses an upload with nothing attached', async () => {
@@ -144,13 +145,13 @@ describe('routes/claims', () => {
       created.push(other.id);
       const zip = makeZip([{ name: 'a.jpg', data: jpegBytes(2) }]);
       const { body } = await start({ archives: [{ name: 'c.zip', data: b64(zip) }] }).expect(202);
-      await request(app).get(`/api/claims/import/${body.jobId}`).set('Authorization', auth(other)).expect(404);
+      await request(serverFor(app)).get(`/api/claims/import/${body.jobId}`).set('Authorization', auth(other)).expect(404);
       await finish(body.jobId);
     });
 
     test('GET /active returns null when no job is running, or active job info when running', async () => {
       // When nothing is active
-      const idleRes = await request(app).get('/api/claims/active').set('Authorization', auth()).expect(200);
+      const idleRes = await request(serverFor(app)).get('/api/claims/active').set('Authorization', auth()).expect(200);
       expect(idleRes.body.job).toBeNull();
 
       // When an import is enqueued.
@@ -170,13 +171,13 @@ describe('routes/claims', () => {
 
       const zip = makeZip([{ name: 'a.jpg', data: jpegBytes(3) }]);
       const { body } = await start({ archives: [{ name: 'c.zip', data: b64(zip) }] }).expect(202);
-      const activeRes = await request(app).get('/api/claims/active').set('Authorization', auth()).expect(200);
+      const activeRes = await request(serverFor(app)).get('/api/claims/active').set('Authorization', auth()).expect(200);
       expect(activeRes.body.job).toBeTruthy();
       expect(activeRes.body.job.id).toBe(body.jobId);
 
       release();
       await finish(body.jobId);
-      const afterRes = await request(app).get('/api/claims/active').set('Authorization', auth()).expect(200);
+      const afterRes = await request(serverFor(app)).get('/api/claims/active').set('Authorization', auth()).expect(200);
       expect(afterRes.body.job).toBeNull();
     });
   });
@@ -285,7 +286,7 @@ describe('routes/claims', () => {
         { name: 'b.jpg', data: jpegBytes(51) },
       ]);
       const done = await finish((await start({ archives: [{ name: 'c.zip', data: b64(zip) }] })).body.jobId);
-      const res = await request(app).delete(`/api/claims/group/${done.result.groupId}`)
+      const res = await request(serverFor(app)).delete(`/api/claims/group/${done.result.groupId}`)
         .set('Authorization', auth()).expect(200);
       expect(res.body.removed).toBe(2);
       expect(invoiceStore.forUser(testUser.id).getReceiptGroup(done.result.groupId)).toHaveLength(0);
@@ -304,7 +305,7 @@ describe('routes/claims', () => {
       expect(invoiceStore.forUser(testUser.id).countByReceiptFile(file)).toBe(1);
       expect(receiptStore.forUser(testUser.id).exists(file)).toBe(true);
 
-      await request(app).delete(`/api/claims/group/${done.result.groupId}`).set('Authorization', auth()).expect(200);
+      await request(serverFor(app)).delete(`/api/claims/group/${done.result.groupId}`).set('Authorization', auth()).expect(200);
       expect(receiptStore.forUser(testUser.id).exists(file)).toBe(false);
     });
 
@@ -313,7 +314,7 @@ describe('routes/claims', () => {
       created.push(other.id);
       const zip = makeZip([{ name: 'a.jpg', data: jpegBytes(70) }]);
       const done = await finish((await start({ archives: [{ name: 'c.zip', data: b64(zip) }] })).body.jobId);
-      await request(app).delete(`/api/claims/group/${done.result.groupId}`)
+      await request(serverFor(app)).delete(`/api/claims/group/${done.result.groupId}`)
         .set('Authorization', auth(other)).expect(404);
       expect(invoiceStore.forUser(testUser.id).getReceiptGroup(done.result.groupId)).toHaveLength(1);
     });

@@ -1,4 +1,5 @@
 const request = require('supertest');
+const { serverFor } = require('../scripts/test-server'); // one server per test, not per request
 const express = require('express');
 const jwt     = require('jsonwebtoken');
 
@@ -33,12 +34,12 @@ describe('routes/xero-oauth', () => {
 
   describe('GET /oauth/connect', () => {
     test('requires authentication', async () => {
-      await request(app).get('/api/xero/oauth/connect').expect(401);
+      await request(serverFor(app)).get('/api/xero/oauth/connect').expect(401);
     });
 
     test('returns the authorize URL from xero/oauth', async () => {
       xeroOAuth.buildAuthorizeUrl.mockReturnValue('https://login.xero.com/identity/connect/authorize?state=abc');
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero/oauth/connect')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -48,7 +49,7 @@ describe('routes/xero-oauth', () => {
 
     test('surfaces a config error as 400, not a 500 crash', async () => {
       xeroOAuth.buildAuthorizeUrl.mockImplementation(() => { throw new Error('Xero OAuth is not configured'); });
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero/oauth/connect')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(400);
@@ -63,20 +64,20 @@ describe('routes/xero-oauth', () => {
     // which completes the connection via an authenticated call. See
     // POST /oauth/complete below for the actual security boundary.
     test('redirects with an error flag when Xero reports a consent error, without touching state', async () => {
-      const res = await request(app).get('/api/xero/oauth/callback?error=access_denied');
+      const res = await request(serverFor(app)).get('/api/xero/oauth/callback?error=access_denied');
       expect(res.status).toBe(302);
       expect(res.headers.location).toContain('xero_oauth=error');
       expect(oauthState.consume).not.toHaveBeenCalled();
     });
 
     test('redirects with an error flag when code or state is missing', async () => {
-      const res = await request(app).get('/api/xero/oauth/callback?code=abc');
+      const res = await request(serverFor(app)).get('/api/xero/oauth/callback?code=abc');
       expect(res.headers.location).toContain('xero_oauth=error');
       expect(xeroOAuth.completeConnection).not.toHaveBeenCalled();
     });
 
     test('never calls completeConnection itself — only forwards code+state pending', async () => {
-      const res = await request(app).get('/api/xero/oauth/callback?code=the-code&state=some-state');
+      const res = await request(serverFor(app)).get('/api/xero/oauth/callback?code=the-code&state=some-state');
       expect(xeroOAuth.completeConnection).not.toHaveBeenCalled();
       expect(oauthState.consume).not.toHaveBeenCalled();
       expect(res.status).toBe(302);
@@ -87,18 +88,18 @@ describe('routes/xero-oauth', () => {
 
     test('does not require an Authorization header at all (browser redirect has none)', async () => {
       // Deliberately no .set('Authorization', ...) here.
-      const res = await request(app).get('/api/xero/oauth/callback?code=c&state=s');
+      const res = await request(serverFor(app)).get('/api/xero/oauth/callback?code=c&state=s');
       expect(res.status).toBe(302);
     });
   });
 
   describe('POST /oauth/complete', () => {
     test('requires authentication', async () => {
-      await request(app).post('/api/xero/oauth/complete').send({ code: 'c', state: 's' }).expect(401);
+      await request(serverFor(app)).post('/api/xero/oauth/complete').send({ code: 'c', state: 's' }).expect(401);
     });
 
     test('rejects when code or state is missing', async () => {
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .post('/api/xero/oauth/complete')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .send({ code: 'c' })
@@ -108,7 +109,7 @@ describe('routes/xero-oauth', () => {
 
     test('rejects when state is missing/invalid/expired', async () => {
       oauthState.consume.mockReturnValue(null);
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .post('/api/xero/oauth/complete')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .send({ code: 'c', state: 'bogus' })
@@ -124,7 +125,7 @@ describe('routes/xero-oauth', () => {
     test('rejects when the authenticated caller is not who the state was minted for', async () => {
       const otherUser = await users.createUser('other@test.com', 'password123', 'user');
       oauthState.consume.mockReturnValue(otherUser.id); // state belongs to a DIFFERENT user
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .post('/api/xero/oauth/complete')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`) // caller is testUser, not otherUser
         .send({ code: 'the-code', state: 'attacker-harvested-state' })
@@ -137,7 +138,7 @@ describe('routes/xero-oauth', () => {
       oauthState.consume.mockReturnValue(testUser.id);
       xeroOAuth.completeConnection.mockResolvedValue([{ tenantId: 't1', tenantName: 'Org' }]);
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .post('/api/xero/oauth/complete')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .send({ code: 'the-code', state: 'valid-state' })
@@ -151,7 +152,7 @@ describe('routes/xero-oauth', () => {
       oauthState.consume.mockReturnValue(testUser.id);
       xeroOAuth.completeConnection.mockRejectedValue(new Error('Xero rejected the code'));
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .post('/api/xero/oauth/complete')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .send({ code: 'bad-code', state: 'valid-state' })
@@ -163,7 +164,7 @@ describe('routes/xero-oauth', () => {
 
   describe('DELETE /oauth/disconnect', () => {
     test('requires authentication', async () => {
-      await request(app).delete('/api/xero/oauth/disconnect').expect(401);
+      await request(serverFor(app)).delete('/api/xero/oauth/disconnect').expect(401);
     });
 
     test('removes every cached tenant and clears the stored OAuth config', async () => {
@@ -173,7 +174,7 @@ describe('routes/xero-oauth', () => {
         removeTenant,
       });
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .delete('/api/xero/oauth/disconnect')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -187,12 +188,12 @@ describe('routes/xero-oauth', () => {
 
   describe('GET /tenants', () => {
     test('requires authentication', async () => {
-      await request(app).get('/api/xero/tenants').expect(401);
+      await request(serverFor(app)).get('/api/xero/tenants').expect(401);
     });
 
     test('defaults connectionType to "custom" when nothing is set yet', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([]);
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero/tenants')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
@@ -203,7 +204,7 @@ describe('routes/xero-oauth', () => {
       users.saveUserConfig(testUser.id, { XERO_CONNECTION_TYPE: 'oauth' });
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1', tenantName: 'Org One' }]);
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/xero/tenants')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);

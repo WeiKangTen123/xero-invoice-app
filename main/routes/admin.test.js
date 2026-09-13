@@ -1,4 +1,5 @@
 const request = require('supertest');
+const { serverFor } = require('../scripts/test-server'); // one server per test, not per request
 const express = require('express');
 const jwt     = require('jsonwebtoken');
 const fs      = require('fs');
@@ -27,11 +28,11 @@ describe('admin routes', () => {
   }
 
   test('GET /users requires authentication', async () => {
-    await request(app).get('/api/admin/users').expect(401);
+    await request(serverFor(app)).get('/api/admin/users').expect(401);
   });
 
   test('GET /users returns all users for an admin', async () => {
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .get('/api/admin/users')
       .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
       .expect(200);
@@ -40,7 +41,7 @@ describe('admin routes', () => {
   });
 
   test('POST /users creates a new user', async () => {
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .post('/api/admin/users')
       .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
       .send({ email: 'new@test.com', password: 'password123', role: 'user' })
@@ -50,14 +51,14 @@ describe('admin routes', () => {
   });
 
   test('DELETE /users/:id blocks deleting your own account', async () => {
-    await request(app)
+    await request(serverFor(app))
       .delete(`/api/admin/users/${adminUser.id}`)
       .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
       .expect(400);
   });
 
   test('GET /monitoring returns system + per-user stats', async () => {
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .get('/api/admin/monitoring')
       .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
       .expect(200);
@@ -76,7 +77,7 @@ describe('admin routes', () => {
   });
 
   test('GET /monitoring reports the requesting admin as online (their own request just touched last_seen_at)', async () => {
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .get('/api/admin/monitoring')
       .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
       .expect(200);
@@ -87,7 +88,7 @@ describe('admin routes', () => {
 
   test('GET /monitoring reports a user who has never made a request as offline', async () => {
     const other = await users.createUser('never-seen@test.com', 'password123', 'user');
-    const res = await request(app)
+    const res = await request(serverFor(app))
       .get('/api/admin/monitoring')
       .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
       .expect(200);
@@ -98,11 +99,11 @@ describe('admin routes', () => {
 
   describe('GET /stats/daily', () => {
     test('requires authentication', async () => {
-      await request(app).get('/api/admin/stats/daily').expect(401);
+      await request(serverFor(app)).get('/api/admin/stats/daily').expect(401);
     });
 
     test('zero-fills every day in range, even with no invoices at all', async () => {
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/admin/stats/daily?days=7')
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);
@@ -121,7 +122,7 @@ describe('admin routes', () => {
       store.add({ id: 'inv-error',  status: 'error',  totalAmount: 50,  processedAt: today });
       store.add({ id: 'inv-pending', status: 'pending', totalAmount: 25, processedAt: today });
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/admin/stats/daily?days=1')
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);
@@ -136,7 +137,7 @@ describe('admin routes', () => {
       invoiceStore.forUser(adminUser.id).add({ id: 'mine', status: 'posted', totalAmount: 10, processedAt: today });
       invoiceStore.forUser(other.id).add({ id: 'theirs', status: 'posted', totalAmount: 10, processedAt: today });
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get(`/api/admin/stats/daily?days=1&userId=${other.id}`)
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);
@@ -183,18 +184,18 @@ describe('admin routes', () => {
     });
 
     test('requires authentication', async () => {
-      await request(app).get('/api/admin/logs').expect(401);
+      await request(serverFor(app)).get('/api/admin/logs').expect(401);
     });
 
     test('requires admin role', async () => {
-      await request(app)
+      await request(serverFor(app))
         .get('/api/admin/logs')
         .set('Authorization', `Bearer ${tokenFor(regularUser)}`)
         .expect(403);
     });
 
     test('defaults to combined.log and returns all entries', async () => {
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/admin/logs')
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);
@@ -203,7 +204,7 @@ describe('admin routes', () => {
     });
 
     test('an unknown ?file falls back to combined instead of reading an arbitrary path', async () => {
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/admin/logs?file=../../etc/passwd')
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);
@@ -211,7 +212,7 @@ describe('admin routes', () => {
     });
 
     test('?file=error switches to the error log', async () => {
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/admin/logs?file=error')
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);
@@ -221,7 +222,7 @@ describe('admin routes', () => {
     });
 
     test('?userId filters to entries mentioning that id', async () => {
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/admin/logs?userId=user-456')
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);
@@ -230,7 +231,7 @@ describe('admin routes', () => {
     });
 
     test('?q filters by free-text match on the message, case-insensitively', async () => {
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/admin/logs?q=POSTED')
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);
@@ -239,7 +240,7 @@ describe('admin routes', () => {
     });
 
     test('?lines caps the number of entries returned, keeping the most recent', async () => {
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/admin/logs?lines=1')
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);
@@ -249,7 +250,7 @@ describe('admin routes', () => {
 
     test('missing log file returns an empty list instead of erroring', async () => {
       fs.rmSync(path.join(logsDir, 'combined.log'));
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .get('/api/admin/logs')
         .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
         .expect(200);

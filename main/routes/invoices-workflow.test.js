@@ -1,4 +1,5 @@
 const request = require('supertest');
+const { serverFor } = require('../scripts/test-server'); // one server per test, not per request
 const express = require('express');
 const jwt     = require('jsonwebtoken');
 
@@ -24,20 +25,20 @@ describe('routes/invoices workflow & batching', () => {
 
   describe('POST /api/invoices/batch-status', () => {
     test('requires authentication', async () => {
-      await request(app)
+      await request(serverFor(app))
         .post('/api/invoices/batch-status')
         .send({ ids: ['123'], status: 'reviewed' })
         .expect(401);
     });
 
     test('validates ids and status arguments', async () => {
-      await request(app)
+      await request(serverFor(app))
         .post('/api/invoices/batch-status')
         .set('Authorization', auth())
         .send({ ids: [], status: 'reviewed' })
         .expect(400);
 
-      await request(app)
+      await request(serverFor(app))
         .post('/api/invoices/batch-status')
         .set('Authorization', auth())
         .send({ ids: ['123'], status: 'invalid-status' })
@@ -68,7 +69,7 @@ describe('routes/invoices workflow & batching', () => {
         totalAmount: 200.00,
       });
 
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .post('/api/invoices/batch-status')
         .set('Authorization', auth())
         .send({ ids: [inv1.id, inv2.id, locked.id], status: 'reviewed' })
@@ -94,7 +95,7 @@ describe('routes/invoices workflow & batching', () => {
         totalAmount: 25.00,
       });
 
-      const patchRes = await request(app)
+      const patchRes = await request(serverFor(app))
         .patch(`/api/invoices/${inv.id}`)
         .set('Authorization', auth())
         .send({
@@ -125,7 +126,7 @@ describe('routes/invoices workflow & batching', () => {
       });
 
       // Simulates clicking "[✓ Use Receipt Total (SGD 23.50)]"
-      const res = await request(app)
+      const res = await request(serverFor(app))
         .patch(`/api/invoices/${inv.id}`)
         .set('Authorization', auth())
         .send({
