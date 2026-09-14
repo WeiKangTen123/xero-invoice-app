@@ -198,13 +198,26 @@ function parseTemplateFormat(text, email, defaults) {
   // label, item two could never match, and stored descriptions carried stray
   // "Description / Detai" fragments. Neither was caught because nothing tested
   // this function against the template it exists for. See parser.test.js.
-  const lineItemRegex = /[ \t]*(?:\d+\.\s*)?Description\s*\/\s*Details\s*:([\s\S]+?)[ \t]*\nAmount\s*:\s*(?:[A-Za-z]{3}|[A-Za-z]{0,2}[$£€])?\s*([\d,]*\.?\d*)[ \t]*\nDiscount\s*:[ \t]*([\d.]*)[ \t]*%?[ \t]*\nTax\s*\(If\s*applicable\)\s*:[ \t]*([^\n]*)/gi;
+  //
+  // Between "Amount", "Discount" and "Tax" the seams are \s*\n — a sender who
+  // leaves blank lines after "Amount : 1000" (they do) must not lose the block.
+  // The value captures close before those seams, so nothing leaks across.
+  const lineItemRegex = /[ \t]*(?:\d+\.\s*)?Description\s*\/\s*Details\s*:([\s\S]+?)[ \t]*\nAmount\s*:\s*(?:[A-Za-z]{3}|[A-Za-z]{0,2}[$£€])?\s*([\d,]*\.?\d*)[ \t]*\s*\nDiscount\s*:[ \t]*([\d.]*)[ \t]*%?[ \t]*\s*\nTax\s*\(If\s*applicable\)\s*:[ \t]*([^\n]*)/gi;
   let match;
+  const schedules = [];
   while ((match = lineItemRegex.exec(text)) !== null) {
     const desc = match[1].trim().replace(/[•·]/g, '*');
     if (!desc) continue;
     const unitAmount   = parseFloat((match[2] || '0').replace(/,/g, '')) || 0;
     const discountRate = parseFloat(match[3]) || 0;
+    // A block that describes HOW the money is paid — "50% upon confirmation,
+    // 50% on event date" — is a payment schedule, not more work. Its amount is
+    // an instalment of the real items and must not be added to the total; its
+    // text (scope of work, terms) belongs on the invoice, so it is kept.
+    if (lineItems.length && _isPaymentSchedule(desc)) {
+      schedules.push({ text: desc, amount: unitAmount });
+      continue;
+    }
     // A real percentage (e.g. "GST 9%") contributes a computable dollar amount to
     // the invoice-level taxAmount; free text with no number ("GST", "-") doesn't —
     // resolveTaxType in xero/invoices.js needs a dollar figure, not a label.
@@ -213,6 +226,15 @@ function parseTemplateFormat(text, email, defaults) {
       taxAmount += unitAmount * (1 - discountRate / 100) * (taxPercent / 100);
     }
     lineItems.push({ description: desc, unitAmount, discountRate });
+  }
+
+  let scheduleReason = null;
+  if (schedules.length) {
+    const last = lineItems[lineItems.length - 1];
+    last.description = [last.description, ...schedules.map(sc => _scheduleText(sc))].join('\n');
+    const instalments = schedules.map(sc => sc.amount).filter(a => a > 0);
+    scheduleReason = `the email has a payment schedule block (${instalments.map(a => a.toLocaleString('en')).join(', ') || 'no amount'}) ` +
+      `alongside the line items — it was read as terms, not as another item. Confirm the total`;
   }
 
   if (!lineItems.length) {
@@ -258,7 +280,27 @@ function parseTemplateFormat(text, email, defaults) {
     description:      (cleanSubject(email.subject) || `Invoice from ${contactName}`).slice(0, 500),
     sourceEmail:      email.from?.text || '',
     accountCode:      defaults.accountCode,
+    // Set when a block was read as a payment schedule. A person confirms the
+    // total before anything moves; the handler turns this into review-needed.
+    reviewReason:     scheduleReason,
   };
+}
+
+// "50% upon confirmation (14 Sep), 50% on Event Date" / "deposit" / "balance
+// upon completion". A percentage next to a payment word is the tell; a plain
+// "10% discount" inside a description is not, since "discount" is not one.
+function _isPaymentSchedule(desc) {
+  const t = desc.toLowerCase();
+  const hasPct   = /\d+(?:\.\d+)?\s*%/.test(t);
+  const hasTerms = /payment\s*terms?|upon\s+(?:confirmation|completion|signing|delivery)|on\s+event\s+date|deposit|balance|instal?ment/.test(t);
+  return hasPct && hasTerms;
+}
+
+// Strip the nested "Description / Details :" label a sender leaves inside the
+// block; the words are what matter.
+function _scheduleText(sc) {
+  const t = sc.text.replace(/^\s*[*]?\s*Description\s*\/\s*Details\s*:\s*/gim, '').trim();
+  return /payment\s*terms?/i.test(t) ? t : `Payment terms: ${t}`;
 }
 
 // ── Generic / fallback regex parser ──────────────────────────────────────────
@@ -424,7 +466,7 @@ async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email
     // the regex result stands, so this cannot make an email worse than before.
     const check = await verifyTemplateExtraction(text, parsed, userId);
     parsed = check.parsed;
-    reviewReason = check.reviewReason;
+    reviewReason = [parsed.reviewReason, check.reviewReason].filter(Boolean).join('; ') || null;
   } else if (noText) {
     // Image-based or corrupt PDF — no usable text for the LLM.
     // Fall back to generic regex (will extract what it can from email headers/subject)
@@ -494,4 +536,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity }; // helpers exposed for tests
+module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity, _isPaymentSchedule }; // helpers exposed for tests
