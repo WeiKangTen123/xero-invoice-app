@@ -8,7 +8,7 @@ const SYSTEM_PROMPT = `You are an invoice data extractor. Return ONLY valid JSON
 
 Extract these fields:
 - vendorName: seller/service provider name (NOT the buyer/recipient of the invoice)
-- vendorAddress: vendor's full street address (null if not found)
+- vendorAddress: the vendor's own street address — the one printed beside the vendor's name or logo. NEVER the bank's address from the payment details / bank transfer box (null if not found)
 - vendorEmail: vendor's email address (null if not found)
 - vendorPhone: vendor's phone number (null if not found)
 - invoiceNumber: invoice reference number (null if not found)
@@ -20,7 +20,8 @@ Extract these fields:
 - subTotal: pre-tax subtotal as a plain number, only if explicitly shown on the invoice (null if not shown)
 - taxAmount: total tax/GST/VAT amount as a plain number, only if explicitly shown (null if not shown; 0 if the invoice explicitly states no tax applies)
 - paymentReference: combine all payment details — PayNow ID, bank name, account number, SWIFT, beneficiary — format: "Bank: OCBC | Acct: 601-493935-001 | Swift: OCBCSGSG | Beneficiary: Denise Teo" — null if none
-- projectName: artist or project name this invoice relates to (null if not applicable)`;
+- projectName: artist or project name this invoice relates to (null if not applicable)
+- description: ONE line, at most 120 characters, saying what this invoice is for, written from the line items (e.g. "Notarial certificate, witnessing, true-copy certification and SAL authentication"). Not the vendor name, not the invoice number, not the email subject.`;
 
 // ── Core LLM call ─────────────────────────────────────────────────────────────
 
