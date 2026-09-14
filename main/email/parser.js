@@ -330,6 +330,14 @@ function parseGenericFormat(text, email, defaults) {
 
 // ── LLM-based PDF parser ──────────────────────────────────────────────────────
 
+function _withQuantity(description, quantity, unitPrice) {
+  const desc = String(description || '').trim();
+  const qty = parseFloat(quantity), price = parseFloat(unitPrice);
+  if (!(qty > 1) || !(price > 0)) return desc;
+  const q = Number.isInteger(qty) ? String(qty) : qty.toFixed(2);
+  return `${desc} — ${q} × ${price.toFixed(2)}`;
+}
+
 async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   let llm;
   try {
@@ -342,8 +350,10 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   const invoiceDate = llm.invoiceDate || new Date().toISOString().split('T')[0];
   const dueDate     = llm.dueDate     || addDays(invoiceDate, 30);
 
+  // Quantity has no column of its own, so "2 × 75.00" rides in the description
+  // and unitAmount stays the line total — the figure Xero must receive.
   const lineItems = (llm.lineItems || []).map(li => ({
-    description:  li.description,
+    description:  _withQuantity(li.description, li.quantity, li.unitPrice),
     unitAmount:   parseFloat(li.amount ?? li.unitAmount) || 0,
     discountRate: 0,
   }));
@@ -484,4 +494,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject }; // helpers exposed for tests
+module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity }; // helpers exposed for tests

@@ -89,9 +89,10 @@ app.use(helmet({
       objectSrc:  ["'none'"],
       baseUri:    ["'self'"],
       formAction: ["'self'"],
-      // Nothing should ever frame this app — the clickjacking counterpart to
-      // the X-Frame-Options header helmet also sets.
-      frameAncestors: ["'none'"],
+      // Only this app may frame this app — the review page embeds its own PDF
+      // route in an iframe, so 'none' broke every preview. Other origins are
+      // still refused, which is the clickjacking point.
+      frameAncestors: ["'self'"],
     },
   },
 }));

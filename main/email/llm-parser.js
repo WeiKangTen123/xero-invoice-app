@@ -15,7 +15,7 @@ Extract these fields:
 - invoiceDate: YYYY-MM-DD (null if not found)
 - dueDate: YYYY-MM-DD (null if not stated)
 - currency: the invoice's actual currency as a 3-letter ISO code (USD, SGD, AUD, GBP, EUR, MYR, etc.) — read explicit codes or symbols on the invoice ("S$" or "PayNow" implies SGD; "£" implies GBP; "€" implies EUR; "A$" implies AUD). If only a bare "$" appears with no other currency signal anywhere on the invoice, return null rather than guessing.
-- lineItems: array of { description, amount } — include full multi-line descriptions
+- lineItems: array of { description, quantity, unitPrice, amount } — description as printed (full multi-line), quantity and unitPrice as plain numbers when the invoice shows them (null otherwise), amount = the line total
 - totalAmount: total due as a plain number (no commas, no symbols)
 - subTotal: pre-tax subtotal as a plain number, only if explicitly shown on the invoice (null if not shown)
 - taxAmount: total tax/GST/VAT amount as a plain number, only if explicitly shown (null if not shown; 0 if the invoice explicitly states no tax applies)

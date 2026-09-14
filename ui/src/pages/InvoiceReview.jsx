@@ -1145,7 +1145,7 @@ export default function InvoiceReview() {
             {(inv.description || editing || inv.invoiceType === 'EXPENSE') && (
               <div className="card">
                 <div className="card-title" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span>📝</span> Claim Purpose / Description
+                  <span>📝</span> {inv.invoiceType === 'EXPENSE' ? 'Claim Purpose / Description' : 'Description'}
                 </div>
                 {editing ? (
                   <div className="form-group" style={{ marginBottom: 0 }}>
