@@ -63,8 +63,9 @@ Per receipt, extract:
     [
       {
         "description": "item description or dish name",
-        "unitAmount": item price as a plain number (e.g. 12.50),
-        "quantity": item quantity if shown (e.g. 1, 2), default 1,
+        "unitAmount": the price of ONE unit as a plain number (e.g. 1.60),
+        "quantity": item quantity if shown (e.g. 1, 6), default 1,
+        "lineTotal": the amount printed on that line (quantity × unit price, e.g. 9.60); same as unitAmount when quantity is 1,
         "discountRate": discount percent if shown, default 0
       }
     ]
@@ -102,7 +103,13 @@ function normalise(parsed) {
 
   const total = _num(parsed.total);
   const tax   = _num(parsed.tax);
-  const sub   = _num(parsed.subTotal);
+  let   sub   = _num(parsed.subTotal);
+  // Singapore receipts print "Sub Total 16.10 / GST 1.33" where the GST is
+  // already inside the sub total. A subtotal equal to the total with a tax
+  // beside it is that case: the pre-tax figure is total − tax.
+  if (sub !== null && total !== null && tax !== null && tax > 0 && Math.abs(sub - total) < 0.005) {
+    sub = Math.round((total - tax) * 100) / 100;
+  }
 
   // A negative total is a refund, which this flow does not model, and a zero
   // total tells the user nothing. Both are treated as "not read".
@@ -115,10 +122,17 @@ function normalise(parsed) {
           const desc = typeof li.description === 'string' && li.description.trim()
             ? li.description.trim().slice(0, 200)
             : (typeof li.name === 'string' && li.name.trim() ? li.name.trim().slice(0, 200) : null);
-          const price = _num(li.unitAmount ?? li.price ?? li.amount ?? li.total);
+          // The stored amount is the LINE total — what the receipt adds up
+          // from — never the unit price. "6 × 1.60" rides in the text since
+          // there is no quantity column.
+          const unit  = _num(li.unitAmount ?? li.price ?? li.amount);
+          const qty   = _num(li.quantity);
+          const line  = _num(li.lineTotal ?? li.total);
+          const price = line !== null ? line : (unit !== null && qty > 1 ? Math.round(unit * qty * 100) / 100 : unit);
           if (!desc && price === null) return null;
+          const label = desc || 'Item';
           return {
-            description:  desc || 'Item',
+            description:  qty > 1 && unit !== null && unit > 0 ? `${label} — ${Number.isInteger(qty) ? qty : qty.toFixed(2)} × ${unit.toFixed(2)}` : label,
             unitAmount:   price !== null && price >= 0 ? price : 0,
             discountRate: typeof li.discountRate === 'number' && li.discountRate >= 0 ? li.discountRate : 0,
           };

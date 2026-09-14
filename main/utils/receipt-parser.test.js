@@ -45,7 +45,8 @@ describe('utils/receipt-parser', () => {
       };
       const res = parser.normalise(withItems);
       expect(res.lineItems).toEqual([
-        { description: 'Burger', unitAmount: 12.5, discountRate: 0 },
+        // 2 × 12.50 is a 25.00 line; the quantity rides in the text.
+        { description: 'Burger — 2 × 12.50', unitAmount: 25, discountRate: 0 },
         { description: 'Fries', unitAmount: 4.5, discountRate: 10 },
       ]);
     });

@@ -168,6 +168,14 @@ describe('AR / AP / Claims tabs — claim controls live only on the claims tab',
     }
   });
 
+  test('the review page labels the contact by document kind', () => {
+    const r = fs.readFileSync(path.join(ROOT, 'ui/src/pages/InvoiceReview.jsx'), 'utf8');
+    expect(r).toContain("isExpense ? 'Merchant' : inv.invoiceType === 'ACCREC' ? 'Customer' : 'Vendor / Contact'");
+    expect(r).toContain("isExpense ? 'Claim ref' : 'Invoice #'");
+    expect(r).toContain("isExpense ? 'Receipt date' : 'Invoice Date'");
+    expect(r).toContain('{!isExpense && <MiniField label="Due Date"');
+  });
+
   test('bills have Add and Import, and deliberately no phone', () => {
     const bills = fs.readFileSync(path.join(ROOT, 'ui/src/components/bills/BillIntake.jsx'), 'utf8');
     expect(bills).toContain('Add bill');

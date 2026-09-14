@@ -1076,21 +1076,21 @@ export default function InvoiceReview() {
                     </select>
                   </div>
                   <div className="form-group">
-                    <label className="form-label">Invoice #</label>
+                    <label className="form-label">{isExpense ? 'Claim ref' : 'Invoice #'}</label>
                     <input className="form-input" value={form.invoiceNumber}
                       onChange={e => updateField('invoiceNumber', e.target.value)} />
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <div className="form-group" style={{ flex: 1 }}>
-                      <label className="form-label">Invoice Date</label>
+                      <label className="form-label">{isExpense ? 'Receipt date' : 'Invoice Date'}</label>
                       <input className="form-input" type="date" value={form.invoiceDate || ''}
                         onChange={e => updateField('invoiceDate', e.target.value)} />
                     </div>
-                    <div className="form-group" style={{ flex: 1 }}>
+                    {!isExpense && <div className="form-group" style={{ flex: 1 }}>
                       <label className="form-label">Due Date</label>
                       <input className="form-input" type="date" value={form.dueDate || ''}
                         onChange={e => updateField('dueDate', e.target.value)} />
-                    </div>
+                    </div>}
                   </div>
                   <div className="form-group" style={{ marginBottom: 0 }}>
                     <label className="form-label">Account</label>
@@ -1123,10 +1123,11 @@ export default function InvoiceReview() {
                   </div>
                   {/* Compact 2-col grid instead of one full-width row per field */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px' }}>
-                    <MiniField label="Invoice #"    value={inv.invoiceNumber} mono />
+                    {/* A claim is a receipt: it has a reference and a receipt date, and no due date. */}
+                    <MiniField label={isExpense ? 'Claim ref' : 'Invoice #'} value={inv.invoiceNumber} mono />
                     <AccountMiniField code={inv.accountCode} />
-                    <MiniField label="Invoice Date" value={inv.invoiceDate} />
-                    <MiniField label="Due Date"     value={inv.dueDate} />
+                    <MiniField label={isExpense ? 'Receipt date' : 'Invoice Date'} value={inv.invoiceDate} />
+                    {!isExpense && <MiniField label="Due Date" value={inv.dueDate} />}
                   </div>
                   <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
                     Source: {
@@ -1200,7 +1201,7 @@ export default function InvoiceReview() {
 
             {/* Vendor card */}
             <div className="card">
-              <div className="card-title" style={{ marginBottom: 12 }}>Vendor / Contact</div>
+              <div className="card-title" style={{ marginBottom: 12 }}>{isExpense ? 'Merchant' : inv.invoiceType === 'ACCREC' ? 'Customer' : 'Vendor / Contact'}</div>
               {editing ? (
                 <>
                   <div className="form-group">
