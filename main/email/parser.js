@@ -406,6 +406,22 @@ function _describeItems(lineItems) {
   return names.length > 4 ? `${shown} +${names.length - 4} more` : shown;
 }
 
+// The bank's address from the payment box kept being returned as the vendor's
+// (JCPINV-1063 stored DBS's). The model now has a slot for the bank address;
+// a vendor address that is the same text, or that sits inside the assembled
+// payment reference, is the bank's and is dropped rather than stored wrong.
+function _vendorAddress(llm) {
+  const norm = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const addr = String(llm.vendorAddress || '').trim();
+  if (!addr) return '';
+  const a = norm(addr);
+  const bank = norm(llm.bankAddress);
+  if (bank && (a === bank || a.includes(bank) || bank.includes(a))) return '';
+  const pay = norm(llm.paymentReference);
+  if (pay && a.length >= 12 && pay.includes(a)) return '';
+  return addr;
+}
+
 function _withQuantity(description, quantity, unitPrice) {
   const desc = String(description || '').trim();
   const qty = parseFloat(quantity), price = parseFloat(unitPrice);
@@ -449,7 +465,7 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     receivedAt:       email.date ? new Date(email.date).toISOString() : null,
     contactName:      (llm.vendorName || 'Unknown Vendor').slice(0, 255),
     contactEmail:     llm.vendorEmail   || email.from?.value?.[0]?.address || '',
-    contactAddress:   llm.vendorAddress || '',
+    contactAddress:   _vendorAddress(llm),
     vendorName:       (llm.vendorName || 'Unknown Vendor').slice(0, 255),
     vendorPhone:      llm.vendorPhone   || '',
     invoiceNumber:    (llm.invoiceNumber || fallbackInvoiceNumber).slice(0, 100),
@@ -572,4 +588,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity, _isPaymentSchedule, _describeItems }; // helpers exposed for tests
+module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity, _isPaymentSchedule, _describeItems, _vendorAddress }; // helpers exposed for tests

@@ -9,6 +9,7 @@ const SYSTEM_PROMPT = `You are an invoice data extractor. Return ONLY valid JSON
 Extract these fields:
 - vendorName: the party that ISSUED the invoice — the one whose logo/letterhead, GST/UEN number and bank account details appear on it. The name printed under the word INVOICE, or after "Bill To" / "To" / "Attention", is the CUSTOMER being billed; never return that as vendorName
 - vendorAddress: the vendor's own street address — the one printed beside the vendor's name or logo. NEVER the bank's address from the payment details / bank transfer box (null if not found)
+- bankAddress: the address printed inside the bank / payment details block, if any (null if none). This is where the bank's address goes, so it never ends up in vendorAddress
 - vendorEmail: vendor's email address (null if not found)
 - vendorPhone: vendor's phone number (null if not found)
 - invoiceNumber: invoice reference number (null if not found)
