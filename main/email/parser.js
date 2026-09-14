@@ -128,7 +128,8 @@ async function extractText(email) {
 
 // ── Template format parser ────────────────────────────────────────────────────
 
-function parseTemplateFormat(text, email, defaults) {
+function parseTemplateFormat(rawText, email, defaults) {
+  const text = _plainTemplateText(rawText);
   const contactName = getMatch(text, /Client\s*\/\s*Customer[^:\n]*:\s*([^\n]+)/i) || 'Unknown';
 
   const contactEmail = (getMatch(text, /^Email\s*:\s*([^\n]+)/im) ||
@@ -298,6 +299,16 @@ function _isPaymentSchedule(desc) {
 
 // Strip the nested "Description / Details :" label a sender leaves inside the
 // block; the words are what matter.
+// mailparser turns the HTML email into Markdown-ish text: bold becomes
+// *Project*:, list items become "   - ". Those marks are formatting, not
+// content — they were ending up in stored descriptions ("Project*: Demo").
+function _plainTemplateText(text) {
+  return String(text || '')
+    .replace(/^[ \t]*[-•·][ \t]+/gm, '')                 // list bullets
+    .replace(/(^|[\s(])[*_]{1,2}(?=\S)/gm, '$1')          // opening emphasis
+    .replace(/(?<=\S)[*_]{1,2}(?=[\s:;,.)]|$)/gm, '');   // closing emphasis
+}
+
 function _scheduleText(sc) {
   const t = sc.text.replace(/^\s*[*]?\s*Description\s*\/\s*Details\s*:\s*/gim, '').trim();
   return /payment\s*terms?/i.test(t) ? t : `Payment terms: ${t}`;
@@ -381,7 +392,14 @@ function _oneLine(text) {
 // joined, so "create AP invoice" never stands in for what was bought.
 function _describeItems(lineItems) {
   const names = (lineItems || [])
-    .map(li => String(li.description || '').split('\n')[0].replace(/^\s*[*•·]\s*/, '').replace(/^(Project|Campaign)\s*:\s*/i, '').trim())
+    .map(li => {
+      const lines = String(li.description || '').split('\n').map(l => l.replace(/^\s*[*•·-]\s*/, '').trim());
+      // The AR template names the job as "Project: X" / "Campaign: Y".
+      const field = label => (lines.find(l => new RegExp(`^${label}\\s*:`, 'i').test(l)) || '').replace(/^[^:]*:\s*/, '').trim();
+      const project = field('Project'), campaign = field('Campaign');
+      if (project) return campaign ? `${project} — ${campaign}` : project;
+      return (lines.find(Boolean) || '').replace(/^(Project|Campaign)\s*:\s*/i, '');
+    })
     .filter(n => n && n.toLowerCase() !== 'item');
   if (!names.length) return '';
   const shown = names.slice(0, 4).join(', ');

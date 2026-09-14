@@ -70,6 +70,65 @@ describe('a payment-schedule block on the AR template', () => {
   });
 });
 
+describe('the same email as mailparser actually delivers it (bold as *x*, bullets as "   - ")', () => {
+  const AS_DELIVERED = `Client / Customer (Full name/entities name) : Demo 123
+Email : demo@123.com
+Address : 123 Tiong Bahru
+
+Date : 14 Sep 2026
+Payment Terms / Payment Date : 28 Sep 2026
+Currency : SGD
+Tax inclusive / exclusive : No Tax
+
+
+   - Description / Details :
+
+*Project*: Project Demo 123
+*Campaign*: Display of products
+*Project period*: 14 Sep to 28 Sep 2026
+*Territory*: Singapore
+Amount : 2000
+Discount :
+Tax (If applicable) : No Tax
+
+
+   - Description / Details :
+
+*Scope of work:*
+
+   - 10 X Philips Airfryer
+
+
+   - Description / Details : *Payment Terms:  50% upon confirmation (14 Sep
+   2026), 50% on Event Date (28 Sep 2026) - immediate upon invoice*
+
+Amount : 1000
+
+
+Discount :
+Tax (If applicable) : No Tax
+`;
+  const r = parseTemplateFormat(AS_DELIVERED, { subject: 'create AR invoice' }, {});
+
+  test('description names the job, with no formatting marks', () => {
+    expect(r.description).toBe('Project Demo 123 — Display of products');
+  });
+  test('item text is clean: no asterisks, no bullets, no nested label', () => {
+    const d = r.lineItems[0].description;
+    expect(d).not.toMatch(/[*]/);
+    expect(d).not.toMatch(/^\s*-\s/m);
+    expect(d).not.toMatch(/Description \/ Details/);
+    expect(d).toContain('Project: Project Demo 123');
+    expect(d).toContain('10 X Philips Airfryer');
+    expect(d).toContain('Payment Terms:  50% upon confirmation');
+  });
+  test('total and flag as before', () => {
+    expect(r.totalAmount).toBe(2000);
+    expect(r.lineItems).toHaveLength(1);
+    expect(r.reviewReason).toMatch(/payment schedule/);
+  });
+});
+
 describe('blank lines between Amount, Discount and Tax', () => {
   test('no longer drop a real second item', () => {
     const two = EMAIL.replace(/• Description \/ Details : Payment Terms[^\n]*\n/, '');
