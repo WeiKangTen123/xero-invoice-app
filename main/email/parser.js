@@ -277,7 +277,7 @@ function parseTemplateFormat(text, email, defaults) {
     totalAmount:      parseFloat(totalAmount.toFixed(2)),
     subTotal:         parseFloat(subTotal.toFixed(2)),
     taxAmount:        parseFloat(taxAmount.toFixed(2)),
-    description:      (cleanSubject(email.subject) || `Invoice from ${contactName}`).slice(0, 500),
+    description:      (_describeItems(lineItems) || cleanSubject(email.subject) || `Invoice from ${contactName}`).slice(0, 500),
     sourceEmail:      email.from?.text || '',
     accountCode:      defaults.accountCode,
     // Set when a block was read as a payment schedule. A person confirms the
@@ -372,6 +372,22 @@ function parseGenericFormat(text, email, defaults) {
 
 // ── LLM-based PDF parser ──────────────────────────────────────────────────────
 
+function _oneLine(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  return t.length >= 4 ? t.slice(0, 200) : '';
+}
+
+// A description built from the items themselves: the first line of each,
+// joined, so "create AP invoice" never stands in for what was bought.
+function _describeItems(lineItems) {
+  const names = (lineItems || [])
+    .map(li => String(li.description || '').split('\n')[0].replace(/^\s*[*•·]\s*/, '').replace(/^(Project|Campaign)\s*:\s*/i, '').trim())
+    .filter(n => n && n.toLowerCase() !== 'item');
+  if (!names.length) return '';
+  const shown = names.slice(0, 4).join(', ');
+  return names.length > 4 ? `${shown} +${names.length - 4} more` : shown;
+}
+
 function _withQuantity(description, quantity, unitPrice) {
   const desc = String(description || '').trim();
   const qty = parseFloat(quantity), price = parseFloat(unitPrice);
@@ -433,7 +449,9 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     // always has a real dollar figure to look up the org's actual tax rate with.
     subTotal:         llm.subTotal  != null ? parseFloat(llm.subTotal)  : null,
     taxAmount:        llm.taxAmount != null ? parseFloat(llm.taxAmount) : null,
-    description:      (cleanSubject(email.subject) || `Invoice from ${llm.vendorName}`).slice(0, 500),
+    // What the bill is for, read from its items — not the subject line the
+    // sender typed to forward it ("create AP invoice").
+    description:      (_oneLine(llm.description) || _describeItems(lineItems) || cleanSubject(email.subject) || `Invoice from ${llm.vendorName}`).slice(0, 500),
     sourceEmail:      email.from?.text || '',
     accountCode:      defaults.accountCode,
     paymentReference: llm.paymentReference || '',
@@ -536,4 +554,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity, _isPaymentSchedule }; // helpers exposed for tests
+module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity, _isPaymentSchedule, _describeItems }; // helpers exposed for tests
