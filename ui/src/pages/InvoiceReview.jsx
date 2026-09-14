@@ -1201,7 +1201,7 @@ export default function InvoiceReview() {
 
             {/* Vendor card */}
             <div className="card">
-              <div className="card-title" style={{ marginBottom: 12 }}>{isExpense ? 'Merchant' : 'Client / Contact'}</div>
+              <div className="card-title" style={{ marginBottom: 12 }}>{isExpense ? 'Merchant' : inv.invoiceType === 'ACCREC' ? 'Client / Contact' : 'Vendor / Contact'}</div>
               {editing ? (
                 <>
                   <div className="form-group">
