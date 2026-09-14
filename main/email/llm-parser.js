@@ -7,7 +7,7 @@ const { parseLlmJson } = require('../utils/llm-json');
 const SYSTEM_PROMPT = `You are an invoice data extractor. Return ONLY valid JSON, no explanation, no markdown.
 
 Extract these fields:
-- vendorName: seller/service provider name (NOT the buyer/recipient of the invoice)
+- vendorName: the party that ISSUED the invoice — the one whose logo/letterhead, GST/UEN number and bank account details appear on it. The name printed under the word INVOICE, or after "Bill To" / "To" / "Attention", is the CUSTOMER being billed; never return that as vendorName
 - vendorAddress: the vendor's own street address — the one printed beside the vendor's name or logo. NEVER the bank's address from the payment details / bank transfer box (null if not found)
 - vendorEmail: vendor's email address (null if not found)
 - vendorPhone: vendor's phone number (null if not found)
