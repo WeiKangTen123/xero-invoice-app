@@ -1,6 +1,7 @@
 const pdfParse             = require('pdf-parse');
 const path                 = require('path');
 const { verifyTemplateExtraction } = require('./template-verifier');
+const { isPaymentSchedule }        = require('./invoice-template');
 const logger               = require('../utils/logger');
 const { extractWithRetry } = require('./llm-parser');
 
@@ -230,9 +231,10 @@ function parseTemplateFormat(rawText, email, defaults) {
   }
 
   let scheduleReason = null;
+  const scheduleNotes = schedules.map(sc => _scheduleText(sc));
   if (schedules.length) {
     const last = lineItems[lineItems.length - 1];
-    last.description = [last.description, ...schedules.map(sc => _scheduleText(sc))].join('\n');
+    last.description = [last.description, ...scheduleNotes].join('\n');
     const instalments = schedules.map(sc => sc.amount).filter(a => a > 0);
     scheduleReason = `the email has a payment schedule block (${instalments.map(a => a.toLocaleString('en')).join(', ') || 'no amount'}) ` +
       `alongside the line items — it was read as terms, not as another item. Confirm the total`;
@@ -284,18 +286,15 @@ function parseTemplateFormat(rawText, email, defaults) {
     // Set when a block was read as a payment schedule. A person confirms the
     // total before anything moves; the handler turns this into review-needed.
     reviewReason:     scheduleReason,
+    // The text of those blocks as attached to the last item, so the verifier
+    // can correct the item's own wording without dropping the terms.
+    scheduleNotes,
   };
 }
 
-// "50% upon confirmation (14 Sep), 50% on Event Date" / "deposit" / "balance
-// upon completion". A percentage next to a payment word is the tell; a plain
-// "10% discount" inside a description is not, since "discount" is not one.
-function _isPaymentSchedule(desc) {
-  const t = desc.toLowerCase();
-  const hasPct   = /\d+(?:\.\d+)?\s*%/.test(t);
-  const hasTerms = /payment\s*terms?|upon\s+(?:confirmation|completion|signing|delivery)|on\s+event\s+date|deposit|balance|instal?ment/.test(t);
-  return hasPct && hasTerms;
-}
+// Declared with the template (invoice-template.js) so the verifier applies the
+// same rule; kept under this name for the tests that pin it.
+const _isPaymentSchedule = isPaymentSchedule;
 
 // Strip the nested "Description / Details :" label a sender leaves inside the
 // block; the words are what matter.

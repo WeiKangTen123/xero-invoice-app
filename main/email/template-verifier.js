@@ -49,7 +49,9 @@ Return this shape:
   "missingLabels": [string]                 // template labels that do not appear in the text at all
 }
 
-Amounts are plain numbers with no currency or thousands separators. A description keeps its full text, bullet points included.`;
+Amounts are plain numbers with no currency or thousands separators. A description keeps its full text, bullet points included.
+
+A "Description / Details" block whose text is a payment SCHEDULE — a percentage beside a payment word, e.g. "Payment Terms: 50% upon confirmation, 50% on Event Date", "30% deposit, balance on delivery" — states when the money for the items above it is paid. It is payment terms, not work, and its Amount is an instalment of an item already listed. Never return it as a line item and never count it as one.`;
 
 const MAX_TEXT   = 6000;
 const ATTEMPTS   = 2;
@@ -106,7 +108,19 @@ function reconcile(parsed, reply) {
   }
 
   // ── Line items: descriptions are corrected; amounts are only ever flagged.
-  const theirs = Array.isArray(reply.lineItems) ? reply.lineItems : null;
+  //
+  //    A block that is a payment schedule is terms for the items above it. The
+  //    parser set it aside and attached its text to the last item (parser.js);
+  //    the model, asked not to, may still hand it back as a block. It is not a
+  //    line item the parser missed, so it is dropped before the counts are
+  //    compared — unless it is all the model found, which is a real disagreement.
+  const notes  = Array.isArray(parsed.scheduleNotes) ? parsed.scheduleNotes : [];
+  const suffix = notes.length ? `\n${notes.join('\n')}` : '';
+  let theirs = Array.isArray(reply.lineItems) ? reply.lineItems : null;
+  if (theirs) {
+    const items = theirs.filter(t => !(t && template.isPaymentSchedule(t.description)));
+    if (items.length) theirs = items;
+  }
   if (theirs) {
     if (theirs.length !== out.lineItems.length) {
       note('lineItems.count', out.lineItems.length, theirs.length, 'flagged');
@@ -114,6 +128,10 @@ function reconcile(parsed, reply) {
     } else {
       theirs.forEach((t, i) => {
         const ours = out.lineItems[i];
+        // The notes ride on the last item. The model's reading is compared
+        // with the item's own wording, and a correction keeps the notes.
+        const last = i === out.lineItems.length - 1;
+        const bare = last && suffix && ours.description.endsWith(suffix) ? ours.description.slice(0, -suffix.length) : ours.description;
         const tAmt = num(t.unitAmount);
         if (tAmt !== null && !same(tAmt, ours.unitAmount)) {
           note(`lineItems[${i}].unitAmount`, ours.unitAmount, tAmt, 'flagged');
@@ -124,9 +142,11 @@ function reconcile(parsed, reply) {
           note(`lineItems[${i}].discountRate`, ours.discountRate, tDisc, 'flagged');
           reasons.push(`Line ${i + 1}: parser read a ${ours.discountRate || 0}% discount, the document appears to say ${tDisc}%.`);
         }
-        if (t.description && norm(t.description) !== norm(ours.description)) {
+        if (t.description && norm(t.description) !== norm(bare)) {
           note(`lineItems[${i}].description`, ours.description, t.description, 'corrected');
-          ours.description = String(t.description).trim().slice(0, 4000);
+          const corrected = String(t.description).trim();
+          const keep = last ? notes.filter(n => !norm(corrected).includes(norm(n))) : [];
+          ours.description = [corrected, ...keep].join('\n').slice(0, 4000);
         }
       });
     }

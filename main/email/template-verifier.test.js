@@ -109,6 +109,45 @@ describe('template-verifier — rule 4: header fields are corrected in place', (
   });
 });
 
+describe('template-verifier — a payment schedule is terms, not an item', () => {
+  // The parser keeps a schedule block's text on the last item and does not
+  // count it as an item (parser.js). The model, reading the same email, may
+  // still hand it back as a block. That must not read as a missing line item,
+  // and correcting the description must not throw the terms away.
+  const NOTE = 'Scope of work: 10 X Philips Airfryer\nPayment Terms: 50% upon confirmation (14 Sep 2026), 50% on Event Date (28 Sep 2026)';
+  const withSchedule = () => ({
+    ...base(),
+    lineItems: [{ description: `Project: Demo 123\n${NOTE}`, unitAmount: 2000, discountRate: 0 }],
+    subTotal: 2000, taxAmount: 0, totalAmount: 2000,
+    scheduleNotes: [NOTE],
+  });
+  const item = (description, unitAmount) => ({ description, unitAmount, discountRate: null, taxPercent: null });
+
+  test('a schedule block the model returns as a second item is not a count mismatch', () => {
+    const reply = { ...agreeing(), lineItems: [
+      item('Project: Demo 123', 2000),
+      item('Payment Terms: 50% upon confirmation (14 Sep 2026), 50% on Event Date (28 Sep 2026)', 1000),
+    ] };
+    const r = _reconcile(withSchedule(), reply);
+    expect(r.reviewReason).toBeNull();
+    expect(r.parsed.lineItems).toHaveLength(1);
+    expect(r.parsed.totalAmount).toBe(2000);
+  });
+
+  test('correcting the description keeps the terms the parser attached', () => {
+    const reply = { ...agreeing(), lineItems: [item('Project: Project Demo 123', 2000)] };
+    const r = _reconcile(withSchedule(), reply);
+    expect(r.parsed.lineItems[0].description).toBe(`Project: Project Demo 123\n${NOTE}`);
+    expect(r.reviewReason).toBeNull();
+  });
+
+  test('a real second item is still a mismatch', () => {
+    const reply = { ...agreeing(), lineItems: [item('Project: Demo 123', 2000), item('Display banners', 1000)] };
+    const r = _reconcile(withSchedule(), reply);
+    expect(r.reviewReason).toMatch(/found 1 line item.*appears to have 2/);
+  });
+});
+
 describe('template-verifier — rule 3: money is flagged, never overwritten', () => {
   test('a different line amount keeps the parser figure and asks for review, naming both', () => {
     const reply = agreeing(); reply.lineItems[0].unitAmount = 1500;
