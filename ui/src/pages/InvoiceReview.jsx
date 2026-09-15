@@ -764,13 +764,17 @@ export default function InvoiceReview() {
           </div>
         )}
 
-        {/* Parsing / general warning error (when not a standard discrepancy and not duplicate) */}
+        {/* Why this record is waiting: a payment schedule the parser set aside,
+            a figure the verifier read differently, a failed submission. The
+            server prefixes its review reasons with "Please check:", which the
+            heading already says. Duplicates and amount discrepancies have their
+            own banners above. */}
         {!discrepancyMatch && inv.errorMsg && !submitErr && !(/duplicate/i.test(inv.errorMsg)) && (
           <div className="alert alert-warning" style={{ marginBottom: 12 }}>
             <span className="alert-icon">⚠</span>
             <div>
               <strong>{inv.status === 'review-needed' ? 'Attention Needed' : 'Previous submission failed'}</strong>
-              {' — '}{inv.errorMsg}
+              {' — '}{inv.errorMsg.replace(/^Please check:\s*/i, '')}
               {inv.status === 'review-needed' && (
                 <div style={{ marginTop: 4, fontSize: 12, opacity: 0.85 }}>
                   Review the document, correct any fields below, then click "Mark as Reviewed".
@@ -1227,7 +1231,8 @@ export default function InvoiceReview() {
                   <InfoRow label="Email"      value={inv.contactEmail} />
                   <InfoRow label="Address"    value={inv.contactAddress} />
                   <InfoRow label="Phone"      value={inv.vendorPhone} />
-                  <InfoRow label="From email" value={inv.sourceEmail} />
+                  {/* A claim is a photo from a phone — nothing emailed it. */}
+                  {!isExpense && <InfoRow label="From email" value={inv.sourceEmail} />}
                 </>
               )}
             </div>
