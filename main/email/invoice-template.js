@@ -61,4 +61,18 @@ function describe() {
   ].join('\n');
 }
 
-module.exports = { HEADER_FIELDS, LINE_ITEM_FIELDS, describe };
+// "50% upon confirmation (14 Sep), 50% on Event Date" / "30% deposit, balance
+// upon completion". A percentage next to a payment word is the tell; a plain
+// "10% discount" inside a description is not, since "discount" is not one.
+//
+// Shared by the regex parser, which sets such a block aside as terms rather than
+// summing it, and by the verifier, which must not count one the model hands
+// back as a line item the parser missed.
+function isPaymentSchedule(text) {
+  const t = String(text || '').toLowerCase();
+  const hasPct   = /\d+(?:\.\d+)?\s*%/.test(t);
+  const hasTerms = /payment\s*terms?|upon\s+(?:confirmation|completion|signing|delivery)|on\s+event\s+date|deposit|balance|instal?ment/.test(t);
+  return hasPct && hasTerms;
+}
+
+module.exports = { HEADER_FIELDS, LINE_ITEM_FIELDS, describe, isPaymentSchedule };

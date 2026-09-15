@@ -56,6 +56,13 @@ describe('a payment-schedule block on the AR template', () => {
     expect(d).not.toMatch(/Description \/ Details/);
   });
 
+  test('exposes the attached text as notes, so a later correction can keep them', () => {
+    expect(r.scheduleNotes).toHaveLength(1);
+    expect(r.scheduleNotes[0]).toContain('10 X Philips Airfryer');
+    expect(r.scheduleNotes[0]).toContain('Payment Terms:');
+    expect(r.lineItems[0].description.endsWith(r.scheduleNotes[0])).toBe(true);
+  });
+
   test('asks a person to confirm the total', () => {
     expect(r.reviewReason).toMatch(/payment schedule/);
     expect(r.reviewReason).toContain('1,000');
@@ -136,6 +143,7 @@ describe('blank lines between Amount, Discount and Tax', () => {
     expect(r.lineItems).toHaveLength(2);
     expect(r.totalAmount).toBe(3000);
     expect(r.reviewReason).toBeNull();
+    expect(r.scheduleNotes).toEqual([]);
   });
 });
 
