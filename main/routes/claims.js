@@ -9,6 +9,7 @@ const claimWorker  = require('../claims/claim-worker');
 const { parseReceiptBatch } = require('../utils/receipt-parser');
 const { suggestCategories } = require('../claims/claim-categories');
 const { hashBuffer, findDuplicate } = require('../claims/claim-dedup');
+const { resolveAccountCode } = require('../claims/category-account');
 const logger       = require('../utils/logger');
 
 // Importing a batch expense claim: a zip of receipts plus the claim form.
@@ -105,6 +106,11 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
   const userConfig = getUserConfig(userId);
   const defaultCurrency = userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'SGD';
   const defaultAccount = userConfig.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '429';
+  // The account follows what the claim was for — the form's category, or the
+  // one the receipt reader named — matched against the org's own chart. No
+  // match, or no connected org, and the default stands (claims/category-account).
+  const cat = category || (receipt && receipt.category) || null;
+  const accountCode = (await resolveAccountCode(userId, cat)) || defaultAccount;
   const invDate = row.date || (receipt && receipt.date) || new Date().toISOString().split('T')[0];
   const claimNum = (receipt && receipt.receiptNumber) || (row.no ? `EXP-${row.no}` : `EXP-${id.slice(-6).toUpperCase()}`);
 
@@ -119,7 +125,7 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
     invoiceNumber: claimNum,
     invoiceDate: invDate,
     dueDate: invDate,
-    accountCode: defaultAccount,
+    accountCode,
     // The claimant's own figures are what is recorded. The receipt read is
     // evidence, and a disagreement is reported rather than silently preferred.
     vendorName:  (receipt && receipt.merchant) || null,
@@ -129,7 +135,6 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
     taxAmount:   receipt && receipt.tax != null ? receipt.tax : null,
     lineItems:   (receipt && Array.isArray(receipt.lineItems) && receipt.lineItems.length) ? receipt.lineItems : [],
     description: (() => {
-      const cat = category || (receipt && receipt.category) || null;
       if (receipt && receipt.description && (!row.description || row.description === receipt.merchant)) {
         return receipt.description;
       }

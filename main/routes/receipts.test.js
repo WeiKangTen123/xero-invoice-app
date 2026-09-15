@@ -5,6 +5,10 @@ const express = require('express');
 // Gemini call from the test suite, and the routes' job is to store the receipt
 // correctly whatever the parser does.
 jest.mock('../utils/receipt-parser', () => ({ parseReceiptImage: jest.fn().mockResolvedValue(null) }));
+// The category → account lookup reads the org's chart from Xero. Mocked so no
+// test needs a connected org; what is under test is what the route does with
+// the answer.
+jest.mock('../claims/category-account', () => ({ resolveAccountCode: jest.fn().mockResolvedValue(null) }));
 const jwt     = require('jsonwebtoken');
 const fs      = require('fs');
 const path    = require('path');
@@ -478,7 +482,8 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
     const row = invoiceStore.forUser(testUser.id).getById(body.receipt.id);
     expect(row.vendorName).toBe('Cafe');
     expect(row.totalAmount).toBe(12.5);
-    expect(row.invoiceDate).toBeFalsy();
+    // The upload stamped today's date; an unreadable date must not erase it.
+    expect(row.invoiceDate).toBe(body.receipt.invoiceDate);
   });
 
   test('a read receipt still requires review — it never jumps to ready-to-post', async () => {
@@ -491,6 +496,39 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
     const { body } = await upload().expect(201);
     await settle();
     expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id).status).toBe('review-needed');
+  });
+
+  describe('the account follows what the receipt was for', () => {
+    const read = extra => ({ merchant: 'Chateraise', date: '2026-08-24', currency: 'SGD', total: 9.6, confidence: 'high', box: null, ...extra });
+
+    test('a category the chart has an account for sets that account', async () => {
+      const accounts = require('../claims/category-account');
+      accounts.resolveAccountCode.mockResolvedValue('420');
+      parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [read({ category: 'Staff Welfare' })] });
+      const { body } = await upload().expect(201);
+      await settle();
+      expect(accounts.resolveAccountCode).toHaveBeenCalledWith(testUser.id, 'Staff Welfare');
+      expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id).accountCode).toBe('420');
+    });
+
+    test('no account for the category keeps the user default rather than clearing it', async () => {
+      const accounts = require('../claims/category-account');
+      accounts.resolveAccountCode.mockResolvedValue(null);
+      parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [read({ category: 'Medical/Dental' })] });
+      const { body } = await upload().expect(201);
+      expect(body.receipt.accountCode).toBeTruthy();          // the default, set at upload
+      await settle();
+      expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id).accountCode).toBe(body.receipt.accountCode);
+    });
+
+    test('a receipt with no category never asks the chart and keeps the default', async () => {
+      const accounts = require('../claims/category-account');
+      parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [read({ category: null })] });
+      const { body } = await upload().expect(201);
+      await settle();
+      expect(accounts.resolveAccountCode).not.toHaveBeenCalled();
+      expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id).accountCode).toBe(body.receipt.accountCode);
+    });
   });
 });
 
