@@ -57,6 +57,20 @@ describe('invoice-store (SQLite)', () => {
     expect(updated.xeroInvoiceId).toBe('xero-1');
   });
 
+  test('update leaves a field alone when the patch has it as undefined; null clears it', () => {
+    const store = invoiceStore.forUser(userId);
+    const inv   = baseInvoice({ accountCode: '429', invoiceDate: '2026-09-14' });
+    store.add(inv);
+    // A reader that could not make out a value passes undefined for it. That
+    // must mean "nothing new here", never "erase what was there" — a receipt
+    // with an unreadable date was losing the upload date it already had.
+    const kept = store.update(inv.id, { accountCode: undefined, invoiceDate: undefined, vendorName: 'Grab' });
+    expect(kept.accountCode).toBe('429');
+    expect(kept.invoiceDate).toBe('2026-09-14');
+    expect(kept.vendorName).toBe('Grab');
+    expect(store.update(inv.id, { accountCode: null }).accountCode).toBeNull();
+  });
+
   test('findPosted matches on normalized vendor name + invoice number', () => {
     const store = invoiceStore.forUser(userId);
     const inv   = baseInvoice({ status: 'posted', vendorName: 'BLCKLB PTE. LTD.' });
