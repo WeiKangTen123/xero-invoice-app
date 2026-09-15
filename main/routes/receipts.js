@@ -12,6 +12,7 @@ const { parseReceiptImage } = require('../utils/receipt-parser');
 const pdfPages = require('../utils/pdf-pages');
 const thumbnailer = require('../utils/thumbnailer');
 const { hashBuffer, findDuplicate } = require('../claims/claim-dedup');
+const { resolveAccountCode } = require('../claims/category-account');
 const QRCode       = require('qrcode');
 const logger       = require('../utils/logger');
 
@@ -180,8 +181,15 @@ function _flagIfSuspected(userId, id) {
 }
 
 // Applies one receipt's fields to a record.
-function _applyFields(userId, id, r, extra = {}) {
+//
+// The account follows what the receipt was for. Every claim used to land on
+// the user's one default account, so snacks and airfares shared a line; the
+// reader already names a category and the org's chart of accounts already
+// names its accounts, so the two are matched. No match keeps the default.
+async function _applyFields(userId, id, r, extra = {}) {
+  const accountCode = r.category ? (await resolveAccountCode(userId, r.category)) || undefined : undefined;
   invoiceStore.forUser(userId).update(id, {
+    accountCode,
     vendorName:  r.merchant    ?? undefined,
     invoiceDate: r.date        ?? undefined,
     dueDate:     r.date        ?? undefined,
@@ -253,7 +261,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = nu
   if (!split) {
     // One receipt, or evidence too weak to split on. Either way the whole image
     // stays on one record.
-    _applyFields(userId, id, receipts[0]);
+    await _applyFields(userId, id, receipts[0]);
     _flagIfSuspected(userId, id);
     logger.info('Receipt read', { userId, id, receipts: receipts.length, split: false, reason });
     return;
@@ -261,7 +269,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = nu
 
   const group = id;
   const [first, ...rest] = receipts;
-  _applyFields(userId, id, first, { receiptBox: JSON.stringify(first.box), receiptGroup: group });
+  await _applyFields(userId, id, first, { receiptBox: JSON.stringify(first.box), receiptGroup: group });
   _flagIfSuspected(userId, id);
   for (const r of rest) {
     const sibId = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
@@ -277,7 +285,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = nu
       receiptGroup: group,
       processedAt: new Date().toISOString(),
     });
-    _applyFields(userId, sibId, r);
+    await _applyFields(userId, sibId, r);
     _flagIfSuspected(userId, sibId);
   }
   logger.info('Photo split into separate receipts', { userId, id, count: receipts.length });

@@ -15,6 +15,9 @@ jest.mock('../utils/receipt-parser', () => ({
   parseReceiptImage: jest.fn().mockResolvedValue(null),
 }));
 jest.mock('../claims/claim-categories', () => ({ suggestCategories: jest.fn().mockResolvedValue([]) }));
+// The category → account lookup reads the org's chart from Xero; mocked so no
+// test needs a connected org.
+jest.mock('../claims/category-account', () => ({ resolveAccountCode: jest.fn().mockResolvedValue(null) }));
 
 // A minimal store-only zip. Same builder the claim-import tests use.
 function makeZip(files) {
@@ -195,6 +198,25 @@ describe('routes/claims', () => {
       const rows = invoiceStore.forUser(testUser.id).getReceiptGroup(done.result.groupId);
       expect(rows).toHaveLength(9);
       expect(rows.every(r => r.invoiceType === 'EXPENSE' && r.source === 'claim')).toBe(true);
+    });
+
+    test("a receipt's account follows its category; one with no category keeps the default", async () => {
+      const accounts = require('../claims/category-account');
+      accounts.resolveAccountCode.mockImplementation(async (uid, category) => category === 'Staff Welfare' ? '420' : null);
+      const zip = makeZip([{ name: 'a.jpg', data: jpegBytes(1) }, { name: 'b.jpg', data: jpegBytes(2) }]);
+      parser.parseReceiptBatch.mockImplementation(async () => [
+        { merchant: 'Chateraise', date: '2026-08-24', currency: 'SGD', total: 9.6, category: 'Staff Welfare' },
+        { merchant: 'Clinic',     date: '2026-08-24', currency: 'SGD', total: 40,  category: null },
+      ]);
+
+      const { body } = await start({ archives: [{ name: 'c.zip', data: b64(zip) }] }).expect(202);
+      const done = await finish(body.jobId);
+      expect(done.stage).toBe('done');
+      const byVendor = Object.fromEntries(invoiceStore.forUser(testUser.id).getReceiptGroup(done.result.groupId).map(r => [r.vendorName, r.accountCode]));
+      expect(accounts.resolveAccountCode).toHaveBeenCalledWith(testUser.id, 'Staff Welfare');
+      expect(byVendor.Chateraise).toBe('420');
+      expect(byVendor.Clinic).toBeTruthy();       // the user's default
+      expect(byVendor.Clinic).not.toBe('420');
     });
   });
 
