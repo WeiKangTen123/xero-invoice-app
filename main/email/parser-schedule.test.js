@@ -4,6 +4,12 @@
 // nothing in the second block may be lost.
 const { parseTemplateFormat, _isPaymentSchedule } = require('./parser');
 
+// The sender writes "Date : 14 Sep 2026", which is not the template's
+// "Invoice Date :" label, so the parser dates the invoice from the email's
+// arrival. The email is given that date here; without it the parser falls
+// back to today and this file only passed on 14 Sep 2026.
+const SENT = { subject: 'Invoice', date: '2026-09-14T09:00:00+08:00' };
+
 const EMAIL = `Client / Customer (Full name/entities name) : Demo 123
 Email : demo@123.com
 Address : 123 Tiong Bahru
@@ -38,7 +44,7 @@ Tax (If applicable) : No Tax
 `;
 
 describe('a payment-schedule block on the AR template', () => {
-  const r = parseTemplateFormat(EMAIL, { subject: 'Invoice' }, {});
+  const r = parseTemplateFormat(EMAIL, SENT, {});
 
   test('is not summed as a second item: total stays 2000', () => {
     expect(r.lineItems).toHaveLength(1);
@@ -115,7 +121,7 @@ Amount : 1000
 Discount :
 Tax (If applicable) : No Tax
 `;
-  const r = parseTemplateFormat(AS_DELIVERED, { subject: 'create AR invoice' }, {});
+  const r = parseTemplateFormat(AS_DELIVERED, { ...SENT, subject: 'create AR invoice' }, {});
 
   test('description names the job, with no formatting marks', () => {
     expect(r.description).toBe('Project Demo 123 — Display of products');
@@ -139,7 +145,7 @@ Tax (If applicable) : No Tax
 describe('blank lines between Amount, Discount and Tax', () => {
   test('no longer drop a real second item', () => {
     const two = EMAIL.replace(/• Description \/ Details : Payment Terms[^\n]*\n/, '');
-    const r = parseTemplateFormat(two, { subject: 'Invoice' }, {});
+    const r = parseTemplateFormat(two, SENT, {});
     expect(r.lineItems).toHaveLength(2);
     expect(r.totalAmount).toBe(3000);
     expect(r.reviewReason).toBeNull();
