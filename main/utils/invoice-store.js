@@ -228,6 +228,10 @@ function forUser(userId) {
     const args = [new Date().toISOString()];
     for (const [field, value] of Object.entries(patch)) {
       if (field === 'lineItems') continue; // handled separately below (child table, not a column)
+      // undefined means "nothing new for this field", not "clear it" — a receipt
+      // reader that could not make out a date passes undefined and the upload
+      // date must survive. null is the way to clear a column on purpose.
+      if (value === undefined) continue;
       const column = FIELD_TO_COLUMN[field];
       if (!column || column === 'id' || column === 'user_id') continue;
       sets.push(`${column} = ?`);
