@@ -25,7 +25,7 @@ const path = require('path');
 // user still has to read, so a finished job stays on disk until the sweep takes
 // it. Only the payload — the megabytes — goes immediately.
 
-const BASE_DIR = path.join(__dirname, '../data/users');
+const BASE_DIR = require('../utils/paths').usersDir();
 
 // Terminal stages. Anything else is either waiting or was interrupted.
 const TERMINAL = new Set(['done', 'failed', 'cancelled']);

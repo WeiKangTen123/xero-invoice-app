@@ -72,7 +72,7 @@ describe('jobs — a generic runner', () => {
     jobs.registerJobType('claim-import', { run: ({ job, payload, deps }) => { ran.push([job.id, Object.keys(payload).sort()]); deps.onSettle({ id: job.id, stage: 'done' }); } });
     const { job } = jobs.enqueue(userId, { archives: bufs(1), forms: [] });
     // Simulate a legacy file: strip the type field on disk.
-    const file = path.join(__dirname, '../data/users', userId, 'claim-queue', `${job.id}.que`);
+    const file = path.join(require('../utils/paths').userDir(userId), 'claim-queue', `${job.id}.que`);
     const raw = JSON.parse(fs.readFileSync(file, 'utf8')); delete raw.type; fs.writeFileSync(file, JSON.stringify(raw));
     expect(jobs.get(userId, job.id).type).toBeUndefined();
 

@@ -9,7 +9,7 @@ describe('utils/pdf-store', () => {
   afterAll(() => {
     try {
       store.clearAll();
-      const userDir = path.join(__dirname, '../data/users', userId);
+      const userDir = require('./paths').userDir(userId);
       fs.rmSync(userDir, { recursive: true, force: true });
     } catch {}
   });

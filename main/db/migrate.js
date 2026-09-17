@@ -51,7 +51,7 @@ function run() {
       const crypto = require('crypto');
       const hashStmt = db.prepare('UPDATE invoices SET receipt_hash = ? WHERE id = ?');
       for (const r of unhashed) {
-        const p = path.join(__dirname, '../data/users', String(r.user_id), 'receipts', r.receipt_file);
+        const p = path.join(require('../utils/paths').userDir(r.user_id), 'receipts', r.receipt_file);
         if (fs.existsSync(p)) {
           const buf = fs.readFileSync(p);
           const h = crypto.createHash('sha256').update(buf).digest('hex');

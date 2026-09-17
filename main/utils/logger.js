@@ -16,16 +16,19 @@ const logger = winston.createLogger({
           })
         )
   ),
-  transports: [
+  // Under jest: one silent transport and no log files. The suite used to
+  // write tens of thousands of fixture lines into logs/ — on the deployment
+  // box too, where the admin log viewer then showed them.
+  transports: process.env.NODE_ENV === 'test' ? [new winston.transports.Console({ silent: true })] : [
     new winston.transports.Console(),
     // maxsize/maxFiles cap total disk usage at ~50MB per log (5x 10MB rotated files)
     // instead of growing unbounded — these had reached 500MB+ uncapped.
     new winston.transports.File({
-      filename: path.join(__dirname, '../../logs/error.log'), level: 'error',
+      filename: path.join(process.env.LOGS_DIR || path.join(__dirname, '../../logs'), 'error.log'), level: 'error',
       maxsize: 10 * 1024 * 1024, maxFiles: 5, tailable: true,
     }),
     new winston.transports.File({
-      filename: path.join(__dirname, '../../logs/combined.log'),
+      filename: path.join(process.env.LOGS_DIR || path.join(__dirname, '../../logs'), 'combined.log'),
       maxsize: 10 * 1024 * 1024, maxFiles: 5, tailable: true,
     }),
   ]

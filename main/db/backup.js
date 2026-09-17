@@ -16,7 +16,7 @@ const Database = require('better-sqlite3');
 const db       = require('./index');
 
 const KEEP_COUNT = 14; // ~2 weeks of daily backups
-const BACKUP_DIR = path.join(__dirname, '../data/backups');
+const BACKUP_DIR = require('../utils/paths').backupsDir();
 
 function _prune() {
   const files = fs.readdirSync(BACKUP_DIR)

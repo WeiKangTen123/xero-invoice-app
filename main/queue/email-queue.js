@@ -1,7 +1,7 @@
 const fs   = require('fs');
 const path = require('path');
 
-const BASE_DIR    = path.join(__dirname, '../data/users');
+const BASE_DIR    = require('../utils/paths').usersDir();
 const MAX_ATTEMPTS = 3;
 
 function _jobDir(userId)         { return path.join(BASE_DIR, userId, 'email-queue'); }

@@ -1,7 +1,7 @@
 const fs   = require('fs');
 const path = require('path');
 
-const BASE_DIR = path.join(__dirname, '../data/users');
+const BASE_DIR = require('./paths').usersDir();
 const _stores  = new Map();
 
 function _isSafeId(id) {

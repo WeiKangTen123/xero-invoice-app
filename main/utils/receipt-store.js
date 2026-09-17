@@ -10,7 +10,7 @@ const path = require('path');
 //
 // Unlike pdf-store the extension varies, so the stored filename is returned by
 // save() and recorded on the invoice row — callers must not reconstruct it.
-const BASE_DIR = path.join(__dirname, '../data/users');
+const BASE_DIR = require('./paths').usersDir();
 const _stores  = new Map();
 
 // What Xero's Files API accepts, which is the real constraint — storing a type

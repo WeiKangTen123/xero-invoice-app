@@ -66,7 +66,7 @@ describe('claims/claim-queue', () => {
     const archives = [{ name: 'a.zip', buffer: Buffer.from('blob-to-delete') }];
     const { job } = claimQueue.enqueue(userId, { archives, forms: [] });
     const ref = job.payload.archives[0].ref;
-    const blobPath = path.join(__dirname, '../data/users', userId, 'claim-queue', ref);
+    const blobPath = path.join(require('../utils/paths').userDir(userId), 'claim-queue', ref);
     expect(fs.existsSync(blobPath)).toBe(true);
 
     claimQueue.save(userId, { id: job.id, stage: 'done' });
