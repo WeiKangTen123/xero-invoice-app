@@ -1,5 +1,4 @@
 const pdfParse             = require('pdf-parse');
-const path                 = require('path');
 const { verifyTemplateExtraction } = require('./template-verifier');
 const { isPaymentSchedule }        = require('./invoice-template');
 const logger               = require('../utils/logger');
@@ -435,7 +434,10 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     llm = await extractWithRetry(text, pdfFilename || 'invoice.pdf', userId);
   } catch (err) {
     logger.warn('LLM parse failed, falling back to regex', { error: err.message, userId });
-    return parseGenericFormat(text, email, defaults);
+    const guess = parseGenericFormat(text, email, defaults);
+    // A regex guess at a PDF is never sent on unreviewed.
+    guess.reviewReason = 'the PDF could not be read by the model; the figures below are a rough guess from the text';
+    return guess;
   }
 
   // Model answers are text. The shared cleaners read "1,250.00" as 1250 and
@@ -462,8 +464,8 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     });
   }
 
-  const fallbackInvoiceNumber = path.basename(pdfFilename || '', '.pdf').split(' ')[0] || ('INV-' + Date.now());
-
+  // No number is left auto-shaped ("INV-<timestamp>") so the handler holds
+  // the bill; the filename's first token used to stand in and looked real.
   return {
     // When the EMAIL arrived, not when we got round to reading it.
     receivedAt:       email.date ? new Date(email.date).toISOString() : null,
@@ -472,7 +474,7 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     contactAddress:   _vendorAddress(llm),
     vendorName:       (llm.vendorName || 'Unknown Vendor').slice(0, 255),
     vendorPhone:      llm.vendorPhone   || '',
-    invoiceNumber:    (llm.invoiceNumber || fallbackInvoiceNumber).slice(0, 100),
+    invoiceNumber:    String(llm.invoiceNumber || `INV-${Date.now()}`).slice(0, 100),
     invoiceDate,
     dueDate,
     // Regex fallback covers the rare case the LLM leaves currency null on text that
@@ -529,6 +531,7 @@ async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email
     // and let the invoice-handler mark it review-needed via the zero-amount guard.
     logger.info('PDF has no extractable text — using generic parser, will be review-needed', { file: pdfFilename, userId });
     parsed = parseGenericFormat(text, email, defaults);
+    parsed.reviewReason = 'the PDF has no readable text; nothing below was read from it';
   } else {
     logger.info('PDF invoice detected — using LLM parser', { file: pdfFilename, userId });
     parsed = await parsePDFWithLLM(text, email, pdfFilename, userId, defaults);
@@ -540,9 +543,9 @@ async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email
     ...parsed,
     invoiceType,
     source,
-    // Set only by the template verifier. invoice-handler turns it into a
-    // review-needed status rather than sending the record on to Xero.
-    reviewReason,
+    // Set by the template verifier, or by a parser that could only guess.
+    // invoice-handler turns it into review-needed rather than posting.
+    reviewReason: reviewReason || parsed.reviewReason || null,
     pdfBuffer:     pdfBuffer   || null,
     pdfFilename:   pdfFilename || null,
     emailBodyText: text.slice(0, 50000),

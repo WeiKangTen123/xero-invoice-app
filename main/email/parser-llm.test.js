@@ -31,3 +31,16 @@ test('no readable invoice date falls back to the email date, never today', async
   const r = await parsePDFWithLLM('text', EMAIL, 'a.pdf', 'u1', DEFAULTS);
   expect(r.invoiceDate).toBe('2026-09-10');
 });
+
+test('when the model fails, the regex guess is flagged for review and never numbered from the filename', async () => {
+  extractWithRetry.mockRejectedValue(new Error('quota'));
+  const r = await parsePDFWithLLM('Total: 500', EMAIL, 'Scan_0001.pdf', 'u1', DEFAULTS);
+  expect(r.reviewReason).toMatch(/could not be read/);
+  expect(r.invoiceNumber).not.toBe('Scan_0001');
+});
+
+test('a model answer with no invoice number is numbered so that the handler holds it', async () => {
+  extractWithRetry.mockResolvedValue({ vendorName: 'Acme', invoiceNumber: null, totalAmount: 10, lineItems: [] });
+  const r = await parsePDFWithLLM('text', EMAIL, 'Scan_0001.pdf', 'u1', DEFAULTS);
+  expect(r.invoiceNumber).toMatch(/^INV-\d{12,}$/);
+});

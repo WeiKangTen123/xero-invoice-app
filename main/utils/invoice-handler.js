@@ -17,6 +17,18 @@ const XERO_SUBMIT_DELAY_MS = 1500;
 // Each user gets their own handler with a scoped Xero submission queue.
 // One _xeroChain per user ensures sequential submission with a 1.5 s gap
 // — staying well inside Xero's 60 calls/minute API limit.
+// Why a stored bill must wait for a person instead of going to Xero. Null
+// means nothing here objects. A zero total is held whatever the number says:
+// the old guard only held "no number AND no amount", so a misread PDF whose
+// number came from its filename could post a blank draft.
+function holdReason(record) {
+  const total = Number(record.totalAmount) || 0;
+  if (total <= 0) return 'Could not read an amount from the PDF';
+  const auto = !record.invoiceNumber || record.invoiceNumber === '—' || /^INV-\d{12,}$/.test(record.invoiceNumber);
+  if (auto) return 'Could not read an invoice number from the PDF';
+  return null;
+}
+
 function createHandler(userId) {
   const invStore      = invoiceStore.forUser(userId);
   const pdfStoreUser  = pdfStore.forUser(userId);
@@ -142,16 +154,11 @@ function createHandler(userId) {
     await invStore.add(record);
     procState.addInvoice();
 
-    // Reject zero-amount auto-numbered invoices — the LLM failed to extract useful data.
-    // Store the record so the user can see it, but don't send a blank draft to Xero.
-    const isAutoNum = !record.invoiceNumber ||
-      record.invoiceNumber === '—' ||
-      /^INV-\d{12,}$/.test(record.invoiceNumber);
-    if (isAutoNum && (record.totalAmount || 0) === 0) {
-      logger.warn('Invoice has no amount and no invoice number — skipping Xero submit', {
-        id, vendor: record.vendorName, userId,
-      });
-            await invStore.update(id, { status: 'review-needed', errorMsg: 'Could not extract invoice number or amount from PDF' });
+    // Stored so the user can see it, but never sent as a blank draft.
+    const hold = holdReason(record);
+    if (hold) {
+      logger.warn('Invoice held for review — skipping Xero submit', { id, vendor: record.vendorName, userId, reason: hold });
+      await invStore.update(id, { status: 'review-needed', errorMsg: hold });
       return { id, status: 'review-needed' };
     }
 
@@ -234,4 +241,4 @@ async function submitInvoiceToXero(userId, invoiceId) {
   }
 }
 
-module.exports = { createHandler, submitInvoiceToXero };
+module.exports = { createHandler, submitInvoiceToXero, holdReason };
