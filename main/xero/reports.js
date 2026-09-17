@@ -19,6 +19,10 @@ const logger             = require('../utils/logger');
 // from fetchedAt, and the refresh control passes force=true to bypass this
 // entirely. Turn it back down here if you would rather pay for fresher numbers.
 const CACHE_TTL_MS = 5 * 60 * 1000;
+// The chart of accounts, bank accounts, contacts and the organisation record
+// change rarely and cost a GET each; five minutes was the wrong TTL for them.
+// `force` still bypasses.
+const DIRECTORY_TTL_MS = 6 * 60 * 60 * 1000;
 const _cache = new Map(); // arbitrary string key -> { data, fetchedAt }
 
 // Expiry alone never freed anything: a stale entry failed the TTL check on read
@@ -267,7 +271,7 @@ async function _getOrganisationRaw(userId, tenantId, force) {
   const token      = await tokenCache.getValidToken(tenantId);
   const api        = _apiFor(token);
   const res = await withRetry(() => api.getOrganisations(tenantId));
-  return _cacheSet(key, { org: res.body.organisations?.[0] || {} }).org;
+  return _cacheSet(key, { org: res.body.organisations?.[0] || {} }, DIRECTORY_TTL_MS).org;
 }
 
 // ── Date-range engine (daily/weekly/monthly/yearly/custom) ──────────────────
@@ -361,7 +365,7 @@ async function _getAccountsRaw(userId, tenantId, { force = false } = {}) {
 
   const res = await withRetry(() => api.getAccounts(tenantId, undefined, undefined, 'Code ASC'));
   const data = { accounts: _buildAccounts(res.body.accounts || []) };
-  return _cacheSet(key, data);
+  return _cacheSet(key, data, DIRECTORY_TTL_MS);
 }
 
 function _buildBankAccounts(accounts) {
@@ -384,7 +388,7 @@ async function _getBankAccountsRaw(userId, tenantId, { force = false } = {}) {
 
   const res = await withRetry(() => api.getAccounts(tenantId, undefined, 'Type=="BANK"', 'Name ASC'));
   const data = { bankAccounts: _buildBankAccounts(res.body.accounts || []) };
-  return _cacheSet(key, data);
+  return _cacheSet(key, data, DIRECTORY_TTL_MS);
 }
 
 function _buildContacts(contacts) {
@@ -407,7 +411,7 @@ async function _getContactsRaw(userId, tenantId, { force = false } = {}) {
     tenantId, undefined, undefined, 'Name ASC', undefined, undefined, undefined, true
   ));
   const data = { contacts: _buildContacts(res.body.contacts || []) };
-  return _cacheSet(key, data);
+  return _cacheSet(key, data, DIRECTORY_TTL_MS);
 }
 
 // ── Bank statement, Profit & Loss, Cash In/Out ───────────────────────────────
@@ -467,8 +471,12 @@ async function _getBankTransactionsRaw(userId, tenantId, accountId, { force = fa
   const token      = await tokenCache.getValidToken(tenantId);
   const api        = _apiFor(token);
 
+  // Bounded to the last year. Unbounded, this pulled the account's entire
+  // history on every miss — and paid for it — for a statement view that
+  // shows recent movement.
+  const since = _fmtXeroDate(_addDays(_partsFromDate(new Date()), -365));
   const res = await withRetry(() => api.getBankTransactions(
-    tenantId, undefined, `BankAccount.AccountID==Guid("${accountId}")`, 'Date DESC'
+    tenantId, undefined, `BankAccount.AccountID==Guid("${accountId}") && Date >= ${since}`, 'Date DESC'
   ));
 
   // Bank transactions alone miss real cash movement that goes through
@@ -481,7 +489,7 @@ async function _getBankTransactionsRaw(userId, tenantId, accountId, { force = fa
   let payments = [];
   try {
     const payRes = await withRetry(() => api.getPayments(
-      tenantId, undefined, `Account.AccountID==Guid("${accountId}")`, 'Date DESC'
+      tenantId, undefined, `Account.AccountID==Guid("${accountId}") && Date >= ${since}`, 'Date DESC'
     ));
     payments = _buildPayments(payRes.body.payments || []);
   } catch (err) {
@@ -1299,7 +1307,9 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
       // Quoted-but-not-invoiced work exists commercially and nowhere in the
       // accounts, so the forward view otherwise stops at issued invoices.
       try {
-        const qRes = await withRetry(() => api.getQuotes(tenantId));
+        // Only this fiscal year's quotes: the pipeline is built from them, and
+        // an unfiltered call returned every quote the org ever raised.
+        const qRes = await withRetry(() => api.getQuotes(tenantId, undefined, bv.fiscalYear.fromISO));
         quotePipeline = _buildQuotePipeline(qRes.body.quotes || [], baseCurrency);
       } catch (qErr) {
         logger.warn('Performance: quotes unavailable', { userId, tenantId, error: qErr.message });
@@ -1661,7 +1671,7 @@ function clearCache(userId) {
 }
 
 module.exports = {
-  FORCE_GRACE_MS,
+  FORCE_GRACE_MS, DIRECTORY_TTL_MS,
   getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
   getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,

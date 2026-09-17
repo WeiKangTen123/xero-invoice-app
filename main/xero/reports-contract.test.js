@@ -234,3 +234,27 @@ describe('Xero call contract — invoice paging', () => {
     expect(s.kpis.receivablesCount).toBe(130);
   });
 });
+
+// Cost: directory data changes rarely but was refetched every five minutes,
+// and a bank statement pulled the account's whole history each time.
+describe('Xero call budget — directory data and statements', () => {
+  test('chart of accounts, bank accounts, contacts and organisation live in cache for hours, not minutes', async () => {
+    api.getAccounts = jest.fn().mockResolvedValue({ body: { accounts: [] } });
+    api.getContacts = jest.fn().mockResolvedValue({ body: { contacts: [] } });
+    const T2 = 't-ttl';
+    await reports.getAccounts(U, T2);
+    await reports.getBankAccounts(U, T2);
+    await reports.getContacts(U, T2);
+    await reports.getBudgetVariance(U, T2, { period: { preset: 'fy' } });   // fetches the organisation
+    for (const k of [`accounts:${U}:${T2}`, `bank:${U}:${T2}`, `contacts:${U}:${T2}`, `org:${U}:${T2}`]) {
+      expect(reports._cache.get(k).ttl).toBe(reports.DIRECTORY_TTL_MS);
+    }
+    expect(reports.DIRECTORY_TTL_MS).toBeGreaterThanOrEqual(60 * 60 * 1000);
+  });
+
+  test("a bank statement asks for the last twelve months, not the account's whole history", async () => {
+    await reports.getBankTransactions(U, 't-stmt', 'acc-1');
+    expect(api.getBankTransactions.mock.calls[0][2]).toMatch(/Date >= DateTime\(\d{4},\s?\d{1,2},\s?\d{1,2}\)/);
+    expect(api.getPayments.mock.calls[0][2]).toMatch(/Date >= DateTime\(/);
+  });
+});
