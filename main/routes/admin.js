@@ -45,38 +45,6 @@ router.post('/users', requireAdmin, async (req, res) => {
   }
 });
 
-// PATCH /api/admin/users/:id — promote or demote a user's role
-router.patch('/users/:id', requireAdmin, async (req, res) => {
-  try {
-    const { id }   = req.params;
-    const { role } = req.body;
-
-    if (!['admin', 'user'].includes(role)) {
-      return res.status(400).json({ error: 'Role must be "admin" or "user"' });
-    }
-
-    const users  = readUsers();
-    const target = users.find(u => u.id === id);
-    if (!target) return res.status(404).json({ error: 'User not found' });
-
-    if (id === req.user.id && role !== 'admin') {
-      return res.status(400).json({ error: 'Cannot demote your own account' });
-    }
-    if (target.role === 'admin' && role === 'user') {
-      const adminCount = users.filter(u => u.role === 'admin').length;
-      if (adminCount <= 1) {
-        return res.status(400).json({ error: 'Cannot demote the last admin account' });
-      }
-    }
-
-    const updated = await updateUserRole(id, role);
-    logger.info('Admin updated user role', { id, newRole: role, by: req.user.email });
-    res.json({ success: true, user: updated });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // DELETE /api/admin/users/:id
 router.delete('/users/:id', requireAdmin, (req, res) => {
   try {

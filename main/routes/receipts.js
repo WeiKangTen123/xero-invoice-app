@@ -442,28 +442,6 @@ router.get('/:id/image', asyncHandler(async (req, res) => {
   res.sendFile(filePath);
 }));
 
-// DELETE /api/receipts/:id — removes the row and the file together
-router.delete('/:id', requireAuth, (req, res) => {
-  const store  = invoiceStore.forUser(req.user.id);
-  const record = store.getById(req.params.id);
-  if (!record) return res.status(404).json({ error: 'Receipt not found' });
-  if (record.invoiceType !== 'EXPENSE') return res.status(400).json({ error: 'Not an expense claim' });
-
-  store.remove(req.params.id);
-
-  // Split siblings SHARE one stored file, so it may only be deleted once the
-  // last record referencing it is gone. Removing it with the first would leave
-  // the others pointing at nothing.
-  if (record.receiptFile) {
-    if (store.countByReceiptFile(record.receiptFile) === 0) {
-      receiptStore.forUser(req.user.id).remove(record.receiptFile);
-    }
-  }
-
-  logger.info('Receipt deleted', { userId: req.user.id, id: req.params.id });
-  res.json({ ok: true });
-});
-
 // POST /api/receipts/:id/reread — ask the model to look at the photo again.
 //
 // Without this, a receipt that failed to read was stuck forever: Gemini being

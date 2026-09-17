@@ -87,13 +87,6 @@ function writeEnvFile(updates) {
   }
 }
 
-// ── GET /api/setup/status — quick summary of which sections are configured ────
-// Lightweight check — no secrets returned, used by the frontend to decide
-// whether to show a "setup required" banner or redirect on first login.
-router.get('/status', requireAuth, (req, res) => {
-  res.json(getSetupStatus(req.user.id));
-});
-
 // ── GET /api/setup — returns both per-user config and global config ───────────
 router.get('/', requireAuth, (req, res) => {
   const userConfig = getUserConfig(req.user.id);

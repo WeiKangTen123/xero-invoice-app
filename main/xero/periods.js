@@ -29,13 +29,7 @@ function _parseISODate(s) {
   return { year, month, day };
 }
 
-const RANGE_PRESETS = new Set(['day', 'week', 'month', 'year', 'all', 'custom']);
 
-// "All time" has no real org-inception date available without an extra
-// lookup, so it uses a fixed anchor far enough back that no real Xero org
-// predates it — functionally identical to "since inception" as a filter
-// bound, without needing to query for the actual first transaction date.
-const ALL_TIME_START = { year: 2000, month: 1, day: 1 };
 
 // The org's fiscal year doesn't necessarily run Jan-Dec (Xero's own "Year to
 // date" dashboard widget uses it, not the calendar year) — defaults to a
@@ -52,43 +46,6 @@ function _fiscalYearStart(today, fiscalYearEnd) {
   return _addDays({ year: endYear, month: feMonth, day: feDay }, 1);
 }
 
-// Pure. Returns { preset, fromISO, toISO, where, days } — `where` is a ready-to-use
-// Xero filter clause; `toExclusive` never leaks out since every caller only needs
-// an inclusive display range or the filter string. `fiscalYearEnd` (optional
-// { month, day }) only affects the 'year' preset.
-function computeRange(preset, timezone, customFrom, customTo, fiscalYearEnd) {
-  const today = _todayPartsInTz(timezone || 'UTC');
-  const usePreset = RANGE_PRESETS.has(preset) ? preset : 'month';
-
-  let from, toExclusive;
-  if (usePreset === 'day') {
-    from = today; toExclusive = _addDays(today, 1);
-  } else if (usePreset === 'week') {
-    from = _addDays(today, -_weekdayMon0(today)); toExclusive = _addDays(today, 1);
-  } else if (usePreset === 'year') {
-    from = _fiscalYearStart(today, fiscalYearEnd); toExclusive = _addDays(today, 1);
-  } else if (usePreset === 'all') {
-    from = ALL_TIME_START; toExclusive = _addDays(today, 1);
-  } else if (usePreset === 'custom') {
-    const f = _parseISODate(customFrom), t = _parseISODate(customTo);
-    if (!f || !t) throw new Error('Custom range requires valid "from" and "to" dates (YYYY-MM-DD)');
-    if (_dateFromParts(f) > _dateFromParts(t)) throw new Error('"from" must not be after "to"');
-    from = f; toExclusive = _addDays(t, 1);
-  } else { // month
-    from = { year: today.year, month: today.month, day: 1 }; toExclusive = _addDays(today, 1);
-  }
-
-  const toInclusive = _addDays(toExclusive, -1);
-  const days = Math.round((_dateFromParts(toExclusive) - _dateFromParts(from)) / 86400000);
-
-  return {
-    preset:  usePreset,
-    fromISO: _fmtISODate(from),
-    toISO:   _fmtISODate(toInclusive),
-    where:   `Date >= ${_fmtXeroDate(from)} && Date < ${_fmtXeroDate(toExclusive)}`,
-    days,
-  };
-}
 
 // Pure. Buckets invoices dated within the range into a trend series — daily
 // buckets for anything a month or shorter (a week or a month both read fine as
@@ -248,4 +205,4 @@ function _monthKeyOfDate(d) {
 // living on injected capital and one collecting from customers look identical
 // on a single "cash in" line, and they are not remotely the same business.
 
-module.exports = { _actualThroughIndex, _addDays, _chunkMonths, _closedCount, _dateFromParts, _fiscalYearMonths, _fiscalYearStart, _fmtISODate, _fmtXeroDate, _monthKeyOfDate, _monthMeta, _monthsBetween, _monthsFrom, _parseISODate, _partsFromDate, _resolvePeriod, _resolveWindow, _todayPartsInTz, _weekdayMon0, computeRange };
+module.exports = { _actualThroughIndex, _addDays, _chunkMonths, _closedCount, _dateFromParts, _fiscalYearMonths, _fiscalYearStart, _fmtISODate, _fmtXeroDate, _monthKeyOfDate, _monthMeta, _monthsBetween, _monthsFrom, _parseISODate, _partsFromDate, _resolvePeriod, _resolveWindow, _todayPartsInTz, _weekdayMon0 };

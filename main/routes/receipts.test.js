@@ -57,6 +57,7 @@ describe('routes/receipts', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    app.use('/api/invoices', require('./invoices'));   // claims are deleted through the invoices route
     server = _srv.current = app.listen(0);
   });
 
@@ -204,25 +205,6 @@ describe('routes/receipts', () => {
     });
   });
 
-  describe('DELETE /:id', () => {
-    test('removes the row and the file together', async () => {
-      const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
-      await request(server).delete(`/api/receipts/${body.receipt.id}`).set('Authorization', auth()).expect(200);
-      expect(invoiceStore.forUser(testUser.id).getById(body.receipt.id)).toBeFalsy();
-      expect(receiptStore.forUser(testUser.id).exists(body.receipt.receiptFile)).toBe(false);
-    });
-
-    test('refuses to delete a bill through the receipts route', async () => {
-      const bill = invoiceStore.forUser(testUser.id).add({ id: 'bill-1', status: 'pending', invoiceType: 'ACCPAY', processedAt: new Date().toISOString() });
-      expect(bill).toBeTruthy();
-      await request(server).delete('/api/receipts/bill-1').set('Authorization', auth()).expect(400);
-      expect(invoiceStore.forUser(testUser.id).getById('bill-1')).toBeTruthy();
-    });
-
-    test('404s for something that does not exist', async () => {
-      await request(server).delete('/api/receipts/nope').set('Authorization', auth()).expect(404);
-    });
-  });
 });
 
 // ── Phone pairing ───────────────────────────────────────────────────────────
@@ -256,6 +238,7 @@ describe('routes/receipts — phone pairing', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    app.use('/api/invoices', require('./invoices'));   // claims are deleted through the invoices route
     server = _srv.current = app.listen(0);
   });
 
@@ -364,7 +347,7 @@ describe('routes/receipts — phone pairing', () => {
       const id = up.body.receipt.id;
       // No route accepts it as a bearer credential for anything else.
       await request(server).get(`/api/receipts/${id}/token`).set('Authorization', `Bearer ${body.token}`).expect(401);
-      await request(server).delete(`/api/receipts/${id}`).set('Authorization', `Bearer ${body.token}`).expect(401);
+      await request(server).delete(`/api/invoices/${id}`).set('Authorization', `Bearer ${body.token}`).expect(401);
       await request(server).get(`/api/receipts/${id}/image?token=${body.token}`).expect(401);
     });
   });
@@ -423,6 +406,7 @@ describe('routes/receipts — parsing fills in a stored receipt', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    app.use('/api/invoices', require('./invoices'));   // claims are deleted through the invoices route
     server = _srv.current = app.listen(0);
   });
 
@@ -577,6 +561,7 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    app.use('/api/invoices', require('./invoices'));   // claims are deleted through the invoices route
     server = _srv.current = app.listen(0);
   });
 
@@ -713,6 +698,7 @@ describe('routes/receipts — one upload, several records', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    app.use('/api/invoices', require('./invoices'));   // claims are deleted through the invoices route
     server = _srv.current = app.listen(0);
   });
 
@@ -872,11 +858,11 @@ describe('routes/receipts — one upload, several records', () => {
       await settle();
       const [a, b] = rows();
 
-      await request(server).delete(`/api/receipts/${a.id}`).set('Authorization', auth()).expect(200);
+      await request(server).delete(`/api/invoices/${a.id}`).set('Authorization', auth()).expect(200);
       // Deleting the file here would leave the other record pointing at nothing.
       expect(receiptStore.forUser(testUser.id).exists(b.receiptFile)).toBe(true);
 
-      await request(server).delete(`/api/receipts/${b.id}`).set('Authorization', auth()).expect(200);
+      await request(server).delete(`/api/invoices/${b.id}`).set('Authorization', auth()).expect(200);
       expect(receiptStore.forUser(testUser.id).exists(b.receiptFile)).toBe(false);
     });
   });
@@ -919,6 +905,7 @@ describe('routes/receipts — reading a receipt again', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    app.use('/api/invoices', require('./invoices'));   // claims are deleted through the invoices route
     server = _srv.current = app.listen(0);
   });
 
@@ -1046,6 +1033,7 @@ describe('routes/receipts — duplicate receipts', () => {
     app = express();
     app.use(express.json({ limit: '10mb' }));
     app.use('/api/receipts', receiptRoutes);
+    app.use('/api/invoices', require('./invoices'));   // claims are deleted through the invoices route
     server = _srv.current = app.listen(0);
   });
 

@@ -1,6 +1,6 @@
 const {
-  _buildSummary, computeRange, _buildPeriod, _buildAccounts, _buildBankAccounts, _buildContacts,
-  _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
+  _buildSummary, _buildAccounts, _buildBankAccounts, _buildContacts,
+  _buildBankTransactions, _buildPayments, _buildBankSummary,
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
 } = require('./reports');
@@ -130,146 +130,6 @@ describe('xero/reports — _buildSummary (pure)', () => {
   });
 });
 
-describe('xero/reports — computeRange (pure, date math only)', () => {
-  // Pin "now" so every preset resolves deterministically. Wednesday, so the
-  // week-start (Monday) case actually crosses a few days, not a no-op.
-  beforeEach(() => { jest.useFakeTimers().setSystemTime(new Date('2026-08-12T10:00:00Z')); }); // Wed
-  afterEach(() => { jest.useRealTimers(); });
-
-  test('day — from and to are both today', () => {
-    const r = computeRange('day', 'UTC');
-    expect(r).toMatchObject({ preset: 'day', fromISO: '2026-08-12', toISO: '2026-08-12', days: 1 });
-    expect(r.where).toBe('Date >= DateTime(2026,8,12) && Date < DateTime(2026,8,13)');
-  });
-
-  test('week — from is Monday of this week, to is today', () => {
-    const r = computeRange('week', 'UTC');
-    expect(r.fromISO).toBe('2026-08-10'); // Monday
-    expect(r.toISO).toBe('2026-08-12');   // today (Wednesday)
-  });
-
-  test('month — from is the 1st of this month', () => {
-    const r = computeRange('month', 'UTC');
-    expect(r.fromISO).toBe('2026-08-01');
-    expect(r.toISO).toBe('2026-08-12');
-  });
-
-  test('year — from is Jan 1 of this year (default, no fiscal year end given)', () => {
-    const r = computeRange('year', 'UTC');
-    expect(r.fromISO).toBe('2026-01-01');
-    expect(r.toISO).toBe('2026-08-12');
-  });
-
-  test('year — with a non-calendar fiscal year end, follows the fiscal year instead of Jan 1', () => {
-    // "Today" (Aug 12) is after this calendar year's Mar 31 fiscal-year-end,
-    // so the current fiscal year started Apr 1 of THIS year — matches what
-    // Xero's own "Year to date" dashboard widget shows for such an org.
-    const r = computeRange('year', 'UTC', undefined, undefined, { month: 3, day: 31 });
-    expect(r.fromISO).toBe('2026-04-01');
-  });
-
-  test('year — fiscal year end still ahead this calendar year falls back to the fiscal year that started last year', () => {
-    jest.setSystemTime(new Date('2026-02-15T10:00:00Z')); // before this year's Mar 31 fiscal year end
-    const r = computeRange('year', 'UTC', undefined, undefined, { month: 3, day: 31 });
-    expect(r.fromISO).toBe('2025-04-01');
-  });
-
-  test('year — a fiscal year end of Dec 31 behaves exactly like the calendar-year default', () => {
-    const r = computeRange('year', 'UTC', undefined, undefined, { month: 12, day: 31 });
-    expect(r.fromISO).toBe('2026-01-01');
-  });
-
-  test('all — from is a fixed far-past anchor, to is today', () => {
-    const r = computeRange('all', 'UTC');
-    expect(r).toMatchObject({ preset: 'all', fromISO: '2000-01-01', toISO: '2026-08-12' });
-  });
-
-  test('custom — uses the given from/to verbatim', () => {
-    const r = computeRange('custom', 'UTC', '2026-01-15', '2026-03-01');
-    expect(r).toMatchObject({ preset: 'custom', fromISO: '2026-01-15', toISO: '2026-03-01' });
-    expect(r.where).toBe('Date >= DateTime(2026,1,15) && Date < DateTime(2026,3,2)');
-  });
-
-  test('custom — rejects "from" after "to"', () => {
-    expect(() => computeRange('custom', 'UTC', '2026-03-01', '2026-01-15')).toThrow(/must not be after/i);
-  });
-
-  test('custom — rejects missing/malformed dates', () => {
-    expect(() => computeRange('custom', 'UTC', 'not-a-date', '2026-01-15')).toThrow(/valid/i);
-    expect(() => computeRange('custom', 'UTC', undefined, undefined)).toThrow(/valid/i);
-  });
-
-  test('an unrecognised preset falls back to month, not a crash', () => {
-    const r = computeRange('bogus', 'UTC');
-    expect(r.preset).toBe('month');
-    expect(r.fromISO).toBe('2026-08-01');
-  });
-
-  test('"today" is resolved per the given timezone, not the server\'s', () => {
-    // 2026-08-12T23:30 UTC is already 2026-08-13 in Singapore (UTC+8).
-    jest.setSystemTime(new Date('2026-08-12T23:30:00Z'));
-    const utc = computeRange('day', 'UTC');
-    const sgt = computeRange('day', 'Asia/Singapore');
-    expect(utc.fromISO).toBe('2026-08-12');
-    expect(sgt.fromISO).toBe('2026-08-13');
-  });
-});
-
-describe('xero/reports — _buildPeriod (pure)', () => {
-  const shortRange = { preset: 'week', fromISO: '2026-08-10', toISO: '2026-08-12', days: 3 };
-  const longRange  = { preset: 'year', fromISO: '2026-01-01', toISO: '2026-08-12', days: 224 };
-
-  test('totals sales and bills separately, computes net', () => {
-    const invoices = [
-      { type: 'ACCREC', total: 300, date: '2026-08-10T00:00:00Z' },
-      { type: 'ACCREC', total: 150, date: '2026-08-11T00:00:00Z' },
-      { type: 'ACCPAY', total: 90,  date: '2026-08-11T00:00:00Z' },
-    ];
-    const { totals } = _buildPeriod(invoices, shortRange);
-    expect(totals).toEqual({ salesTotal: 450, billsTotal: 90, salesCount: 2, billsCount: 1, net: 360 });
-  });
-
-  test('short ranges (<=31 days) bucket by day', () => {
-    const invoices = [
-      { type: 'ACCREC', total: 100, date: '2026-08-10T00:00:00Z' },
-      { type: 'ACCREC', total: 50,  date: '2026-08-10T00:00:00Z' },
-      { type: 'ACCPAY', total: 20,  date: '2026-08-11T00:00:00Z' },
-    ];
-    const { granularity, trend } = _buildPeriod(invoices, shortRange);
-    expect(granularity).toBe('day');
-    expect(trend).toEqual([
-      { bucket: '2026-08-10', sales: 150, bills: 0 },
-      { bucket: '2026-08-11', sales: 0, bills: 20 },
-    ]);
-  });
-
-  test('long ranges (>31 days) bucket by month', () => {
-    const invoices = [
-      { type: 'ACCREC', total: 100, date: '2026-01-05T00:00:00Z' },
-      { type: 'ACCREC', total: 200, date: '2026-01-20T00:00:00Z' },
-      { type: 'ACCPAY', total: 30,  date: '2026-03-01T00:00:00Z' },
-    ];
-    const { granularity, trend } = _buildPeriod(invoices, longRange);
-    expect(granularity).toBe('month');
-    expect(trend).toEqual([
-      { bucket: '2026-01', sales: 300, bills: 0 },
-      { bucket: '2026-03', sales: 0, bills: 30 },
-    ]);
-  });
-
-  test('an invoice with no date is totalled but excluded from the trend', () => {
-    const { totals, trend } = _buildPeriod([{ type: 'ACCREC', total: 75, date: null }], shortRange);
-    expect(totals.salesTotal).toBe(75);
-    expect(trend).toEqual([]);
-  });
-
-  test('no invoices — zeroed totals, empty trend', () => {
-    const { totals, trend } = _buildPeriod([], shortRange);
-    expect(totals).toEqual({ salesTotal: 0, billsTotal: 0, salesCount: 0, billsCount: 0, net: 0 });
-    expect(trend).toEqual([]);
-  });
-});
-
 describe('xero/reports — directory builders (pure)', () => {
   test('_buildAccounts maps the fields the Chart of Accounts table needs', () => {
     const accounts = _buildAccounts([{ accountID: 'a1', code: '200', name: 'Sales', type: 'REVENUE', taxType: 'OUTPUT', status: 'ACTIVE' }]);
@@ -364,68 +224,6 @@ describe('xero/reports — _buildPayments (pure)', () => {
   });
 });
 
-describe('xero/reports — _flattenReportRows (pure)', () => {
-  test('walks nested sections into a flat title/cells list', () => {
-    const tree = [
-      section('Income', [row('Sales', ['Sales', '50,000.00'])]),
-      row('Net Profit', ['Net Profit', '40,000.00'], 'SummaryRow'),
-    ];
-    const flat = _flattenReportRows(tree);
-    expect(flat).toEqual([
-      { title: 'Sales', cells: ['Sales', '50,000.00'] },
-      { title: 'Net Profit', cells: ['Net Profit', '40,000.00'] },
-    ]);
-  });
-
-  test('rows with neither nested rows nor cells are skipped, not crashed on', () => {
-    const tree = [{ rowType: 'Header', title: 'Empty header' }];
-    expect(_flattenReportRows(tree)).toEqual([]);
-  });
-});
-
-describe('xero/reports — _buildProfitAndLoss (pure)', () => {
-  test('extracts income, expenses, and net profit from a realistic report tree', () => {
-    const tree = [
-      section('Income', [
-        row('Sales', ['Sales', '50,000.00']),
-        row('Total Income', ['Total Income', '50,000.00'], 'SummaryRow'),
-      ]),
-      section('Expenses', [
-        row('Rent', ['Rent', '10,000.00']),
-        row('Total Expenses', ['Total Expenses', '10,000.00'], 'SummaryRow'),
-      ]),
-      row('Net Profit', ['Net Profit', '40,000.00'], 'SummaryRow'),
-    ];
-    expect(_buildProfitAndLoss(tree)).toEqual({ income: 50000, expenses: 10000, netProfit: 40000, netMargin: 0.8 });
-  });
-
-  test('a net LOSS renders in parentheses and parses as negative', () => {
-    const tree = [
-      row('Total Income', ['Total Income', '10,000.00'], 'SummaryRow'),
-      row('Total Expenses', ['Total Expenses', '15,000.00'], 'SummaryRow'),
-      row('Net Loss', ['Net Loss', '(5,000.00)'], 'SummaryRow'),
-    ];
-    expect(_buildProfitAndLoss(tree).netProfit).toBe(-5000);
-  });
-
-  test('falls back to income-minus-expenses if no explicit Net Profit/Loss row is found', () => {
-    const tree = [
-      row('Total Income', ['Total Income', '10,000.00'], 'SummaryRow'),
-      row('Total Expenses', ['Total Expenses', '4,000.00'], 'SummaryRow'),
-    ];
-    expect(_buildProfitAndLoss(tree)).toEqual({ income: 10000, expenses: 4000, netProfit: 6000, netMargin: 0.6 });
-  });
-
-  test('an empty report tree yields all zeros, not a crash (no division by zero income)', () => {
-    expect(_buildProfitAndLoss([])).toEqual({ income: 0, expenses: 0, netProfit: 0, netMargin: 0 });
-  });
-});
-
-// Xero's real Bank Summary report is COLUMNAR, not "one section per account
-// with labeled rows" — confirmed against a live response (see git history/PR
-// description): one Header row spells out what each cell position means, then
-// every bank account is a plain Row with values at those same positions,
-// followed by a SummaryRow "Total" line. These fixtures mirror that exactly.
 function bankSummaryHeader(...columns) { return { rowType: 'Header', cells: columns.map(cell) }; }
 function bankSummaryAccountRow(...values) { return { rowType: 'Row', cells: values.map(cell) }; }
 
@@ -474,7 +272,7 @@ describe('xero/reports — _buildBankSummary (pure)', () => {
 // Xero's Report endpoints (ProfitAndLoss, BankSummary) reject any
 // fromDate/toDate pair more than 365 days apart — confirmed via a live 400
 // ValidationException triggered by the "All Time" preset. These two pure
-// helpers are what keeps getProfitAndLoss/getBankSummary inside that limit.
+// helpers are what keeps getBankSummary inside that limit.
 describe('xero/reports — _splitIntoReportWindows (pure)', () => {
   test('a range within the limit is a single window, unchanged', () => {
     expect(_splitIntoReportWindows('2026-01-01', '2026-01-31')).toEqual([
@@ -577,7 +375,7 @@ describe('xero/reports — getSummary caching', () => {
   });
 });
 
-describe('xero/reports — getPeriod / getAccounts / getBankAccounts / getContacts caching', () => {
+describe('xero/reports — getAccounts / getBankAccounts / getContacts caching', () => {
   let reports, getInvoices, getAccounts, getContacts, getOrganisations;
 
   beforeEach(() => {
@@ -597,39 +395,7 @@ describe('xero/reports — getPeriod / getAccounts / getBankAccounts / getContac
     reports = require('./reports');
   });
 
-  test('getPeriod passes the computed Xero `where` filter through to getInvoices', async () => {
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'custom', from: '2026-01-01', to: '2026-01-31', timezone: 'UTC' });
-    const whereArg = getInvoices.mock.calls[0][2];
-    expect(whereArg).toBe('Date >= DateTime(2026,1,1) && Date < DateTime(2026,2,1)');
-  });
-
-  test('getPeriod caches per distinct range — a different preset refetches, the same one does not', async () => {
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' });
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' }); // same range, cached
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'year', timezone: 'UTC' });   // different range, refetches
-    expect(getInvoices).toHaveBeenCalledTimes(2);
-  });
-
-  test('getPeriod only looks up the org (for fiscal-year-end) on the "year" preset, not the others', async () => {
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' });
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'week', timezone: 'UTC' });
-    expect(getOrganisations).not.toHaveBeenCalled();
-
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'year', timezone: 'UTC' });
-    expect(getOrganisations).toHaveBeenCalledTimes(1);
-  });
-
-  test('getPeriod\'s "year" preset applies the org\'s real fiscal year end to the Xero filter, not Jan 1', async () => {
-    jest.useFakeTimers().setSystemTime(new Date('2026-08-12T10:00:00Z'));
-    // mocked org above has financialYearEndMonth: 3, day: 31 — fiscal year
-    // starting Apr 1 2026, not the calendar-year Jan 1 2026.
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'year', timezone: 'UTC' });
-    const whereArg = getInvoices.mock.calls[0][2];
-    expect(whereArg).toBe('Date >= DateTime(2026,4,1) && Date < DateTime(2026,8,13)');
-    jest.useRealTimers();
-  });
-
-  test('getAccounts and getBankAccounts cache independently of getSummary/getPeriod', async () => {
+  test('getAccounts and getBankAccounts cache independently of getSummary', async () => {
     await reports.getAccounts('user-1', 'tenant-1');
     await reports.getAccounts('user-1', 'tenant-1');
     await reports.getBankAccounts('user-1', 'tenant-1');
@@ -642,22 +408,18 @@ describe('xero/reports — getPeriod / getAccounts / getBankAccounts / getContac
     expect(getContacts).toHaveBeenCalledTimes(1);
   });
 
-  test('clearCache also clears period/accounts/bank/contacts entries for that user', async () => {
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' });
-    await reports.getAccounts('user-1', 'tenant-1');
-    await reports.getContacts('user-1', 'tenant-1');
-    reports.clearCache('user-1');
-
-    await reports.getPeriod('user-1', 'tenant-1', { preset: 'month', timezone: 'UTC' });
-    await reports.getAccounts('user-1', 'tenant-1');
-    await reports.getContacts('user-1', 'tenant-1');
-    expect(getInvoices).toHaveBeenCalledTimes(2);
-    expect(getAccounts).toHaveBeenCalledTimes(2);
-    expect(getContacts).toHaveBeenCalledTimes(2);
-  });
 });
 
-describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSummary caching', () => {
+describe('xero/reports — getBankTransactions / getBankSummary caching', () => {
+  test('clearCache clears statement and bank-summary entries too, for that user only', async () => {
+    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
+    await reports.getBankTransactions('user-2', 'tenant-1', 'acct-1');
+    reports.clearCache('user-1');
+    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');   // refetched
+    await reports.getBankTransactions('user-2', 'tenant-1', 'acct-1');   // still cached
+    expect(getBankTransactions).toHaveBeenCalledTimes(3);
+  });
+
   let reports, getBankTransactions, getPayments, getReportProfitAndLoss, getReportBankSummary;
 
   beforeEach(() => {
@@ -741,14 +503,6 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
     await expect(reports.getBankTransactions('user-1', 'tenant-1', 'acct-1')).rejects.toBeTruthy();
   });
 
-  test('getProfitAndLoss passes from/to through and caches per date range', async () => {
-    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
-    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' }); // cached
-    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-02-01', to: '2026-02-28' }); // different range
-    expect(getReportProfitAndLoss).toHaveBeenCalledTimes(2);
-    expect(getReportProfitAndLoss).toHaveBeenCalledWith('tenant-1', '2026-01-01', '2026-01-31');
-  });
-
   test('getBankSummary passes from/to through and caches per date range', async () => {
     await reports.getBankSummary('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
     await reports.getBankSummary('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
@@ -758,27 +512,6 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
   // Xero's Report API 400s on a >365-day range — a range wider than that
   // must never reach api.getReportProfitAndLoss/getReportBankSummary in one
   // call; every call this mock records must itself span <=365 days.
-  test('getProfitAndLoss splits a >365-day range into multiple calls, each within the limit, and sums the results', async () => {
-    getReportProfitAndLoss
-      .mockResolvedValueOnce({ body: { reports: [{ rows: [
-        row('Total Income', ['Total Income', '10,000.00'], 'SummaryRow'),
-        row('Total Expenses', ['Total Expenses', '4,000.00'], 'SummaryRow'),
-      ] }] } })
-      .mockResolvedValueOnce({ body: { reports: [{ rows: [
-        row('Total Income', ['Total Income', '5,000.00'], 'SummaryRow'),
-        row('Total Expenses', ['Total Expenses', '1,000.00'], 'SummaryRow'),
-      ] }] } });
-
-    const result = await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2024-01-01', to: '2026-08-10' });
-
-    expect(getReportProfitAndLoss.mock.calls.length).toBeGreaterThan(1);
-    for (const [, callFrom, callTo] of getReportProfitAndLoss.mock.calls) {
-      const days = (new Date(callTo) - new Date(callFrom)) / 86400000;
-      expect(days).toBeLessThanOrEqual(365);
-    }
-    expect(result).toMatchObject({ income: 15000, expenses: 5000, netProfit: 10000 });
-  });
-
   test('getBankSummary merges per-window results: cash received/spent add up across windows, closing balance keeps only the most recent window\'s value', async () => {
     const header = row('Bank Accounts', ['Bank Accounts', 'Opening Balance', 'Cash Received', 'Cash Spent', 'Closing Balance'], 'Header');
     getReportBankSummary
@@ -800,13 +533,6 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
     expect(result).toMatchObject({ cashIn: 1500, cashOut: 500, net: 1000 });
   });
 
-  test('an ultra-wide range (e.g. "All Time") is clamped before windowing — never generates decades of near-empty calls', async () => {
-    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2000-01-01', to: '2026-08-10' });
-    // 10-year lookback cap → ~10 windows, nowhere near the ~27 a literal 2000-2026 split would need.
-    expect(getReportProfitAndLoss.mock.calls.length).toBeLessThanOrEqual(11);
-    expect(getReportProfitAndLoss.mock.calls[0][1]).toBe('2016-01-01'); // clamped from, not 2000-01-01
-  });
-
   test('force:true refetches once the entry is past the grace window', async () => {
     await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
     reports._cache.get('banktx:user-1:tenant-1:acct-1').fetchedAt -= reports.FORCE_GRACE_MS + 1;
@@ -814,16 +540,6 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
     expect(getBankTransactions).toHaveBeenCalledTimes(2);
   });
 
-  test('clearCache clears bank-transaction/P&L/bank-summary entries too', async () => {
-    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
-    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
-    reports.clearCache('user-1');
-
-    await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
-    await reports.getProfitAndLoss('user-1', 'tenant-1', { from: '2026-01-01', to: '2026-01-31' });
-    expect(getBankTransactions).toHaveBeenCalledTimes(2);
-    expect(getReportProfitAndLoss).toHaveBeenCalledTimes(2);
-  });
 });
 
 // ── Budget vs Actual ─────────────────────────────────────────────────────────

@@ -474,7 +474,6 @@ xero-invoice-app/
 | POST | `/api/receipts/capture/:token` | — | Phone uploads a receipt image |
 | GET | `/api/receipts/:id/token` | JWT | Get short-lived signed token for receipt image |
 | GET | `/api/receipts/:id/image` | token | Serve receipt image (signed token in query param) |
-| DELETE | `/api/receipts/:id` | JWT | Delete a receipt record + image file |
 | POST | `/api/receipts/:id/reread` | JWT | Re-run AI on this receipt (costs 1 LLM call) |
 | GET | `/api/receipts/:id/group` | JWT | Siblings + `groupType` (`batch`/`split`) + `batchLabel` |
 | POST | `/api/receipts/:id/merge` | JWT | Undo a genuine photo split (not for batch imports) |
@@ -501,13 +500,10 @@ xero-invoice-app/
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/xero-reports/summary` | JWT | Outstanding balances snapshot (what's owed now) |
-| GET | `/api/xero-reports/period` | JWT | Invoice trend for a date range (`?preset=week\|month\|year\|custom`) |
 | GET | `/api/xero-reports/accounts` | JWT | Chart of accounts |
 | GET | `/api/xero-reports/bank-accounts` | JWT | Bank accounts list |
 | GET | `/api/xero-reports/contacts` | JWT | Contacts with outstanding balances |
 | GET | `/api/xero-reports/bank-transactions` | JWT | Bank transactions |
-| GET | `/api/xero-reports/profit-loss` | JWT | Profit & Loss report |
-| GET | `/api/xero-reports/bank-summary` | JWT | Bank summary |
 | GET | `/api/xero-reports/budget-variance` | JWT | Budget vs actual variance |
 | GET | `/api/xero-reports/performance` | JWT | Financial performance metrics |
 | GET | `/api/xero-reports/variance-insights` | JWT | AI-generated variance insights (Gemini) |

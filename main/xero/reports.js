@@ -174,10 +174,8 @@ const {
   _closedCount,
   _dateFromParts,
   _fiscalYearMonths,
-  _fiscalYearStart,
   _fmtISODate,
   _fmtXeroDate,
-  _monthKeyOfDate,
   _monthMeta,
   _monthsBetween,
   _monthsFrom,
@@ -186,8 +184,6 @@ const {
   _resolvePeriod,
   _resolveWindow,
   _todayPartsInTz,
-  _weekdayMon0,
-  computeRange,
 } = require('./periods');
 
 function _buildSummary(org, invoices) {
@@ -287,64 +283,7 @@ async function _getOrganisationRaw(userId, tenantId, force) {
 // counts as today depends on where the user is), resolved once via
 // Intl.DateTimeFormat against the user's stored timezone preference.
 
-function _buildPeriod(invoices, range) {
-  const granularity = range.days <= 31 ? 'day' : 'month';
-  const bucketOf = dateStr => {
-    if (!dateStr) return null;
-    const d = new Date(dateStr);
-    return granularity === 'day'
-      ? dateStr.slice(0, 10)
-      : `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-  };
 
-  const buckets = new Map(); // key -> { sales, bills }
-  let salesTotal = 0, billsTotal = 0, salesCount = 0, billsCount = 0;
-
-  for (const inv of invoices) {
-    const isReceivable = inv.type === 'ACCREC';
-    const total = Number(inv.total || 0);
-    if (isReceivable) { salesTotal += total; salesCount++; } else { billsTotal += total; billsCount++; }
-
-    const key = bucketOf(inv.date);
-    if (!key) continue;
-    if (!buckets.has(key)) buckets.set(key, { bucket: key, sales: 0, bills: 0 });
-    const b = buckets.get(key);
-    if (isReceivable) b.sales += total; else b.bills += total;
-  }
-
-  const trend = [...buckets.values()].sort((a, b) => a.bucket.localeCompare(b.bucket));
-
-  return {
-    range: { preset: range.preset, fromISO: range.fromISO, toISO: range.toISO },
-    totals: { salesTotal, billsTotal, salesCount, billsCount, net: salesTotal - billsTotal },
-    granularity,
-    trend,
-  };
-}
-
-async function _getPeriodRaw(userId, tenantId, { preset = 'month', from, to, timezone = 'UTC', force = false } = {}) {
-  // Fiscal-year-end only matters for the 'year' preset — skip the extra org
-  // lookup entirely for every other preset.
-  let fiscalYearEnd;
-  if (preset === 'year') {
-    const org = await _getOrganisation(userId, tenantId, force);
-    fiscalYearEnd = { month: org.financialYearEndMonth || 12, day: org.financialYearEndDay || 31 };
-  }
-  const range = computeRange(preset, timezone, from, to, fiscalYearEnd);
-  const key   = `period:${userId}:${tenantId}:${range.preset}:${range.fromISO}:${range.toISO}`;
-  const cached = _cacheGet(key, force);
-  if (cached) return cached;
-
-  const tokenCache = require('../utils/token-cache').forUser(userId);
-  const token      = await tokenCache.getValidToken(tenantId);
-  const api        = _apiFor(token);
-
-  const invoices = await _allInvoices(api, tenantId, { where: range.where, order: 'Date ASC', statuses: ['AUTHORISED', 'PAID'] });
-
-  const data = _buildPeriod(invoices, range);
-  logger.info('Insights period fetched', { userId, tenantId, range: range.preset, invoiceCount: invoices.length });
-  return _cacheSet(key, data);
-}
 
 // ── Chart of Accounts, Contacts, Bank Accounts ───────────────────────────────
 // All three ride on scopes already granted for existing features — Accounts and
@@ -508,18 +447,6 @@ async function _getBankTransactionsRaw(userId, tenantId, accountId, { force = fa
   return _cacheSet(key, data);
 }
 
-// Xero's Report API returns a tree (sections contain rows contain cells) rather
-// than flat fields — this walks it into a flat { title, cells } list so the P&L
-// and Bank Summary builders below can just search by row title instead of
-// knowing the tree shape. Pure, and exactly what's unit-tested — the real
-// nested Xero response shape only needs to be right in the tests' fixtures.
-function _flattenReportRows(rows, out = []) {
-  for (const row of rows || []) {
-    if (row.rows?.length) _flattenReportRows(row.rows, out);
-    if (row.cells?.length) out.push({ title: row.title || row.cells[0]?.value || '', cells: row.cells.map(c => c.value) });
-  }
-  return out;
-}
 
 // Xero formats report cell values like "1,234.56" or "(123.45)" for negatives —
 // never a plain parseable number.
@@ -531,24 +458,7 @@ function _parseReportNumber(s) {
   return negative ? -n : n;
 }
 
-function _findRow(flatRows, pattern) {
-  const row = flatRows.find(r => pattern.test(r.title));
-  return row ? _parseReportNumber(row.cells[row.cells.length - 1]) : 0;
-}
 
-function _buildProfitAndLoss(reportRows) {
-  const flat = _flattenReportRows(reportRows);
-  const income   = _findRow(flat, /^total income$/i);
-  const expenses = _findRow(flat, /^total expenses$/i) || _findRow(flat, /^total operating expenses$/i);
-  // "Net Profit" is Xero's default label; some orgs' report layouts say "Net Loss"
-  // instead when negative, or "Net Profit/(Loss)" — match broadly.
-  const netProfit = _findRow(flat, /^net (profit|loss)/i) || (income - expenses);
-  // Only net margin, not gross margin — the P&L data here doesn't separate a
-  // Cost of Sales section from Operating Expenses, so there's no distinct
-  // "gross profit" figure to divide by; fabricating one would be a guess.
-  const netMargin = income > 0 ? netProfit / income : 0;
-  return { income, expenses, netProfit, netMargin };
-}
 
 // Bank Summary is COLUMNAR, not sectioned-with-labeled-rows like it visually
 // appears in Xero's UI: one Header row spells out what each cell position
@@ -626,29 +536,6 @@ function _splitIntoReportWindows(fromISO, toISO, maxDays = REPORT_WINDOW_MAX_DAY
   return windows;
 }
 
-async function _getProfitAndLossRaw(userId, tenantId, { from, to, force = false } = {}) {
-  const clampedFrom = _clampReportFrom(from, to);
-  const key    = `pnl:${userId}:${tenantId}:${clampedFrom}:${to}`;
-  const cached = _cacheGet(key, force);
-  if (cached) return cached;
-
-  const tokenCache = require('../utils/token-cache').forUser(userId);
-  const token      = await tokenCache.getValidToken(tenantId);
-  const api        = _apiFor(token);
-
-  const windows = _splitIntoReportWindows(clampedFrom, to);
-  let income = 0, expenses = 0;
-  for (const w of windows) {
-    const res  = await withRetry(() => api.getReportProfitAndLoss(tenantId, w.from, w.to));
-    const part = _buildProfitAndLoss(res.body.reports?.[0]?.rows || []);
-    income   += part.income;
-    expenses += part.expenses;
-  }
-  const netProfit = income - expenses;
-  const netMargin = income > 0 ? netProfit / income : 0;
-  logger.info('Insights P&L fetched', { userId, tenantId, from: clampedFrom, to, windows: windows.length });
-  return _cacheSet(key, { income, expenses, netProfit, netMargin, from: clampedFrom, to });
-}
 
 async function _getBankSummaryRaw(userId, tenantId, { from, to, force = false } = {}) {
   const clampedFrom = _clampReportFrom(from, to);
@@ -1656,12 +1543,10 @@ async function _getFinancialNarrativeRaw(userId, tenantId, { timezone = 'UTC', f
 // getBudgetVariance, and so on) go through the same in-flight map as routes.
 const getSummary             = _dedupe('getSummary', _getSummaryRaw);
 const _getOrganisation       = _dedupe('_getOrganisation', _getOrganisationRaw);
-const getPeriod              = _dedupe('getPeriod', _getPeriodRaw);
 const getAccounts            = _dedupe('getAccounts', _getAccountsRaw);
 const getBankAccounts        = _dedupe('getBankAccounts', _getBankAccountsRaw);
 const getContacts            = _dedupe('getContacts', _getContactsRaw);
 const getBankTransactions    = _dedupe('getBankTransactions', _getBankTransactionsRaw);
-const getProfitAndLoss       = _dedupe('getProfitAndLoss', _getProfitAndLossRaw);
 const getBankSummary         = _dedupe('getBankSummary', _getBankSummaryRaw);
 const getBudgetVariance      = _dedupe('getBudgetVariance', _getBudgetVarianceRaw);
 const getPerformance         = _dedupe('getPerformance', _getPerformanceRaw);
@@ -1677,10 +1562,10 @@ function clearCache(userId) {
 
 module.exports = {
   FORCE_GRACE_MS, DIRECTORY_TTL_MS,
-  getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
-  getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
-  _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,
-  _buildBankTransactions, _buildPayments, _buildProfitAndLoss, _buildBankSummary, _flattenReportRows,
+  getSummary, getAccounts, getBankAccounts, getContacts,
+  getBankTransactions, getBankSummary, getBudgetVariance, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
+  _buildSummary, _buildAccounts, _buildBankAccounts, _buildContacts,
+  _buildBankTransactions, _buildPayments, _buildBankSummary,
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _monthsFrom, _monthMeta, _monthsBetween, _chunkMonths,
   _resolveWindow, _resolvePeriod, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,

@@ -25,147 +25,93 @@ function _resolveTenant(req) {
   return { tenants, tenantId };
 }
 
-router.get('/summary', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
+// One shape for every report route: resolve the tenant, answer connected:false
+// without touching Xero when there is none, check the query the report needs,
+// call it, spread the result with the tenant list, and turn a scope error into
+// a reconnect prompt. Twelve handlers used to repeat these ten lines with small
+// drifts between them.
+const force = req => req.query.force === 'true';
+const tz    = req => getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
+function report(label, fetch, { needs = [] } = {}) {
+  return async (req, res) => {
+    try {
+      const { tenants, tenantId } = _resolveTenant(req);
+      if (!tenantId) return res.json({ connected: false, tenants: [] });
+      for (const q of needs) if (!req.query[q]) return res.status(400).json({ error: `${q} is required` });
+      const data = await fetch(req, tenantId);
+      res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
+    } catch (err) {
+      logger.error(`${label} failed`, { error: xeroErrMsg(err), userId: req.user.id });
+      res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
+    }
+  };
+}
 
-    const data = await reports.getSummary(req.user.id, tenantId, { force: req.query.force === 'true' });
-    res.json({ ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Insights summary failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(500).json({ error: xeroErrMsg(err) });
-  }
-});
-
-// GET /api/xero-reports/period?preset=day|week|month|year|all|custom&from=&to=
-// Invoiced-value trend for a date range, for the "monthly review" style view —
-// distinct from /summary, which is always "right now" outstanding balances.
-router.get('/period', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-
-    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-    const data = await reports.getPeriod(req.user.id, tenantId, {
-      preset: req.query.preset, from: req.query.from, to: req.query.to,
-      timezone, force: req.query.force === 'true',
-    });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    // Bad custom-range input (e.g. from-after-to) is a 400, not a Xero failure.
-    const isInputError = /valid|must not be after/i.test(err.message || '');
-    logger.warn('Insights period failed', { error: err.message, userId: req.user.id });
-    res.status(isInputError ? 400 : 500).json({ error: isInputError ? err.message : xeroErrMsg(err) });
-  }
-});
-
-router.get('/accounts', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-    const data = await reports.getAccounts(req.user.id, tenantId, { force: req.query.force === 'true' });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Insights accounts failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(500).json({ error: xeroErrMsg(err) });
-  }
-});
-
-router.get('/bank-accounts', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-    const data = await reports.getBankAccounts(req.user.id, tenantId, { force: req.query.force === 'true' });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Insights bank accounts failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(500).json({ error: xeroErrMsg(err) });
-  }
-});
-
-router.get('/contacts', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-    const data = await reports.getContacts(req.user.id, tenantId, { force: req.query.force === 'true' });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Insights contacts failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(500).json({ error: xeroErrMsg(err) });
-  }
-});
-
-// GET /api/xero-reports/bank-transactions?accountId=&force=
+router.get('/summary',       requireAuth, report('Insights summary',       (req, t) => reports.getSummary(req.user.id, t, { force: force(req) })));
+router.get('/accounts',      requireAuth, report('Insights accounts',      (req, t) => reports.getAccounts(req.user.id, t, { force: force(req) })));
+router.get('/bank-accounts', requireAuth, report('Insights bank accounts', (req, t) => reports.getBankAccounts(req.user.id, t, { force: force(req) })));
+router.get('/contacts',      requireAuth, report('Insights contacts',      (req, t) => reports.getContacts(req.user.id, t, { force: force(req) })));
 // The statement view behind Banking's "View transactions" — needs
-// accounting.banktransactions.read, so it 400s with a clear message for anyone
-// still connected under the older, narrower scope list rather than a raw Xero
-// 403 the user can't act on.
-router.get('/bank-transactions', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-    if (!req.query.accountId) return res.status(400).json({ error: 'accountId is required' });
-
-    const data = await reports.getBankTransactions(req.user.id, tenantId, req.query.accountId, { force: req.query.force === 'true' });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Insights bank transactions failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
-  }
-});
-
-// GET /api/xero-reports/profit-loss?from=&to=
-router.get('/profit-loss', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-    if (!req.query.from || !req.query.to) return res.status(400).json({ error: 'from and to dates are required' });
-
-    const data = await reports.getProfitAndLoss(req.user.id, tenantId, { from: req.query.from, to: req.query.to, force: req.query.force === 'true' });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Insights P&L failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
-  }
-});
-
-// GET /api/xero-reports/bank-summary?from=&to=
-router.get('/bank-summary', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-    if (!req.query.from || !req.query.to) return res.status(400).json({ error: 'from and to dates are required' });
-
-    const data = await reports.getBankSummary(req.user.id, tenantId, { from: req.query.from, to: req.query.to, force: req.query.force === 'true' });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Insights bank summary failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
-  }
-});
-
-// GET /api/xero-reports/budget-variance?force=
-// The monthly actual/budget grid. Needs accounting.reports.budgetsummary.read,
-// which is newer than the other report scopes — so anyone who hasn't reconnected
-// since it was added gets the reconnect prompt rather than a raw Xero 401.
-router.get('/budget-variance', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-
-    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-    const data = await reports.getBudgetVariance(req.user.id, tenantId, { timezone, force: req.query.force === 'true' });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Budget vs Actual failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
-  }
-});
-
-// GET /api/xero-reports/performance?force=
+// accounting.banktransactions.read, so a scope error becomes a reconnect prompt.
+router.get('/bank-transactions', requireAuth, report('Insights bank transactions',
+  (req, t) => reports.getBankTransactions(req.user.id, t, req.query.accountId, { force: force(req) }), { needs: ['accountId'] }));
+// The monthly actual/budget grid. Needs accounting.reports.budgetsummary.read.
+router.get('/budget-variance', requireAuth, report('Budget vs Actual',
+  (req, t) => reports.getBudgetVariance(req.user.id, t, { timezone: tz(req), force: force(req) })));
 // Powers Dashboard -> Overview and Revenue. Composed from the budget-variance
 // fetch plus a bank summary, so it needs no scope those two don't already have.
+router.get('/performance', requireAuth, report('Performance overview',
+  (req, t) => reports.getPerformance(req.user.id, t, {
+    timezone: tz(req), period: _periodFromQuery(req),
+    cashFlow: req.query.cashFlow === 'true', customers: req.query.customers === 'true', force: force(req),
+  })));
+// Xero has no cash-flow-statement endpoint, so this is built from Bank Summary,
+// Payments, Bank Transactions and Invoices. Every one of those is a read.
+router.get('/cash-flow', requireAuth, report('Cash flow',
+  (req, t) => reports.getCashFlow(req.user.id, t, { timezone: tz(req), period: _periodFromQuery(req), force: force(req) })));
+
+// GET /api/xero-reports/variance-insights?force=
+// Gemini-written commentary on variances the server computed from Xero. Split
+// from /performance deliberately: the dashboard paints from real figures first,
+// and this arrives after, so an LLM outage or a missing API key can never delay
+// or blank the numbers. Its own shape: no tenant list.
+router.get('/variance-insights', requireAuth, async (req, res) => {
+  try {
+    const { tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false });
+    const data = await reports.getVarianceInsights(req.user.id, tenantId, {
+      timezone: tz(req), period: _periodFromQuery(req),
+      force:     force(req),                          // re-pull from Xero
+      reanalyse: req.query.reanalyse === 'true',      // re-run the model only
+    });
+    res.json({ connected: true, ...data });
+  } catch (err) {
+    logger.error('Variance insights failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
+  }
+});
+
+// GET /api/xero-reports/narrative?preset=|from=&to=
+// Three sentences joining up the alerts, written by Gemini from figures this
+// server computed. Read-only. Never a hard failure: the card is an extra.
+router.get('/narrative', requireAuth, async (req, res) => {
+  try {
+    const { tenantId } = _resolveTenant(req);
+    if (!tenantId) return res.json({ connected: false, available: false });
+    const data = await reports.getFinancialNarrative(req.user.id, tenantId, {
+      timezone: tz(req), period: _periodFromQuery(req),
+      force:     force(req),
+      // Asking for another look must not re-download the ledger, which Xero
+      // bills by the gigabyte.
+      reanalyse: req.query.reanalyse === 'true',
+    });
+    res.json({ connected: true, ...data });
+  } catch (err) {
+    logger.error('Financial narrative failed', { error: xeroErrMsg(err), userId: req.user.id });
+    res.json({ connected: true, available: false, reason: 'error' });
+  }
+});
+
 // ── Budget exports ───────────────────────────────────────────────────────────
 // Two steps, the same shape as /api/invoices/:id/pdf-url: the browser cannot put
 // an Authorization header on a plain navigation, so the authed call hands back a
@@ -254,97 +200,6 @@ router.get('/budget/export', async (req, res) => {
   } catch (err) {
     logger.error('Budget export failed', { error: xeroErrMsg(err), userId: spec.userId, kind: spec.kind });
     if (!res.headersSent) res.status(500).type('text/plain').send('Could not build the export.');
-  }
-});
-
-router.get('/performance', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-
-    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-    const data = await reports.getPerformance(req.user.id, tenantId, {
-      timezone, period: _periodFromQuery(req),
-      cashFlow: req.query.cashFlow === 'true',
-      customers: req.query.customers === 'true',
-      force: req.query.force === 'true',
-    });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Performance overview failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
-  }
-});
-
-// GET /api/xero-reports/variance-insights?force=
-// Gemini-written commentary on variances the server computed from Xero. Split
-// from /performance deliberately: the dashboard paints from real figures first,
-// and this arrives after, so an LLM outage or a missing API key can never delay
-// or blank the numbers.
-router.get('/variance-insights', requireAuth, async (req, res) => {
-  try {
-    const { tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false });
-
-    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-    // Same period the figures used — otherwise the commentary describes months
-    // the reader isn't looking at.
-    const data = await reports.getVarianceInsights(req.user.id, tenantId, {
-      timezone, period: _periodFromQuery(req),
-      force:     req.query.force === 'true',        // re-pull from Xero
-      reanalyse: req.query.reanalyse === 'true',    // re-run the model only
-    });
-    res.json({ connected: true, ...data });
-  } catch (err) {
-    logger.error('Variance insights failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
-  }
-});
-
-// GET /api/xero-reports/narrative?preset=|from=&to=
-// Three sentences joining up the alerts, written by Gemini from figures this
-// server computed. Split from /performance for the same reason variance
-// insights are: the dashboard paints from real numbers first, and this arrives
-// after, so an LLM outage can never delay or blank the figures.
-//
-// Read-only. It proposes nothing and can act on nothing.
-router.get('/narrative', requireAuth, async (req, res) => {
-  try {
-    const { tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, available: false });
-
-    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-    const data = await reports.getFinancialNarrative(req.user.id, tenantId, {
-      timezone, period: _periodFromQuery(req),
-      force:     req.query.force === 'true',
-      // Asking for another look must not re-download the ledger, which Xero
-      // bills by the gigabyte.
-      reanalyse: req.query.reanalyse === 'true',
-    });
-    res.json({ connected: true, ...data });
-  } catch (err) {
-    logger.error('Financial narrative failed', { error: xeroErrMsg(err), userId: req.user.id });
-    // Never a hard failure: the card is an extra, not a figure.
-    res.json({ connected: true, available: false, reason: 'error' });
-  }
-});
-
-// GET /api/xero-reports/cash-flow?preset=|from=&to=
-// Xero has no cash-flow-statement endpoint, so this is built from Bank Summary,
-// Payments, Bank Transactions and Invoices. Every one of those is a read.
-router.get('/cash-flow', requireAuth, async (req, res) => {
-  try {
-    const { tenants, tenantId } = _resolveTenant(req);
-    if (!tenantId) return res.json({ connected: false, tenants: [] });
-
-    const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-    const data = await reports.getCashFlow(req.user.id, tenantId, {
-      timezone, period: _periodFromQuery(req), force: req.query.force === 'true',
-    });
-    res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
-  } catch (err) {
-    logger.error('Cash flow failed', { error: xeroErrMsg(err), userId: req.user.id });
-    res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
   }
 });
 

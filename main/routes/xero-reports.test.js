@@ -111,66 +111,6 @@ describe('routes/xero-reports', () => {
     expect(res.body.error).toMatch(/rate limit/i);
   });
 
-  describe('GET /period', () => {
-    test('returns connected:false with no tenant, without calling reports.getPeriod', async () => {
-      tokenCache.getPersistedTenants.mockReturnValue([]);
-      const res = await request(serverFor(app))
-        .get('/api/xero-reports/period')
-        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
-        .expect(200);
-      expect(res.body).toEqual({ connected: false, tenants: [] });
-      expect(reports.getPeriod).not.toHaveBeenCalled();
-    });
-
-    test('threads preset/from/to/force through, and passes this user\'s timezone default', async () => {
-      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      reports.getPeriod.mockResolvedValue({ range: {}, totals: {}, granularity: 'day', trend: [] });
-
-      await request(serverFor(app))
-        .get('/api/xero-reports/period?preset=custom&from=2026-01-01&to=2026-01-31&force=true')
-        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
-        .expect(200);
-
-      expect(reports.getPeriod).toHaveBeenCalledWith(testUser.id, 't1', {
-        preset: 'custom', from: '2026-01-01', to: '2026-01-31', timezone: 'Asia/Singapore', force: true,
-      });
-    });
-
-    test('uses this user\'s saved timezone preference when set', async () => {
-      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      reports.getPeriod.mockResolvedValue({ range: {}, totals: {}, granularity: 'day', trend: [] });
-      users.saveUserConfig(testUser.id, { TIMEZONE: 'America/New_York' });
-
-      await request(serverFor(app))
-        .get('/api/xero-reports/period')
-        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
-        .expect(200);
-
-      expect(reports.getPeriod).toHaveBeenCalledWith(testUser.id, 't1', expect.objectContaining({ timezone: 'America/New_York' }));
-    });
-
-    test('a bad custom range surfaces as 400, not 500', async () => {
-      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      reports.getPeriod.mockRejectedValue(new Error('Custom range requires valid "from" and "to" dates (YYYY-MM-DD)'));
-
-      const res = await request(serverFor(app))
-        .get('/api/xero-reports/period?preset=custom')
-        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
-        .expect(400);
-      expect(res.body.error).toMatch(/valid/i);
-    });
-
-    test('a real Xero failure still surfaces as 500', async () => {
-      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      reports.getPeriod.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
-
-      await request(serverFor(app))
-        .get('/api/xero-reports/period')
-        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
-        .expect(500);
-    });
-  });
-
   describe('GET /accounts, /bank-accounts, /contacts', () => {
     test('all three require authentication', async () => {
       await request(serverFor(app)).get('/api/xero-reports/accounts').expect(401);
@@ -238,11 +178,11 @@ describe('routes/xero-reports', () => {
     });
   });
 
-  describe('GET /bank-transactions, /profit-loss, /bank-summary', () => {
+  describe('GET /bank-transactions', () => {
     test('all three require authentication', async () => {
       await request(serverFor(app)).get('/api/xero-reports/bank-transactions?accountId=a1').expect(401);
-      await request(serverFor(app)).get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31').expect(401);
-      await request(serverFor(app)).get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31').expect(401);
+      await request(serverFor(app)).get('/api/xero-reports/bank-transactions?accountId=acc-1').expect(401);
+      await request(serverFor(app)).get('/api/xero-reports/bank-transactions?accountId=acc-1').expect(401);
     });
 
     test('/bank-transactions requires accountId', async () => {
@@ -267,48 +207,13 @@ describe('routes/xero-reports', () => {
       expect(reports.getBankTransactions).toHaveBeenCalledWith(testUser.id, 't1', 'acct-1', { force: false });
     });
 
-    test('/profit-loss and /bank-summary require from and to', async () => {
-      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      const res1 = await request(serverFor(app)).get('/api/xero-reports/profit-loss').set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(400);
-      expect(res1.body.error).toMatch(/from and to/i);
-      const res2 = await request(serverFor(app)).get('/api/xero-reports/bank-summary?from=2026-01-01').set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(400);
-      expect(res2.body.error).toMatch(/from and to/i);
-    });
-
-    test('/profit-loss calls reports.getProfitAndLoss with the resolved tenant and date range', async () => {
-      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      reports.getProfitAndLoss.mockResolvedValue({ income: 0, expenses: 0, netProfit: 0 });
-
-      await request(serverFor(app))
-        .get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31')
-        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
-        .expect(200);
-
-      expect(reports.getProfitAndLoss).toHaveBeenCalledWith(testUser.id, 't1', { from: '2026-01-01', to: '2026-01-31', force: false });
-    });
-
-    test('/bank-summary calls reports.getBankSummary with the resolved tenant and date range', async () => {
-      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      reports.getBankSummary.mockResolvedValue({ accounts: [], cashIn: 0, cashOut: 0, net: 0 });
-
-      await request(serverFor(app))
-        .get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31')
-        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
-        .expect(200);
-
-      expect(reports.getBankSummary).toHaveBeenCalledWith(testUser.id, 't1', { from: '2026-01-01', to: '2026-01-31', force: false });
-    });
-
-    // The whole reason these three routes exist behind a wider scope than the
-    // rest of Insights: someone still on the old, narrower connection hits a
-    // real Xero 403 here. That must read as "reconnect", not a generic failure.
     test('a Xero 403 (insufficient scope) surfaces as a clear reconnect prompt, not a generic error', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       const scopeErr = new Error(JSON.stringify({ response: { statusCode: 403 }, body: { Detail: 'Forbidden resource' } }));
-      reports.getProfitAndLoss.mockRejectedValue(scopeErr);
+      reports.getBankTransactions.mockRejectedValue(scopeErr);
 
       const res = await request(serverFor(app))
-        .get('/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31')
+        .get('/api/xero-reports/bank-transactions?accountId=acc-1')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(403);
       expect(res.body.error).toMatch(/reconnect/i);
@@ -320,24 +225,46 @@ describe('routes/xero-reports', () => {
     test('a Xero 401 with WWW-Authenticate: insufficient_scope also surfaces as a clear reconnect prompt', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
       const scopeErr = new Error(JSON.stringify({ response: { statusCode: 401, headers: { 'www-authenticate': 'insufficient_scope' } }, body: {} }));
-      reports.getBankSummary.mockRejectedValue(scopeErr);
+      reports.getBankTransactions.mockRejectedValue(scopeErr);
 
       const res = await request(serverFor(app))
-        .get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31')
+        .get('/api/xero-reports/bank-transactions?accountId=acc-1')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(403);
       expect(res.body.error).toMatch(/reconnect/i);
     });
 
-    test('a non-scope Xero failure on these three still surfaces as 500', async () => {
+    test('a non-scope Xero failure still surfaces as 500', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      reports.getBankSummary.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
+      reports.getBankTransactions.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
 
       const res = await request(serverFor(app))
-        .get('/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31')
+        .get('/api/xero-reports/bank-transactions?accountId=acc-1')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(500);
       expect(res.body.error).toMatch(/rate limit/i);
+    });
+  });
+
+  describe('one handler shape', () => {
+    test('the three report routes nothing called are gone', async () => {
+      for (const path of ['/api/xero-reports/period', '/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31', '/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31']) {
+        const res = await request(serverFor(app)).get(path).set('Authorization', `Bearer ${tokenFor(testUser)}`);
+        if (res.status !== 404) console.log('UNEXPECTED', path, res.status, res.text.slice(0, 300));
+        expect({ status: res.status, body: res.body }).toMatchObject({ status: 404 });   // body shown on failure
+      }
+    });
+
+    test('every report route answers the same envelope', async () => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1', tenantName: 'Org' }]);
+      reports.getAccounts.mockResolvedValue({ accounts: [] });
+      reports.getBankAccounts.mockResolvedValue({ bankAccounts: [] });
+      reports.getContacts.mockResolvedValue({ contacts: [] });
+      for (const path of ['/api/xero-reports/accounts', '/api/xero-reports/bank-accounts', '/api/xero-reports/contacts']) {
+        const res = await request(serverFor(app)).get(path).set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(200);
+        expect(res.body).toMatchObject({ connected: true, activeTenantId: 't1' });
+        expect(res.body.tenants).toHaveLength(1);
+      }
     });
   });
 });
