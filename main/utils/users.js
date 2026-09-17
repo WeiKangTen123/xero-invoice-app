@@ -86,6 +86,35 @@ function saveUserConfig(userId, patch) {
   return getUserConfig(userId);
 }
 
+// ── Defaults ──────────────────────────────────────────────────────────────────
+// Where a document's currency and account come from when the document itself
+// does not say: the user's Setup values, then the environment, then one
+// literal per kind. These fallbacks used to be spelled in six files with five
+// different values ('SGD'/'USD', '429'/'200'/'310'), so a user with nothing
+// configured got SGD claims and USD bills.
+const LITERAL_DEFAULTS = {
+  currency:    'SGD',
+  accountCode: { claim: '429', bill: '310', invoice: '200' },   // Xero's default SG chart
+  zeroTaxRate: 'NONE',
+};
+
+function defaultsFrom(config = {}) {
+  const account = config.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || null;
+  return {
+    currency:    config.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || LITERAL_DEFAULTS.currency,
+    // One configured code applies to every kind — Setup offers a single default.
+    accountCode: account
+      ? { claim: account, bill: account, invoice: account }
+      : { ...LITERAL_DEFAULTS.accountCode },
+    zeroTaxRate: config.ZERO_TAX_RATE || process.env.ZERO_TAX_RATE || LITERAL_DEFAULTS.zeroTaxRate,
+    timezone:    config.TIMEZONE || DEFAULT_TIMEZONE,
+  };
+}
+
+function getUserDefaults(userId) {
+  return defaultsFrom(userId ? getUserConfig(userId) : {});
+}
+
 // ── User CRUD ─────────────────────────────────────────────────────────────────
 
 function hasUsers() {
@@ -258,7 +287,7 @@ function ensureUserDirectories() {
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
   getAllUsers, updateUserRole, deleteUser, readUsers,
-  getUserConfig, saveUserConfig, getSetupStatus, ensureUserDirectories,
+  getUserConfig, saveUserConfig, getUserDefaults, defaultsFrom, getSetupStatus, ensureUserDirectories,
   getGeminiKeys, addGeminiKey, removeGeminiKey,
   touchLastSeen, isOnline, DEFAULT_TIMEZONE,
   CONFIG_KEY_TO_COLUMN, ENCRYPTED_COLUMNS, // exposed for the one-time JSON->SQLite importer

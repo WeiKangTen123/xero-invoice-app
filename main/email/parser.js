@@ -62,18 +62,8 @@ const _parseTaxPercent   = intake.parseTaxPercent;
 const _ensureSubtotalTax = intake.ensureSubtotalTax;
 // Resolve per-user defaults, falling back to .env globals
 function _userDefaults(userId) {
-  if (!userId) {
-    return {
-      currency:    process.env.DEFAULT_CURRENCY    || 'USD',
-      accountCode: process.env.DEFAULT_ACCOUNT_CODE || '310',
-    };
-  }
-  const { getUserConfig } = require('../utils/users');
-  const cfg = getUserConfig(userId);
-  return {
-    currency:    cfg.DEFAULT_CURRENCY    || process.env.DEFAULT_CURRENCY    || 'USD',
-    accountCode: cfg.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '310',
-  };
+  const d = require('../utils/users').getUserDefaults(userId);
+  return { currency: d.currency, accountCode: d.accountCode.bill, accountCodes: d.accountCode };
 }
 
 // ── PDF text extraction ───────────────────────────────────────────────────────

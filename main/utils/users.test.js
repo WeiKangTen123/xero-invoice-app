@@ -84,6 +84,25 @@ describe('users store (SQLite)', () => {
     }
   });
 
+  test('getUserDefaults: the user setting wins, then the environment, then one literal per kind', async () => {
+    // Currency and account-code fallbacks were spelled in six files with five
+    // different values ('SGD'/'USD', '429'/'200'/'310').
+    const u = await users.createUser('defaults@test.com', 'password123', 'user');
+    const prev = { c: process.env.DEFAULT_CURRENCY, a: process.env.DEFAULT_ACCOUNT_CODE };
+    try {
+      delete process.env.DEFAULT_CURRENCY; delete process.env.DEFAULT_ACCOUNT_CODE;
+      expect(users.getUserDefaults(u.id)).toMatchObject({ currency: 'SGD', accountCode: { claim: '429', bill: '310', invoice: '200' }, timezone: 'Asia/Singapore' });
+      process.env.DEFAULT_ACCOUNT_CODE = '999';
+      expect(users.getUserDefaults(u.id).accountCode).toEqual({ claim: '999', bill: '999', invoice: '999' });
+      users.saveUserConfig(u.id, { DEFAULT_CURRENCY: 'USD', DEFAULT_ACCOUNT_CODE: '412', TIMEZONE: 'UTC' });
+      expect(users.getUserDefaults(u.id)).toMatchObject({ currency: 'USD', accountCode: { claim: '412', bill: '412', invoice: '412' }, timezone: 'UTC' });
+      expect(users.getUserDefaults(null).currency).toBe('SGD');
+    } finally {
+      if (prev.c === undefined) delete process.env.DEFAULT_CURRENCY; else process.env.DEFAULT_CURRENCY = prev.c;
+      if (prev.a === undefined) delete process.env.DEFAULT_ACCOUNT_CODE; else process.env.DEFAULT_ACCOUNT_CODE = prev.a;
+    }
+  });
+
   test('IMAP_LOOKBACK_DAYS round-trips through saveUserConfig / getUserConfig', async () => {
     const u = await users.createUser('lookback@test.com', 'password123', 'user');
     users.saveUserConfig(u.id, { IMAP_LOOKBACK_DAYS: '30' });

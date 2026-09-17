@@ -1,5 +1,7 @@
 const express      = require('express');
+const { newId } = require('../utils/ids');
 const router       = express.Router();
+const { decodeBase64 } = require('../utils/base64');
 const jwt          = require('jsonwebtoken');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
@@ -45,16 +47,6 @@ function verifyImageToken(token, invoiceId) {
   return payload;
 }
 
-// Base64 can carry a data: prefix depending on how the client built it. Decode
-// strictly: a string that isn't valid base64 must fail here, not produce a
-// truncated file that looks stored but won't open.
-function decodeBase64(data) {
-  if (typeof data !== 'string' || !data) return null;
-  const raw = data.includes(',') ? data.slice(data.indexOf(',') + 1) : data;
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw.replace(/\s/g, ''))) return null;
-  const buf = Buffer.from(raw, 'base64');
-  return buf.length ? buf : null;
-}
 
 // Shared by the authenticated desktop upload and the paired phone upload, so
 // the two cannot drift apart on validation, ordering or the state a new receipt
@@ -101,15 +93,14 @@ function storeReceipt(userId, { mime, data, filename, source }) {
     } };
   }
 
-  const id = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+  const id = newId();
   // Store the file BEFORE the row. A failed write must not leave a record
   // pointing at an image that was never saved.
   const storedName = receiptStore.forUser(userId).save(id, buffer, mime);
 
-  const { getUserConfig } = require('../utils/users');
-  const userConfig = getUserConfig(userId);
-  const defaultCurrency = userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'SGD';
-  const defaultAccount = userConfig.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '429';
+  const defaults = require('../utils/users').getUserDefaults(userId);
+  const defaultCurrency = defaults.currency;
+  const defaultAccount  = defaults.accountCode.claim;
   const today = new Date().toISOString().split('T')[0];
 
   const record = invoiceStore.forUser(userId).add({
@@ -234,7 +225,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = nu
     const [first, ...rest] = decision.pageNumbers;
     store.update(id, { receiptPage: first, receiptGroup: group });
     for (const page of rest) {
-      const sibId = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+      const sibId = newId();
       store.add({
         id: sibId,
         status: 'review-needed',
@@ -273,7 +264,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = nu
   await _applyFields(userId, id, first, { receiptBox: JSON.stringify(first.box), receiptGroup: group });
   _flagIfSuspected(userId, id);
   for (const r of rest) {
-    const sibId = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+    const sibId = newId();
     store.add({
       id: sibId,
       status: 'review-needed',

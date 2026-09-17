@@ -1,4 +1,6 @@
 const { enqueueInvoice }  = require('../queue/processor');
+const { getUserDefaults } = require('./users');
+const { newId } = require('./ids');
 const { reconnectXero }   = require('../xero/reconnect');
 const { xeroErrMsg }      = require('../xero/xero-utils');
 const { notifyError }     = require('./notify');
@@ -103,7 +105,7 @@ function createHandler(userId) {
       return { id: existing.id, status: existing.status, duplicate: true };
     }
 
-    const id = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+    const id = newId();
 
     // Save PDF to per-user storage
     let hasPdf = false;
@@ -126,7 +128,7 @@ function createHandler(userId) {
       document:    normaliseDocument(invoiceData),
       invoiceType: invoiceData.invoiceType || 'ACCPAY',
       source:      invoiceData.source      || 'pdf',
-      defaults:    { accountCode: invoiceData.accountCode || '', currency: invoiceData.currency || 'USD' },
+      defaults:    { accountCode: invoiceData.accountCode || '', currency: invoiceData.currency || getUserDefaults(userId).currency },
       extras: {
         hasPdf,
         pdfFilename:   invoiceData.pdfFilename    || null,
@@ -139,7 +141,7 @@ function createHandler(userId) {
         invoiceDate:   invoiceData.invoiceDate    || null,
         dueDate:       invoiceData.dueDate        || null,
         totalAmount:   invoiceData.totalAmount    || 0,
-        currency:      invoiceData.currency       || 'USD',
+        currency:      invoiceData.currency       || getUserDefaults(userId).currency,
         lineItems:     invoiceData.lineItems      || [],
         description:   invoiceData.description    || '',
         accountCode:   invoiceData.accountCode    || '',

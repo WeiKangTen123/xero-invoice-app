@@ -1,5 +1,7 @@
 const express      = require('express');
+const { newId } = require('../utils/ids');
 const router       = express.Router();
+const { decodeBase64 } = require('../utils/base64');
 const { requireAuth } = require('../middleware/auth-middleware');
 const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
@@ -37,13 +39,6 @@ const logger       = require('../utils/logger');
 // which says what the limit is. Raising it means raising all three together.
 const MAX_UPLOAD_BYTES = 7 * 1024 * 1024;
 
-function decodeBase64(data) {
-  if (typeof data !== 'string' || !data) return null;
-  const raw = data.includes(',') ? data.slice(data.indexOf(',') + 1) : data;
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw.replace(/\s/g, ''))) return null;
-  const buf = Buffer.from(raw, 'base64');
-  return buf.length ? buf : null;
-}
 
 // Turns one matched claim line into a local record. Injected into the job so the
 // job itself stays testable without a database.
@@ -53,7 +48,7 @@ function decodeBase64(data) {
 // one record at a time means a repeat inside a single archive is caught too: the
 // first row is committed before the second is checked.
 async function createClaimRecord({ userId, groupId, row, receipt, match, category, categorySuggested, store }) {
-  const id = `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+  const id = newId();
   const invStore = invoiceStore.forUser(userId);
 
   const hash = receipt && receipt.buffer ? hashBuffer(receipt.buffer) : null;
@@ -102,10 +97,9 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
       // arrived without a form. Only a line MISSING its receipt is a problem.
       : (!receipt && row.no ? 'No receipt found for this claim line' : null);
 
-  const { getUserConfig } = require('../utils/users');
-  const userConfig = getUserConfig(userId);
-  const defaultCurrency = userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'SGD';
-  const defaultAccount = userConfig.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '429';
+  const defaults = require('../utils/users').getUserDefaults(userId);
+  const defaultCurrency = defaults.currency;
+  const defaultAccount  = defaults.accountCode.claim;
   // The account follows what the claim was for, matched against the org's own
   // chart (claims/category-account). The form's heading leads the description,
   // but the chart may only know the reader's wording ("Local Travel" against a

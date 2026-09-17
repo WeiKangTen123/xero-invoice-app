@@ -115,8 +115,9 @@ async function buildLineItems(invoiceData, userConfig, accountingApi, tenantId) 
     rawLineItems.push({ description: paymentLines, unitAmount: 0 });
   }
 
-  const zeroRate    = userConfig.ZERO_TAX_RATE         || process.env.ZERO_TAX_RATE         || 'NONE';
-  const accountCode = invoiceData.accountCode           || userConfig.DEFAULT_ACCOUNT_CODE   || process.env.DEFAULT_ACCOUNT_CODE || '200';
+  const defaults    = require('../utils/users').defaultsFrom(userConfig);
+  const zeroRate    = defaults.zeroTaxRate;
+  const accountCode = invoiceData.accountCode || defaults.accountCode[invoiceData.invoiceType === 'ACCREC' ? 'invoice' : 'bill'];
 
   const { taxType, applied, unmatchedTaxAmount } =
     await resolveTaxType(accountingApi, tenantId, invoiceData, zeroRate);
@@ -141,7 +142,7 @@ async function buildLineItems(invoiceData, userConfig, accountingApi, tenantId) 
       description: invoiceData.description,
       quantity:    1.0,
       unitAmount:  parseFloat(invoiceData.subTotal) || 0,
-      accountCode: invoiceData.accountCode || userConfig.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '310',
+      accountCode,
       taxType,
     }];
   }
@@ -187,7 +188,7 @@ async function _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi) {
   const brandingThemeID = await getBrandingThemeID(accountingApi, tenantId, invoiceData.brandingThemeName);
   const lineItems       = await buildLineItems(invoiceData, userConfig, accountingApi, tenantId);
   const lineAmountTypes = invoiceData.lineAmountTypes === 'Inclusive' ? 'Inclusive' : 'Exclusive';
-  const currencyCode    = invoiceData.currency || userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'USD';
+  const currencyCode    = invoiceData.currency || require('../utils/users').defaultsFrom(userConfig).currency;
 
   return {
     currencyCode,

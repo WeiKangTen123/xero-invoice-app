@@ -10,9 +10,7 @@ const { profileFor } = require('./profiles');
 // receipt's image and hash, a claim's category. They are spread last, so a
 // path can override a default but the shape is always the same.
 
-function newId() {
-  return `${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
-}
+const { newId } = require('../utils/ids');
 
 function buildRecord({ id = newId(), document: doc, invoiceType, source, defaults = {}, extras = {} }) {
   const profile = profileFor(invoiceType);
@@ -34,7 +32,7 @@ function buildRecord({ id = newId(), document: doc, invoiceType, source, default
     invoiceDate:      doc.date || null,
     dueDate:          doc.dueDate || null,
     totalAmount:      doc.total || 0,
-    currency:         doc.currency || defaults.currency || 'USD',
+    currency:         doc.currency || defaults.currency || require('../utils/users').getUserDefaults(null).currency,
     invoiceType:      profile.xeroType === 'ACCREC' ? 'ACCREC' : invoiceType,
     source,
     sourceEmail:      '',

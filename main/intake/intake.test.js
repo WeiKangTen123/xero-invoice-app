@@ -219,14 +219,14 @@ describe('intake/record — one row builder', () => {
       hasPdf: false, reports: [],
     });
     expect(r.lineItems).toEqual([{ description: 'Goods', unitAmount: 100, discountRate: 0 }]);
-    expect(r.id).toMatch(/^\d{13}[a-z0-9]{3}$/);
+    expect(r.id).toMatch(/^\d{13}[a-z0-9]{8}$/);   // utils/ids: eight random characters behind the timestamp
   });
   test('an empty document still produces a row a person can fix, not a crash', () => {
     const r = buildRecord({ document: doc.normaliseDocument({}), invoiceType: 'EXPENSE', source: 'phone' });
     expect(r.vendorName).toBe('Unknown');
     expect(r.invoiceNumber).toBe('—');
     expect(r.totalAmount).toBe(0);
-    expect(r.currency).toBe('USD');
+    expect(r.currency).toBe(require('../utils/users').getUserDefaults(null).currency);   // one shared default, not a literal
   });
   test('extras override defaults but cannot change the shape', () => {
     const r = buildRecord({ document: d, invoiceType: 'ACCPAY', source: 'upload', extras: { hasPdf: true, pdfFilename: 'a.pdf', receivedAt: '2026-08-01T00:00:00Z' } });

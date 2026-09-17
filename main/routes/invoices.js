@@ -1,5 +1,6 @@
 const express      = require('express');
 const router       = express.Router();
+const { decodeBase64 } = require('../utils/base64');
 const jwt          = require('jsonwebtoken');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
@@ -55,19 +56,12 @@ const invoiceIntake = require('../intake/invoice-intake');
 const jobs          = require('../jobs');
 const IMPORT_TYPES  = new Set(['bill-import', 'invoice-import']);
 
-function _decodeBase64(data) {
-  if (typeof data !== 'string' || !data) return null;
-  const raw = data.includes(',') ? data.slice(data.indexOf(',') + 1) : data;
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(raw.replace(/\s/g, ''))) return null;
-  const buf = Buffer.from(raw, 'base64');
-  return buf.length ? buf : null;
-}
 
 // POST /api/invoices  { name, data (base64 PDF) }
 // One uploaded bill. Stored as review-needed; never sent to Xero on its own.
 router.post('/', requireAuth, async (req, res) => {
   const { name, data } = req.body || {};
-  const buffer = _decodeBase64(data);
+  const buffer = decodeBase64(data);
   if (!buffer) return res.status(400).json({ error: `${name || 'The file'} came through empty or unreadable. Try attaching it again.` });
   if (!billIntake.looksLikePdf(buffer)) return res.status(400).json({ error: `${name || 'The file'} is not a PDF. Bills are added as PDF files.` });
   if (buffer.length > billIntake.MAX_PDF_BYTES) {
@@ -124,7 +118,7 @@ router.post('/import', requireAuth, (req, res) => {
   const decode = (list, kind) => {
     const out = [];
     for (const f of list) {
-      const buffer = _decodeBase64(f && f.data);
+      const buffer = decodeBase64(f && f.data);
       if (!buffer) return { error: `${(f && f.name) || 'a file'} came through empty or unreadable. Try attaching it again.` };
       if (kind === 'pdf' && !billIntake.looksLikePdf(buffer)) return { error: `${f.name || 'a file'} is not a PDF.` };
       out.push({ name: f.name || `${kind}-${out.length + 1}`, buffer });
