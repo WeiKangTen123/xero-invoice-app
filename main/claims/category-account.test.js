@@ -5,6 +5,7 @@ jest.mock('../xero/reports',      () => ({ getAccounts: jest.fn() }));
 jest.mock('../utils/gemini-client', () => ({ callGemini: jest.fn(), GEMINI_MODELS: [] }));
 
 const { accountForCategory, resolveAccountCode, CATEGORY_HINTS } = require('./category-account');
+const { CATEGORY_NAMES } = require('./categories');
 const tokenCache = require('../utils/token-cache');
 const reports    = require('../xero/reports');
 
@@ -131,5 +132,11 @@ describe('resolveAccountCode — reading the chart from Xero', () => {
     tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't-1' }]);
     reports.getAccounts.mockRejectedValue(new Error('rate limited'));
     await expect(resolveAccountCode('u1', 'Staff Welfare')).resolves.toBeNull();
+  });
+});
+
+describe('the hint table and the reader agree', () => {
+  test('the hints cover exactly the categories the reader can return', () => {
+    expect(Object.keys(CATEGORY_HINTS).sort()).toEqual([...CATEGORY_NAMES].sort());
   });
 });

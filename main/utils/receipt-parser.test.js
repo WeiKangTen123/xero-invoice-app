@@ -419,3 +419,25 @@ describe('receipt-parser — reading a PDF from its text', () => {
     expect(callGemini).not.toHaveBeenCalled();
   });
 });
+
+describe('receipt-parser — categories come from one list, and the reader describes rather than justifies', () => {
+  const { CATEGORY_NAMES } = require('../claims/categories');
+
+  test('the prompt names every category and forbids inventing a business purpose', () => {
+    for (const name of CATEGORY_NAMES) expect(parser.SYSTEM_PROMPT).toContain(`"${name}"`);
+    expect(parser.SYSTEM_PROMPT).toMatch(/do not invent a business purpose/i);
+    expect(parser.SYSTEM_PROMPT).not.toMatch(/with client/i);
+  });
+
+  test('a category the model reworded is canonicalised', () => {
+    const r = parser.normalise({ ...good, category: 'staff welfare', description: 'Snacks' });
+    expect(r.category).toBe('Staff Welfare');
+    expect(r.description).toBe('[Staff Welfare] Snacks');
+  });
+
+  test('an invented category is dropped and never prefixed onto the description', () => {
+    const r = parser.normalise({ ...good, category: 'Bribes', description: 'Snacks' });
+    expect(r.category).toBeNull();
+    expect(r.description).toBe('Snacks');
+  });
+});

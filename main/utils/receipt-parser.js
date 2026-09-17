@@ -15,6 +15,8 @@ const { parseLlmJson } = require('./llm-json');
 //
 // Nothing here reaches Xero.
 
+const { CATEGORIES, canonicalCategory } = require('../claims/categories');
+
 const SYSTEM_PROMPT = `You read photographed shop receipts and return ONLY valid JSON. No explanation, no markdown.
 
 An image may contain MORE THAN ONE receipt (several laid on a desk). Return a JSON
@@ -34,31 +36,17 @@ Per receipt, extract:
 - total: the FINAL amount paid, as a plain number. No symbols, no thousands separators.
 - tax: the GST/VAT/service-tax amount as a plain number, only if the receipt states it separately. null if not shown. 0 if the receipt says no tax applies.
 - subTotal: the pre-tax amount as a plain number, only if explicitly printed. null otherwise.
-- category: one of the following exact corporate expense categories:
-    "Entertainment/Meals", "Staff Welfare", "Staff Overtime Meal", "Local Travel",
-    "Overtime Transport", "Overseas Travel", "Office Supplies", "Software/Utilities",
-    "Medical/Dental", "General Expense"
-- description: a concise, professional corporate expense claim description answering business justification and policy compliance (max 200 characters).
-  Format: "[Category] <Business Purpose> @ <Merchant> (<Time/Location Context>)"
-  Rules:
-  * Dining/Food at lunchtime (11:00-14:59):
-    "[Entertainment/Meals] Business working lunch with client @ <Merchant> (<Time>, <City/Location if visible>)"
-  * Confectionery/bakery/snacks in afternoon (15:00-17:59):
-    "[Staff Welfare] Office pantry refreshments & team snacks @ <Merchant> (<Time>)"
-  * Dining/Food at dinner time (18:00-20:59):
-    "[Entertainment/Meals] Client business dinner discussion @ <Merchant> (<Time>)"
-  * Food/Dining late night (after 21:00):
-    "[Staff Overtime Meal] Overtime dinner while working late @ <Merchant> (<Time>)"
-  * Grab/Gojek/taxi during business hours:
-    "[Local Travel] Business transit to client meeting: <Origin> to <Destination> (<Merchant>)"
-  * Grab/Gojek/taxi late night (after 20:00):
-    "[Local Travel] Event commute or late-night ride home: <Origin> to <Destination> (<Merchant>, <Time>)"
-  * Hotel/Flights:
-    "[Overseas Travel] Hotel accommodation / business travel stay @ <Merchant>"
-  * Office supplies:
-    "[Office Supplies] Office stationery and supplies @ <Merchant>"
-  * Software/Hosting:
-    "[Software/Utilities] Monthly software/cloud service subscription @ <Merchant>"
+- category: one of these exact names, judged from what was bought and when:
+${CATEGORIES.map(c => `    "${c.name}": ${c.scope}`).join('\n')}
+  When nothing on the receipt settles it, use "General Expense".
+- description: WHAT was bought and WHERE, from what is printed, max 200 characters.
+  Format: "[Category] <what was bought> @ <Merchant> (<HH:MM>)". For a ride, put
+  "<pickup> to <dropoff>" in place of what was bought when both are printed,
+  e.g. "[Local Travel] Orchard Rd to Changi Airport @ Grab (08:08)".
+  "[Entertainment/Meals] Lunch for 2 @ Dong Seoul Supply (12:01)" is right.
+  "Client lunch to discuss the project" is wrong, because the receipt does not say so.
+  Do not invent a business purpose, a client, a meeting or a reason — the claimant
+  adds that when they review. Do not add a place that is not printed.
 - lineItems: array of each individual item or service listed on the receipt with its price:
     [
       {
@@ -123,7 +111,9 @@ function normalise(parsed) {
     .filter(Boolean)
     .map(({ description, unitAmount, discountRate }) => ({ description: description.slice(0, 200), unitAmount, discountRate }));
 
-  const category = typeof parsed.category === 'string' && parsed.category.trim() ? parsed.category.trim().slice(0, 50) : null;
+  // Only a listed category survives; a reworded one is mapped back, an
+  // invented one is dropped and never prefixed onto the description.
+  const category = canonicalCategory(parsed.category);
   let desc = typeof parsed.description === 'string' && parsed.description.trim() ? parsed.description.trim().slice(0, 250) : null;
   if (desc && category && !desc.startsWith('[')) {
     desc = `[${category}] ${desc}`.slice(0, 250);

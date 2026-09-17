@@ -10,54 +10,59 @@ This document specifies the rules, business justifications, and heuristic logic 
 
 In corporate finance and tax compliance (IRAS Singapore, LHDN Malaysia, HMRC, etc.), an expense claim is **never approved based merely on what was purchased** (e.g., food dishes or items). Approvals require clear evidence of **why the expense was incurred for the company** and whether it satisfies **company policy limits**.
 
-Every AI-generated claim description must answer:
-1. **Expense Category**: What accounting category does this fall under?
-2. **Business Purpose**: What business activity justified this cost? (Client entertainment, working lunch, overtime meal, site transit, etc.)
-3. **Contextual Metadata**: Merchant name, timestamp (`HH:MM`), location, and route (for transit).
+Every claim description must answer:
+1. **Expense Category**: What accounting category does this fall under? — *the reader decides this from what was bought and when.*
+2. **Business Purpose**: What business activity justified this cost? — *the claimant supplies this at review. The reader never invents it: a receipt does not say who the lunch was with or why the ride was taken, and a description that claims it does is fabricated evidence.*
+3. **Contextual Metadata**: Merchant name, timestamp (`HH:MM`), and route (for transit) — *the reader copies these from the receipt, and adds nothing that is not printed.*
 
 ### Standard Claim Description Formula:
 ```
 [Category] <Business Purpose> @ <Merchant> (<Time/Location Context>)
 ```
-*Examples:*
-- `[Entertainment/Meals] Business working lunch with client @ Dong Seoul Supply (12:01 PM, Johor)`
-- `[Staff Welfare] Office pantry refreshments & team snacks @ Isetan Chateraise (16:37)`
-- `[Local Travel] Business transit to client meeting: Home to Apple Orchard (CDG Zig)`
-- `[Local Travel] Late-night event commute: Esplanade to Home (Gojek, 20:09)`
-- `[Overseas Travel] Hotel accommodation for ASOBIEXPO Tokyo conference @ Agoda (Aug 17–24)`
+*What the reader writes (what was bought, where, when):*
+- `[Entertainment/Meals] Lunch for 2 @ Dong Seoul Supply (12:01)`
+- `[Staff Welfare] Pastries and coffee @ Isetan Chateraise (16:37)`
+- `[Local Travel] Home to Apple Orchard @ CDG Zig (08:08)`
+- `[Overtime Transport] Esplanade to Home @ Gojek (22:09)`
+- `[Overseas Travel] Hotel, Aug 17–24 @ Agoda`
+
+*What the claimant adds at review (the purpose):* "with Acme to close the Q3 order", "team planning lunch", "ride home after the launch event". The `[Category] … @ Merchant (time)` part stays; the purpose is typed in front of the merchant.
 
 ---
 
-## 2. Standard Expense Categories (Matching Xero Chart of Accounts)
+## 2. Standard Expense Categories
 
-| Category Tag | Description & Scope | Typical Merchants | Default Xero Account |
-| :--- | :--- | :--- | :--- |
-| **`[Entertainment/Meals]`** | Client lunches, business dinners, partner discussions, vendor meetings. | Restaurants, Cafes, GrabFood | `420 - Entertainment` |
-| **`[Staff Welfare]`** | Internal team milestone meals, department planning lunches, pantry snacks/coffee. | Cafes, Bakeries, Supermarkets | `420 / 460 - Staff Welfare` |
-| **`[Staff Overtime Meal]`** | Dinners purchased when required to work late past company cutoff (typically past 8:00 PM / 8:30 PM). | Food delivery, Casual dining | `420 - Meals (Overtime)` |
-| **`[Local Travel]`** | Travel between office and client sites, partner offices, or events during work hours. | Grab, Gojek, CDG Zig, Taxis, Petrol | `429 - Travel & Transport` |
-| **`[Overtime Transport]`** | Taxi or ride-hailing home after working late (typically past 9:30 PM / 10:00 PM). | Grab, Gojek, CDG Zig | `429 - Travel & Transport` |
-| **`[Overseas Travel]`** | Flights, hotels, trains, and visas for business trips or overseas conferences. | Agoda, Airlines, Booking.com | `430 - Travel (Overseas)` |
-| **`[Office Supplies]`** | Stationery, printer toner, desk accessories, minor equipment for office operations. | Popular, OfficeMate, Hardware stores | `453 - Office Expenses` |
-| **`[Software/Utilities]`** | Cloud servers, SaaS subscriptions, telecom, internet bills. | AWS, Google Cloud, Zoom, Slack | `489 - Subscriptions / Telco`|
-| **`[Medical/Dental]`** | Outpatient clinic visits, prescription medicine, dental checkups under employee benefits. | Medical clinics, Hospitals | `425 - Medical Benefits` |
-| **`[General Expense]`** | Courier fees, postage, bank charges, cleaning, general miscellaneous costs. | SingPost, DHL, NinjaVan | `499 - General Expenses` |
+The list lives in `main/claims/categories.js` and nowhere else: the reader's prompt offers exactly these names, anything else the model returns is dropped, and the account hints below are keyed by them (a test fails if the two drift).
+
+**Which Xero account a claim lands on** is decided at claim time by matching the category against the org's *own* chart of accounts by name (`main/claims/category-account.js`) — "Staff Welfare" looks for an account whose name contains *staff welfare*, then *welfare*, then *pantry*, and finally falls back to an *entertainment* account. No code is fixed: 429 is General Expenses in one org and something else in the next. When nothing matches, the user's default claim account stands.
+
+| Category Tag | Description & Scope | Typical Merchants |
+| :--- | :--- | :--- |
+| **`[Entertainment/Meals]`** | Client lunches, business dinners, partner discussions, vendor meetings. | Restaurants, Cafes, GrabFood |
+| **`[Staff Welfare]`** | Internal team milestone meals, department planning lunches, pantry snacks/coffee. | Cafes, Bakeries, Supermarkets |
+| **`[Staff Overtime Meal]`** | Dinners purchased when required to work late past company cutoff (typically past 8:00 PM / 8:30 PM). | Food delivery, Casual dining |
+| **`[Local Travel]`** | Travel between office and client sites, partner offices, or events during work hours. | Grab, Gojek, CDG Zig, Taxis, Petrol |
+| **`[Overtime Transport]`** | Taxi or ride-hailing home after working late (typically past 9:30 PM / 10:00 PM). | Grab, Gojek, CDG Zig |
+| **`[Overseas Travel]`** | Flights, hotels, trains, and visas for business trips or overseas conferences. | Agoda, Airlines, Booking.com |
+| **`[Office Supplies]`** | Stationery, printer toner, desk accessories, minor equipment for office operations. | Popular, OfficeMate, Hardware stores |
+| **`[Software/Utilities]`** | Cloud servers, SaaS subscriptions, telecom, internet bills. | AWS, Google Cloud, Zoom, Slack |
+| **`[Medical/Dental]`** | Outpatient clinic visits, prescription medicine, dental checkups under employee benefits. | Medical clinics, Hospitals |
+| **`[General Expense]`** | Courier fees, postage, bank charges, cleaning, general miscellaneous costs. | SingPost, DHL, NinjaVan |
 
 ---
 
-## 3. Temporal & Time-of-Day Intelligence Matrix
+## 3. What the Time on the Receipt Decides
 
-When reading receipt timestamps, the AI infers the natural business context:
+Only the **category**, and only in two cases:
 
-| Time Window | Detected Window | Inferred Business Claim Purpose | Example Output Description |
-| :--- | :--- | :--- | :--- |
-| **07:00 – 10:59** | Morning / Breakfast | Morning client breakfast or meeting coffee | `[Entertainment/Meals] Morning breakfast meeting @ Starbucks (08:45)` |
-| **11:00 – 14:59** | Lunchtime | Business working lunch or team project lunch | `[Entertainment/Meals] Business working lunch @ Dong Seoul Supply (12:01 PM, Johor)` |
-| **15:00 – 17:59** | Afternoon | Office pantry supplies or team meeting refreshments | `[Staff Welfare] Office pantry refreshments & snacks @ Isetan Chateraise (16:37)` |
-| **18:00 – 20:59** | Evening / Dinner | Client business dinner or partner entertainment | `[Entertainment/Meals] Client business dinner discussion @ Restaurant (19:30)` |
-| **21:00 – 06:00** | Late Night (Meals) | Staff overtime dinner (working late past cutoff) | `[Staff Overtime Meal] Overtime dinner while working late on deadline (21:15)` |
-| **08:00 – 19:59** | Business Hours (Rides) | Business transit between office and client sites | `[Local Travel] Business transit to client meeting: Home to Apple (08:08)` |
-| **20:00 – 06:00** | Night Hours (Rides) | Event return commute or late-night overtime ride home | `[Local Travel] Late-night event commute: Esplanade to Home (Gojek, 20:09)` |
+| Receipt | Time paid | Category |
+| :--- | :--- | :--- |
+| A meal | at or after 21:00 | `[Staff Overtime Meal]` |
+| A meal | before 21:00 | `[Entertainment/Meals]` (or `[Staff Welfare]` for pantry-type purchases) |
+| A taxi / ride-hailing trip | at or after 21:30 | `[Overtime Transport]` |
+| A taxi / ride-hailing trip | before 21:30 | `[Local Travel]` |
+
+The time is copied into the description as printed (`(12:01)`), so the reviewer can see it. It does **not** license a purpose: a 12:01 lunch is "Lunch for 2", not "Business working lunch with client"; a 20:09 ride is "Esplanade to Home", not "late-night event commute". Earlier versions of this document inferred a business purpose from the time window; that produced descriptions that read as evidence the receipt does not contain, and it has been removed.
 
 ---
 
@@ -65,10 +70,7 @@ When reading receipt timestamps, the AI infers the natural business context:
 
 For Grab, Gojek, ComfortDelGro (CDG Zig), and taxi receipts:
 1. **Origin & Destination**: Extract pickup and dropoff points whenever visible on the receipt or invoice snippet (e.g. *Apple Orchard to Spotify*, *Esplanade to Home*).
-2. **Commute vs. Meeting**:
-   - `Office to Client Site` &rarr; `Business transit to client meeting`
-   - `Site A to Site B` &rarr; `Inter-site business transit`
-   - `Office / Event to Home` &rarr; `Late-night event / overtime commute home`
+2. **Only the route is copied.** `Orchard Rd to Changi Airport @ Grab (08:08)` is the whole description; whether it was a client visit or an airport run is the claimant's to say at review.
 
 ---
 
@@ -79,33 +81,45 @@ For Grab, Gojek, ComfortDelGro (CDG Zig), and taxi receipts:
 - **Time**: `12:01:47 PM` (Lunchtime)
 - **Amount**: `MYR 232.00` (incl. 5% service charge, 6% SST)
 - **Dishes**: Beef prime rib, fried octopus, kimbap, rose tteokbokki, noodles (5 dishes)
-- **Claim Purpose**: `[Entertainment/Meals] Business working lunch with client @ Dong Seoul Supply (12:01 PM, Johor)`
-- **Alternative (Site Visit)**: `[Local Travel] Lunch expense during Johor client/site visit @ Dong Seoul Supply (12:01 PM)`
+- **Reader writes**: `[Entertainment/Meals] Lunch, 5 dishes @ Dong Seoul Supply (12:01)`
+- **Claimant adds at review**: who the lunch was with, or that it was during the Johor site visit
 
 ### Case 2: `sample_expenses/SG-1.jpg`
 - **Merchant**: `ISETAN (SINGAPORE) LIMITED` (Jurong East)
 - **Time**: `16:37` (Afternoon)
 - **Amount**: `SGD 6.60` (Tax SGD 0.43)
 - **Items**: Chateraise confectionery / bakery items (2 items)
-- **Claim Purpose**: `[Staff Welfare] Office pantry refreshments & team snacks @ Isetan Chateraise (16:37)`
+- **Reader writes**: `[Staff Welfare] Chateraise bakery items, 2 @ Isetan (16:37)`
+- **Claimant adds at review**: "office pantry" or "team meeting snacks"
 
 ### Case 3: `Jan to May 13/Screenshot ... at 8.09.12 PM.png` (Gojek)
 - **Merchant**: `Gojek`
 - **Date & Time**: `2026-03-10 20:09`
 - **Route**: `Esplanade to Home` (Return from The Paperkites concert/event)
 - **Amount**: `SGD 25.00`
-- **Claim Purpose**: `[Local Travel] Company event return commute: Esplanade to Home (Gojek, 20:09)`
+- **Reader writes**: `[Local Travel] Esplanade to Home @ Gojek (20:09)` — before 21:30, so not Overtime Transport
+- **Claimant adds at review**: "return from the company event"
 
 ### Case 4: `Jan to May 13/Screenshot ... at 8.08.26 PM.png` (CDG Zig)
 - **Merchant**: `CDG Zig`
 - **Date & Time**: `2026-02-26 08:08`
 - **Route**: `Home to Apple`
 - **Amount**: `SGD 30.60`
-- **Claim Purpose**: `[Local Travel] Business transit to client meeting: Home to Apple (CDG Zig, 08:08)`
+- **Reader writes**: `[Local Travel] Home to Apple @ CDG Zig (08:08)`
+- **Claimant adds at review**: "client meeting at Apple"
 
 ### Case 5: `sample_expenses/#note Agoda receipt #note.eml`
 - **Merchant**: `Agoda Company Pte. Ltd.`
 - **Dates**: `Aug 17–24, 2026` (7 nights)
 - **Amount**: `SGD 1,443.21`
-- **Purpose**: ASOBIEXPO Tokyo conference hotel stay
-- **Claim Purpose**: `[Overseas Travel] Hotel accommodation for ASOBIEXPO Tokyo conference @ Agoda (Aug 17–24)`
+- **Reader writes**: `[Overseas Travel] Hotel, Aug 17–24, 7 nights @ Agoda` — read from the PDF's text, not from an image
+- **Claimant adds at review**: "ASOBIEXPO Tokyo conference"
+
+---
+
+## 6. How a Receipt Is Read
+
+- **A photo** goes to the vision reader. Several receipts in one photo are split into one record each when the evidence is clean.
+- **A PDF with a text layer** (an emailed Agoda or Grab receipt, a print-to-PDF) is read from its text — the whole file, or page by page when each page is its own receipt. No image is rendered.
+- **A scanned PDF** (every page an image, no text) is stored but not read; the review page says so and the fields are typed in by hand.
+- **Re-read** on the review page repeats whichever of these applies, on the page that record owns.

@@ -11,6 +11,7 @@
 // "429" is General Expenses in one org and something else in the next.
 
 const logger = require('../utils/logger');
+const { CATEGORY_NAMES } = require('./categories');
 
 // Ordered from most specific to least. First name that contains one of these
 // wins, so "Staff Welfare" beats a bare "Welfare" only because it is asked for
@@ -30,6 +31,11 @@ const CATEGORY_HINTS = {
   'Medical/Dental':       ['medical', 'dental', 'health', 'insurance - medical'],
   'General Expense':      ['general expenses', 'sundry', 'miscellaneous'],
 };
+// The hints and the reader's list must agree, or a category the reader can
+// return would silently fall through to the default account.
+for (const name of Object.keys(CATEGORY_HINTS)) {
+  if (!CATEGORY_NAMES.includes(name)) throw new Error(`CATEGORY_HINTS names "${name}", which claims/categories.js does not list`);
+}
 
 // A claim is a cost. Revenue, assets and liabilities are never the answer, and
 // an archived account cannot be posted to.
