@@ -395,3 +395,27 @@ describe('receipt-parser — reading several at once', () => {
     expect(callGemini).not.toHaveBeenCalled();
   });
 });
+
+describe('receipt-parser — reading a PDF from its text', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('sends the system prompt and the text, with no image part', async () => {
+    callGemini.mockResolvedValue(JSON.stringify({ receipts: [{ merchant: 'Agoda', total: 120, currency: 'SGD', date: '2026-08-17', confidence: 'high' }] }));
+    const res = await parser.parseReceiptText('u1', 'AGODA Booking 12345 Total SGD 120.00');
+    expect(res.receipts[0]).toMatchObject({ merchant: 'Agoda', total: 120, currency: 'SGD' });
+    const [, messages] = callGemini.mock.calls[0];
+    expect(messages[0]).toEqual({ role: 'system', content: parser.SYSTEM_PROMPT });
+    expect(messages[1].content).toMatch(/AGODA Booking 12345/);
+    expect(JSON.stringify(messages)).not.toMatch(/image_url/);
+  });
+
+  test('an unusable reply answers null rather than a half record', async () => {
+    callGemini.mockResolvedValue('not json');
+    expect(await parser.parseReceiptText('u1', 'x'.repeat(80))).toBeNull();
+  });
+
+  test('blank text is never sent', async () => {
+    expect(await parser.parseReceiptText('u1', '   ')).toBeNull();
+    expect(callGemini).not.toHaveBeenCalled();
+  });
+});

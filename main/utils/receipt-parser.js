@@ -222,17 +222,31 @@ async function parseReceiptImage(userId, buffer, mime, { maxAttempts = 2 } = {})
   if (!Buffer.isBuffer(buffer) || !buffer.length) return null;
 
   const dataUri = `data:${mime};base64,${buffer.toString('base64')}`;
+  return _readWith(userId, [
+    { type: 'text', text: 'Read this receipt and return the JSON described.' },
+    { type: 'image_url', image_url: { url: dataUri } },
+  ], maxAttempts);
+}
+
+// A PDF with a text layer is read from that text. Same prompt, same
+// normaliser, no image: the model cannot place a box on text, so box_2d is
+// simply absent and a text PDF is never split by region (pages do that).
+const MAX_TEXT_CHARS = 20000;
+async function parseReceiptText(userId, text, { maxAttempts = 2 } = {}) {
+  const body = typeof text === 'string' ? text.trim() : '';
+  if (!body) return null;
+  return _readWith(userId,
+    `Read this receipt text (extracted from a PDF, so there is no image and no box_2d) and return the JSON described.\n\n${body.slice(0, MAX_TEXT_CHARS)}`,
+    maxAttempts);
+}
+
+// One attempt loop for both readers: a transient model error or an unusable
+// shape earns a second try, then the receipt is left for the user.
+async function _readWith(userId, userContent, maxAttempts) {
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
-    {
-      role: 'user',
-      content: [
-        { type: 'text', text: 'Read this receipt and return the JSON described.' },
-        { type: 'image_url', image_url: { url: dataUri } },
-      ],
-    },
+    { role: 'user',   content: userContent },
   ];
-
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const content = await callGemini(userId, messages, { temperature: 0, maxTokens: 1200 });
@@ -334,4 +348,4 @@ async function parseReceiptBatch(userId, images, { batchSize = BATCH_SIZE, onPro
   return results;
 }
 
-module.exports = { parseReceiptImage, parseReceiptBatch, _readBatch, BATCH_SIZE, normalise, normaliseMany, splittable, SYSTEM_PROMPT, _num, _isoDate, _time, _currency, _box, _overlapFraction };
+module.exports = { parseReceiptImage, parseReceiptText, parseReceiptBatch, _readBatch, BATCH_SIZE, normalise, normaliseMany, splittable, SYSTEM_PROMPT, _num, _isoDate, _time, _currency, _box, _overlapFraction };

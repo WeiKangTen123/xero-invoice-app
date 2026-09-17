@@ -4,7 +4,10 @@ const express = require('express');
 // Parsing is mocked everywhere in this file. Left real it would make a live
 // Gemini call from the test suite, and the routes' job is to store the receipt
 // correctly whatever the parser does.
-jest.mock('../utils/receipt-parser', () => ({ parseReceiptImage: jest.fn().mockResolvedValue(null) }));
+jest.mock('../utils/receipt-parser', () => ({
+  parseReceiptImage: jest.fn().mockResolvedValue(null),
+  parseReceiptText:  jest.fn().mockResolvedValue(null),
+}));
 // The category → account lookup reads the org's chart from Xero. Mocked so no
 // test needs a connected org; what is under test is what the route does with
 // the answer.
@@ -823,6 +826,37 @@ describe('routes/receipts — one upload, several records', () => {
       expect(parser.parseReceiptImage).not.toHaveBeenCalled();
       pdfPages.extractPages.mockRestore();
     });
+
+    test('a text PDF has its fields read from the text', async () => {
+      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['AGODA total 120'], numPages: 1, hasText: true, textPageCount: 1 });
+      parser.parseReceiptText.mockResolvedValueOnce({ receipts: [{ merchant: 'Agoda', total: 120, currency: 'SGD', date: '2026-08-17', lineItems: [], confidence: 'high' }], split: false });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      expect(parser.parseReceiptText).toHaveBeenCalledWith(testUser.id, expect.stringContaining('AGODA total 120'));
+      expect(rows()[0]).toMatchObject({ vendorName: 'Agoda', totalAmount: 120, currency: 'SGD' });
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('each page of a split PDF is read on its own', async () => {
+      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['GRAB '.repeat(20), 'GOJEK '.repeat(20)], numPages: 2, hasText: true, textPageCount: 2 });
+      parser.parseReceiptText
+        .mockResolvedValueOnce({ receipts: [{ merchant: 'Grab',  total: 10, confidence: 'high', lineItems: [] }], split: false })
+        .mockResolvedValueOnce({ receipts: [{ merchant: 'Gojek', total: 20, confidence: 'high', lineItems: [] }], split: false });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      const byPage = Object.fromEntries(rows().map(r => [r.receiptPage, r.vendorName]));
+      expect(byPage).toEqual({ 1: 'Grab', 2: 'Gojek' });
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('a scanned PDF is sent to neither parser', async () => {
+      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['', ''], numPages: 2, hasText: false, textPageCount: 0 });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      expect(parser.parseReceiptText).not.toHaveBeenCalled();
+      expect(parser.parseReceiptImage).not.toHaveBeenCalled();
+      pdfPages.extractPages.mockRestore();
+    });
   });
 
   describe('undoing a split', () => {
@@ -873,7 +907,7 @@ describe('routes/receipts — one upload, several records', () => {
 // having a bad moment meant typing every field by hand with no way to retry on
 // a perfectly legible photo.
 describe('routes/receipts — reading a receipt again', () => {
-  let app, server, users, jwtSecret, testUser, invoiceStore, parser;
+  let app, server, users, jwtSecret, testUser, invoiceStore, parser, pdfPages;
   const created = [];
   const JPEG_B64 = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]).toString('base64');
   // Uploads are deduplicated on the bytes, so a test that wants a SECOND receipt
@@ -897,6 +931,9 @@ describe('routes/receipts — reading a receipt again', () => {
     parser = require('../utils/receipt-parser');
     parser.parseReceiptImage.mockReset();
     parser.parseReceiptImage.mockResolvedValue(null);
+    parser.parseReceiptText.mockReset();
+    parser.parseReceiptText.mockResolvedValue(null);
+    pdfPages = require('../utils/pdf-pages');
     require('../utils/pairing')._reset();
     const receiptRoutes = require('./receipts');
 
@@ -990,11 +1027,24 @@ describe('routes/receipts — reading a receipt again', () => {
     expect(res.body.receipt.totalAmount).toBe(70);
   });
 
-  test('refuses a PDF, which is read from text rather than as an image', async () => {
+  test('re-reads a PDF from its text', async () => {
+    jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['AGODA total 120'], numPages: 1, hasText: true, textPageCount: 1 });
     const { body } = await upload('application/pdf').expect(201);
     await settle();
-    const res = await reread(body.receipt.id).expect(400);
-    expect(res.body.error).toMatch(/PDF/i);
+    parser.parseReceiptText.mockResolvedValueOnce({ receipts: [{ merchant: 'Agoda', total: 120, confidence: 'high', lineItems: [] }], split: false });
+    const res = await reread(body.receipt.id).expect(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.receipt.vendorName).toBe('Agoda');
+    pdfPages.extractPages.mockRestore();
+  });
+
+  test('a scanned PDF reports unreadable instead of pretending', async () => {
+    jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: [''], numPages: 1, hasText: false, textPageCount: 0 });
+    const { body } = await upload('application/pdf').expect(201);
+    await settle();
+    const res = await reread(body.receipt.id).expect(200);
+    expect(res.body).toMatchObject({ ok: false, reason: 'unreadable' });
+    pdfPages.extractPages.mockRestore();
   });
 
   test('requires auth, and 404s for something that does not exist', async () => {

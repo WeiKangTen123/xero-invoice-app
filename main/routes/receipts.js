@@ -8,7 +8,7 @@ const asyncHandler = require('../middleware/async-handler');
 const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
 const pairing      = require('../utils/pairing');
-const { parseReceiptImage } = require('../utils/receipt-parser');
+const { parseReceiptImage, parseReceiptText } = require('../utils/receipt-parser');
 // Required as a module rather than destructured so the functions are looked up
 // at call time — a destructured import captures the original reference and can
 // never be substituted in a test.
@@ -189,12 +189,20 @@ async function _applyFields(userId, id, r, extra = {}) {
 async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = null) {
   const store = invoiceStore.forUser(userId);
 
-  // ── PDF: one record per page ──────────────────────────────────────────────
+  // ── PDF: one record per page, each read from its own text ────────────────
   if (mime === 'application/pdf') {
     const extracted = await pdfPages.extractPages(buffer);
-    const decision  = pdfPages.splittablePages(extracted);
+    if (!extracted.hasText) {
+      // A scan: every page is an image and there is no renderer to draw one
+      // for the vision reader. The record stays as uploaded, typeable by hand.
+      logger.info('PDF has no text layer; left for the user', { userId, id });
+      return;
+    }
+    const decision = pdfPages.splittablePages(extracted);
     if (!decision.split) {
-      logger.info('PDF kept as one receipt', { userId, id, reason: decision.reason });
+      const parsed = await parseReceiptText(userId, extracted.pages.join('\n\n'));
+      if (parsed) { await _applyFields(userId, id, parsed.receipts[0]); _flagIfSuspected(userId, id); }
+      logger.info('PDF read as one receipt', { userId, id, read: !!parsed, reason: decision.reason });
       return;
     }
 
@@ -202,12 +210,18 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = nu
     const parent = store.getById(id);
     const [first, ...rest] = decision.pageNumbers;
     store.update(id, { receiptPage: first, receiptGroup: group });
+    const targets = [[id, first]];
     for (const page of rest) {
       // A sibling is a complete claim of the same source as the upload,
       // pointing at the SAME file — the same bytes, so the same hash.
-      store.add(newClaimRow({ userId, source: parent.source, groupId: group, extras: {
+      const sib = store.add(newClaimRow({ userId, source: parent.source, groupId: group, extras: {
         receiptFile: storedName, receiptMime: mime, receiptHash: hash, receiptPage: page,
       } }));
+      targets.push([sib.id, page]);
+    }
+    for (const [rowId, page] of targets) {
+      const parsed = await parseReceiptText(userId, extracted.pages[page - 1]);
+      if (parsed) { await _applyFields(userId, rowId, parsed.receipts[0]); _flagIfSuspected(userId, rowId); }
     }
     logger.info('PDF split by page', { userId, id, pages: decision.pageNumbers.length });
     return;
@@ -454,20 +468,27 @@ router.get('/:id/image', asyncHandler(async (req, res) => {
 // stays a decision made once, at upload.
 //
 // Costs one Gemini call and NO Xero call. Nothing here writes to Xero.
+// A photo goes back to the vision reader. A PDF is read from its text again —
+// only the page this record owns when it is one page of a split file.
+async function _rereadFrom(userId, record, buffer) {
+  if (record.receiptMime !== 'application/pdf') return parseReceiptImage(userId, buffer, record.receiptMime);
+  const extracted = await pdfPages.extractPages(buffer);
+  if (!extracted.hasText) return null;
+  const text = record.receiptPage ? extracted.pages[record.receiptPage - 1] : extracted.pages.join('\n\n');
+  return parseReceiptText(userId, text);
+}
+
 router.post('/:id/reread', requireAuth, async (req, res) => {
   const store  = invoiceStore.forUser(req.user.id);
   const record = store.getById(req.params.id);
   if (!record) return res.status(404).json({ error: 'Receipt not found' });
-  if (!record.receiptFile) return res.status(400).json({ error: 'This record has no receipt image to read' });
-  if (record.receiptMime === 'application/pdf') {
-    return res.status(400).json({ error: 'PDF receipts are read from their text, not re-read as an image.' });
-  }
+  if (!record.receiptFile) return res.status(400).json({ error: 'This record has no receipt file to read' });
 
   const buffer = receiptStore.forUser(req.user.id).read(record.receiptFile);
-  if (!buffer) return res.status(404).json({ error: 'The receipt image is missing from storage' });
+  if (!buffer) return res.status(404).json({ error: 'The receipt file is missing from storage' });
 
   try {
-    const parsed = await parseReceiptImage(req.user.id, buffer, record.receiptMime);
+    const parsed = await _rereadFrom(req.user.id, record, buffer);
     if (!parsed || !parsed.receipts?.length) {
       // Honest failure: the record is untouched and still typeable by hand.
       return res.json({ ok: false, reason: 'unreadable', receipt: record });
