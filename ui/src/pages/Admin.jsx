@@ -710,10 +710,13 @@ function LogsPanel({ timezone, initialUserId, initialUserEmail }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  async function fetchLogs(overrideFile, overrideUserId) {
+  // Overrides exist because a setState is not visible until the next render;
+  // a change handler that sets a value and fetches in the same breath must
+  // hand the new value over itself or fetch with the old one.
+  async function fetchLogs(overrideFile, overrideUserId, overrideLines) {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ file: overrideFile || file, lines: String(lines) });
+      const params = new URLSearchParams({ file: overrideFile || file, lines: String(overrideLines ?? lines) });
       const uid = overrideUserId !== undefined ? overrideUserId : userId;
       if (uid.trim())    params.set('userId', uid.trim());
       if (q.trim())      params.set('q', q.trim());
@@ -789,7 +792,7 @@ function LogsPanel({ timezone, initialUserId, initialUserEmail }) {
         />
         <select
           className="form-input" value={lines}
-          onChange={e => { const n = Number(e.target.value); setLines(n); fetchLogs(); }}
+          onChange={e => { const n = Number(e.target.value); setLines(n); fetchLogs(undefined, undefined, n); }}
           style={{ maxWidth: 110 }}
         >
           {[100, 200, 500, 1000].map(n => <option key={n} value={n}>{n} lines</option>)}
