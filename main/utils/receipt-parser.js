@@ -115,30 +115,13 @@ function normalise(parsed) {
   // total tells the user nothing. Both are treated as "not read".
   const usableTotal = total !== null && total > 0 ? total : null;
 
-  const lineItems = Array.isArray(parsed.lineItems)
-    ? parsed.lineItems
-        .map(li => {
-          if (!li || typeof li !== 'object') return null;
-          const desc = typeof li.description === 'string' && li.description.trim()
-            ? li.description.trim().slice(0, 200)
-            : (typeof li.name === 'string' && li.name.trim() ? li.name.trim().slice(0, 200) : null);
-          // The stored amount is the LINE total — what the receipt adds up
-          // from — never the unit price. "6 × 1.60" rides in the text since
-          // there is no quantity column.
-          const unit  = _num(li.unitAmount ?? li.price ?? li.amount);
-          const qty   = _num(li.quantity);
-          const line  = _num(li.lineTotal ?? li.total);
-          const price = line !== null ? line : (unit !== null && qty > 1 ? Math.round(unit * qty * 100) / 100 : unit);
-          if (!desc && price === null) return null;
-          const label = desc || 'Item';
-          return {
-            description:  qty > 1 && unit !== null && unit > 0 ? `${label} — ${Number.isInteger(qty) ? qty : qty.toFixed(2)} × ${unit.toFixed(2)}` : label,
-            unitAmount:   price !== null && price >= 0 ? price : 0,
-            discountRate: typeof li.discountRate === 'number' && li.discountRate >= 0 ? li.discountRate : 0,
-          };
-        })
-        .filter(Boolean)
-    : [];
+  // One normaliser for every reader (intake/document.js): the stored amount is
+  // the LINE total and a quantity rides in the text. Receipts carry no tax
+  // percent per line, and the store's shape has none.
+  const lineItems = (Array.isArray(parsed.lineItems) ? parsed.lineItems : [])
+    .map(li => _intake.normaliseLineItem(li))
+    .filter(Boolean)
+    .map(({ description, unitAmount, discountRate }) => ({ description: description.slice(0, 200), unitAmount, discountRate }));
 
   const category = typeof parsed.category === 'string' && parsed.category.trim() ? parsed.category.trim().slice(0, 50) : null;
   let desc = typeof parsed.description === 'string' && parsed.description.trim() ? parsed.description.trim().slice(0, 250) : null;

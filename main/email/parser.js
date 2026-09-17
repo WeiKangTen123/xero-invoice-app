@@ -410,14 +410,6 @@ function _vendorAddress(llm) {
   return addr;
 }
 
-function _withQuantity(description, quantity, unitPrice) {
-  const desc = String(description || '').trim();
-  const qty = intake.num(quantity), price = intake.num(unitPrice);
-  if (!(qty > 1) || !(price > 0)) return desc;
-  const q = Number.isInteger(qty) ? String(qty) : qty.toFixed(2);
-  return `${desc} — ${q} × ${price.toFixed(2)}`;
-}
-
 async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   let llm;
   try {
@@ -438,13 +430,10 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   const invoiceDate = intake.isoDate(llm.invoiceDate) || intake.parseDate(llm.invoiceDate) || emailDate;
   const dueDate     = intake.isoDate(llm.dueDate) || intake.parseDate(llm.dueDate) || intake.addDays(invoiceDate, 30);
 
-  // Quantity has no column of its own, so "2 × 75.00" rides in the description
-  // and unitAmount stays the line total — the figure Xero must receive.
-  const lineItems = (llm.lineItems || []).map(li => ({
-    description:  _withQuantity(li.description, li.quantity, li.unitPrice),
-    unitAmount:   intake.money(li.amount ?? li.unitAmount) ?? 0,
-    discountRate: 0,
-  }));
+  // One normaliser for every reader: "2 × 75.00" rides in the description and
+  // unitAmount is the line total — the figure Xero must receive.
+  const lineItems = (llm.lineItems || []).map(li => intake.normaliseLineItem(li)).filter(Boolean)
+    .map(({ description, unitAmount, discountRate }) => ({ description, unitAmount, discountRate }));
 
   if (!lineItems.length) {
     lineItems.push({
@@ -585,4 +574,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, parseTemplateFormat, parsePDFWithLLM, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity, _isPaymentSchedule, _describeItems, _vendorAddress }; // helpers exposed for tests
+module.exports = { parseInvoice, parseTemplateFormat, parsePDFWithLLM, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _isPaymentSchedule, _describeItems, _vendorAddress }; // helpers exposed for tests

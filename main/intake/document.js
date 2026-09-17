@@ -149,25 +149,42 @@ function ensureSubtotalTax(doc) {
 
 const str = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
 
+// One line item from any vocabulary the readers have used: the template's
+// { description, unitAmount, discountRate, taxPercent }, the bill model's
+// { description, quantity, unitPrice, amount }, the receipt reader's
+// { description, quantity, unitAmount (a unit price), lineTotal }.
+//
+// The stored unitAmount is always the LINE total — the figure Xero must
+// receive — and a quantity above one rides in the text as "6 × 1.60", since
+// there is no quantity column. Three readers each did this their own way
+// and this function did not know quantity at all.
+function normaliseLineItem(li) {
+  if (!li || typeof li !== 'object') return null;
+  const description = str(li.description ?? li.name, 4000);
+  const unit  = money(li.unitPrice ?? li.unitAmount ?? li.price);
+  const qty   = num(li.quantity);
+  const line  = money(li.lineTotal ?? li.amount ?? li.total);
+  const unitAmount = line !== null ? line
+    : (unit !== null && qty > 1 ? Math.round(unit * qty * 100) / 100 : unit);
+  if (!description && unitAmount === null) return null;
+  const label    = description || 'Item';
+  const folded   = qty > 1 && unit !== null && unit > 0
+    ? `${label} — ${Number.isInteger(qty) ? qty : qty.toFixed(2)} × ${unit.toFixed(2)}`
+    : label;
+  const discount = num(li.discountRate);
+  return {
+    description:  folded,
+    unitAmount:   unitAmount !== null && unitAmount >= 0 ? unitAmount : 0,
+    discountRate: discount !== null && discount >= 0 ? discount : 0,
+    taxPercent:   parseTaxPercent(li.taxPercent ?? li.tax) ?? (num(li.taxPercent) ?? null),
+  };
+}
+
 // Accepts any of the vocabularies the extractors have used and returns one
 // shape. Unknown keys are dropped; nothing is invented.
 function normaliseDocument(raw = {}) {
   const contactName = str(raw.contact?.name ?? raw.contactName ?? raw.vendorName ?? raw.merchant, 255);
-  const lineItems = (Array.isArray(raw.lineItems) ? raw.lineItems : [])
-    .map(li => {
-      if (!li || typeof li !== 'object') return null;
-      const description = str(li.description ?? li.name, 4000);
-      const unitAmount  = money(li.unitAmount ?? li.price ?? li.amount ?? li.total);
-      if (!description && unitAmount === null) return null;
-      const discount = num(li.discountRate);
-      return {
-        description:  description || 'Item',
-        unitAmount:   unitAmount !== null && unitAmount >= 0 ? unitAmount : 0,
-        discountRate: discount !== null && discount >= 0 ? discount : 0,
-        taxPercent:   parseTaxPercent(li.taxPercent ?? li.tax) ?? (num(li.taxPercent) ?? null),
-      };
-    })
-    .filter(Boolean);
+  const lineItems = (Array.isArray(raw.lineItems) ? raw.lineItems : []).map(normaliseLineItem).filter(Boolean);
 
   return ensureSubtotalTax({
     contact: {
@@ -196,5 +213,5 @@ module.exports = {
   CURRENCY_CODES,
   num, money, isoDate, parseDate, addDays, today, localDateStr,
   currencyCode, detectCurrency, parseTaxPercent, ensureSubtotalTax,
-  normaliseDocument,
+  normaliseLineItem, normaliseDocument,
 };

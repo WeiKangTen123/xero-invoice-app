@@ -235,3 +235,32 @@ describe('intake/record — one row builder', () => {
     expect(r.receivedAt).toBe('2026-08-01T00:00:00Z');
   });
 });
+
+describe('normaliseLineItem — every vocabulary the readers have used', () => {
+  // Three readers each folded quantity into the text their own way and capped
+  // the description at their own length; document.js did not know quantity
+  // at all, so an item that reached it raw lost its "6 × 1.60".
+  const n = li => doc.normaliseLineItem(li);
+  test('receipt shape: quantity and unit price fold into the text, amount is the line total', () => {
+    expect(n({ description: 'Bun', quantity: 6, unitAmount: 1.6, lineTotal: 9.6 })).toEqual({ description: 'Bun — 6 × 1.60', unitAmount: 9.6, discountRate: 0, taxPercent: null });
+  });
+  test('LLM bill shape: quantity/unitPrice/amount', () => {
+    expect(n({ description: 'Work', quantity: 2, unitPrice: '75.00', amount: '150.00' })).toMatchObject({ description: 'Work — 2 × 75.00', unitAmount: 150 });
+  });
+  test('a quantity of one leaves the text alone; no line total multiplies out', () => {
+    expect(n({ description: 'Coffee', quantity: 1, unitAmount: 4.5 })).toMatchObject({ description: 'Coffee', unitAmount: 4.5 });
+    expect(n({ description: 'Pens', quantity: 3, unitPrice: 2 })).toMatchObject({ description: 'Pens — 3 × 2.00', unitAmount: 6 });
+  });
+  test('template shape and strings with separators', () => {
+    expect(n({ description: 'Fees', unitAmount: '1,250.00', discountRate: '10', taxPercent: 'GST 9%' })).toEqual({ description: 'Fees', unitAmount: 1250, discountRate: 10, taxPercent: 9 });
+  });
+  test('nothing usable is null; text alone is an item at zero', () => {
+    expect(n(null)).toBeNull();
+    expect(n({})).toBeNull();
+    expect(n({ description: 'Note' })).toMatchObject({ description: 'Note', unitAmount: 0 });
+  });
+  test('normaliseDocument keeps the quantity fold too', () => {
+    const d = doc.normaliseDocument({ lineItems: [{ description: 'Pie', quantity: 6, unitPrice: 1.6, amount: 9.6 }] });
+    expect(d.lineItems[0]).toMatchObject({ description: 'Pie — 6 × 1.60', unitAmount: 9.6 });
+  });
+});
