@@ -32,6 +32,13 @@ describe('intake/document — two date readers, for two jobs', () => {
     expect(doc.isoDate('10/08/2026')).toBeNull();
     expect(doc.isoDate('2099-01-01')).toBeNull();
   });
+  test('addDays answers null for a date it cannot read instead of throwing', () => {
+    expect(doc.addDays('TBC', 30)).toBeNull();
+    expect(doc.addDays(null, 30)).toBeNull();
+    expect(doc.addDays('14/09/2026', 30)).toBe('2026-10-14');   // day-first is readable
+    expect(doc.addDays('2026-09-14', 30)).toBe('2026-10-14');
+  });
+
   test('parseDate is lenient and day-first, and returns null rather than today', () => {
     expect(doc.parseDate('10/08/2026')).toBe('2026-08-10');
     expect(doc.parseDate('2026-08-10')).toBe('2026-08-10');

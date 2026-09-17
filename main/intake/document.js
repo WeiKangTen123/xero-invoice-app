@@ -81,10 +81,14 @@ function parseDate(raw) {
   }
 }
 
+// Null, not a throw, for input it cannot read: a model that answers
+// "14/09/2026" must not take the whole bill down with a RangeError.
 function addDays(dateStr, days) {
-  const d = new Date(dateStr);
+  const iso = isoDate(String(dateStr || '')) || parseDate(dateStr);
+  if (!iso) return null;
+  const d = new Date(`${iso}T00:00:00`);
   d.setDate(d.getDate() + days);
-  return d.toISOString().split('T')[0];
+  return localDateStr(d);
 }
 
 // ── Currency ────────────────────────────────────────────────────────────────

@@ -423,7 +423,7 @@ function _vendorAddress(llm) {
 
 function _withQuantity(description, quantity, unitPrice) {
   const desc = String(description || '').trim();
-  const qty = parseFloat(quantity), price = parseFloat(unitPrice);
+  const qty = intake.num(quantity), price = intake.num(unitPrice);
   if (!(qty > 1) || !(price > 0)) return desc;
   const q = Number.isInteger(qty) ? String(qty) : qty.toFixed(2);
   return `${desc} — ${q} × ${price.toFixed(2)}`;
@@ -438,21 +438,26 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     return parseGenericFormat(text, email, defaults);
   }
 
-  const invoiceDate = llm.invoiceDate || new Date().toISOString().split('T')[0];
-  const dueDate     = llm.dueDate     || addDays(invoiceDate, 30);
+  // Model answers are text. The shared cleaners read "1,250.00" as 1250 and
+  // "14/09/2026" as a date; parseFloat read the first as 1 and the second
+  // threw. An unreadable invoice date falls back to the email's date — never
+  // today, which is the drift intake/document.js exists to stop.
+  const emailDate   = email.date ? intake.localDateStr(new Date(email.date)) : intake.today();
+  const invoiceDate = intake.isoDate(llm.invoiceDate) || intake.parseDate(llm.invoiceDate) || emailDate;
+  const dueDate     = intake.isoDate(llm.dueDate) || intake.parseDate(llm.dueDate) || intake.addDays(invoiceDate, 30);
 
   // Quantity has no column of its own, so "2 × 75.00" rides in the description
   // and unitAmount stays the line total — the figure Xero must receive.
   const lineItems = (llm.lineItems || []).map(li => ({
     description:  _withQuantity(li.description, li.quantity, li.unitPrice),
-    unitAmount:   parseFloat(li.amount ?? li.unitAmount) || 0,
+    unitAmount:   intake.money(li.amount ?? li.unitAmount) ?? 0,
     discountRate: 0,
   }));
 
   if (!lineItems.length) {
     lineItems.push({
       description:  cleanSubject(email.subject) || `Invoice from ${llm.vendorName}`,
-      unitAmount:   parseFloat(llm.totalAmount) || 0,
+      unitAmount:   intake.money(llm.totalAmount) ?? 0,
       discountRate: 0,
     });
   }
@@ -476,12 +481,12 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     brandingThemeName:'Standard',
     lineAmountTypes:  'Exclusive',
     lineItems,
-    totalAmount:      parseFloat(llm.totalAmount) || 0,
+    totalAmount:      intake.money(llm.totalAmount) ?? 0,
     // Both nullable — _ensureSubtotalTax (called by the shared caller) fills in
     // whichever the LLM didn't find from whichever it did, so xero/invoices.js
     // always has a real dollar figure to look up the org's actual tax rate with.
-    subTotal:         llm.subTotal  != null ? parseFloat(llm.subTotal)  : null,
-    taxAmount:        llm.taxAmount != null ? parseFloat(llm.taxAmount) : null,
+    subTotal:         intake.money(llm.subTotal),
+    taxAmount:        intake.money(llm.taxAmount),
     // What the bill is for, read from its items — not the subject line the
     // sender typed to forward it ("create AP invoice").
     description:      (_oneLine(llm.description) || _describeItems(lineItems) || cleanSubject(email.subject) || `Invoice from ${llm.vendorName}`).slice(0, 500),
@@ -587,4 +592,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, parseTemplateFormat, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity, _isPaymentSchedule, _describeItems, _vendorAddress }; // helpers exposed for tests
+module.exports = { parseInvoice, parseTemplateFormat, parsePDFWithLLM, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _withQuantity, _isPaymentSchedule, _describeItems, _vendorAddress }; // helpers exposed for tests
