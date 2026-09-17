@@ -64,14 +64,20 @@ describe('users store (SQLite)', () => {
     expect(cfg.XERO_CLIENT_ID).toBeUndefined();
   });
 
-  test('provider keys the app no longer uses are wiped on migrate, and every secret column is encrypted', async () => {
+  test('the dead Nvidia/OpenRouter columns are dropped on migrate, and every secret column is encrypted', async () => {
+    // An older database still carries the three columns (with live keys in
+    // plaintext). Simulate one, then migrate: the columns must be gone.
     const db = require('../db');
+    const cols = () => db.prepare('PRAGMA table_info(user_credentials)').all().map(c => c.name);
+    for (const c of ['nvidia_api_key', 'openrouter_api_key', 'openrouter_model']) {
+      if (!cols().includes(c)) db.exec(`ALTER TABLE user_credentials ADD COLUMN ${c} TEXT`);
+    }
     const u = await users.createUser('old@test.com', 'password123', 'user');
     db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(u.id);
     db.prepare('UPDATE user_credentials SET nvidia_api_key = ?, openrouter_api_key = ?, openrouter_model = ? WHERE user_id = ?').run('nv-key', 'or-key', 'm', u.id);
     require('../db/migrate').run();
-    const row = db.prepare('SELECT nvidia_api_key, openrouter_api_key, openrouter_model FROM user_credentials WHERE user_id = ?').get(u.id);
-    expect(row).toEqual({ nvidia_api_key: null, openrouter_api_key: null, openrouter_model: null });
+    expect(cols()).toEqual(expect.not.arrayContaining(['nvidia_api_key', 'openrouter_api_key', 'openrouter_model']));
+    expect(users.getUserConfig(u.id)).toEqual({});           // nothing else was disturbed
     // Nothing that looks like a credential may be mapped to a plaintext column.
     for (const col of Object.values(users.CONFIG_KEY_TO_COLUMN)) {
       if (/key|secret|pass|token/.test(col)) expect(users.ENCRYPTED_COLUMNS.has(col)).toBe(true);

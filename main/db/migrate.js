@@ -64,14 +64,17 @@ function run() {
   }
 
   // Nvidia and OpenRouter were removed from the LLM client, but their columns
-  // still held live keys — in plaintext, since they were never in
-  // ENCRYPTED_COLUMNS. Nothing reads them, so they are emptied on every boot
-  // (a no-op once done) rather than left lying in the database.
-  try {
-    db.prepare(`UPDATE user_credentials SET nvidia_api_key = NULL, openrouter_api_key = NULL, openrouter_model = NULL
-                WHERE nvidia_api_key IS NOT NULL OR openrouter_api_key IS NOT NULL OR openrouter_model IS NOT NULL`).run();
-  } catch (err) {
-    require('../utils/logger').warn('dead provider key wipe skipped', { error: err.message });
+  // stayed behind holding live keys — in plaintext, since they were never in
+  // ENCRYPTED_COLUMNS. Nothing reads them; the owner no longer uses either
+  // provider. The columns are dropped (SQLite ≥ 3.35 supports DROP COLUMN),
+  // which takes the values with them. A no-op on a database created since.
+  for (const column of ['nvidia_api_key', 'openrouter_api_key', 'openrouter_model']) {
+    try {
+      const cols = db.prepare('PRAGMA table_info(user_credentials)').all().map(c => c.name);
+      if (cols.includes(column)) db.exec(`ALTER TABLE user_credentials DROP COLUMN ${column}`);
+    } catch (err) {
+      require('../utils/logger').warn('dead provider column drop skipped', { column, error: err.message });
+    }
   }
 
   // Rebuilds user_settings so a NEW account starts with auto-submit off.
