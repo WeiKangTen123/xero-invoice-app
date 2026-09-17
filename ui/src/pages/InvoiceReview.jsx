@@ -153,7 +153,7 @@ function listPathFor(inv) {
   return tab === 'ap' ? '/invoices' : `/invoices?tab=${tab}`;
 }
 
-export default function InvoiceReview() {
+function InvoiceReviewPage() {
   const { isMobile } = useViewMode();
   const { id }   = useParams();
   const navigate = useNavigate();
@@ -1425,4 +1425,13 @@ export default function InvoiceReview() {
       />
     </>
   );
+}
+
+// Every piece of state on this page belongs to ONE record. Prev/Next and the
+// filmstrip change :id without unmounting, so edit mode, the submit poll and
+// the rotation survived into the next record — Save could patch the wrong
+// one. Keying on the id remounts the page with fresh state for each record.
+export default function InvoiceReview() {
+  const { id } = useParams();
+  return <InvoiceReviewPage key={id} />;
 }
