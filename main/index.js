@@ -168,11 +168,15 @@ if (PROD) {
   // Clean 404 for missing static assets — prevents browser from receiving index.html
   // for a missing .css or .js file and throwing a strict MIME type error.
   app.use('/assets', (_req, res) => res.status(404).type('text/plain').send('Asset not found'));
+  // An API path nobody serves is a JSON 404, not the SPA with a 200 — the
+  // client turned that HTML into a silent {} and a typo'd route looked fine.
+  app.all('/api/*', (_req, res) => res.status(404).json({ error: 'Not found' }));
   app.get('*', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store, must-revalidate');
     res.sendFile(path.join(UI_DIST, 'index.html'));
   });
 } else {
+  app.all('/api/*', (_req, res) => res.status(404).json({ error: 'Not found' }));
   app.get('/', (_req, res) => res.json({
     app:    'Xero Invoice Automation API',
     status: 'running',

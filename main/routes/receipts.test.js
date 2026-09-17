@@ -128,6 +128,17 @@ describe('routes/receipts', () => {
         .expect(200).expect('Content-Type', /image\/jpeg/);
     });
 
+    test('a failure while scaling answers 500 instead of crashing the process', async () => {
+      // Express 4 does not catch a rejected async handler, and index.js turns
+      // an unhandled rejection into process.exit(1): one bad thumbnail used to
+      // restart the server for everyone.
+      const thumbnailer = require('../utils/thumbnailer');
+      const spy = jest.spyOn(thumbnailer, 'thumbnailPath').mockRejectedValueOnce(new Error('sharp exploded'));
+      const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
+      await request(server).get(`/api/receipts/${body.receipt.id}/image?w=76&token=${body.imageToken}`).expect(500);
+      spy.mockRestore();
+    });
+
     test('rejects a missing, garbage or expired token', async () => {
       const { body } = await upload({ mime: 'image/jpeg', data: jpeg() });
       await request(server).get(`/api/receipts/${body.receipt.id}/image`).expect(401);

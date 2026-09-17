@@ -2,6 +2,7 @@ const express      = require('express');
 const router       = express.Router();
 const jwt          = require('jsonwebtoken');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
+const asyncHandler = require('../middleware/async-handler');
 const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
 const pairing      = require('../utils/pairing');
@@ -449,7 +450,7 @@ router.get('/:id/token', requireAuth, (req, res) => {
 });
 
 // GET /api/receipts/:id/image?token=... — no requireAuth; the token IS the auth
-router.get('/:id/image', async (req, res) => {
+router.get('/:id/image', asyncHandler(async (req, res) => {
   let payload;
   try {
     payload = verifyImageToken(req.query.token, req.params.id);
@@ -486,7 +487,7 @@ router.get('/:id/image', async (req, res) => {
 
   res.type(record.receiptMime || 'application/octet-stream');
   res.sendFile(filePath);
-});
+}));
 
 // DELETE /api/receipts/:id — removes the row and the file together
 router.delete('/:id', requireAuth, (req, res) => {

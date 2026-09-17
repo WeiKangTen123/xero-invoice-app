@@ -2,6 +2,7 @@ const express      = require('express');
 const router       = express.Router();
 const jwt          = require('jsonwebtoken');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
+const asyncHandler = require('../middleware/async-handler');
 const invoiceStore = require('../utils/invoice-store');
 const pdfStore     = require('../utils/pdf-store');
 const receiptStore = require('../utils/receipt-store');
@@ -452,7 +453,7 @@ router.post('/batch-status', requireAuth, async (req, res, next) => {
 // ── POST /api/invoices/submit-all ────────────────────────────────────────────
 // Bulk-submit all pending invoices that were never sent to Xero.
 // Useful after a server restart that killed the in-memory submission chain.
-router.post('/submit-all', requireAuth, async (req, res) => {
+router.post('/submit-all', requireAuth, asyncHandler(async (req, res) => {
   const userId  = req.user.id;
   const store   = invoiceStore.forUser(userId);
   const pending = store.getAll().filter(i => i.status === 'pending');
@@ -475,7 +476,7 @@ router.post('/submit-all', requireAuth, async (req, res) => {
 
   logger.info('Bulk Xero submission started', { count, userId });
   res.json({ submitted: count, message: `Submitting ${count} invoice(s) to Xero` });
-});
+}));
 
 // ── DELETE /api/invoices/:id ──────────────────────────────────────────────────
 router.delete('/:id', requireAuth, async (req, res, next) => {
