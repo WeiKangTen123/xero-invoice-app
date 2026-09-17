@@ -86,11 +86,17 @@ function _fetchUnseen(s) {
     }
 
     logger.info(`[user:${s.userId}] Processing ${uids.length} unseen email(s)`);
-    const f       = s.imap.fetch(uids, { bodies: '', markSeen: true });
+    // Not marked seen by the fetch: the mail is flagged only after its job is
+    // on disk. With markSeen at fetch time, anything that failed between here
+    // and enqueue (a parse error, a bad Date header, a full disk) was a mail
+    // already read in the mailbox and gone from the queue — lost silently.
+    const f       = s.imap.fetch(uids, { bodies: '', markSeen: false });
     const pending = [];
 
     f.on('message', (msg) => {
       const chunks = [];
+      let uid = null;
+      msg.once('attributes', attrs => { uid = attrs && attrs.uid; });
       msg.on('body', (stream) => {
         // Accumulate raw Buffer chunks — do NOT toString per-chunk because a
         // multi-byte UTF-8 character can be split across TCP packet boundaries,
@@ -107,6 +113,11 @@ function _fetchUnseen(s) {
                 const job = emailQueue.enqueue(s.userId, parsed);
                 logger.info(`[user:${s.userId}] Email queued`, { jobId: job.id, subject: parsed.subject });
                 emailWorker.kickWorker(s.userId);
+                if (uid != null && s.imap) {
+                  s.imap.addFlags(uid, ['\\Seen'], err => {
+                    if (err) logger.warn(`[user:${s.userId}] Could not mark email seen`, { uid, error: err.message });
+                  });
+                }
               })
               .catch(err => logger.error(`[user:${s.userId}] Failed to queue email`, { error: err.message }))
           );

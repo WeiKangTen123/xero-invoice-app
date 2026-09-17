@@ -14,8 +14,17 @@ class FakeImap extends EventEmitter {
   connect() { /* test fires 'ready' manually */ }
   openBox(name, readOnly, cb) { this._openBoxCb = cb; }
   resolveOpenBox(err) { this._openBoxCb(err || null); }
-  search(criteria, cb) { this.searchCalls.push(criteria); cb(null, []); }
-  fetch() { const f = new EventEmitter(); process.nextTick(() => f.emit('end')); return f; }
+  search(criteria, cb) { this.searchCalls.push(criteria); cb(null, this.unseen || []); }
+  // Tests that need to deliver a message drive `this.lastFetch` by hand;
+  // everyone else gets an immediately-ending fetch as before.
+  fetch(uids, opts) {
+    this.fetchOpts = opts;
+    const f = new EventEmitter();
+    this.lastFetch = f;
+    if (!this.unseen) process.nextTick(() => f.emit('end'));
+    return f;
+  }
+  addFlags(uid, flags, cb) { (this.flagged ||= []).push({ uid, flags }); cb && cb(null); }
   end() { this.ended = true; this.emit('end'); }
 }
 
@@ -239,5 +248,35 @@ describe('watcher-registry — failures that must not leave a zombie', () => {
     jest.advanceTimersByTime(5 * 60 * 1000);
     expect(Imap.mock.results.length).toBe(before);              // no reconnect attempted
     expect(watcherRegistry.isRunning('badpw-1')).toBe(false);
+  });
+});
+
+describe('watcher-registry — a mail is marked read only once its job is on disk', () => {
+  afterEach(() => watcherRegistry.stopAll());
+
+  test('fetch does not mark seen; \\Seen is added after enqueue succeeds', async () => {
+    const { simpleParser } = require('mailparser');
+    const emailQueue = require('../queue/email-queue');
+    simpleParser.mockResolvedValue({ subject: 'x', attachments: [] });
+    emailQueue.enqueue.mockClear();
+
+    watcherRegistry.start('seen-1', CREDS, () => {});
+    const fake = lastImapInstance();
+    fake.unseen = [41];
+    fake.emit('ready');
+    fake.resolveOpenBox();                                   // runs _fetchUnseen → search → fetch
+    expect(fake.fetchOpts.markSeen).toBe(false);
+
+    const msg = new EventEmitter(); const body = new EventEmitter();
+    fake.lastFetch.emit('message', msg);
+    msg.emit('attributes', { uid: 41 });
+    msg.emit('body', body);
+    body.emit('data', Buffer.from('raw mail'));
+    body.emit('end');
+    fake.lastFetch.emit('end');
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(emailQueue.enqueue).toHaveBeenCalledTimes(1);
+    expect(fake.flagged).toEqual([{ uid: 41, flags: ['\\Seen'] }]);
   });
 });
