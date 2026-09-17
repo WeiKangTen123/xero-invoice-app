@@ -43,7 +43,7 @@ const SECTION_META = {
   },
   defaults:    { label: 'Invoice Defaults', desc: 'Fallback values when fields cannot be detected automatically', icon: '⚙', testKey: null },
   preferences: { label: 'Preferences',      desc: 'Personal display settings — do not affect processing', icon: '🕒', testKey: null },
-  optional:    { label: 'Optional',         desc: 'Slack error notifications, Redis queue', icon: '◎', testKey: null },
+  optional:    { label: 'Optional',         desc: 'Slack error notifications', icon: '◎', testKey: null },
   xeroOAuth: {
     label: 'Xero OAuth Redirect URI (admin)', icon: '🔐',
     desc: 'Set once for the whole server — every user registers this same value on their own Xero Web app',

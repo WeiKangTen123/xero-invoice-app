@@ -28,7 +28,7 @@ const USER_SECTIONS = {
 };
 
 // Shared/global fields — stored in .env; only admins can set these
-// (Slack webhook, Redis — infrastructure-level config not per-user)
+// (Slack webhook — infrastructure-level config not per-user)
 // Real credentials. They are reported as set/unset and never sent back to
 // the browser; a blank value on save means "keep what is stored". The page
 // used to receive the raw client secret and IMAP password on every load and
