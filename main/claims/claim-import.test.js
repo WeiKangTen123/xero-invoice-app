@@ -289,3 +289,11 @@ describe('claims/claim-import — reads in batches', () => {
     expect(job.receiptsTotal).toBe(7);
   });
 });
+
+describe('pacing', () => {
+  test('reads are not paced here — gemini-client paces every caller at 15 a minute', () => {
+    // Two throttles on one call chain hide each other; the client's sliding
+    // window is the one that knows the quota, so the import adds none.
+    expect(claimImport.READ_INTERVAL_MS).toBe(0);
+  });
+});

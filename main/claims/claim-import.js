@@ -15,10 +15,11 @@ const { suggestCategories } = require('./claim-categories');
 // Nothing here writes to Xero. The output is local records for a person to
 // review, plus a reconciliation showing which lines need their attention.
 
-// Gemini's free tier allows roughly fifteen requests a minute. Four seconds
-// between reads keeps a large claim inside that without the caller having to
-// think about it.
-const READ_INTERVAL_MS = 4000;
+// No pacing here. utils/gemini-client.js already holds every caller to the
+// quota (a 15-a-minute sliding window per user), and a second, blind sleep
+// on top of it only made a large claim take four seconds longer per read.
+// Kept as a knob (deps.waitMs) so a test can still slow the loop down.
+const READ_INTERVAL_MS = 0;
 // How many receipts go into one model call.
 //
 // Measured on a real nine-receipt claim: batch sizes of 1, 3, 5 and 9 all
