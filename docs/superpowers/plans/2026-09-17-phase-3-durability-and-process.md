@@ -20,7 +20,7 @@
 - Create: `main/utils/paths.js`, `main/utils/paths.test.js`
 - Modify: `main/utils/receipt-store.js:13`, `main/utils/pdf-store.js:4`, `main/queue/email-queue.js:4`, `main/claims/claim-queue.js:28`, `main/db/migrate.js:54`, `main/db/backup.js` (BACKUP_DIR), `main/utils/logger.js`, `main/scripts/jest.setup.js`
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```js
 // main/utils/paths.test.js
@@ -47,8 +47,8 @@ test('the stores write under it', () => {
   expect(rs.getPath(name).startsWith(paths.userDir('paths-user'))).toBe(true);
 });
 ```
-- [ ] **Step 2:** `npx jest main/utils/paths.test.js` → FAIL (module missing).
-- [ ] **Step 3:** `paths.js`:
+- [x] **Step 2:** `npx jest main/utils/paths.test.js` → FAIL (module missing).
+- [x] **Step 3:** `paths.js`:
 
 ```js
 const path = require('path');
@@ -69,7 +69,7 @@ process.env.DATA_DIR  = fs.mkdtempSync(path.join(os.tmpdir(), 'xero-test-'));
 process.env.LOG_LEVEL = 'silent';
 ```
 `logger.js`: under `NODE_ENV === 'test'` use `transports: [new winston.transports.Console({ silent: true })]` (no file transports). `db/index.js` already uses `:memory:` under test.
-- [ ] **Step 4:** `npm test` → PASS; `ls main/data/users` gains no new `*@test.com`-era directories. Commit: `test: data and logs go to a temp dir under jest — never main/data or logs/`.
+- [x] **Step 4:** `npm test` → PASS; `ls main/data/users` gains no new `*@test.com`-era directories. Commit: `test: data and logs go to a temp dir under jest — never main/data or logs/`.
 
 ---
 
@@ -77,7 +77,7 @@ process.env.LOG_LEVEL = 'silent';
 
 **Files:** `main/db/backup.js`, `main/db/backup.test.js` (new), `main/scripts/backup-pull.sh` (new), `package.json` scripts
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```js
 // main/db/backup.test.js
@@ -121,8 +121,8 @@ test('a copy that fails integrity_check is deleted and reported', async () => {
   expect(fs.readdirSync(destDir).filter(f => f.endsWith('.db'))).toHaveLength(0);
 });
 ```
-- [ ] **Step 2:** FAIL (`run` takes no options; KEEP_COUNT not exported).
-- [ ] **Step 3:** `backup.js` — `async function run({ db: source = db, destDir = backupsDir() } = {})`: create dir, `await source.backup(dest)`, open the copy, `journal_mode = DELETE`, `integrity_check`; on anything but `ok` unlink and throw `new Error(\`Backup failed integrity_check: ${result}\`)`; prune; return `dest`. Export `{ run, KEEP_COUNT }`. CLI tail unchanged (exit code 1 on failure). `backup-pull.sh`: 
+- [x] **Step 2:** FAIL (`run` takes no options; KEEP_COUNT not exported).
+- [x] **Step 3:** `backup.js` — `async function run({ db: source = db, destDir = backupsDir() } = {})`: create dir, `await source.backup(dest)`, open the copy, `journal_mode = DELETE`, `integrity_check`; on anything but `ok` unlink and throw `new Error(\`Backup failed integrity_check: ${result}\`)`; prune; return `dest`. Export `{ run, KEEP_COUNT }`. CLI tail unchanged (exit code 1 on failure). `backup-pull.sh`: 
 
 ```bash
 #!/usr/bin/env bash
@@ -140,7 +140,7 @@ tar tzf "$DEST/xero-backup.tgz" | head -5
 echo "✓ backup set in $DEST"
 ```
 `package.json`: `"backup:pull": "bash main/scripts/backup-pull.sh"`.
-- [ ] **Step 4:** `npx jest main/db/backup.test.js` → PASS. Commit: `feat(backup): the copy verifies itself; npm run backup:pull brings the full set off the box`.
+- [x] **Step 4:** `npx jest main/db/backup.test.js` → PASS. Commit: `feat(backup): the copy verifies itself; npm run backup:pull brings the full set off the box`.
 
 ---
 
@@ -148,7 +148,7 @@ echo "✓ backup set in $DEST"
 
 **Files:** `main/routes/dashboard.js` (health), `main/index.js:1-14`, test `main/routes/dashboard.test.js` (new)
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```js
 // main/routes/dashboard.test.js
@@ -164,9 +164,9 @@ test('health names the running commit, so a deploy can prove what is live', asyn
   expect(body.commit).toMatch(/^[0-9a-f]{7,40}$/);
 });
 ```
-- [ ] **Step 2:** FAIL (no `commit`).
-- [ ] **Step 3:** dashboard.js: at module load `const COMMIT = process.env.DEPLOY_SHA || (() => { try { return require('child_process').execSync('git rev-parse HEAD', { cwd: path.join(__dirname, '..'), stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch { return 'unknown'; } })();` and `res.json({ status: 'healthy', commit: COMMIT, timestamp })`. index.js fatal handlers: before `process.exit(1)`, `try { require('./utils/notify').notifyError({ context: 'FATAL — process exiting', error: msg }).catch(() => {}) } catch {}` with `setTimeout(() => process.exit(1), 1500).unref()` instead of an immediate exit so the webhook has a moment (keep the immediate exit path for EADDRINUSE).
-- [ ] **Step 4:** PASS. Commit: `feat(ops): health reports the running commit; a fatal exit tells Slack why`.
+- [x] **Step 2:** FAIL (no `commit`).
+- [x] **Step 3:** dashboard.js: at module load `const COMMIT = process.env.DEPLOY_SHA || (() => { try { return require('child_process').execSync('git rev-parse HEAD', { cwd: path.join(__dirname, '..'), stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch { return 'unknown'; } })();` and `res.json({ status: 'healthy', commit: COMMIT, timestamp })`. index.js fatal handlers: before `process.exit(1)`, `try { require('./utils/notify').notifyError({ context: 'FATAL — process exiting', error: msg }).catch(() => {}) } catch {}` with `setTimeout(() => process.exit(1), 1500).unref()` instead of an immediate exit so the webhook has a moment (keep the immediate exit path for EADDRINUSE).
+- [x] **Step 4:** PASS. Commit: `feat(ops): health reports the running commit; a fatal exit tells Slack why`.
 
 ---
 
@@ -174,7 +174,7 @@ test('health names the running commit, so a deploy can prove what is live', asyn
 
 **Files:** `main/routes/admin.js` (DELETE /users/:id), `main/utils/invoice-store.js:216-221`, tests `main/routes/admin.test.js`, `main/utils/invoice-store.test.js:105`
 
-- [ ] **Step 1: Failing tests** — admin.test.js:
+- [x] **Step 1: Failing tests** — admin.test.js:
 
 ```js
   test('DELETE /users/:id removes the user\'s files as well as the rows', async () => {
@@ -196,9 +196,9 @@ invoice-store.test.js — replace the cap test with:
     expect(store.getById('bulk-0')).not.toBeNull();
   });
 ```
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** admin.js after `deleteUser(id)`: `try { fs.rmSync(require('../utils/paths').userDir(id), { recursive: true, force: true }); } catch (err) { logger.warn('Could not remove deleted user\'s files', { id, error: err.message }); }`. invoice-store.js: delete the `DELETE FROM invoices … LIMIT ?` block and the `MAX` constant (comment why: it evicted posted rows — the only guard against re-posting — and orphaned their files).
-- [ ] **Step 4:** PASS. Commit: `fix(data): a deleted user's files go with the rows; the 500-row cap that evicted posted invoices is gone`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** admin.js after `deleteUser(id)`: `try { fs.rmSync(require('../utils/paths').userDir(id), { recursive: true, force: true }); } catch (err) { logger.warn('Could not remove deleted user\'s files', { id, error: err.message }); }`. invoice-store.js: delete the `DELETE FROM invoices … LIMIT ?` block and the `MAX` constant (comment why: it evicted posted rows — the only guard against re-posting — and orphaned their files).
+- [x] **Step 4:** PASS. Commit: `fix(data): a deleted user's files go with the rows; the 500-row cap that evicted posted invoices is gone`.
 
 ---
 
@@ -206,7 +206,7 @@ invoice-store.test.js — replace the cap test with:
 
 **Files:** `.github/workflows/ci.yml` (new), `ecosystem.config.js` (new), `main/scripts/deploy.sh`
 
-- [ ] **Step 1:** `ci.yml`:
+- [x] **Step 1:** `ci.yml`:
 
 ```yaml
 name: ci
@@ -225,7 +225,7 @@ jobs:
       - run: npm --prefix ui ci
       - run: npm run build:ui
 ```
-- [ ] **Step 2:** `ecosystem.config.js`:
+- [x] **Step 2:** `ecosystem.config.js`:
 
 ```js
 // pm2 process definition, committed so restart policy is not a setting that
@@ -247,7 +247,7 @@ module.exports = {
   }],
 };
 ```
-- [ ] **Step 3:** `deploy.sh` changes (keep everything else):
+- [x] **Step 3:** `deploy.sh` changes (keep everything else):
   - after "clean and pushed": CI gate —
     ```bash
     if command -v gh >/dev/null && [ "${SKIP_CI:-0}" != "1" ]; then
@@ -268,7 +268,7 @@ module.exports = {
   - Health: parse `commit` from the health JSON and `die` unless it equals `$LOCAL_SHA`.
   - Cron: `remote '(crontab -l 2>/dev/null | grep -v "main/db/backup.js"; echo "0 19 * * * cd '"$APP"' && node main/db/backup.js >> logs/backup.log 2>&1") | crontab -'` (19:00 UTC = 03:00 Singapore).
   - Tag: `git tag -f "deploy/$(date -u +%Y%m%d-%H%M%S)" "$LOCAL_SHA" && git push -q origin --tags`.
-- [ ] **Step 4:** `bash -n main/scripts/deploy.sh`; `node -e "require('./ecosystem.config.js')"`. Commit: `ops: CI on Node 22; deploy waits for it, installs from the lockfile, backs up, reloads with backoff, proves the commit, tags`.
+- [x] **Step 4:** `bash -n main/scripts/deploy.sh`; `node -e "require('./ecosystem.config.js')"`. Commit: `ops: CI on Node 22; deploy waits for it, installs from the lockfile, backs up, reloads with backoff, proves the commit, tags`.
 
 ---
 
@@ -276,15 +276,15 @@ module.exports = {
 
 **Files:** `main/.env.example`, `.gitignore`, `docs/RUNBOOK.md` (new), delete `main/index.js.bak`; `main/.env.bak` only if identical to `.env`'s values
 
-- [ ] **Step 1:** `.env.example`: drop `IMAP_HOST/PORT/USER/PASS`, `IMAP_POLL_INTERVAL_MS`, `XERO_CLIENT_SECRET` (per-user in Setup; code never reads them); add with one-line comments: `HOST` (bind address, default 127.0.0.1 in production), `FRONTEND_URL` (dev UI origin for the OAuth redirect), `DB_PATH`, `DATA_DIR`, `LOGS_DIR`, `LOG_LEVEL`, `ZERO_TAX_RATE`. Find the remaining `process.env.REDIS_URL` reader and remove it.
-- [ ] **Step 2:** `.gitignore`: add `.claude/settings.local.json`; `git rm --cached .claude/settings.local.json`.
-- [ ] **Step 3:** `rm main/index.js.bak`. Compare `main/.env.bak` keys with `.env` (values equal?) — if every key in `.env.bak` has the same value in `.env`, `rm main/.env.bak`; otherwise leave it and report.
-- [ ] **Step 4:** `docs/RUNBOOK.md`: backup set (app.db, `main/data/users`, `.env` with `ENCRYPTION_KEY`), schedule (03:00 SGT cron; `npm run backup:pull` for an off-box copy), restore (stop pm2, copy app.db over, delete `-wal/-shm`, restore users dir and .env, start), rollback (`git checkout <deploy tag>` on the box + `pm2 reload`), keys (where `JWT_SECRET`/`ENCRYPTION_KEY` live, what losing each means), health URL and what `commit` means, CI and `SKIP_CI=1`.
-- [ ] **Step 5:** Commit: `docs(ops): runbook; env example matches the code; personal settings untracked; stale backups removed`.
+- [x] **Step 1:** `.env.example`: drop `IMAP_HOST/PORT/USER/PASS`, `IMAP_POLL_INTERVAL_MS`, `XERO_CLIENT_SECRET` (per-user in Setup; code never reads them); add with one-line comments: `HOST` (bind address, default 127.0.0.1 in production), `FRONTEND_URL` (dev UI origin for the OAuth redirect), `DB_PATH`, `DATA_DIR`, `LOGS_DIR`, `LOG_LEVEL`, `ZERO_TAX_RATE`. Find the remaining `process.env.REDIS_URL` reader and remove it.
+- [x] **Step 2:** `.gitignore`: add `.claude/settings.local.json`; `git rm --cached .claude/settings.local.json`.
+- [x] **Step 3:** `rm main/index.js.bak`. Compare `main/.env.bak` keys with `.env` (values equal?) — if every key in `.env.bak` has the same value in `.env`, `rm main/.env.bak`; otherwise leave it and report.
+- [x] **Step 4:** `docs/RUNBOOK.md`: backup set (app.db, `main/data/users`, `.env` with `ENCRYPTION_KEY`), schedule (03:00 SGT cron; `npm run backup:pull` for an off-box copy), restore (stop pm2, copy app.db over, delete `-wal/-shm`, restore users dir and .env, start), rollback (`git checkout <deploy tag>` on the box + `pm2 reload`), keys (where `JWT_SECRET`/`ENCRYPTION_KEY` live, what losing each means), health URL and what `commit` means, CI and `SKIP_CI=1`.
+- [x] **Step 5:** Commit: `docs(ops): runbook; env example matches the code; personal settings untracked; stale backups removed`.
 
 ---
 
 ### Finish
 
-- [ ] `npm test` (local, gated), push, `npm run deploy` (first deploy exercises the CI wait, the pre-restart backup, the ecosystem cutover, the commit check, the cron install and the tag).
-- [ ] `npm run backup:pull` once to prove the off-box path.
+- [x] `npm test` (local, gated), push, `npm run deploy` (first deploy exercises the CI wait, the pre-restart backup, the ecosystem cutover, the commit check, the cron install and the tag).
+- [x] `npm run backup:pull` once to prove the off-box path.

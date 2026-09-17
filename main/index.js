@@ -23,7 +23,6 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 console.log('Starting up...');
 console.log('NODE_ENV:', process.env.NODE_ENV);
 console.log('PORT:', process.env.PORT);
-console.log('XERO_CLIENT_ID set:', !!process.env.XERO_CLIENT_ID);
 
 // Xero and IMAP credentials are now per-user (set in Setup page per account).
 // Only JWT_SECRET is strictly required at boot.

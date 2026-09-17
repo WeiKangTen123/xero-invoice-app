@@ -32,3 +32,7 @@ server.MD
 # Real claim samples — actual names, email addresses and expense data.
 # Kept locally for testing; never committed. The repo is public.
 sample_expenses/
+
+# Personal Claude Code permissions — per machine, not for the repo (the `*.local`
+# rule above only matches files that END in .local).
+.claude/settings.local.json
