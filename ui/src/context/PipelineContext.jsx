@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../api/client';
+import { useVisiblePolling } from '../utils/useVisiblePolling';
 
 const PipelineContext = createContext(null);
 
@@ -20,24 +21,13 @@ export function PipelineProvider({ children }) {
     } catch (_) { return null; }
   }, []);
 
-  useEffect(() => {
-    refresh();
-
-    let id = null;
-    function getInterval() {
-      const q = statusRef.current?.queue;
-      return (q?.processing > 0 || q?.pending > 0) ? 3000 : 15000;
-    }
-    function schedule() {
-      if (id) clearInterval(id);
-      if (document.hidden) { id = null; return; }
-      id = setInterval(() => { refresh(); schedule(); }, getInterval());
-    }
-    schedule();
-    const onVis = () => document.hidden ? (clearInterval(id), id = null) : schedule();
-    document.addEventListener('visibilitychange', onVis);
-    return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
-  }, [refresh]);
+  useEffect(() => { refresh(); }, [refresh]);
+  // Every 3 s while the queue is busy, 15 s when idle, nothing while the tab
+  // is hidden; the hook refreshes at once when the tab is shown again.
+  useVisiblePolling(refresh, () => {
+    const q = statusRef.current?.queue;
+    return (q?.processing > 0 || q?.pending > 0) ? 3000 : 15000;
+  });
 
   return (
     <PipelineContext.Provider value={{ status, refresh }}>

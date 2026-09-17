@@ -12,6 +12,7 @@ import { fmtMoney } from '../utils/format';
 import { useViewMode } from '../context/ViewModeContext';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime } from '../utils/formatDate';
+import { useVisiblePolling } from '../utils/useVisiblePolling';
 
 // The three kinds of document this page holds, in the order they are shown.
 //
@@ -181,20 +182,13 @@ export default function Invoices() {
 
   useEffect(() => { fetchInvoices(); }, []);
 
-  // Poll for background claim import jobs to drive the persistent progress banner
-  useEffect(() => {
-    let mounted = true;
-    function checkActiveClaim() {
-      api.get('/claims/active')
-        .then(res => {
-          if (mounted) setActiveClaimJob(res.job || null);
-        })
-        .catch(() => {});
-    }
-    checkActiveClaim();
-    const timer = setInterval(checkActiveClaim, 3500);
-    return () => { mounted = false; clearInterval(timer); };
-  }, []);
+  // A background claim import drives the persistent progress banner. Checked
+  // now, then every 3.5 s while the tab is visible; a hidden tab asks nothing.
+  function checkActiveClaim() {
+    api.get('/claims/active').then(res => setActiveClaimJob(res.job || null)).catch(() => {});
+  }
+  useEffect(() => { checkActiveClaim(); }, []);
+  useVisiblePolling(checkActiveClaim, 3500);
 
   useEffect(() => {
     setSelected(s => {
