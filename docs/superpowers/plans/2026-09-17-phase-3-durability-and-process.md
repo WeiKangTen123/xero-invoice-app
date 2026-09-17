@@ -4,7 +4,7 @@
 
 **Goal:** Make the deployment recoverable and the deploy pipeline honest: scheduled, verified, off-box backups with a written restore; tests that never touch real data or logs; CI on Node 22 that the deploy script waits for; a deploy that installs from the lockfile, backs up before restarting, reloads under a committed pm2 config with backoff, and proves the running commit; and the data-loss edges closed (deleted users' files, the 500-row cap).
 
-**Architecture:** One `main/utils/paths.js` owns where data lives (`DATA_DIR`, default `main/data`), so tests can point it at a temp directory. `backup.js` becomes a function that verifies its copy. `deploy.sh` keeps its "server SHA must match" rule and gains: CI wait via `gh`, `npm ci`, a pre-restart backup, `pm2 startOrReload` from `ecosystem.config.cjs`, a health check that returns the running commit, and a deploy tag. A `docs/RUNBOOK.md` records backup set, restore, rollback and key handling.
+**Architecture:** One `main/utils/paths.js` owns where data lives (`DATA_DIR`, default `main/data`), so tests can point it at a temp directory. `backup.js` becomes a function that verifies its copy. `deploy.sh` keeps its "server SHA must match" rule and gains: CI wait via `gh`, `npm ci`, a pre-restart backup, `pm2 startOrReload` from `ecosystem.config.js`, a health check that returns the running commit, and a deploy tag. A `docs/RUNBOOK.md` records backup set, restore, rollback and key handling.
 
 **Tech Stack:** Node 22, better-sqlite3 online backup API, pm2, GitHub Actions, `gh` CLI (installed and authenticated locally), gcloud.
 
@@ -204,7 +204,7 @@ invoice-store.test.js — replace the cap test with:
 
 ### Task 5: CI on Node 22, and a deploy that waits for it, installs from the lockfile, backs up, reloads with backoff, proves the commit, and tags
 
-**Files:** `.github/workflows/ci.yml` (new), `ecosystem.config.cjs` (new), `main/scripts/deploy.sh`
+**Files:** `.github/workflows/ci.yml` (new), `ecosystem.config.js` (new), `main/scripts/deploy.sh`
 
 - [ ] **Step 1:** `ci.yml`:
 
@@ -225,7 +225,7 @@ jobs:
       - run: npm --prefix ui ci
       - run: npm run build:ui
 ```
-- [ ] **Step 2:** `ecosystem.config.cjs`:
+- [ ] **Step 2:** `ecosystem.config.js`:
 
 ```js
 // pm2 process definition, committed so restart policy is not a setting that
@@ -264,11 +264,11 @@ module.exports = {
     ```
   - Building: `remote 'npm ci 2>&1 | tail -1'`; `remote 'npm --prefix ui ci 2>&1 | tail -1'`; tests unchanged (now harmless: DATA_DIR/LOG_LEVEL under jest); build: `BUILD=$(remote 'cd ui && npx vite build 2>&1 | tail -3'); echo "$BUILD" | grep -q 'built in' || die "UI build failed: $BUILD"`.
   - Before restart: `remote 'node main/db/backup.js 2>&1 | tail -1' | sed 's/^/    /'` and die if it prints "Backup failed".
-  - Restart: `remote 'DEPLOY_SHA='"$LOCAL_SHA"' pm2 startOrReload ecosystem.config.cjs --update-env >/dev/null 2>&1 && pm2 save >/dev/null 2>&1; sleep 7; pm2 list | grep xero-invoice-app'`. One-time cutover from the bare process: if `remote 'pm2 jlist' | grep -q '"exp_backoff_restart_delay":1000'` is false after reload, do `pm2 delete xero-invoice-app; pm2 start ecosystem.config.cjs; pm2 save`.
+  - Restart: `remote 'DEPLOY_SHA='"$LOCAL_SHA"' pm2 startOrReload ecosystem.config.js --update-env >/dev/null 2>&1 && pm2 save >/dev/null 2>&1; sleep 7; pm2 list | grep xero-invoice-app'`. One-time cutover from the bare process: if `remote 'pm2 jlist' | grep -q '"exp_backoff_restart_delay":1000'` is false after reload, do `pm2 delete xero-invoice-app; pm2 start ecosystem.config.js; pm2 save`.
   - Health: parse `commit` from the health JSON and `die` unless it equals `$LOCAL_SHA`.
   - Cron: `remote '(crontab -l 2>/dev/null | grep -v "main/db/backup.js"; echo "0 19 * * * cd '"$APP"' && node main/db/backup.js >> logs/backup.log 2>&1") | crontab -'` (19:00 UTC = 03:00 Singapore).
   - Tag: `git tag -f "deploy/$(date -u +%Y%m%d-%H%M%S)" "$LOCAL_SHA" && git push -q origin --tags`.
-- [ ] **Step 4:** `bash -n main/scripts/deploy.sh`; `node -e "require('./ecosystem.config.cjs')"`. Commit: `ops: CI on Node 22; deploy waits for it, installs from the lockfile, backs up, reloads with backoff, proves the commit, tags`.
+- [ ] **Step 4:** `bash -n main/scripts/deploy.sh`; `node -e "require('./ecosystem.config.js')"`. Commit: `ops: CI on Node 22; deploy waits for it, installs from the lockfile, backs up, reloads with backoff, proves the commit, tags`.
 
 ---
 

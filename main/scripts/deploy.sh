@@ -14,6 +14,14 @@
 #
 #   npm run deploy            # deploy HEAD
 #   npm run deploy -- --check # report drift without changing anything
+#   SKIP_CI=1 npm run deploy  # do not wait for the GitHub Actions run
+#
+# Beyond the SHA rule, a deploy: waits for CI to be green for the commit,
+# installs from the lockfile (npm ci — npm install rewrote package-lock.json
+# on the box and blocked the next pull), takes a verified DB backup before
+# restarting, reloads through ecosystem.config.js (restart backoff), checks
+# the RUNNING process reports the shipped commit, installs the daily backup
+# cron, and tags the commit deploy/<timestamp> so a rollback has a name.
 set -euo pipefail
 
 INSTANCE="${DEPLOY_INSTANCE:-xero-automation}"
@@ -50,6 +58,27 @@ if [ -n "$(git log origin/master..HEAD --oneline)" ]; then
   die "Local commits are not pushed. The server pulls from origin."
 fi
 grn "  ✓ clean and pushed"
+
+# ── 1b. CI must be green for this commit ────────────────────────────────────
+# The route suites are flaky on a Mac (see main/scripts/jest.setup.js); the
+# GitHub Actions run on Node 22 is the reliable verdict. Waits if it is still
+# running. SKIP_CI=1 overrides; a missing run (workflow not on master yet) is
+# reported and allowed.
+if [ "$CHECK_ONLY" != "1" ] && [ "${SKIP_CI:-0}" != "1" ] && command -v gh >/dev/null 2>&1; then
+  ci_run() { gh run list --commit "$LOCAL_SHA" --workflow ci --json databaseId -q '.[0].databaseId' 2>/dev/null || true; }
+  RUN_ID=$(ci_run)
+  if [ -z "$RUN_ID" ]; then sleep 20; RUN_ID=$(ci_run); fi
+  if [ -n "$RUN_ID" ]; then
+    info "CI run $RUN_ID — waiting for it"
+    if gh run watch "$RUN_ID" --exit-status >/dev/null 2>&1; then
+      grn "  ✓ CI green"
+    else
+      die "CI is red for $LOCAL_SHA — fix it before deploying (SKIP_CI=1 to override)"
+    fi
+  else
+    red "  ! no CI run found for $LOCAL_SHA — continuing without it"
+  fi
+fi
 
 # ── 2. What is the server actually running? ─────────────────────────────────
 echo
@@ -132,19 +161,49 @@ grn "  ✓ server is on $AFTER"
 # ── 5. Only now is it worth building ────────────────────────────────────────
 echo
 echo "Building"
-remote 'npm install 2>&1 | tail -1' | sed 's/^/    /'
+# npm ci, never npm install: install rewrote package-lock.json on the box and
+# blocked the next pull (see the header). Both trees, from their lockfiles.
+remote 'npm ci 2>&1 | tail -1' | sed 's/^/    /'
+remote 'npm --prefix ui ci 2>&1 | tail -1' | sed 's/^/    /'
 TESTS=$(remote 'npm test 2>&1 | grep -E "^Tests:" | tail -1' || true)
 info "${TESTS:-tests did not report}"
 echo "$TESTS" | grep -q 'failed' && die "tests failed on the server"
-remote 'cd ui && npx vite build 2>&1 | grep -E "built in"' | sed 's/^/    /'
+BUILD=$(remote 'cd ui && npx vite build 2>&1 | tail -4' || true)
+echo "$BUILD" | grep -q 'built in' || die "UI build failed: $BUILD"
+echo "$BUILD" | grep -E 'built in' | sed 's/^/    /'
+
+# ── 5b. A verified backup before anything restarts ──────────────────────────
+echo
+echo "Backing up"
+BACKUP=$(remote 'node main/db/backup.js 2>&1 | tail -1' || true)
+info "$BACKUP"
+echo "$BACKUP" | grep -q 'Backed up' || die "backup did not succeed — not restarting"
 
 echo
 echo "Restarting"
-remote 'pm2 restart xero-invoice-app --update-env >/dev/null 2>&1; sleep 7; pm2 list | grep xero-invoice-app' | sed 's/^/    /'
+# Reload through the committed ecosystem file so the restart policy (backoff,
+# max_restarts) is what runs. The first deploy after a bare `pm2 start`
+# cannot reload into the new options, so it is deleted and started once.
+if remote 'pm2 jlist' | grep -q '"exp_backoff_restart_delay":1000'; then
+  remote "DEPLOY_SHA=$LOCAL_SHA pm2 startOrReload ecosystem.config.js --update-env >/dev/null 2>&1; pm2 save >/dev/null 2>&1; sleep 7; pm2 list | grep xero-invoice-app" | sed 's/^/    /'
+else
+  info "first deploy under ecosystem.config.js — replacing the bare pm2 process once"
+  remote "pm2 delete xero-invoice-app >/dev/null 2>&1 || true; DEPLOY_SHA=$LOCAL_SHA pm2 start ecosystem.config.js >/dev/null 2>&1; pm2 save >/dev/null 2>&1; sleep 7; pm2 list | grep xero-invoice-app" | sed 's/^/    /'
+fi
 
 HEALTH_OUT=$(curl -sk "$HEALTH" || true)
 info "$HEALTH_OUT"
 echo "$HEALTH_OUT" | grep -q healthy || die "health check did not report healthy"
+RUNNING=$(echo "$HEALTH_OUT" | sed -n 's/.*"commit":"\([0-9a-f]*\)".*/\1/p')
+[ "$RUNNING" = "$LOCAL_SHA" ] || die "the running process reports commit '${RUNNING:-none}', not $LOCAL_SHA — it did not restart onto the new code"
+grn "  ✓ running process is on $RUNNING"
+
+# ── 6. Daily backup cron (idempotent) and a name for this deploy ────────────
+# node by absolute path: cron's PATH does not include an nvm-installed node.
+remote "N=\$(command -v node); (crontab -l 2>/dev/null | grep -v 'main/db/backup.js'; printf '0 19 * * * cd %s && %s main/db/backup.js >> logs/backup.log 2>&1\n' $APP \$N) | crontab -" >/dev/null 2>&1 \
+  && info "daily backup cron installed (03:00 Singapore)" || red "  ! could not install the backup cron"
+TAG="deploy/$(date -u +%Y%m%d-%H%M%S)"
+git tag -f "$TAG" "$LOCAL_SHA" >/dev/null 2>&1 && git push -q origin "$TAG" 2>/dev/null && info "tagged $TAG" || red "  ! could not push tag $TAG"
 
 echo
-grn "✓ deployed $LOCAL_SHA — server commit verified, tests passed, healthy"
+grn "✓ deployed $LOCAL_SHA — server commit verified, tests passed, backed up, running process confirmed, healthy"

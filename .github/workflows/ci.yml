@@ -1,0 +1,21 @@
+# Runs on Node 22 — the version the VM runs and the one main/scripts/jest.setup.js
+# records as the reliable one for the route suites. deploy.sh waits for this
+# run to be green before it touches the server (SKIP_CI=1 to override).
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm --prefix ui ci
+      - run: npm run build:ui
