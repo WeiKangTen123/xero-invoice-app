@@ -8,7 +8,7 @@ jest.mock('../utils/users', () => ({
   saveUserConfig: jest.fn(),
 }));
 jest.mock('../utils/token-cache', () => ({
-  forUser: jest.fn(() => ({ cacheToken: jest.fn() })),
+  forUser: jest.fn(() => ({ cacheToken: jest.fn(), pruneTenants: jest.fn() })),
 }));
 
 const axios = require('axios');
@@ -124,7 +124,7 @@ describe('xero/oauth', () => {
         { tenantId: 'tenant-2', tenantName: 'Org Two' },
       ]});
       const cacheToken = jest.fn();
-      tokenCache.forUser.mockReturnValue({ cacheToken });
+      tokenCache.forUser.mockReturnValue({ cacheToken, pruneTenants: jest.fn() });
 
       const tenants = await oauth.completeConnection('user-1', 'the-code');
 

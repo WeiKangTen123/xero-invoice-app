@@ -57,6 +57,7 @@ async function autoConnect(userId) {
     tokenCache.cacheToken(tenant.tenantId, tenant.tenantName, access_token, expires_at, 'custom');
     logger.info('Xero org connected', { tenantName: tenant.tenantName, userId });
   }
+  tokenCache.pruneTenants(tenants.map(t => t.tenantId));
 
   // A successful Custom Connection means this is now the active method — flips a
   // user back from 'oauth' if they'd previously connected that way and are now

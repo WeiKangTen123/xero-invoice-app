@@ -105,6 +105,39 @@ describe('token-cache', () => {
     expect(await p2).toBe('tok-b');
   });
 
+  test('concurrent calls on an expired token share ONE refresh (rotation would break the second)', async () => {
+    const cache = tokenCache.forUser('user-r');
+    cache.cacheToken('t1', 'Org', 'stale', new Date(Date.now() - 1000), 'oauth');
+    refreshAuthCodeToken.mockImplementation(() => new Promise(r => setTimeout(() => r({ access_token: 'fresh', expires_at: new Date(Date.now() + 60_000) }), 20)));
+    const [a, b] = await Promise.all([cache.getValidToken('t1'), cache.getValidToken('t1')]);
+    expect(a).toBe('fresh');
+    expect(b).toBe('fresh');
+    expect(refreshAuthCodeToken).toHaveBeenCalledTimes(1);
+  });
+
+  test('a refresh updates every tenant on the same connection, not only the one that asked', async () => {
+    const cache = tokenCache.forUser('user-m');
+    cache.cacheToken('t1', 'Org A', 'stale', new Date(Date.now() - 1000), 'oauth');
+    cache.cacheToken('t2', 'Org B', 'stale', new Date(Date.now() - 1000), 'oauth');
+    // Comfortably past the 60s expiry buffer, or the second read would refresh again.
+    refreshAuthCodeToken.mockResolvedValue({ access_token: 'fresh', expires_at: new Date(Date.now() + 10 * 60_000) });
+    await cache.getValidToken('t1');
+    expect(await cache.getValidToken('t2')).toBe('fresh');
+    expect(refreshAuthCodeToken).toHaveBeenCalledTimes(1);
+  });
+
+  test('pruneTenants drops orgs Xero no longer lists, in memory and on disk', async () => {
+    // xero_tenants rows reference users(id), so the persisted half needs a real account.
+    const u = await require('./users').createUser('prune@test.com', 'password123', 'user');
+    const cache = tokenCache.forUser(u.id);
+    cache.cacheToken('t1', 'Keep', 'tok', new Date(Date.now() + 60_000));
+    cache.cacheToken('t2', 'Gone', 'tok', new Date(Date.now() + 60_000));
+    expect(tokenCache.getPersistedTenants(u.id).map(t => t.tenantId)).toEqual(['t1', 't2']);
+    cache.pruneTenants(['t1']);
+    expect(cache.getAllTenants().map(t => t.tenant_id)).toEqual(['t1']);
+    expect(tokenCache.getPersistedTenants(u.id).map(t => t.tenantId)).toEqual(['t1']);
+  });
+
   test('clear() empties both tokens and tenants', () => {
     const cache = tokenCache.forUser('user-5');
     cache.cacheToken('t5', 'Org', 'tok', new Date(Date.now() + 60_000));

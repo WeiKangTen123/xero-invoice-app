@@ -122,6 +122,7 @@ async function _listAndCacheTenants(userId, access_token, expires_at) {
     tokenCache.cacheToken(tenant.tenantId, tenant.tenantName, access_token, expires_at, 'oauth');
     logger.info('Xero org connected via OAuth', { tenantName: tenant.tenantName, userId });
   }
+  tokenCache.pruneTenants(tenants.map(t => t.tenantId));
   return tenants;
 }
 
