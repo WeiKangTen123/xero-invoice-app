@@ -78,18 +78,34 @@ describe('routes/auth', () => {
       expect(res.body.error).toMatch(/at least 8 characters/);
     });
 
-    test('blocks registration when ALLOW_REGISTRATION=false and users exist', async () => {
+    test('the very first account can always be created, and becomes admin', async () => {
+      const res = await request(serverFor(app))
+        .post('/api/auth/register')
+        .send({ email: 'first@test.com', password: 'password123' })
+        .expect(201);
+      expect(res.body.user.role).toBe('admin');
+    });
+
+    test('once a user exists, registration is closed unless ALLOW_REGISTRATION=true', async () => {
+      // The public URL used to accept anyone: the flag was opt-OUT and
+      // undocumented. After the first account, admins add users on the Admin page.
       await users.createUser('existing@test.com', 'password123', 'admin');
       const prevEnv = process.env.ALLOW_REGISTRATION;
       try {
-        process.env.ALLOW_REGISTRATION = 'false';
+        delete process.env.ALLOW_REGISTRATION;
         const res = await request(serverFor(app))
           .post('/api/auth/register')
           .send({ email: 'stranger@test.com', password: 'password123' })
           .expect(403);
         expect(res.body.error).toMatch(/registration is disabled/i);
+
+        process.env.ALLOW_REGISTRATION = 'true';
+        await request(serverFor(app))
+          .post('/api/auth/register')
+          .send({ email: 'stranger@test.com', password: 'password123' })
+          .expect(201);
       } finally {
-        process.env.ALLOW_REGISTRATION = prevEnv;
+        if (prevEnv === undefined) delete process.env.ALLOW_REGISTRATION; else process.env.ALLOW_REGISTRATION = prevEnv;
       }
     });
   });

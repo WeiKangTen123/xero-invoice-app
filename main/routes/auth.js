@@ -21,10 +21,10 @@ router.get('/status', (_req, res) => {
   res.json({ hasUsers: hasUsers() });
 });
 
-// Self-registration — open to anyone by default, or restricted when ALLOW_REGISTRATION=false.
-// First person to register becomes admin automatically.
-// All subsequent registrations get the 'user' role.
-// Admins can promote users via POST /api/admin/users.
+// Self-registration creates the FIRST account, which becomes admin. After
+// that it is closed: admins add users on the Admin page. ALLOW_REGISTRATION=true
+// reopens it. It used to be the other way round — open unless the flag said
+// "false" — and the flag was documented nowhere, so the public URL took anyone.
 // Returns a JWT immediately so the user lands on Setup without a second login step.
 router.post('/register', authLimiter, async (req, res) => {
   try {
@@ -36,7 +36,7 @@ router.post('/register', authLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
 
-    if (process.env.ALLOW_REGISTRATION === 'false' && hasUsers()) {
+    if (hasUsers() && process.env.ALLOW_REGISTRATION !== 'true') {
       return res.status(403).json({ error: 'Public registration is disabled. Contact your administrator.' });
     }
 
