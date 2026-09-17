@@ -76,6 +76,13 @@ describe('admin routes', () => {
     expect(res.body.users[0].invoices).toEqual({ pending: 0, submitting: 0, posted: 0, error: 0, reviewNeeded: 0 });
   });
 
+  test("a demoted admin's old token no longer opens admin routes", async () => {
+    const second = await users.createUser('two@test.com', 'password123', 'admin');
+    const token = tokenFor(second);            // minted while still admin
+    users.updateUserRole(second.id, 'user');
+    await request(serverFor(app)).get('/api/admin/users').set('Authorization', `Bearer ${token}`).expect(403);
+  });
+
   test('PATCH /reports/:userId/:invoiceId/resolve marks the invoice reviewed and records who did it', async () => {
     const invoiceStore = require('../utils/invoice-store');
     const owner = await users.createUser('owner@test.com', 'password123', 'user');

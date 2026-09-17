@@ -60,6 +60,15 @@ describe('routes/auth', () => {
     expect(users.isOnline(after.last_seen_at)).toBe(true);
   });
 
+  test("a deleted user's token is refused, however long it has left", async () => {
+    // Role and existence come from the database on every request; a 7-day
+    // token must not outlive a deletion.
+    const u = await users.createUser('gone@test.com', 'password123', 'user');
+    const token = tokenFor(u);
+    users.deleteUser(u.id);
+    await request(serverFor(app)).get('/api/auth/me').set('Authorization', `Bearer ${token}`).expect(401);
+  });
+
   test('an invalid token does not touch last_seen_at and is rejected', async () => {
     const u = await users.createUser('badtoken@test.com', 'password123', 'user');
     await request(serverFor(app))
