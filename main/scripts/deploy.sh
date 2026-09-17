@@ -185,10 +185,10 @@ echo "Restarting"
 # max_restarts) is what runs. The first deploy after a bare `pm2 start`
 # cannot reload into the new options, so it is deleted and started once.
 if remote 'pm2 jlist' | grep -q '"exp_backoff_restart_delay":1000'; then
-  remote "DEPLOY_SHA=$LOCAL_SHA pm2 startOrReload ecosystem.config.js --update-env >/dev/null 2>&1; pm2 save >/dev/null 2>&1; sleep 7; pm2 list | grep xero-invoice-app" | sed 's/^/    /'
+  remote "pm2 startOrReload ecosystem.config.js --update-env >/dev/null 2>&1; pm2 save >/dev/null 2>&1; sleep 7; pm2 list | grep xero-invoice-app" | sed 's/^/    /'
 else
   info "first deploy under ecosystem.config.js — replacing the bare pm2 process once"
-  remote "pm2 delete xero-invoice-app >/dev/null 2>&1 || true; DEPLOY_SHA=$LOCAL_SHA pm2 start ecosystem.config.js >/dev/null 2>&1; pm2 save >/dev/null 2>&1; sleep 7; pm2 list | grep xero-invoice-app" | sed 's/^/    /'
+  remote "pm2 delete xero-invoice-app >/dev/null 2>&1 || true; pm2 start ecosystem.config.js >/dev/null 2>&1; pm2 save >/dev/null 2>&1; sleep 7; pm2 list | grep xero-invoice-app" | sed 's/^/    /'
 fi
 
 HEALTH_OUT=$(curl -sk "$HEALTH" || true)

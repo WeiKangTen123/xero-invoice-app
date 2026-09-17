@@ -14,6 +14,16 @@ module.exports = {
     max_restarts: 10,
     min_uptime:   '10s',
     kill_timeout: 8000,
-    env: { NODE_ENV: 'production' },
+    env: {
+      NODE_ENV: 'production',
+      // The commit this process is started from, read here — from the checkout
+      // pm2 is evaluating this file in — so a reload can never carry the value
+      // of a previous start. (`--update-env` did not replace it, and health
+      // then reported the old commit for a process running the new code.)
+      DEPLOY_SHA: (() => {
+        try { return require('child_process').execSync('git rev-parse HEAD', { cwd: __dirname, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); }
+        catch { return ''; }
+      })(),
+    },
   }],
 };
