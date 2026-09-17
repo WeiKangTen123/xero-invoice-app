@@ -92,6 +92,13 @@ router.delete('/users/:id', requireAdmin, (req, res) => {
       return res.status(400).json({ error: 'Cannot delete the last admin account' });
     }
     deleteUser(id);
+    // The rows cascade in the database; the files (receipts, PDFs, queues)
+    // do not. users.js had said this route removed them — it never did.
+    try {
+      fs.rmSync(require('../utils/paths').userDir(id), { recursive: true, force: true });
+    } catch (err) {
+      logger.warn("Could not remove the deleted user's files", { id, error: err.message });
+    }
     logger.info('Admin deleted user', { id, by: req.user.email });
     res.json({ success: true });
   } catch (err) {

@@ -125,14 +125,14 @@ describe('invoice-store (SQLite)', () => {
     expect(store.getFlagged()).toHaveLength(1);
   });
 
-  test('keeps only the newest MAX (500) invoices per user', () => {
+  test('no silent cap: a 505th invoice does not evict the first (posted rows were being deleted)', () => {
+    // The JSON-era 500-row cap deleted the oldest rows by rowid whatever their
+    // status — including posted ones, whose xero_invoice_id is the only guard
+    // against posting the same invoice twice — and orphaned their files.
     const store = invoiceStore.forUser(userId);
-    for (let i = 0; i < 505; i++) {
-      store.add(baseInvoice({ id: `bulk-${i}` }));
-    }
-    expect(store.getAll()).toHaveLength(500);
-    expect(store.getById('bulk-0')).toBeNull();
-    expect(store.getById('bulk-504')).not.toBeNull();
+    for (let i = 0; i < 505; i++) store.add(baseInvoice({ id: `bulk-${i}` }));
+    expect(store.count()).toBe(505);
+    expect(store.getById('bulk-0')).not.toBeNull();
   });
 
   // Regression test for the batched-report-fetch fix (was one query per invoice,

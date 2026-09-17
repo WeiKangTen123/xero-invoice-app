@@ -50,6 +50,18 @@ describe('admin routes', () => {
     expect(res.body.user.role).toBe('user');
   });
 
+  test("DELETE /users/:id removes the user's files as well as the rows", async () => {
+    // users.js said the route removed the data directory; it never did, so a
+    // deleted user's receipts and PDFs stayed on disk indefinitely.
+    const fs = require('fs'), path = require('path');
+    const target = await users.createUser('bye@test.com', 'password123', 'user');
+    const dir = require('../utils/paths').userDir(target.id);
+    fs.mkdirSync(path.join(dir, 'receipts'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'receipts', 'r.jpg'), 'x');
+    await request(serverFor(app)).delete(`/api/admin/users/${target.id}`).set('Authorization', `Bearer ${tokenFor(adminUser)}`).expect(200);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
   test('DELETE /users/:id blocks deleting your own account', async () => {
     await request(serverFor(app))
       .delete(`/api/admin/users/${adminUser.id}`)

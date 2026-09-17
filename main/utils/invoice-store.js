@@ -1,5 +1,4 @@
 const db  = require('../db');
-const MAX = 500;
 
 // Normalise a vendor name for dedup comparison.
 // Strips honorifics, common legal suffixes, punctuation, and lowercases so that
@@ -213,13 +212,10 @@ function forUser(userId) {
     db.prepare(`INSERT INTO invoices (${cols.join(', ')}) VALUES (${placeholders})`).run(...vals);
     if ('lineItems' in invoice) _replaceLineItems(invoice.id, invoice.lineItems);
 
-    // Enforce the same MAX-500-per-user cap the old JSON store had.
-    db.prepare(`
-      DELETE FROM invoices WHERE user_id = ? AND id NOT IN (
-        SELECT id FROM invoices WHERE user_id = ? ORDER BY rowid DESC LIMIT ?
-      )
-    `).run(userId, userId, MAX);
-
+    // No cap. The JSON-era 500-row cap deleted the oldest rows by rowid
+    // whatever their status — including posted ones, whose xero_invoice_id is
+    // the only guard against posting an invoice twice — and left their files
+    // on disk. SQLite is fine at a hundred times that.
     return getById(invoice.id);
   }
 
