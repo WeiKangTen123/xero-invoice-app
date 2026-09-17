@@ -42,7 +42,9 @@ function enqueue(userId, parsedEmail) {
     email: {
       from:    parsedEmail.from?.text || '',
       subject: parsedEmail.subject    || '',
-      date:    parsedEmail.date ? parsedEmail.date.toISOString() : null,
+      // mailparser hands over an Invalid Date for a malformed header, and
+      // toISOString() on one throws — which used to drop the whole mail.
+      date:    parsedEmail.date && !Number.isNaN(+parsedEmail.date) ? parsedEmail.date.toISOString() : null,
       text:    textBody,
       attachments,
     },
@@ -139,22 +141,17 @@ function markDone(userId, jobId) {
   } catch {}
 }
 
-// On failure, reset to pending for retry or delete after maxAttempts (dead jobs).
+// On failure, reset to pending for retry; after MAX_ATTEMPTS the job is kept
+// as 'dead' with its attachments. It used to be deleted, so a mail that
+// failed three times — already marked read in the mailbox — vanished without
+// a trace, and the queue's "dead" count was always zero.
 function markFailed(userId, jobId, error) {
   const file = _jobFile(userId, jobId);
   try {
     const job = JSON.parse(fs.readFileSync(file, 'utf8'));
     job.lastError = String(error);
-    if (job.attempts >= MAX_ATTEMPTS) {
-      // Job is dead — delete it and its PDF attachments so it never accumulates
-      (job.email?.attachments || []).forEach(a => {
-        try { fs.unlinkSync(_pdfPath(userId, a.ref)); } catch {}
-      });
-      try { fs.unlinkSync(file); } catch {}
-    } else {
-      job.status = 'pending';
-      fs.writeFileSync(file, JSON.stringify(job, null, 2));
-    }
+    job.status = job.attempts >= MAX_ATTEMPTS ? 'dead' : 'pending';
+    fs.writeFileSync(file, JSON.stringify(job, null, 2));
   } catch {}
 }
 
@@ -181,6 +178,7 @@ function reconstructEmail(userId, job) {
 }
 
 module.exports = {
+  MAX_ATTEMPTS,
   enqueue, getPending, getStats, getAllUserIds,
   markProcessing, markDone, markFailed,
   reconstructEmail, clearAll,
