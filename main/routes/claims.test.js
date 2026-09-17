@@ -220,6 +220,23 @@ describe('routes/claims', () => {
     });
   });
 
+  describe('account from category', () => {
+    test("the form's own heading loses to the reader's category when only the latter matches the chart", async () => {
+      // A spreadsheet column heading ("LOCAL TRAVEL COST") leads the
+      // description, but the chart only knows the reader's wording.
+      const accounts = require('../claims/category-account');
+      accounts.resolveAccountCode.mockImplementation(async (uid, c) => c === 'Local Travel' ? '493' : null);
+      const rec = await require('./claims')._createClaimRecord({
+        userId: testUser.id, groupId: 'g1',
+        row: { no: '1', description: 'Grab to client', amount: 18.4, currency: 'SGD', date: '2026-09-01' },
+        receipt: { merchant: 'Grab', category: 'Local Travel', total: 18.4, date: '2026-09-01', currency: 'SGD' },
+        match: null, category: 'LOCAL TRAVEL COST', store: async () => null,
+      });
+      expect(rec.accountCode).toBe('493');
+      expect(rec.description).toMatch(/^\[LOCAL TRAVEL COST\]/);
+    });
+  });
+
   describe('duplicates', () => {
     test('the same receipt twice in one archive: the second is marked, not dropped', async () => {
       // Byte-identical entries under different names — exactly what happens when

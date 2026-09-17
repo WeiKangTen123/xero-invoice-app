@@ -106,11 +106,16 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
   const userConfig = getUserConfig(userId);
   const defaultCurrency = userConfig.DEFAULT_CURRENCY || process.env.DEFAULT_CURRENCY || 'SGD';
   const defaultAccount = userConfig.DEFAULT_ACCOUNT_CODE || process.env.DEFAULT_ACCOUNT_CODE || '429';
-  // The account follows what the claim was for — the form's category, or the
-  // one the receipt reader named — matched against the org's own chart. No
-  // match, or no connected org, and the default stands (claims/category-account).
+  // The account follows what the claim was for, matched against the org's own
+  // chart (claims/category-account). The form's heading leads the description,
+  // but the chart may only know the reader's wording ("Local Travel" against a
+  // column called "LOCAL TRAVEL COST"), so both are tried. No match, or no
+  // connected org, and the default stands.
   const cat = category || (receipt && receipt.category) || null;
-  const accountCode = (await resolveAccountCode(userId, cat)) || defaultAccount;
+  const alt = receipt && receipt.category && receipt.category !== cat ? receipt.category : null;
+  const accountCode = (await resolveAccountCode(userId, cat))
+    || (alt ? await resolveAccountCode(userId, alt) : null)
+    || defaultAccount;
   const invDate = row.date || (receipt && receipt.date) || new Date().toISOString().split('T')[0];
   const claimNum = (receipt && receipt.receiptNumber) || (row.no ? `EXP-${row.no}` : `EXP-${id.slice(-6).toUpperCase()}`);
 
