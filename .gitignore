@@ -36,3 +36,7 @@ sample_expenses/
 # Personal Claude Code permissions — per machine, not for the repo (the `*.local`
 # rule above only matches files that END in .local).
 .claude/settings.local.json
+
+# Private business documents and real claim samples: never in the repo again (history was rewritten to remove them on 17 Sep 2026).
+report/
+sample_expenses/
