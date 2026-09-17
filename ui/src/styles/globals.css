@@ -19,6 +19,9 @@
   --bottom-nav-height: 60px;
   --safe-bottom:       env(safe-area-inset-bottom, 0px);
   --bottom-nav-total:  calc(var(--bottom-nav-height) + var(--safe-bottom));
+  /* Horizontal padding of .page-body on mobile. Anything that wants to sit
+     flush with the screen edge cancels THIS, not a number it hopes matches. */
+  --page-pad-x: 12px;
 }
 
 /* ── Reset ───────────────────────────────────────── */
@@ -636,7 +639,7 @@ body {
 
 .mobile-mode .page-body {
   /* 16px of breathing room above the bottom nav, plus the nav itself. */
-  padding: 14px 12px calc(var(--bottom-nav-total) + 16px) !important;
+  padding: 14px var(--page-pad-x) calc(var(--bottom-nav-total) + 16px) !important;
 }
 
 .mobile-mode .card {
@@ -752,3 +755,16 @@ body {
 .mobile-scroll-x::-webkit-scrollbar {
   display: none;
 }
+
+/* A line-item row in the intake form: one wide description and three small
+   numbers on desktop; on a phone the description takes its own line and the
+   numbers share the next, instead of the row running off the screen. */
+.line-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 3fr) 110px 80px 80px 32px;
+  gap: 6px;
+  margin-bottom: 6px;
+  align-items: center;
+}
+.mobile-mode .line-row { grid-template-columns: 1fr 1fr 1fr 32px; }
+.mobile-mode .line-row > :first-child { grid-column: 1 / -1; }

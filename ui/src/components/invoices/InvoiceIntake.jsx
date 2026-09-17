@@ -143,7 +143,7 @@ export function InvoiceForm({ onClose, onSaved }) {
         <div style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '6px 0 4px' }}>Line items</div>
         {errors.lineItems && <div style={{ fontSize: 11.5, color: 'var(--danger)', marginBottom: 6 }}>{errors.lineItems}</div>}
         {f.lineItems.map((li, i) => (
-          <div key={i} style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 3fr) 110px 80px 80px 32px', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+          <div key={i} className="line-row">
             <input className="form-input" placeholder="Description" value={li.description} onChange={e => setLine(i, 'description', e.target.value)} />
             <input className="form-input" type="number" step="0.01" placeholder="Amount" value={li.unitAmount} onChange={e => setLine(i, 'unitAmount', e.target.value)}
                    style={{ borderColor: errors[`lineItems[${i}].unitAmount`] ? 'var(--danger)' : undefined }} />

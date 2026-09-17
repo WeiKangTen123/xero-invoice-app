@@ -1358,8 +1358,8 @@ function InvoiceReviewPage() {
             // Negative bottom margin cancels .page-body's bottom padding so the
             // bar can sit flush on the nav; it has to track that padding, which
             // is now derived from the same variable.
-            margin: '16px -14px calc(-1 * (var(--bottom-nav-total) + 16px)) -14px',
-            padding: '10px 14px',
+            margin: '16px calc(-1 * var(--page-pad-x)) calc(-1 * (var(--bottom-nav-total) + 16px))',
+            padding: '10px var(--page-pad-x)',
             background: 'var(--bg-card)',
             borderTop: '1px solid var(--border)',
             boxShadow: '0 -4px 16px rgba(0,0,0,0.1)',
