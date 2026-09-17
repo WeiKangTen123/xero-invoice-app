@@ -199,9 +199,13 @@ RUNNING=$(echo "$HEALTH_OUT" | sed -n 's/.*"commit":"\([0-9a-f]*\)".*/\1/p')
 grn "  ✓ running process is on $RUNNING"
 
 # ── 6. Daily backup cron (idempotent) and a name for this deploy ────────────
-# node by absolute path: cron's PATH does not include an nvm-installed node.
-remote "N=\$(command -v node); (crontab -l 2>/dev/null | grep -v 'main/db/backup.js'; printf '0 19 * * * cd %s && %s main/db/backup.js >> logs/backup.log 2>&1\n' $APP \$N) | crontab -" >/dev/null 2>&1 \
-  && info "daily backup cron installed (03:00 Singapore)" || red "  ! could not install the backup cron"
+# node by absolute path: cron's PATH need not include node. Resolved in its
+# own remote call and pasted in as a literal — a `$N` inside the command was
+# expanded by the ssh login shell (empty) before the inner bash ever ran.
+NODE_BIN=$(remote 'command -v node' | tr -d '[:space:]')
+[ -n "$NODE_BIN" ] || NODE_BIN=node
+remote "(crontab -l 2>/dev/null | grep -v 'main/db/backup.js'; printf '0 19 * * * cd %s && %s main/db/backup.js >> logs/backup.log 2>&1\n' $APP $NODE_BIN) | crontab -" >/dev/null 2>&1 \
+  && info "daily backup cron installed (03:00 Singapore, $NODE_BIN)" || red "  ! could not install the backup cron"
 TAG="deploy/$(date -u +%Y%m%d-%H%M%S)"
 git tag -f "$TAG" "$LOCAL_SHA" >/dev/null 2>&1 && git push -q origin "$TAG" 2>/dev/null && info "tagged $TAG" || red "  ! could not push tag $TAG"
 

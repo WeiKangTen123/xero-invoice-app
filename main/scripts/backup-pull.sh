@@ -20,5 +20,5 @@ echo "Taking a fresh, verified DB backup on the box and bundling the set…"
 gcloud compute ssh "$INSTANCE" --zone="$ZONE" --command="sudo -u $RUNAS -H bash -lc 'cd $APP && node main/db/backup.js | tail -1 && LATEST=\$(ls -t main/data/backups/*.db | head -1) && tar czf /tmp/xero-backup.tgz \"\$LATEST\" main/data/users main/.env && chmod 644 /tmp/xero-backup.tgz'" 2>/dev/null
 gcloud compute scp "$INSTANCE:/tmp/xero-backup.tgz" "$DEST/" --zone="$ZONE" 2>/dev/null
 gcloud compute ssh "$INSTANCE" --zone="$ZONE" --command="rm -f /tmp/xero-backup.tgz" 2>/dev/null
-echo "Contents:"; tar tzf "$DEST/xero-backup.tgz" | head -6 | sed 's/^/    /'
+echo "Contents:"; tar tzf "$DEST/xero-backup.tgz" | sed -n '1,6s/^/    /p'   # sed, not head: head closing the pipe trips pipefail
 echo "✓ backup set in $DEST"
