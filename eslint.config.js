@@ -18,7 +18,7 @@ module.exports = [
     ignores: [
       'node_modules/**', 'ui/node_modules/**', 'ui/dist/**',
       'main/data/**', 'logs/**', 'coverage/**',
-      'prototype/**', 'report/**',
+      'report/**', 'docs/archive/**',
     ],
   },
 

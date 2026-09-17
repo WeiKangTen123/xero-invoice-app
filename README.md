@@ -15,7 +15,7 @@ Per-user background email worker
   └── Drains the queue job-by-job (survives server restarts)
   └── Extracts PDF attachments — batch-parses up to 5 PDFs concurrently
 
-Per-user LLM parser (Gemini / Nvidia / OpenRouter)
+Per-user LLM parser (Gemini — several API keys, rotated across models on quota errors)
   └── Rate-limited: max 15 RPM per user (Gemini free tier)
   └── Falls back to regex if LLM fails
 
@@ -23,7 +23,7 @@ Per-user Xero Custom Connection
   └── Sequential submission queue (1.5s gap between calls, 10s timeout)
   └── Atomic dedup lock — claimForSubmit prevents concurrent callers from double-posting
   └── Currency-first: tries PDF currency, auto-detects org base currency as fallback
-  └── Attaches original PDF and email body to each Xero invoice
+  └── Attaches the original PDF to each Xero invoice
 
 Per-user claims queue & worker (main/claims/)
   └── Disk-backed queue (.que + .bin) for batch claims (.zip receipts + .xlsx claim forms)
@@ -33,14 +33,14 @@ Per-user claims queue & worker (main/claims/)
   └── Reconciles form items against receipts; zero writes to Xero (local review only)
   └── Intelligent corporate description synthesis (time-of-day, route, category detection)
 
-Per-user file storage
-  data/users/{userId}/invoices.json      — invoice history
-  data/users/{userId}/pdfs/             — PDF files
-  data/users/{userId}/receipts/         — receipt image files
-  data/users/{userId}/email-queue/      — disk-based email processing queue
-  data/users/{userId}/claim-queue/      — disk-based batch claim processing queue
-  data/users/{userId}/settings.json     — autoProcess toggle
-  data/users/{userId}/config.json       — IMAP + Xero + LLM credentials
+Storage
+  main/data/app.db                      — one SQLite file: users, credentials (encrypted at rest),
+                                          invoices and line items, connected orgs, settings
+  main/data/users/{userId}/pdfs/        — PDF files
+  main/data/users/{userId}/receipts/    — receipt image files
+  main/data/users/{userId}/email-queue/ — disk-based email processing queue
+  main/data/users/{userId}/claim-queue/ — disk-based batch job queue (claims, bill and invoice imports)
+  main/data/backups/                    — verified daily DB backups (see docs/RUNBOOK.md)
 ```
 
 Each user is fully isolated — different email accounts, different Xero orgs, different data.  
@@ -67,37 +67,41 @@ The server binary and LLM infrastructure are shared; everything else is per-user
 
 ---
 
-## Deployment (Railway)
+## Deployment
 
-### Step 1 — Upload to GitHub
+The app runs on a single VM under pm2, behind nginx, with SQLite on the same
+disk. Deploys are pushed from your machine:
 
-1. Go to github.com → create a free account
-2. Click **+** → **New repository** → name it `xero-invoice-app` → **Private** → **Create**
-3. Click **uploading an existing file** and drag all project files in
-4. Click **Commit changes**
+```bash
+npm run deploy              # deploy HEAD
+npm run deploy -- --check   # report drift between local, GitHub and the server
+npm run backup:pull         # copy the latest backup set to ~/xero-backups/
+```
 
-> Do NOT upload `.env`. It is excluded by `.gitignore`.
+`npm run deploy` refuses uncommitted or unpushed changes, waits for the GitHub
+Actions run for that commit to be green, pulls on the server, installs from the
+lockfile, runs the tests there, builds the UI, takes a verified database backup,
+reloads pm2 through `ecosystem.config.js`, and only reports success once the
+running process says it is on the shipped commit (`/dashboard/health` returns
+`commit`). Every deploy is tagged `deploy/<timestamp>`. Restore and rollback
+steps are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
-### Step 2 — Deploy on Railway
-
-1. Go to railway.app → sign up with GitHub
-2. **New Project** → **Deploy from GitHub repo** → select your repo
-3. Click your service → **Settings** → set **Start Command**: `node main/index.js`
-4. Click **Settings** → **Domains** → **Generate Domain** → copy your URL
-
-### Step 3 — Set environment variables
-
-Click your service → **Variables** tab:
+### Environment variables (`main/.env`)
 
 | Variable | Required | Description |
 |---|---|---|
-| `JWT_SECRET` | Yes | Any long random string (min 32 chars) |
+| `JWT_SECRET` | Yes | Signs login tokens — any long random string |
+| `ENCRYPTION_KEY` | Yes | 64 hex characters; encrypts stored Xero/IMAP/Gemini credentials. Losing it makes them unreadable |
 | `NODE_ENV` | Yes | `production` |
-| `PORT` | No | Default: `3000` |
-| `SLACK_WEBHOOK_URL` | No | Slack notifications for errors |
+| `PORT` | No | Default `3000` |
+| `ALLOW_REGISTRATION` | No | Registration is closed after the first account; `true` reopens it |
+| `XERO_OAUTH_REDIRECT_URI` | For OAuth | The HTTPS callback registered on each user's Xero Web app |
+| `SLACK_WEBHOOK_URL` | No | Invoice created / error / fatal-exit notifications |
 
-> Xero, IMAP, and LLM credentials are set per-user in the **Setup** page after logging in.  
-> No global Xero or IMAP env vars needed.
+`main/.env.example` lists every key the server reads, with the defaults.
+
+> Xero, IMAP and Gemini credentials are set per user on the **Setup** page and
+> stored encrypted in the database — not in `.env`.
 
 ---
 
@@ -155,13 +159,10 @@ Gmail blocks plain-password IMAP login. You need an App Password:
 
 ## LLM rate limits and batch processing
 
-Each user's LLM usage is independently rate-limited:
-
-| Provider | RPM | RPD | Notes |
-|---|---|---|---|
-| Gemini (free) | 15 | 500 | Default recommendation |
-| Nvidia | varies | varies | |
-| OpenRouter | varies | varies | |
+Parsing runs on Gemini. Each user adds one or more Gemini API keys on the Setup
+page; the client tries every model on one key before moving to the next, so a
+second key is real extra quota, not just a spare. Usage is rate-limited per
+user (15 requests per minute, five in flight — the free tier's limits).
 
 When an email contains multiple PDF attachments (e.g. 10 invoices in one email), the parser processes them in batches of **up to 5 concurrently**. The rate limiter queues any excess and processes them as slots free up — no manual intervention needed.
 
@@ -319,9 +320,10 @@ Claims are deduplicated on two tiers:
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/api/claims/import` | JWT | Start a batch import job (multipart: ZIP + optional XLSX) |
-| GET | `/api/claims/jobs` | JWT | List all import jobs for this user |
-| GET | `/api/claims/jobs/:jobId` | JWT | Poll a specific import job for progress |
-| DELETE | `/api/claims/jobs/:jobId` | JWT | Cancel / delete a job |
+| GET | `/api/claims/active` | JWT | The active import job, if any |
+| GET | `/api/claims/import/:jobId` | JWT | Poll a specific import job for progress |
+| DELETE | `/api/claims/import/:jobId` | JWT | Cancel / remove an import job |
+| DELETE | `/api/claims/group/:groupId` | JWT | Delete every record from one import |
 | GET | `/api/receipts/:id/group` | JWT | Returns siblings, `groupType` (`batch`/`split`), `batchLabel`, and `index/total` |
 | GET | `/api/receipts/:id/token` | JWT | Short-lived signed URL token for receipt image |
 | POST | `/api/receipts/:id/reread` | JWT | Re-run AI on this receipt (costs 1 LLM call) |
@@ -335,84 +337,26 @@ Claims are deduplicated on two tiers:
 xero-invoice-app/
 ├── main/
 │   ├── index.js                  Server entry point + middleware + route mounts
-│   ├── .env                      Server-wide secrets (JWT_SECRET, SLACK_WEBHOOK_URL)
-│   ├── data/
-│   │   ├── users.json            User accounts
-│   │   └── users/{id}/           Per-user data directory
-│   │       ├── config.json       IMAP + Xero + LLM credentials
-│   │       ├── settings.json     autoProcess toggle
-│   │       ├── invoices.json     Invoice history (max 500)
-│   │       ├── pdfs/             PDF files (one per invoice)
-│   │       ├── receipts/         Receipt image files (one per claim)
-│   │       ├── email-queue/      Background email job queue (.que + .pdf files)
-│   │       └── claim-queue/      Background claim job queue (.que + .bin files)
-│   ├── claims/                   Expense claims processing module
-│   │   ├── claim-import.js       Job runner: archive → parse → match → save
-│   │   ├── claim-queue.js        Disk-backed claim job store + recovery
-│   │   ├── claim-worker.js       Per-user background worker (start/stop/recover)
-│   │   ├── claim-archive.js      ZIP / folder extraction
-│   │   ├── claim-form.js         Excel (.xlsx) claim form parser
-│   │   ├── claim-matcher.js      Match form rows against parsed receipts
-│   │   ├── claim-categories.js   LLM-powered category suggestions
-│   │   └── claim-dedup.js        Tier-1 SHA-256 + Tier-2 suspicion dedup
-│   ├── email/
-│   │   ├── watcher-registry.js   Per-user IMAP watcher management
-│   │   ├── idle-sweeper.js       Cleans up abandoned watcher sessions
-│   │   ├── parser.js             Email and PDF field extraction (batch-aware)
-│   │   └── llm-parser.js         LLM API calls with per-user rate limiter
-│   ├── middleware/
-│   │   └── auth-middleware.js    requireAuth JWT guard
-│   ├── xero/
-│   │   ├── connect.js            Per-user Xero auth (client credentials)
-│   │   ├── contacts.js           Contact lookup and creation
-│   │   ├── invoices.js           Draft invoice creation with PDF/email attachment
-│   │   └── reports.js            Xero reporting queries (P&L, cash flow, etc.)
-│   ├── queue/
-│   │   ├── email-queue.js        Disk-based email job store (.que files)
-│   │   ├── email-worker.js       Per-user background worker (start/stop/recover)
-│   │   └── processor.js          Xero submission (inline or Bull queue)
-│   ├── routes/
-│   │   ├── auth.js               Login, register, JWT
-│   │   ├── setup.js              Per-user config save/load + connection tests
-│   │   ├── process.js            Watcher start/stop/rescan/settings per user
-│   │   ├── invoices.js           Invoice CRUD + submit + batch-status
-│   │   ├── receipts.js           Receipt store, image serving, QR pairing, group/merge
-│   │   ├── claims.js             Claim import jobs, active-job list, group delete
-│   │   ├── chat.js               AI assistant (read-only, Gemini-powered)
-│   │   ├── xero-oauth.js         Xero OAuth2 connect/callback/disconnect/tenants
-│   │   ├── xero-reports.js       Xero Insights: P&L, cash flow, accounts, contacts, etc.
-│   │   ├── admin.js              User management, cross-user reports
-│   │   └── dashboard.js          Health check + org list
-│   └── utils/
-│       ├── invoice-store.js      Per-user invoice store with write mutex + claimForSubmit
-│       ├── pdf-store.js          Per-user PDF file store
-│       ├── receipt-store.js      Per-user receipt image file store
-│       ├── settings-store.js     Per-user settings store
-│       ├── token-cache.js        Per-user Xero token cache (in-memory)
-│       ├── process-state.js      Per-user watcher activity tracking
-│       ├── invoice-handler.js    Orchestrates dedup, PDF save, Xero queue
-│       ├── chat-agent.js         Gemini chat agent (reads invoices, proposes edits)
-│       ├── users.js              User accounts + per-user config
-│       └── logger.js             Winston structured logging
-└── ui/                           React frontend (Vite)
-    └── src/
-        ├── context/
-        │   ├── AuthContext.jsx        Authentication state
-        │   ├── ThemeContext.jsx       Dark/light theme toggle
-        │   └── PipelineContext.jsx    Shared pipeline status (polls /process/status app-wide)
-        ├── components/layout/
-        │   ├── Layout.jsx            App shell (sidebar + header + outlet)
-        │   ├── Sidebar.jsx           Navigation + compact pipeline widget (always visible)
-        │   └── Header.jsx            Top bar
-        └── pages/
-            ├── Login.jsx             Login / register page
-            ├── Dashboard.jsx         Full pipeline panel, watcher controls, recent invoices
-            ├── Invoices.jsx          Invoice list + bulk submit banner + expense claims tab
-            ├── InvoiceReview.jsx     Invoice/claim detail + post to Xero + batch nav
-            ├── Capture.jsx           Phone QR-pairing camera UI (mobile browser)
-            ├── Setup.jsx             Per-user credentials + connection tests
-            ├── XeroInsights.jsx      Xero analytics dashboard (P&L, cash flow, contacts)
-            └── Admin.jsx             Admin: user management, cross-user flagged reports
+│   ├── .env                      Server-wide secrets (see main/.env.example)
+│   ├── data/                     Runtime data (gitignored): app.db, users/{id}/, backups/
+│   ├── db/                       SQLite schema, versioned migrations, verified backup
+│   ├── intake/                   One document shape, dedup, profiles, the row builder
+│   ├── email/                    IMAP watcher, template parser + LLM verifier, bill parser
+│   ├── claims/                   Expense claims: import job, form/archive readers, matcher,
+│   │                             categories → accounts, claim-record builder, job queue/worker
+│   ├── jobs/                     The generic background job runner (claims, bill and invoice imports)
+│   ├── queue/                    Inbound mail queue + worker; the Xero submitter
+│   ├── xero/                     OAuth / Custom Connection, invoices, contacts, reports, insights
+│   ├── reports/                  Budget PDF/XLSX exports
+│   ├── routes/                   Express routers (one per API area)
+│   ├── middleware/               requireAuth / requireAdmin, async-handler
+│   ├── utils/                    invoice-store, users (+ defaults), token-cache, receipt/pdf stores,
+│   │                             paths, ids, base64, crypto, logger, notify, Gemini client
+│   └── scripts/                  deploy.sh, backup-pull.sh, smoke test, jest setup, lint test
+├── ui/src/                       React frontend (Vite): pages, components, contexts, api client
+├── docs/                         RUNBOOK.md, claim guidelines, implementation plans, archive/
+├── ecosystem.config.js           pm2 process definition (restart backoff)
+└── .github/workflows/ci.yml      Tests + UI build on Node 22 for every push
 ```
 
 
@@ -424,14 +368,19 @@ xero-invoice-app/
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/api/auth/login` | — | Login, returns JWT |
-| POST | `/api/auth/register` | — | Register (first user only, or admin) |
-| GET | `/api/auth/status` | JWT | Current user info |
+| POST | `/api/auth/register` | — | Create the first account (becomes admin); closed after that unless `ALLOW_REGISTRATION=true` |
+| POST | `/api/auth/logout` | JWT | Stop this user's watcher and end the session |
+| GET | `/api/auth/me` | JWT | Current user |
+| GET | `/api/auth/status` | — | Whether any account exists yet |
 
 ### Setup
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/setup` | JWT | Get this user's config |
-| POST | `/api/setup` | JWT | Save this user's config |
+| POST | `/api/setup` | JWT | Save this user's config (a blank secret keeps the stored one) |
+| GET | `/api/setup/llm-keys` | JWT | This user's Gemini keys (masked) |
+| POST | `/api/setup/llm-keys` | JWT | Add a Gemini key |
+| DELETE | `/api/setup/llm-keys/:id` | JWT | Remove a Gemini key |
 | POST | `/api/setup/test/xero` | JWT | Test Xero connection |
 | POST | `/api/setup/test/imap` | JWT | Test IMAP connection |
 | POST | `/api/setup/test/llm` | JWT | Test LLM API key |
@@ -449,7 +398,13 @@ xero-invoice-app/
 ### Invoices
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/invoices` | JWT | List this user's invoices (supports `?type=`, `?status=`, `?q=`) |
+| GET | `/api/invoices` | JWT | List this user's invoices |
+| POST | `/api/invoices` | JWT | Add a bill by hand (one PDF, or a batch as a background job) |
+| POST | `/api/invoices/compose` | JWT | Compose a sales invoice from a form |
+| POST | `/api/invoices/import` | JWT | Import invoices from a spreadsheet (background job) |
+| GET | `/api/invoices/import/active` | JWT | The active import job, if any |
+| GET | `/api/invoices/import/:jobId` | JWT | Poll an import job |
+| DELETE | `/api/invoices/import/:jobId` | JWT | Cancel / remove an import job |
 | GET | `/api/invoices/:id` | JWT | Invoice detail |
 | PATCH | `/api/invoices/:id` | JWT | Edit invoice fields |
 | GET | `/api/invoices/:id/pdf` | JWT | Download PDF (token-authenticated) |
@@ -509,6 +464,8 @@ xero-invoice-app/
 | GET | `/api/xero-reports/variance-insights` | JWT | AI-generated variance insights (Gemini) |
 | GET | `/api/xero-reports/narrative` | JWT | AI-generated P&L narrative (Gemini) |
 | GET | `/api/xero-reports/cash-flow` | JWT | Cash flow report |
+| GET | `/api/xero-reports/budget/export-url` | JWT | Short-lived signed URL for a budget export |
+| GET | `/api/xero-reports/budget/export` | token | The PDF or XLSX export |
 
 ### AI Chat assistant
 | Method | Path | Auth | Description |
@@ -522,12 +479,16 @@ xero-invoice-app/
 | POST | `/api/admin/users` | Admin | Create user |
 | DELETE | `/api/admin/users/:id` | Admin | Delete user |
 | GET | `/api/admin/reports` | Admin | Flagged invoices across all users |
+| PATCH | `/api/admin/reports/:userId/:invoiceId/resolve` | Admin | Mark a flagged invoice reviewed |
+| GET | `/api/admin/monitoring` | Admin | Per-user activity + backend health |
+| GET | `/api/admin/stats/daily` | Admin | Daily invoice counts |
+| GET | `/api/admin/logs` | Admin | Recent log entries |
 
 ### Health
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/dashboard/health` | — | Health check |
-| GET | `/dashboard/health` | — | Legacy alias (same response) |
+| GET | `/api/dashboard/health` | — | Health check: `{ status, commit, timestamp }` — `commit` is what the running process started from |
+| GET | `/dashboard/health` | — | Same response (the path deploy.sh and uptime checks use) |
 
 
 ---
@@ -597,7 +558,10 @@ The following hardening measures are active on every deployment:
 | **Global rate limit** | 500 requests per 15 minutes, keyed by JWT user ID (not IP) so a shared office network doesn't penalise all users for one user's traffic |
 | **Chat rate limit** | Separate 12 RPM cap on `POST /api/chat` to protect Gemini daily quota |
 | **Auth rate limit** | Login and register endpoints are individually rate-limited to prevent brute-force |
-| **Registration lock** | After the first user registers, registration is closed unless an admin explicitly enables it |
+| **Registration lock** | After the first account, registration is closed unless `ALLOW_REGISTRATION=true` is set |
+| **Role checked per request** | Role and existence are read from the database on every request, so a deleted or demoted user loses access at once |
+| **Secrets stay server-side** | Stored client secrets and mailbox passwords are never returned to the browser; a blank field on save keeps the stored value |
+| **Credentials encrypted at rest** | Xero/IMAP/Gemini credentials are AES-256-GCM encrypted in the database with `ENCRYPTION_KEY` |
 | **JWT authentication** | All API routes (except auth, QR capture, and health check) require a valid signed JWT in the `Authorization: Bearer` header |
 | **Path traversal sanitization** | File paths for PDFs and receipt images are sanitized before disk access; `..` sequences are rejected |
 | **Helmet** | `helmet` sets standard HTTP security headers (HSTS, X-Frame-Options, etc.) |
