@@ -93,3 +93,98 @@ describe('UI React hooks are imported where they are used', () => {
     expect(withHooks.length).toBeGreaterThan(3);
   });
 });
+
+// ── Every call goes somewhere ───────────────────────────────────────────────
+// The rules above catch a repeated prefix. They do not catch a path that is
+// simply wrong: `/admin/users/resolve` when the server only has
+// `/admin/reports/:id/resolve`. That shipped too, and every click on the
+// button was a 404 nobody saw. So: read the server's routes and check that
+// each literal path the UI calls is one of them, verb included.
+const MAIN = path.join(__dirname, '..');
+
+function serverRoutes() {
+  const index  = fs.readFileSync(path.join(MAIN, 'index.js'), 'utf8');
+  const files  = {};
+  for (const m of index.matchAll(/const\s+(\w+)\s*=\s*require\('\.\/routes\/([\w-]+)'\)/g)) files[m[1]] = m[2];
+  const routes = [];
+  for (const m of index.matchAll(/app\.use\('(\/api\/[\w-]+)',\s*(\w+)\)/g)) {
+    const [, mount, variable] = m;
+    const file = files[variable];
+    if (!file) continue;
+    const src = fs.readFileSync(path.join(MAIN, 'routes', `${file}.js`), 'utf8');
+    for (const r of src.matchAll(/router\.(get|post|patch|put|delete|all)\(\s*'([^']*)'/g)) {
+      routes.push({ verb: r[1], path: (mount + (r[2] === '/' ? '' : r[2])).replace(/^\/api/, '') });
+    }
+  }
+  return routes;
+}
+
+// The first argument of api.<verb>(, read as source text: a quoted string, or
+// a template literal whose ${…} parts (which may themselves contain quotes)
+// are skipped over rather than cutting the literal short.
+function literalAt(src, from) {
+  const quote = src[from];
+  let depth = 0, out = '';
+  for (let i = from + 1; i < src.length; i++) {
+    const c = src[i];
+    if (depth > 0) {
+      // Inside ${…}: only the braces matter, and a nested template's own ${
+      // is just another brace to balance.
+      if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) out += '${}';
+      continue;
+    }
+    if (c === quote) return out;
+    if (quote === '`' && c === '$' && src[i + 1] === '{') { depth = 1; i++; continue; }
+    out += c;
+  }
+  return null;
+}
+
+// '/invoices/${id}/report' → ['invoices', '*', 'report']; a query is dropped;
+// '/accounts${qs}' → ['accounts*'] (a segment that starts with "accounts").
+function uiSegments(literal) {
+  return literal.replace(/\$\{\}/g, '*').split('?')[0].split('/').filter(Boolean);
+}
+
+function segMatches(ui, route) {
+  if (route.startsWith(':') || route === '*' || ui === '*') return true;
+  if (ui.endsWith('*')) return route.startsWith(ui.slice(0, -1));
+  return ui === route;
+}
+
+function matches(uiSegs, routePath) {
+  const rs = routePath.split('/').filter(Boolean);
+  if (rs.length !== uiSegs.length) return false;
+  return rs.every((seg, i) => segMatches(uiSegs[i], seg));
+}
+
+describe('every literal API path the UI calls exists on the server', () => {
+  const routes = serverRoutes();
+  const files  = jsxFiles(UI_SRC);
+
+  test('the server routes were actually read', () => {
+    expect(routes.length).toBeGreaterThan(40);
+    expect(routes).toContainEqual({ verb: 'get', path: '/invoices/:id' });
+  });
+
+  test('each call resolves to a route with the same verb', () => {
+    const bad = [];
+    let checked = 0;
+    const call = /\bapi\.(get|post|patch|delete|put)\(\s*(?=['"`])/g;
+    for (const file of files) {
+      const src = fs.readFileSync(file, 'utf8');
+      for (const m of src.matchAll(call)) {
+        const verb    = m[1];
+        const literal = literalAt(src, m.index + m[0].length);
+        if (literal === null) { bad.push(`${path.relative(UI_SRC, file)}: unreadable literal after api.${verb}(`); continue; }
+        checked++;
+        const segs = uiSegments(literal);
+        const ok = routes.some(r => (r.verb === verb || r.verb === 'all') && matches(segs, r.path));
+        if (!ok) bad.push(`${path.relative(UI_SRC, file)}: api.${verb}('${literal}')`);
+      }
+    }
+    expect(checked).toBeGreaterThan(40);
+    expect(bad).toEqual([]);
+  });
+});
