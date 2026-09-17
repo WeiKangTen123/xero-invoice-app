@@ -218,8 +218,8 @@ async function submitInvoiceToXero(userId, invoiceId) {
   try {
     const xeroInvoiceId = await enqueueInvoice(userId, invoiceData);
 
-    // xeroInvoiceId is null when Bull/Redis queue is active — status will be
-    // updated by the queue processor once the job completes.
+    // null means no connected org: nothing was sent, so the row waits as
+    // pending rather than being marked posted.
     const patch = xeroInvoiceId
       ? { status: 'posted', xeroInvoiceId, submittedAt: new Date().toISOString(), errorMsg: null }
       : { status: 'pending', errorMsg: null };

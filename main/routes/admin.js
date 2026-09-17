@@ -194,7 +194,6 @@ router.get('/monitoring', requireAdmin, (_req, res) => {
       },
       dbSizeKb,
       logsSizeMb,
-      redisConfigured: !!process.env.REDIS_URL,
       totalUsers:      users.length,
       totalInvoices,
     },

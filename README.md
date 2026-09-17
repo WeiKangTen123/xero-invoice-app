@@ -95,7 +95,6 @@ Click your service → **Variables** tab:
 | `NODE_ENV` | Yes | `production` |
 | `PORT` | No | Default: `3000` |
 | `SLACK_WEBHOOK_URL` | No | Slack notifications for errors |
-| `REDIS_URL` | No | Enables Bull queue (optional — works without Redis) |
 
 > Xero, IMAP, and LLM credentials are set per-user in the **Setup** page after logging in.  
 > No global Xero or IMAP env vars needed.

@@ -470,7 +470,6 @@ function MonitoringPanel({ timezone, onViewLogs }) {
           <StatCard label="Heap Used"     value={`${system.memory.heapUsedMb} MB`} />
           <StatCard label="DB Size"       value={system.dbSizeKb != null ? `${system.dbSizeKb} KB` : '—'} />
           <StatCard label="Logs Size"     value={system.logsSizeMb != null ? `${system.logsSizeMb} MB` : '—'} />
-          <StatCard label="Redis"         value={system.redisConfigured ? 'Configured' : 'Not set'} />
           <StatCard label="Total Users"   value={system.totalUsers} />
           <StatCard label="Total Invoices" value={system.totalInvoices} />
         </div>

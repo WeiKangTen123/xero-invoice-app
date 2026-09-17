@@ -20,7 +20,6 @@ const HELP = {
   DEFAULT_CURRENCY:      'Default invoice currency code (e.g. SGD, USD, AUD).',
   ZERO_TAX_RATE:         'Tax rate name in Xero for zero-rated items (e.g. NONE, TAX001).',
   SLACK_WEBHOOK_URL:     'Optional Slack incoming webhook URL for error notifications.',
-  REDIS_URL:             'Optional Redis URL for the job queue. Leave blank to use in-memory queue.',
   XERO_OAUTH_CLIENT_ID:     'Client ID from your own Xero "Web app" (not Custom Connection). Each user brings their own — not shared with other accounts.',
   XERO_OAUTH_CLIENT_SECRET: 'Client secret for the same Xero Web app.',
   XERO_OAUTH_REDIRECT_URI:  'Set once for this whole server — register this exact value as a redirect URI on every user\'s Xero Web app. Must be HTTPS in production (http://localhost is fine for local dev).',

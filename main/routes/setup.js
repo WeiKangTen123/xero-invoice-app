@@ -30,7 +30,7 @@ const USER_SECTIONS = {
 // Shared/global fields — stored in .env; only admins can set these
 // (Slack webhook, Redis — infrastructure-level config not per-user)
 const GLOBAL_SECTIONS = {
-  optional:  ['SLACK_WEBHOOK_URL', 'REDIS_URL'],
+  optional:  ['SLACK_WEBHOOK_URL'],
   // A property of this server's deployment, not of any one user — every user's own
   // Xero Web app (see USER_SECTIONS.xero above) registers this same redirect URI.
   xeroOAuth: ['XERO_OAUTH_REDIRECT_URI'],
