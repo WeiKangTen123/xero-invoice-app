@@ -32,10 +32,10 @@ const path        = require('path');
 const helmet      = require('helmet');
 const compression = require('compression');
 const rateLimit   = require('express-rate-limit');
+const { rateLimitKey } = require('./middleware/rate-limit-key');
 const morgan      = require('morgan');
 const logger      = require('./utils/logger');
 
-const { jwtSecret }             = require('./middleware/auth-middleware');
 require('./db/migrate').run();
 const { ensureUserDirectories, getAllUsers } = require('./utils/users');
 const emailWorker               = require('./queue/email-worker');
@@ -109,18 +109,7 @@ app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max:      500,
-  keyGenerator: (req) => {
-    // Prefer JWT user ID so each user has their own bucket
-    try {
-      const auth = req.headers.authorization || '';
-      if (auth.startsWith('Bearer ')) {
-        const jwt     = require('jsonwebtoken');
-        const payload = jwt.verify(auth.slice(7), jwtSecret());
-        return `user:${payload.id}`;
-      }
-    } catch (_) {}
-    return req.ip;
-  },
+  keyGenerator: rateLimitKey,
   message: { error: 'Too many requests — slow down' },
   standardHeaders: true,
   legacyHeaders:   false,

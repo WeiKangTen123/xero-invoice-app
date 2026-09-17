@@ -43,7 +43,15 @@ export default function Capture() {
     const timer = setInterval(async () => {
       try {
         const res = await fetch(`/api/receipts/capture/${encodeURIComponent(token)}/status`);
-        if (!res.ok || stop) return;
+        if (stop) return;
+        if (res.status === 401) {
+          // The link died while we were waiting. Asking again every few
+          // seconds would only tell us the same thing.
+          setState('expired');
+          setError('This link has expired. Show a new QR code on your computer.');
+          return;
+        }
+        if (!res.ok) return;
         const body = await res.json();
         const byId = new Map((body.receipts || []).map(r => [r.id, r]));
         setSent(list => list.map(item => {
@@ -51,7 +59,7 @@ export default function Capture() {
           return got ? { ...item, ...got } : item;
         }));
       } catch { /* transient — try again next tick */ }
-    }, 2500);
+    }, 5000);
     return () => { stop = true; clearInterval(timer); };
   }, [state, sent, token]);
 
@@ -84,7 +92,7 @@ export default function Capture() {
           name: file.name,
           preview: URL.createObjectURL(blob),
           from: originalBytes, to: bytes,
-          vendorName: null, totalAmount: null, currency: null, parsed: false,
+          vendorName: null, totalAmount: null, currency: null, parsed: false, unreadable: false,
         }]);
         setUses(n => (n === null ? null : Math.max(0, n - 1)));
       } catch (err) {
@@ -166,7 +174,14 @@ export default function Capture() {
               </div>
               <div style={{ minWidth: 0, flex: 1 }}>
                 {/* Confirms the RECEIPT was captured, not just that a file moved. */}
-                {s.parsed ? (
+                {s.parsed && s.unreadable ? (
+                  <>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>
+                      <span style={{ color: 'var(--warning)' }}>!</span> Saved, but not read
+                    </div>
+                    <div style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>Fill it in on your computer.</div>
+                  </>
+                ) : s.parsed ? (
                   <>
                     <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       <span style={{ color: 'var(--success)' }}>✓</span> {s.vendorName || 'Expense claim'}
