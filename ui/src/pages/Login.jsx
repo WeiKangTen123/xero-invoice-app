@@ -247,9 +247,9 @@ export default function Login() {
               }}
             >
               <div className="form-group" style={{ animation: 'fadeUp 0.3s ease 0ms both' }}>
-                <label className="form-label">Email address</label>
+                <label htmlFor="login-email" className="form-label">Email address</label>
                 <div className="input-wrapper">
-                  <input
+                  <input id="login-email"
                     type="email"
                     className="form-input has-icon"
                     placeholder="you@company.com"
@@ -263,9 +263,9 @@ export default function Login() {
               </div>
 
               <div className="form-group" style={{ marginBottom: 22, animation: 'fadeUp 0.3s ease 60ms both' }}>
-                <label className="form-label">Password</label>
+                <label htmlFor="login-password" className="form-label">Password</label>
                 <div className="input-wrapper" style={{ position: 'relative' }}>
-                  <input
+                  <input id="login-password"
                     type={showPass ? 'text' : 'password'}
                     className="form-input has-icon"
                     placeholder={mode === 'register' ? 'Min. 6 characters' : 'Enter your password'}

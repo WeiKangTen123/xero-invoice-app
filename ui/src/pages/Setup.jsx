@@ -92,11 +92,12 @@ function Field({ name, meta, value, onChange }) {
   if (name === 'TIMEZONE') {
     return (
       <div className="form-group">
-        <label className="form-label">
+        <label htmlFor={`setting-${name}`} className="form-label">
           {name}
           {HELP[name] && <HelpTooltip text={HELP[name]} />}
         </label>
         <select
+          id={`setting-${name}`}
           className="form-input"
           value={value || DEFAULT_TIMEZONE}
           onChange={e => onChange(name, e.target.value)}
@@ -111,13 +112,14 @@ function Field({ name, meta, value, onChange }) {
 
   return (
     <div className="form-group">
-      <label className="form-label">
+      <label htmlFor={`setting-${name}`} className="form-label">
         {name}
         {HELP[name] && <HelpTooltip text={HELP[name]} />}
         {isReadOnly && <span className="badge badge-gray" style={{ marginLeft: 4 }}>Read-only</span>}
       </label>
       <div style={{ position: 'relative' }}>
         <input
+          id={`setting-${name}`}
           type={isSecret && !show ? 'password' : 'text'}
           className="form-input"
           // A stored secret never comes back from the server; the field is

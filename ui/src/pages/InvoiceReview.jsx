@@ -52,8 +52,8 @@ function ReportModal({ invoiceId, onClose, onDone }) {
         {error && <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>}
         <form onSubmit={submit}>
           <div className="form-group">
-            <label className="form-label">What's wrong?</label>
-            <textarea
+            <label htmlFor="report-note" className="form-label">What's wrong?</label>
+            <textarea id="report-note"
               className="form-input"
               placeholder="e.g. Wrong vendor name extracted, incorrect total amount, missing line items..."
               value={note}
@@ -1041,33 +1041,33 @@ function InvoiceReviewPage() {
                 <>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <div className="form-group" style={{ width: 90 }}>
-                      <label className="form-label">Currency</label>
-                      <input className="form-input" value={form.currency} maxLength={3}
+                      <label htmlFor="rv-currency" className="form-label">Currency</label>
+                      <input id="rv-currency" className="form-input" value={form.currency} maxLength={3}
                         onChange={e => updateField('currency', e.target.value.toUpperCase())} />
                     </div>
                     <div className="form-group" style={{ flex: 1 }}>
-                      <label className="form-label">Total Amount</label>
-                      <input className="form-input" type="number" step="0.01" value={form.totalAmount}
+                      <label htmlFor="rv-total" className="form-label">Total Amount</label>
+                      <input id="rv-total" className="form-input" type="number" step="0.01" value={form.totalAmount}
                         onChange={e => updateField('totalAmount', e.target.value)} />
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <div className="form-group" style={{ flex: 1 }}>
-                      <label className="form-label">Subtotal</label>
-                      <input className="form-input" type="number" step="0.01" value={form.subTotal ?? ''}
+                      <label htmlFor="rv-subtotal" className="form-label">Subtotal</label>
+                      <input id="rv-subtotal" className="form-input" type="number" step="0.01" value={form.subTotal ?? ''}
                         placeholder="0.00"
                         onChange={e => updateField('subTotal', e.target.value !== '' ? Number(e.target.value) : null)} />
                     </div>
                     <div className="form-group" style={{ flex: 1 }}>
-                      <label className="form-label">Tax / GST</label>
-                      <input className="form-input" type="number" step="0.01" value={form.taxAmount ?? ''}
+                      <label htmlFor="rv-tax" className="form-label">Tax / GST</label>
+                      <input id="rv-tax" className="form-input" type="number" step="0.01" value={form.taxAmount ?? ''}
                         placeholder="0.00"
                         onChange={e => updateField('taxAmount', e.target.value !== '' ? Number(e.target.value) : null)} />
                     </div>
                   </div>
                   <div className="form-group">
-                    <label className="form-label">Type</label>
-                    <select className="form-input" value={form.invoiceType}
+                    <label htmlFor="rv-type" className="form-label">Type</label>
+                    <select id="rv-type" className="form-input" value={form.invoiceType}
                       onChange={e => updateField('invoiceType', e.target.value)}>
                       <option value="EXPENSE">Expense Claim</option>
                       <option value="ACCPAY">Bill (ACCPAY)</option>
@@ -1075,19 +1075,19 @@ function InvoiceReviewPage() {
                     </select>
                   </div>
                   <div className="form-group">
-                    <label className="form-label">{isExpense ? 'Claim ref' : 'Invoice #'}</label>
-                    <input className="form-input" value={form.invoiceNumber}
+                    <label htmlFor="rv-number" className="form-label">{isExpense ? 'Claim ref' : 'Invoice #'}</label>
+                    <input id="rv-number" className="form-input" value={form.invoiceNumber}
                       onChange={e => updateField('invoiceNumber', e.target.value)} />
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <div className="form-group" style={{ flex: 1 }}>
-                      <label className="form-label">{isExpense ? 'Receipt date' : 'Invoice Date'}</label>
-                      <input className="form-input" type="date" value={form.invoiceDate || ''}
+                      <label htmlFor="rv-date" className="form-label">{isExpense ? 'Receipt date' : 'Invoice Date'}</label>
+                      <input id="rv-date" className="form-input" type="date" value={form.invoiceDate || ''}
                         onChange={e => updateField('invoiceDate', e.target.value)} />
                     </div>
                     {!isExpense && <div className="form-group" style={{ flex: 1 }}>
-                      <label className="form-label">Due Date</label>
-                      <input className="form-input" type="date" value={form.dueDate || ''}
+                      <label htmlFor="rv-due" className="form-label">Due Date</label>
+                      <input id="rv-due" className="form-input" type="date" value={form.dueDate || ''}
                         onChange={e => updateField('dueDate', e.target.value)} />
                     </div>}
                   </div>
@@ -1204,18 +1204,18 @@ function InvoiceReviewPage() {
               {editing ? (
                 <>
                   <div className="form-group">
-                    <label className="form-label">Name</label>
-                    <input className="form-input" value={form.vendorName}
+                    <label htmlFor="rv-contact-name" className="form-label">Name</label>
+                    <input id="rv-contact-name" className="form-input" value={form.vendorName}
                       onChange={e => updateField('vendorName', e.target.value)} />
                   </div>
                   <div className="form-group">
-                    <label className="form-label">Email</label>
-                    <input className="form-input" value={form.contactEmail}
+                    <label htmlFor="rv-contact-email" className="form-label">Email</label>
+                    <input id="rv-contact-email" className="form-input" value={form.contactEmail}
                       onChange={e => updateField('contactEmail', e.target.value)} />
                   </div>
                   <div className="form-group" style={{ marginBottom: 0 }}>
-                    <label className="form-label">Address</label>
-                    <textarea className="form-input" rows={2} value={form.contactAddress}
+                    <label htmlFor="rv-contact-address" className="form-label">Address</label>
+                    <textarea id="rv-contact-address" className="form-input" rows={2} value={form.contactAddress}
                       onChange={e => updateField('contactAddress', e.target.value)}
                       style={{ resize: 'vertical', fontFamily: 'inherit' }} />
                   </div>
@@ -1266,13 +1266,13 @@ function InvoiceReviewPage() {
                     {editing ? (
                       <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                         <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-                          <label className="form-label">Subtotal</label>
-                          <input className="form-input" type="number" step="0.01" value={form.subTotal}
+                          <label htmlFor="rv-li-subtotal" className="form-label">Subtotal</label>
+                          <input id="rv-li-subtotal" className="form-input" type="number" step="0.01" value={form.subTotal}
                             onChange={e => updateField('subTotal', e.target.value)} />
                         </div>
                         <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-                          <label className="form-label">Tax</label>
-                          <input className="form-input" type="number" step="0.01" value={form.taxAmount}
+                          <label htmlFor="rv-li-tax" className="form-label">Tax</label>
+                          <input id="rv-li-tax" className="form-input" type="number" step="0.01" value={form.taxAmount}
                             onChange={e => updateField('taxAmount', e.target.value)} />
                         </div>
                       </div>

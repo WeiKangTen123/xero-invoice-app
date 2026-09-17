@@ -212,8 +212,8 @@ export default function Admin() {
 
           <form onSubmit={handleCreate}>
             <div className="form-group">
-              <label className="form-label">Email address</label>
-              <input
+              <label htmlFor="admin-email" className="form-label">Email address</label>
+              <input id="admin-email"
                 type="email"
                 className="form-input"
                 placeholder="user@company.com"
@@ -224,9 +224,9 @@ export default function Admin() {
             </div>
 
             <div className="form-group">
-              <label className="form-label">Password</label>
+              <label htmlFor="admin-password" className="form-label">Password</label>
               <div style={{ position: 'relative' }}>
-                <input
+                <input id="admin-password"
                   type={showPass ? 'text' : 'password'}
                   className="form-input"
                   placeholder="Min. 6 characters"
