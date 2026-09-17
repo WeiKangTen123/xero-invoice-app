@@ -43,6 +43,7 @@ const BUDGET_MAX_PERIODS = 12;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  reports._cache.clear();   // each test starts cold; `force` alone no longer busts a fresh entry
   api.getOrganisations.mockResolvedValue({ body: { organisations: [
     { name: 'Test Org', baseCurrency: 'SGD', financialYearEndDay: 31, financialYearEndMonth: 3 },
   ] } });
@@ -178,5 +179,42 @@ describe('Xero call contract — nothing in the read path writes', () => {
     const called = Object.keys(api).filter(k => api[k].mock?.calls.length > 0);
     expect(called.length).toBeGreaterThan(0);
     for (const name of called) expect(name).toMatch(/^get/);
+  });
+});
+
+// Cost: identical work must be fetched once. The Insights page fires
+// /performance, /variance-insights and /narrative together on first load, and
+// each miss used to become its own chain of Xero GETs; a Refresh forwarded
+// `force` into every dependent report, refetching Budget-vs-Actual five times.
+jest.mock('../utils/gemini-client', () => ({ callGemini: jest.fn().mockRejectedValue(new Error('no model in tests')), GEMINI_MODELS: [] }));
+
+describe('Xero call budget — identical work is fetched once', () => {
+  test('three concurrent summary requests make one invoice fetch', async () => {
+    const T2 = 't-dedupe-1';
+    await Promise.all([reports.getSummary(U, T2), reports.getSummary(U, T2), reports.getSummary(U, T2)]);
+    expect(api.getInvoices).toHaveBeenCalledTimes(1);
+  });
+
+  test('three concurrent budget-variance requests fetch the budget report once', async () => {
+    const T2 = 't-dedupe-2';
+    const opts = { period: { preset: 'fy' } };
+    await Promise.all([reports.getBudgetVariance(U, T2, opts), reports.getBudgetVariance(U, T2, opts), reports.getBudgetVariance(U, T2, opts)]);
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
+  });
+
+  test('a forced request seconds after a fresh fetch reuses it; one older than the grace refetches', async () => {
+    const T2 = 't-grace';
+    await reports.getSummary(U, T2, { force: true });
+    await reports.getSummary(U, T2, { force: true });          // within the grace window
+    expect(api.getInvoices).toHaveBeenCalledTimes(1);
+    reports._cache.get(`summary:${U}:${T2}`).fetchedAt -= reports.FORCE_GRACE_MS + 1;
+    await reports.getSummary(U, T2, { force: true });
+    expect(api.getInvoices).toHaveBeenCalledTimes(2);
+  });
+
+  test('a forced insights request fetches Budget-vs-Actual once, not once per dependent report', async () => {
+    const T2 = 't-cascade';
+    await reports.getVarianceInsights(U, T2, { period: { preset: 'fy' }, force: true });
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
   });
 });

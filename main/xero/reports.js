@@ -50,7 +50,9 @@ function _pruneCache() {
   }
 }
 
-function _cacheGet(key, force) {
+// `noGrace`: a person asking the model to re-analyse expects a fresh answer
+// however recent the last one is; the grace window is for Xero fetch chains.
+function _cacheGet(key, force, { noGrace = false } = {}) {
   const cached = _cache.get(key);
   if (!cached) return null;
   // Per-entry TTL, defaulting to the short one. Report data is cheap to refetch
@@ -60,7 +62,11 @@ function _cacheGet(key, force) {
     _cache.delete(key);
     return null;
   }
-  if (force) return null;
+  // A forced read is a person clicking Refresh, and several reports built on
+  // one base fetch each forward it — so one click could refetch Budget-vs-
+  // Actual five times. A force within the grace window of a fresh fetch
+  // reuses it; only an entry older than that is bypassed.
+  if (force && (noGrace || Date.now() - cached.fetchedAt > FORCE_GRACE_MS)) return null;
   return { ...cached.data, cached: true, fetchedAt: cached.fetchedAt };
 }
 
@@ -71,6 +77,26 @@ function _cacheSet(key, data, ttl) {
   if (_cache.size >= CACHE_MAX_ENTRIES) _pruneCache();
   _cache.set(key, { data, fetchedAt: Date.now(), ttl });
   return { ...data, cached: false, fetchedAt: Date.now() };
+}
+
+const FORCE_GRACE_MS = 10_000;
+
+// Identical work in flight is shared, not repeated. The Insights page fires
+// /performance, /variance-insights and /narrative together on first load, and
+// each cache miss used to become its own chain of Xero GETs (and its own LLM
+// call). Every cached fetcher below is bound through this, so callers inside
+// this file share the same in-flight promise as callers outside it.
+const _inflight = new Map();
+function _dedupe(name, fn) {
+  return function deduped(...args) {
+    const key = `${name}:${JSON.stringify(args)}`;
+    let p = _inflight.get(key);
+    if (!p) {
+      p = Promise.resolve().then(() => fn.apply(this, args)).finally(() => _inflight.delete(key));
+      _inflight.set(key, p);
+    }
+    return p;
+  };
 }
 
 function _apiFor(token) {
@@ -188,7 +214,7 @@ function _buildSummary(org, invoices) {
   };
 }
 
-async function getSummary(userId, tenantId, { force = false } = {}) {
+async function _getSummaryRaw(userId, tenantId, { force = false } = {}) {
   const key    = `summary:${userId}:${tenantId}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
@@ -213,7 +239,7 @@ async function getSummary(userId, tenantId, { force = false } = {}) {
 // Cached separately from getSummary's own org fetch (same underlying Xero
 // call, but this one's only reached for the 'year' preset, and keeping it
 // standalone avoids reshaping getSummary's existing parallel fetch).
-async function _getOrganisation(userId, tenantId, force) {
+async function _getOrganisationRaw(userId, tenantId, force) {
   const key    = `org:${userId}:${tenantId}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached.org;
@@ -268,7 +294,7 @@ function _buildPeriod(invoices, range) {
   };
 }
 
-async function getPeriod(userId, tenantId, { preset = 'month', from, to, timezone = 'UTC', force = false } = {}) {
+async function _getPeriodRaw(userId, tenantId, { preset = 'month', from, to, timezone = 'UTC', force = false } = {}) {
   // Fiscal-year-end only matters for the 'year' preset — skip the extra org
   // lookup entirely for every other preset.
   let fiscalYearEnd;
@@ -308,7 +334,7 @@ function _buildAccounts(accounts) {
   }));
 }
 
-async function getAccounts(userId, tenantId, { force = false } = {}) {
+async function _getAccountsRaw(userId, tenantId, { force = false } = {}) {
   const key    = `accounts:${userId}:${tenantId}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
@@ -331,7 +357,7 @@ function _buildBankAccounts(accounts) {
     }));
 }
 
-async function getBankAccounts(userId, tenantId, { force = false } = {}) {
+async function _getBankAccountsRaw(userId, tenantId, { force = false } = {}) {
   const key    = `bank:${userId}:${tenantId}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
@@ -352,7 +378,7 @@ function _buildContacts(contacts) {
   }));
 }
 
-async function getContacts(userId, tenantId, { force = false } = {}) {
+async function _getContactsRaw(userId, tenantId, { force = false } = {}) {
   const key    = `contacts:${userId}:${tenantId}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
@@ -416,7 +442,7 @@ function _buildPayments(payments) {
   })).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 }
 
-async function getBankTransactions(userId, tenantId, accountId, { force = false } = {}) {
+async function _getBankTransactionsRaw(userId, tenantId, accountId, { force = false } = {}) {
   const key    = `banktx:${userId}:${tenantId}:${accountId}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
@@ -571,7 +597,7 @@ function _splitIntoReportWindows(fromISO, toISO, maxDays = REPORT_WINDOW_MAX_DAY
   return windows;
 }
 
-async function getProfitAndLoss(userId, tenantId, { from, to, force = false } = {}) {
+async function _getProfitAndLossRaw(userId, tenantId, { from, to, force = false } = {}) {
   const clampedFrom = _clampReportFrom(from, to);
   const key    = `pnl:${userId}:${tenantId}:${clampedFrom}:${to}`;
   const cached = _cacheGet(key, force);
@@ -595,7 +621,7 @@ async function getProfitAndLoss(userId, tenantId, { from, to, force = false } = 
   return _cacheSet(key, { income, expenses, netProfit, netMargin, from: clampedFrom, to });
 }
 
-async function getBankSummary(userId, tenantId, { from, to, force = false } = {}) {
+async function _getBankSummaryRaw(userId, tenantId, { from, to, force = false } = {}) {
   const clampedFrom = _clampReportFrom(from, to);
   const key    = `banksum:${userId}:${tenantId}:${clampedFrom}:${to}`;
   const cached = _cacheGet(key, force);
@@ -847,7 +873,7 @@ function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx, m
   };
 }
 
-async function getBudgetVariance(userId, tenantId, { force = false, timezone = 'UTC', window = 'fy', period } = {}) {
+async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone = 'UTC', window = 'fy', period } = {}) {
   const org           = await _getOrganisation(userId, tenantId, force);
   const fiscalYearEnd = { month: org.financialYearEndMonth || 12, day: org.financialYearEndDay || 31 };
   const today         = _todayPartsInTz(timezone);
@@ -1203,7 +1229,7 @@ function _buildQuotePipeline(quotes = [], baseCurrency = '') {
   };
 }
 
-async function getPerformance(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period, cashFlow = false, customers = false } = {}) {
+async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period, cashFlow = false, customers = false } = {}) {
   // Reuses the budget-variance fetch and its cache — on a warm cache this whole
   // endpoint costs one Xero call (the bank summary) rather than three.
   const bv = await getBudgetVariance(userId, tenantId, { timezone, force, window, period });
@@ -1333,7 +1359,7 @@ const {
   _varianceCandidates,
 } = require('./ai-insights');
 
-async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force = false, reanalyse = false, period } = {}) {
+async function _getVarianceInsightsRaw(userId, tenantId, { timezone = 'UTC', force = false, reanalyse = false, period } = {}) {
   const perf = await getPerformance(userId, tenantId, { timezone, force, period });
   // Cash flow enriches the commentary with category context; it is not required
   // for it. Losing it must not blank the insights — but it must not vanish
@@ -1356,7 +1382,7 @@ async function getVarianceInsights(userId, tenantId, { timezone = 'UTC', force =
   // Keyed on the figures themselves, so the model is re-asked only when the numbers actually move.
   const sig = categories.map(c => `${c.key}:${Math.round(c.variance)}`).join('|') + '::' + candidates.map(c => `${c.account}:${Math.round(c.variance)}`).join('|');
   const key = `insights:v3:${userId}:${tenantId}:${perf.period?.fromKey}:${perf.period?.toKey}:${sig}`;
-  const cached = _cacheGet(key, force || reanalyse);
+  const cached = _cacheGet(key, force || reanalyse, { noGrace: true });
   if (cached) return cached;
 
   const { callGemini } = require('../utils/gemini-client');
@@ -1400,7 +1426,7 @@ const {
   _buildSupplierSpend,
 } = require('./cash-flow');
 
-async function getCashFlow(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
+async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
   // Reuses the cached performance fetch for the P&L side, so the accrual-vs-cash
   // reconciliation compares like with like over the same months.
   const perf = await getPerformance(userId, tenantId, { timezone, force, period });
@@ -1551,7 +1577,7 @@ async function _narrateFrom(userId, tenantId, cf, { force = false } = {}) {
   const facts = _narrativeFacts(cf);
   // Keyed on the figures themselves, so it is rewritten only when they change.
   const key = `narrative:${userId}:${tenantId}:${facts.lines.join('|')}`;
-  const cached = _cacheGet(key, force);
+  const cached = _cacheGet(key, force, { noGrace: true });
   if (cached) return cached;
 
   // Required lazily, exactly as getVarianceInsights does — reports.js has no
@@ -1591,7 +1617,7 @@ async function _narrateFrom(userId, tenantId, cf, { force = false } = {}) {
   }, NARRATIVE_CACHE_TTL_MS);
 }
 
-async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force = false, reanalyse = false, period } = {}) {
+async function _getFinancialNarrativeRaw(userId, tenantId, { timezone = 'UTC', force = false, reanalyse = false, period } = {}) {
   // Only `force` reaches Xero. `reanalyse` reuses whatever is cached and simply
   // asks the model again.
   const cf = await getCashFlow(userId, tenantId, { timezone, force, period });
@@ -1599,6 +1625,23 @@ async function getFinancialNarrative(userId, tenantId, { timezone = 'UTC', force
 }
 
 // Called on disconnect so nothing here can outlive the connection it came from.
+// Bound here, after the declarations, so internal callers (getPerformance →
+// getBudgetVariance, and so on) go through the same in-flight map as routes.
+const getSummary             = _dedupe('getSummary', _getSummaryRaw);
+const _getOrganisation       = _dedupe('_getOrganisation', _getOrganisationRaw);
+const getPeriod              = _dedupe('getPeriod', _getPeriodRaw);
+const getAccounts            = _dedupe('getAccounts', _getAccountsRaw);
+const getBankAccounts        = _dedupe('getBankAccounts', _getBankAccountsRaw);
+const getContacts            = _dedupe('getContacts', _getContactsRaw);
+const getBankTransactions    = _dedupe('getBankTransactions', _getBankTransactionsRaw);
+const getProfitAndLoss       = _dedupe('getProfitAndLoss', _getProfitAndLossRaw);
+const getBankSummary         = _dedupe('getBankSummary', _getBankSummaryRaw);
+const getBudgetVariance      = _dedupe('getBudgetVariance', _getBudgetVarianceRaw);
+const getPerformance         = _dedupe('getPerformance', _getPerformanceRaw);
+const getVarianceInsights    = _dedupe('getVarianceInsights', _getVarianceInsightsRaw);
+const getCashFlow            = _dedupe('getCashFlow', _getCashFlowRaw);
+const getFinancialNarrative  = _dedupe('getFinancialNarrative', _getFinancialNarrativeRaw);
+
 function clearCache(userId) {
   for (const key of _cache.keys()) {
     if (key.includes(`:${userId}:`)) _cache.delete(key);
@@ -1606,6 +1649,7 @@ function clearCache(userId) {
 }
 
 module.exports = {
+  FORCE_GRACE_MS,
   getSummary, getPeriod, getAccounts, getBankAccounts, getContacts,
   getBankTransactions, getProfitAndLoss, getBankSummary, getBudgetVariance, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
   _buildSummary, _buildPeriod, computeRange, _buildAccounts, _buildBankAccounts, _buildContacts,

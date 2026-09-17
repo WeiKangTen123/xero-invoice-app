@@ -540,9 +540,12 @@ describe('xero/reports — getSummary caching', () => {
     expect(second.cached).toBe(true);
   });
 
-  test('force:true bypasses the cache even within the TTL', async () => {
+  test('force:true refetches once the entry is older than the grace window, and reuses a fresher one', async () => {
     await reports.getSummary('user-1', 'tenant-1');
-    await reports.getSummary('user-1', 'tenant-1', { force: true });
+    await reports.getSummary('user-1', 'tenant-1', { force: true });          // seconds old: reused
+    expect(getOrganisations).toHaveBeenCalledTimes(1);
+    reports._cache.get('summary:user-1:tenant-1').fetchedAt -= reports.FORCE_GRACE_MS + 1;
+    await reports.getSummary('user-1', 'tenant-1', { force: true });          // past the grace: refetched
     expect(getOrganisations).toHaveBeenCalledTimes(2);
   });
 
@@ -793,8 +796,9 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
     expect(getReportProfitAndLoss.mock.calls[0][1]).toBe('2016-01-01'); // clamped from, not 2000-01-01
   });
 
-  test('force:true bypasses the cache for all three', async () => {
+  test('force:true refetches once the entry is past the grace window', async () => {
     await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
+    reports._cache.get('banktx:user-1:tenant-1:acct-1').fetchedAt -= reports.FORCE_GRACE_MS + 1;
     await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1', { force: true });
     expect(getBankTransactions).toHaveBeenCalledTimes(2);
   });
