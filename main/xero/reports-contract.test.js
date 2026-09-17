@@ -218,3 +218,19 @@ describe('Xero call budget — identical work is fetched once', () => {
     expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('Xero call contract — invoice paging', () => {
+  test('invoice fetches page until a short page, so KPIs are not silently capped at 100', async () => {
+    // Xero returns at most 100 per page; `page=1` was never followed up, so
+    // every invoice-based KPI was computed on the newest hundred.
+    const inv = i => ({ type: 'ACCREC', status: 'AUTHORISED', amountDue: 1, total: 1, invoiceNumber: `I-${i}`, dueDate: '2099-01-01' });
+    api.getInvoices
+      .mockResolvedValueOnce({ body: { invoices: Array.from({ length: 100 }, (_, i) => inv(i)) } })
+      .mockResolvedValueOnce({ body: { invoices: Array.from({ length: 30 }, (_, i) => inv(100 + i)) } });
+    const s = await reports.getSummary(U, 't-paged');
+    expect(api.getInvoices).toHaveBeenCalledTimes(2);
+    expect(api.getInvoices.mock.calls[0][8]).toBe(1);
+    expect(api.getInvoices.mock.calls[1][8]).toBe(2);
+    expect(s.kpis.receivablesCount).toBe(130);
+  });
+});

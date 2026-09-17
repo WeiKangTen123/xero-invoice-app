@@ -110,6 +110,28 @@ function _apiFor(token) {
 // PAID invoices, and AUTHORISED ones already fully paid down to zero, both read
 // as "paid" here — amountDue is the source of truth for what's actually owed,
 // not just the coarse Xero status.
+// Xero returns at most 100 invoices per page and `page=1` was never followed
+// up, so every KPI built on invoices — receivables, overdue, DSO, the
+// forecast, supplier spend — was computed on the 100 most recent. Pages until
+// a short page; the cap is a safety net that logs when hit. Always summaryOnly:
+// no caller here needs line items, and it keeps each page small.
+const INVOICE_PAGE_SIZE = 100;
+const INVOICE_MAX_PAGES = 20;
+async function _allInvoices(api, tenantId, { where, order, statuses }) {
+  const out = [];
+  for (let page = 1; page <= INVOICE_MAX_PAGES; page++) {
+    const res = await withRetry(() => api.getInvoices(
+      tenantId, undefined, where, order, undefined, undefined, undefined,
+      statuses, page, undefined, undefined, undefined, true,
+    ));
+    const batch = res.body.invoices || [];
+    out.push(...batch);
+    if (batch.length < INVOICE_PAGE_SIZE) return out;
+  }
+  logger.warn('Invoice fetch hit the page cap; figures may be incomplete', { tenantId, pages: INVOICE_MAX_PAGES });
+  return out;
+}
+
 function _statusLabel(inv) {
   const amountDue = Number(inv.amountDue || 0);
   if (inv.status === 'PAID' || amountDue <= 0) return 'paid';
@@ -223,15 +245,12 @@ async function _getSummaryRaw(userId, tenantId, { force = false } = {}) {
   const token      = await tokenCache.getValidToken(tenantId);
   const api        = _apiFor(token);
 
-  const [orgRes, invRes] = await Promise.all([
+  const [orgRes, invoices] = await Promise.all([
     withRetry(() => api.getOrganisations(tenantId)),
-    withRetry(() => api.getInvoices(
-      tenantId, undefined, undefined, 'Date DESC', undefined, undefined, undefined,
-      ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true // summaryOnly — no line items needed here
-    )),
+    _allInvoices(api, tenantId, { order: 'Date DESC', statuses: ['AUTHORISED', 'PAID'] }),
   ]);
 
-  const data = _buildSummary(orgRes.body.organisations?.[0] || {}, invRes.body.invoices || []);
+  const data = _buildSummary(orgRes.body.organisations?.[0] || {}, invoices);
   logger.info('Insights summary fetched', { userId, tenantId, invoiceCount: data.invoices.length });
   return _cacheSet(key, data);
 }
@@ -311,13 +330,10 @@ async function _getPeriodRaw(userId, tenantId, { preset = 'month', from, to, tim
   const token      = await tokenCache.getValidToken(tenantId);
   const api        = _apiFor(token);
 
-  const invRes = await withRetry(() => api.getInvoices(
-    tenantId, undefined, range.where, 'Date ASC', undefined, undefined, undefined,
-    ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true
-  ));
+  const invoices = await _allInvoices(api, tenantId, { where: range.where, order: 'Date ASC', statuses: ['AUTHORISED', 'PAID'] });
 
-  const data = _buildPeriod(invRes.body.invoices || [], range);
-  logger.info('Insights period fetched', { userId, tenantId, range: range.preset, invoiceCount: (invRes.body.invoices || []).length });
+  const data = _buildPeriod(invoices, range);
+  logger.info('Insights period fetched', { userId, tenantId, range: range.preset, invoiceCount: invoices.length });
   return _cacheSet(key, data);
 }
 
@@ -1277,11 +1293,8 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
       const start = _parseISODate(bv.fiscalYear.fromISO);
       const endEx = _addDays(_parseISODate(bv.fiscalYear.toISO), 1); // Xero's upper bound is exclusive
       const where = `Type=="ACCREC" && Date >= ${_fmtXeroDate(start)} && Date < ${_fmtXeroDate(endEx)}`;
-      const res = await withRetry(() => api.getInvoices(
-        tenantId, undefined, where, 'Date DESC', undefined, undefined, undefined,
-        ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true, // summaryOnly
-      ));
-      customerRevenue = _buildCustomerRevenue(res.body.invoices || [], baseCurrency);
+      const fyInvoices = await _allInvoices(api, tenantId, { where, order: 'Date DESC', statuses: ['AUTHORISED', 'PAID'] });
+      customerRevenue = _buildCustomerRevenue(fyInvoices, baseCurrency);
 
       // Quoted-but-not-invoiced work exists commercially and nowhere in the
       // accounts, so the forward view otherwise stops at issued invoices.
@@ -1470,11 +1483,10 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
     // summaryOnly flag"). Order is irrelevant here anyway: the forecast buckets
     // by due date rather than reading them in sequence, and summaryOnly keeps
     // the response small.
-    withRetry(() => api.getInvoices(tenantId, undefined, invoiceWhere, 'Date DESC', undefined, undefined, undefined,
-      ['AUTHORISED', 'PAID'], 1, undefined, undefined, undefined, true)),
+    _allInvoices(api, tenantId, { where: invoiceWhere, order: 'Date DESC', statuses: ['AUTHORISED', 'PAID'] }),
   ]);
 
-  const invoices = invRes.body.invoices || [];
+  const invoices = invRes;
   const baseCurrency = perf.organisation?.currency || '';
   const movement = _buildCashMovement({
     payments:         payRes.body.payments || [],
