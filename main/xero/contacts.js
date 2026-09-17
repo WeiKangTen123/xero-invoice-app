@@ -15,19 +15,21 @@ async function getOrCreateContact(userId, tenantId, { vendorName, sourceEmail, a
     .trim()
     .slice(0, 255) || 'Unknown Vendor';
 
-  // Search for existing contact by exact name
-  try {
-    const where    = `Name=="${cleanName.replace(/"/g, '')}"`;
-    const response = await withRetry(() =>
-      accountingApi.getContacts(tenantId, undefined, where, undefined, undefined, undefined, undefined, undefined, true)
-    );
-    const contacts = response.body.contacts || [];
-    if (contacts.length > 0) {
-      logger.info('Contact found', { tenantId, vendorName, contactID: contacts[0].contactID });
-      return contacts[0].contactID;
-    }
-  } catch (err) {
-    logger.warn('Contact search failed, will create new', { vendorName, error: err.message });
+  // Search for an existing contact by exact name. The SDK call is positional:
+  // the eighth argument is summaryOnly; a `true` one slot later was being sent
+  // as a search term, so the exact-name lookup never worked as written.
+  //
+  // A failed search propagates. It used to fall through to create, which
+  // relied on Xero's unique-name rule to stop the duplicate; the caller's
+  // retry handles a transient failure better than a second contact does.
+  const where    = `Name=="${cleanName.replace(/"/g, '')}"`;
+  const response = await withRetry(() =>
+    accountingApi.getContacts(tenantId, undefined, where, undefined, undefined, undefined, undefined, true)
+  );
+  const contacts = response.body.contacts || [];
+  if (contacts.length > 0) {
+    logger.info('Contact found', { tenantId, vendorName, contactID: contacts[0].contactID });
+    return contacts[0].contactID;
   }
 
   const isACCREC = invoiceType === 'ACCREC';
