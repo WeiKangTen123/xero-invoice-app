@@ -64,6 +64,20 @@ describe('users store (SQLite)', () => {
     expect(cfg.XERO_CLIENT_ID).toBeUndefined();
   });
 
+  test('provider keys the app no longer uses are wiped on migrate, and every secret column is encrypted', async () => {
+    const db = require('../db');
+    const u = await users.createUser('old@test.com', 'password123', 'user');
+    db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(u.id);
+    db.prepare('UPDATE user_credentials SET nvidia_api_key = ?, openrouter_api_key = ?, openrouter_model = ? WHERE user_id = ?').run('nv-key', 'or-key', 'm', u.id);
+    require('../db/migrate').run();
+    const row = db.prepare('SELECT nvidia_api_key, openrouter_api_key, openrouter_model FROM user_credentials WHERE user_id = ?').get(u.id);
+    expect(row).toEqual({ nvidia_api_key: null, openrouter_api_key: null, openrouter_model: null });
+    // Nothing that looks like a credential may be mapped to a plaintext column.
+    for (const col of Object.values(users.CONFIG_KEY_TO_COLUMN)) {
+      if (/key|secret|pass|token/.test(col)) expect(users.ENCRYPTED_COLUMNS.has(col)).toBe(true);
+    }
+  });
+
   test('IMAP_LOOKBACK_DAYS round-trips through saveUserConfig / getUserConfig', async () => {
     const u = await users.createUser('lookback@test.com', 'password123', 'user');
     users.saveUserConfig(u.id, { IMAP_LOOKBACK_DAYS: '30' });

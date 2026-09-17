@@ -63,6 +63,17 @@ function run() {
     require('../utils/logger').warn('receipt_hash backfill skipped', { error: err.message });
   }
 
+  // Nvidia and OpenRouter were removed from the LLM client, but their columns
+  // still held live keys — in plaintext, since they were never in
+  // ENCRYPTED_COLUMNS. Nothing reads them, so they are emptied on every boot
+  // (a no-op once done) rather than left lying in the database.
+  try {
+    db.prepare(`UPDATE user_credentials SET nvidia_api_key = NULL, openrouter_api_key = NULL, openrouter_model = NULL
+                WHERE nvidia_api_key IS NOT NULL OR openrouter_api_key IS NOT NULL OR openrouter_model IS NOT NULL`).run();
+  } catch (err) {
+    require('../utils/logger').warn('dead provider key wipe skipped', { error: err.message });
+  }
+
   // Rebuilds user_settings so a NEW account starts with auto-submit off.
   // Idempotent and value-preserving — see the migration for why.
   try {
