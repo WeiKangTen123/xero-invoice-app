@@ -29,6 +29,12 @@ const USER_SECTIONS = {
 
 // Shared/global fields — stored in .env; only admins can set these
 // (Slack webhook, Redis — infrastructure-level config not per-user)
+// Real credentials. They are reported as set/unset and never sent back to
+// the browser; a blank value on save means "keep what is stored". The page
+// used to receive the raw client secret and IMAP password on every load and
+// post them back on every save.
+const SECRET_KEYS = new Set(['XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_SECRET', 'IMAP_PASS']);
+
 const GLOBAL_SECTIONS = {
   optional:  ['SLACK_WEBHOOK_URL'],
   // A property of this server's deployment, not of any one user — every user's own
@@ -97,9 +103,9 @@ router.get('/', requireAuth, (req, res) => {
   for (const [section, keys] of Object.entries(USER_SECTIONS)) {
     result[section] = {};
     for (const key of keys) {
-      const val = userConfig[key] || '';
+      const val = String(userConfig[key] || '');
       result[section][key] = {
-        value: val,
+        value: SECRET_KEYS.has(key) ? '' : val,
         isSet: val.length > 0,
       };
     }
@@ -131,6 +137,7 @@ router.post('/', requireAuth, (req, res) => {
     const globalPatch = {};
 
     for (const [k, v] of Object.entries(req.body)) {
+      if (SECRET_KEYS.has(k) && (v === '' || v == null)) continue;   // blank = keep the stored secret
       if (allUserKeys.includes(k))   userPatch[k]   = v;
       else if (allGlobalKeys.includes(k) && req.user.role === 'admin') globalPatch[k] = v;
     }

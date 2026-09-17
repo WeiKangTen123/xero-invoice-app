@@ -120,7 +120,9 @@ function Field({ name, meta, value, onChange }) {
         <input
           type={isSecret && !show ? 'password' : 'text'}
           className="form-input"
-          placeholder={`Enter ${name}`}
+          // A stored secret never comes back from the server; the field is
+          // blank and a blank save keeps it. Say so, or it looks unset.
+          placeholder={isSecret && meta.isSet ? 'Saved — leave blank to keep, or enter a new one' : `Enter ${name}`}
           value={value}
           onChange={e => onChange(name, e.target.value)}
           readOnly={isReadOnly}
