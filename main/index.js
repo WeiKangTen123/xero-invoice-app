@@ -1,16 +1,21 @@
+// A fatal exit under pm2 is one silent restart. Tell Slack why (if a webhook
+// is configured) and give the request a moment to leave before exiting;
+// ecosystem.config.cjs's backoff keeps a crash loop from becoming a storm.
+function fatal(kind, msg) {
+  console.error(`${kind}:`, msg);
+  try { require('./utils/logger').error(kind, { error: msg }); } catch {}
+  try { require('./utils/notify').notifyError({ context: `${kind} — process exiting`, error: String(msg).slice(0, 1500) }).catch(() => {}); } catch {}
+  setTimeout(() => process.exit(1), 1500).unref();
+}
 process.on('uncaughtException', err => {
   if (err.code === 'EADDRINUSE') {
     console.error(`Port ${process.env.PORT || 3000} is already in use — kill the existing process and restart.`);
-  } else {
-    console.error('FATAL CRASH:', err.message, err.stack);
+    process.exit(1);
   }
-  process.exit(1);
+  fatal('FATAL CRASH', `${err.message}\n${err.stack}`);
 });
 process.on('unhandledRejection', err => {
-  const msg = err?.stack || err?.message || String(err);
-  console.error('FATAL REJECTION:', msg);
-  try { require('./utils/logger').error('FATAL REJECTION', { error: msg }); } catch {}
-  process.exit(1);
+  fatal('FATAL REJECTION', err?.stack || err?.message || String(err));
 });
 
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
