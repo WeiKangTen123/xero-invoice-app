@@ -672,7 +672,8 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
     await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1'); // cached
     await reports.getBankTransactions('user-1', 'tenant-1', 'acct-2'); // different account, refetches
     expect(getBankTransactions).toHaveBeenCalledTimes(2);
-    expect(getBankTransactions.mock.calls[0][2]).toBe('BankAccount.AccountID==Guid("acct-1")');
+    // Filtered by account and bounded to the last year (see getBankTransactions).
+    expect(getBankTransactions.mock.calls[0][2]).toMatch(/^BankAccount\.AccountID==Guid\("acct-1"\) && Date >= DateTime\(\d{4},\d{1,2},\d{1,2}\)$/);
   });
 
   // A bank account's real cash movement isn't fully captured by
@@ -689,7 +690,7 @@ describe('xero/reports — getBankTransactions / getProfitAndLoss / getBankSumma
 
     const { transactions } = await reports.getBankTransactions('user-1', 'tenant-1', 'acct-1');
 
-    expect(getPayments.mock.calls[0][2]).toBe('Account.AccountID==Guid("acct-1")');
+    expect(getPayments.mock.calls[0][2]).toMatch(/^Account\.AccountID==Guid\("acct-1"\) && Date >= DateTime\(/);
     expect(transactions.map(t => t.transactionId)).toEqual(['p1', 'bt1']); // newest (Aug 7) first
     expect(transactions[0]).toMatchObject({ type: 'Money Out', contact: 'Chua Jia Hern', total: 2983, source: 'payment' });
     expect(transactions[1]).toMatchObject({ type: 'Money In', contact: 'Customer Co', total: 500, source: 'bank' });
