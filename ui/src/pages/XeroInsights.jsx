@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, Fragment } from 'react';
+import { useState, useEffect, useMemo, Fragment, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
@@ -438,6 +438,9 @@ export default function XeroInsights() {
       const d = await api.get(`/xero-reports/summary?${params.toString()}`);
       setData(d);
       setError('');
+      // The mount fetch has just loaded the default tenant: record it so the
+      // tenant effect does not treat learning its id as a switch.
+      if (d.activeTenantId && loadedTenantRef.current === null) loadedTenantRef.current = d.activeTenantId;
       if (d.activeTenantId) setActiveTenantId(d.activeTenantId);
     } catch (err) {
       setError(err.message || 'Could not load the dashboard');
@@ -453,8 +456,16 @@ export default function XeroInsights() {
 
 
   useEffect(() => { fetchSummary(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // A tenant is "loaded" once its summary is on screen. The first summary
+  // resolves the default tenant, which used to re-trigger this effect: the
+  // summary was fetched a second time and the performance report a third
+  // (the tab effect below had already asked once). Now this runs only for a
+  // real switch to a different organisation.
+  const loadedTenantRef = useRef(null);
   useEffect(() => {
-    if (activeTenantId) fetchSummary();
+    if (!activeTenantId || loadedTenantRef.current === activeTenantId) return;
+    loadedTenantRef.current = activeTenantId;
+    fetchSummary();
     // Budget vs Actual is per-organisation, so a tenant switch invalidates it —
     // refetch if it's on screen, otherwise let the lazy loader pick it up.
     if (tab === 'budget' || tab === 'variance') fetchBudget();
