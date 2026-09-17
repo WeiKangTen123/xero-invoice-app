@@ -87,4 +87,12 @@ function xeroErrMsg(err) {
   );
 }
 
-module.exports = { withRetry, xeroErrMsg, _parseXeroErr, isScopeError };
+// Every accounting scope the app uses, in one place. OAuth adds offline_access
+// (refresh tokens); a Custom Connection has no refresh token to ask for. The
+// two lists had drifted: budgets were added to OAuth only, so Custom
+// Connection users got insufficient_scope on the whole dashboard.
+const SCOPES = 'accounting.invoices accounting.contacts accounting.settings.read '
+  + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read '
+  + 'accounting.payments.read accounting.reports.budgetsummary.read accounting.budgets.read';
+
+module.exports = { withRetry, xeroErrMsg, _parseXeroErr, isScopeError, SCOPES };

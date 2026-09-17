@@ -1,11 +1,9 @@
 const axios  = require('axios');
 const logger = require('../utils/logger');
 
-// See xero/oauth.js for why these three were added and why it requires
-// re-authorizing — same reasoning applies to Custom Connection users.
-const SCOPES = 'accounting.invoices accounting.contacts accounting.settings.read '
-  + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read '
-  + 'accounting.payments.read';
+// The scope list lives with the other Xero helpers so OAuth and Custom
+// Connection cannot drift apart again (they had: budgets were OAuth-only).
+const { SCOPES } = require('./xero-utils');
 
 async function refreshClientCredentialsToken(userId) {
   const { getUserConfig } = require('../utils/users');
@@ -68,4 +66,4 @@ async function autoConnect(userId) {
   return tenants;
 }
 
-module.exports = { autoConnect, refreshClientCredentialsToken };
+module.exports = { autoConnect, refreshClientCredentialsToken, SCOPES };

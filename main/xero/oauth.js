@@ -18,9 +18,7 @@ const oauthState = require('../utils/oauth-state');
 // column-for-column. budgets.read isn't needed for that report, but it's the
 // only way to enumerate budgets or read tracking-category ones, and requesting
 // it now avoids a SECOND reconnect later for anyone who reconnects today.
-const SCOPES = 'offline_access accounting.invoices accounting.contacts accounting.settings.read '
-  + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read '
-  + 'accounting.payments.read accounting.reports.budgetsummary.read accounting.budgets.read';
+const SCOPES = `offline_access ${require('./xero-utils').SCOPES}`;
 const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
 const TOKEN_URL      = 'https://identity.xero.com/connect/token';
 
@@ -153,4 +151,4 @@ async function reconnect(userId) {
   return _listAndCacheTenants(userId, access_token, expires_at);
 }
 
-module.exports = { buildAuthorizeUrl, exchangeCodeForTokens, refreshAuthCodeToken, completeConnection, reconnect };
+module.exports = { buildAuthorizeUrl, exchangeCodeForTokens, refreshAuthCodeToken, completeConnection, reconnect, SCOPES };
