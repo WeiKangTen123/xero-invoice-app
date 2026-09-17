@@ -200,7 +200,10 @@ function forUser(userId) {
     const cols = ['id', 'user_id'];
     const vals = [invoice.id, userId];
     for (const [field, column] of Object.entries(FIELD_TO_COLUMN)) {
-      if (field === 'id' || field === 'userId' || !(field in invoice)) continue;
+      // undefined is "nothing known", the same rule update() has; binding it
+      // as NULL tripped NOT NULL on has_pdf and defeated the processed_at
+      // fallback below whenever a parser had read nothing for a field.
+      if (field === 'id' || field === 'userId' || invoice[field] === undefined) continue;
       cols.push(column);
       vals.push(_toBindable(field, invoice[field]));
     }

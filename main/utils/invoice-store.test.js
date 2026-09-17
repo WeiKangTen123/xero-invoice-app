@@ -57,6 +57,15 @@ describe('invoice-store (SQLite)', () => {
     expect(updated.xeroInvoiceId).toBe('xero-1');
   });
 
+  test('add ignores undefined fields, so a parser that read nothing does not null a NOT NULL column', () => {
+    const store = invoiceStore.forUser(userId);
+    const inv = baseInvoice({ hasPdf: undefined, processedAt: undefined });
+    expect(() => store.add(inv)).not.toThrow();
+    const row = store.getById(inv.id);
+    expect(row.hasPdf).toBe(false);
+    expect(row.processedAt).toBeTruthy();
+  });
+
   test('update leaves a field alone when the patch has it as undefined; null clears it', () => {
     const store = invoiceStore.forUser(userId);
     const inv   = baseInvoice({ accountCode: '429', invoiceDate: '2026-09-14' });
