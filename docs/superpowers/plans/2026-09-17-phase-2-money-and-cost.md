@@ -20,7 +20,7 @@
 - Modify: `main/xero/reports.js` (cache helpers; wrap the fetchers)
 - Test: `main/xero/reports-contract.test.js`
 
-- [ ] **Step 1: Failing tests** (append a describe to the contract test file)
+- [x] **Step 1: Failing tests** (append a describe to the contract test file)
 
 ```js
 describe('Xero call budget — identical work is fetched once', () => {
@@ -52,9 +52,9 @@ describe('Xero call budget — identical work is fetched once', () => {
 });
 ```
 
-- [ ] **Step 2: Run** `npx jest main/xero/reports-contract.test.js -t "call budget"` → FAIL (3 fetches; BudgetSummary fetched more than once).
+- [x] **Step 2: Run** `npx jest main/xero/reports-contract.test.js -t "call budget"` → FAIL (3 fetches; BudgetSummary fetched more than once).
 
-- [ ] **Step 3: Implement** — in `reports.js`, after `_cacheSet`:
+- [x] **Step 3: Implement** — in `reports.js`, after `_cacheSet`:
 
 ```js
 // A "force" is a person clicking Refresh. Several reports built on the same
@@ -90,7 +90,7 @@ const getSummary = _dedupe('summary', _getSummaryRaw);
 ```
 Apply to: `getSummary`, `_getOrganisation`, `getPeriod`, `getAccounts`, `getBankAccounts`, `getContacts`, `getBankTransactions`, `getProfitAndLoss`, `getBankSummary`, `getBudgetVariance`, `getPerformance`, `getVarianceInsights`, `getCashFlow`, `getFinancialNarrative`. Export `FORCE_GRACE_MS` and keep `_cache` exported.
 
-- [ ] **Step 4: Run** `npx jest main/xero` → PASS. Commit: `perf(reports): identical work is fetched once; a Refresh no longer cascades into five fetches`.
+- [x] **Step 4: Run** `npx jest main/xero` → PASS. Commit: `perf(reports): identical work is fetched once; a Refresh no longer cascades into five fetches`.
 
 ---
 
@@ -98,7 +98,7 @@ Apply to: `getSummary`, `_getOrganisation`, `getPeriod`, `getAccounts`, `getBank
 
 **Files:** `main/xero/reports.js` (four `api.getInvoices` sites), test `main/xero/reports-contract.test.js`
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```js
   test('invoice fetches page until a short page, so KPIs are not silently capped at 100', async () => {
@@ -113,8 +113,8 @@ Apply to: `getSummary`, `_getOrganisation`, `getPeriod`, `getAccounts`, `getBank
     expect(s.kpis.receivablesCount).toBe(130);
   });
 ```
-- [ ] **Step 2:** FAIL (one call, count 100).
-- [ ] **Step 3:** helper in reports.js:
+- [x] **Step 2:** FAIL (one call, count 100).
+- [x] **Step 3:** helper in reports.js:
 
 ```js
 // Xero returns at most 100 invoices per page and `page=1` was never followed
@@ -138,7 +138,7 @@ async function _allInvoices(api, tenantId, { where, order, statuses }) {
 }
 ```
 Replace the four call sites (`:202`, `:288`, `:1254`, `:1447`) with `_allInvoices(api, tenantId, { where, order, statuses: ['AUTHORISED', 'PAID'] })` keeping each site's `where`/`order`. In `getSummary` the `Promise.all` becomes `[orgRes, invoices] = await Promise.all([withRetry(() => api.getOrganisations(tenantId)), _allInvoices(...)])`.
-- [ ] **Step 4:** `npx jest main/xero` → PASS (existing contract tests read `mock.calls[0]` positions; unchanged). Commit: `fix(reports): invoice fetches page past 100 — receivables, overdue and DSO were computed on the newest 100 only`.
+- [x] **Step 4:** `npx jest main/xero` → PASS (existing contract tests read `mock.calls[0]` positions; unchanged). Commit: `fix(reports): invoice fetches page past 100 — receivables, overdue and DSO were computed on the newest 100 only`.
 
 ---
 
@@ -146,7 +146,7 @@ Replace the four call sites (`:202`, `:288`, `:1254`, `:1447`) with `_allInvoice
 
 **Files:** `main/xero/reports.js`, test `main/xero/reports-contract.test.js`
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```js
   test('chart of accounts, bank accounts, contacts and organisation live in cache for hours, not minutes', async () => {
@@ -168,9 +168,9 @@ Replace the four call sites (`:202`, `:288`, `:1254`, `:1447`) with `_allInvoice
   });
 ```
 (Check the actual cache key prefixes used by `getBankAccounts`/`getContacts` in the file and adjust the keys in the test.)
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** `const DIRECTORY_TTL_MS = 6 * 60 * 60 * 1000;` pass as third arg in `_cacheSet` for accounts, bank accounts, contacts, and `_getOrganisation`; in `getBankTransactions` compute `const since = _fmtXeroDate(_addDays(new Date(), -365))` (use the file's existing date helpers) and append `&& Date >= ${since}` to both `where` clauses. Export `DIRECTORY_TTL_MS`.
-- [ ] **Step 4:** `npx jest main/xero` → PASS. Commit: `perf(reports): directory data cached for hours; statements bounded to a year`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** `const DIRECTORY_TTL_MS = 6 * 60 * 60 * 1000;` pass as third arg in `_cacheSet` for accounts, bank accounts, contacts, and `_getOrganisation`; in `getBankTransactions` compute `const since = _fmtXeroDate(_addDays(new Date(), -365))` (use the file's existing date helpers) and append `&& Date >= ${since}` to both `where` clauses. Export `DIRECTORY_TTL_MS`.
+- [x] **Step 4:** `npx jest main/xero` → PASS. Commit: `perf(reports): directory data cached for hours; statements bounded to a year`.
 
 ---
 
@@ -178,7 +178,7 @@ Replace the four call sites (`:202`, `:288`, `:1254`, `:1447`) with `_allInvoice
 
 **Files:** `main/xero/currency.js`, `main/xero/reports.js` (`_buildSummary`), `main/xero/invoices.js` (`_submitWithCurrencyRetry`), tests `main/xero/reports.test.js`, `main/xero/invoices.test.js`
 
-- [ ] **Step 1: Failing tests** — in reports.test.js replace the four `_toBase` expectations at lines ~1846-1856 and the fixtures at ~1888, ~1901, ~2538 with Xero's convention (a USD invoice in an SGD org carries a rate near 0.74, meaning 1 SGD = 0.74 USD):
+- [x] **Step 1: Failing tests** — in reports.test.js replace the four `_toBase` expectations at lines ~1846-1856 and the fixtures at ~1888, ~1901, ~2538 with Xero's convention (a USD invoice in an SGD org carries a rate near 0.74, meaning 1 SGD = 0.74 USD):
 
 ```js
     expect(_toBase({ currencyCode: 'USD', currencyRate: 0.74 }, 100, 'SGD')).toBeCloseTo(135.14, 1);
@@ -212,9 +212,9 @@ describe('_submitWithCurrencyRetry', () => {
 });
 ```
 (Read `xeroErrMsg` and `getOrgBaseCurrency` in invoices.js to build a rejection the message matcher recognises; export `_submitWithCurrencyRetry`.)
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** currency.js: `if (rate > 0 && rate !== 1) return v / rate;` with the convention in the comment (Xero: "CurrencyRate … e.g. 0.7500" — document units per one base unit). `_buildSummary`: accumulate `totalReceivables += _toBase(inv, inv.amountDue, base)` etc. (import `_toBase, _foreignCurrency` from './currency' if not already), add `currency: _foreignCurrency(invoices, base)` to the result. invoices.js: replace the relabel branch with `throw new Error(\`Xero org is not subscribed to ${currencyCode} — add the currency in Xero or change the invoice currency\`)`.
-- [ ] **Step 4:** `npx jest main/xero` → PASS. Commit: `fix(currency): convert with Xero's rate the way Xero defines it; summary KPIs in base; never relabel an unsubscribed currency`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** currency.js: `if (rate > 0 && rate !== 1) return v / rate;` with the convention in the comment (Xero: "CurrencyRate … e.g. 0.7500" — document units per one base unit). `_buildSummary`: accumulate `totalReceivables += _toBase(inv, inv.amountDue, base)` etc. (import `_toBase, _foreignCurrency` from './currency' if not already), add `currency: _foreignCurrency(invoices, base)` to the result. invoices.js: replace the relabel branch with `throw new Error(\`Xero org is not subscribed to ${currencyCode} — add the currency in Xero or change the invoice currency\`)`.
+- [x] **Step 4:** `npx jest main/xero` → PASS. Commit: `fix(currency): convert with Xero's rate the way Xero defines it; summary KPIs in base; never relabel an unsubscribed currency`.
 
 ---
 
@@ -222,7 +222,7 @@ describe('_submitWithCurrencyRetry', () => {
 
 **Files:** `main/utils/token-cache.js`, `main/xero/oauth.js` (`_listAndCacheTenants`), `main/xero/connect.js` (`autoConnect`), tests `main/utils/token-cache.test.js`
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```js
   test('concurrent calls on an expired token share ONE refresh (rotation would break the second)', async () => {
@@ -253,8 +253,8 @@ describe('_submitWithCurrencyRetry', () => {
     expect(tokenCache.getPersistedTenants('user-p').map(t => t.tenantId)).toEqual(['t1']);
   });
 ```
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** token-cache.js — module-level `const _refreshing = new Map();` in `getValidToken` expiry branch:
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** token-cache.js — module-level `const _refreshing = new Map();` in `getValidToken` expiry branch:
 
 ```js
     let inFlight = _refreshing.get(userId);
@@ -271,7 +271,7 @@ describe('_submitWithCurrencyRetry', () => {
     return inFlight;
 ```
 Add `pruneTenants(keepIds)`: remove from `cache.tokens`/`cache.tenants` and `DELETE FROM xero_tenants WHERE user_id = ? AND tenant_id NOT IN (...)`. `getPersistedTenants` gets `ORDER BY connected_at`. In `oauth._listAndCacheTenants` and `connect.autoConnect`, after the cache loop: `tokenCache.pruneTenants(tenants.map(t => t.tenantId));`.
-- [ ] **Step 4:** `npx jest main/utils/token-cache.test.js main/xero main/routes/xero-oauth.test.js` → PASS. Commit: `fix(xero): one refresh per user, written to every tenant; persisted orgs pruned against Xero's list`.
+- [x] **Step 4:** `npx jest main/utils/token-cache.test.js main/xero main/routes/xero-oauth.test.js` → PASS. Commit: `fix(xero): one refresh per user, written to every tenant; persisted orgs pruned against Xero's list`.
 
 ---
 
@@ -279,7 +279,7 @@ Add `pruneTenants(keepIds)`: remove from `cache.tokens`/`cache.tenants` and `DEL
 
 **Files:** `ui/src/pages/XeroInsights.jsx:455-464`
 
-- [ ] **Step 1:** Replace the tenant effect:
+- [x] **Step 1:** Replace the tenant effect:
 
 ```jsx
   // A tenant is "loaded" once its summary is on screen. The first summary
@@ -297,11 +297,11 @@ Add `pruneTenants(keepIds)`: remove from `cache.tokens`/`cache.tenants` and `DEL
   }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
 ```
 and in `fetchSummary`, after `setData(d)`: `if (d.activeTenantId && loadedTenantRef.current === null) loadedTenantRef.current = d.activeTenantId;` (the mount summary already loaded it; the tab effect fetched perf once).
-- [ ] **Step 2:** `npm run build:ui`, `npx eslint ui/src/pages/XeroInsights.jsx` (import `useRef`). Commit: `perf(insights): each report is requested once on first load`.
+- [x] **Step 2:** `npm run build:ui`, `npx eslint ui/src/pages/XeroInsights.jsx` (import `useRef`). Commit: `perf(insights): each report is requested once on first load`.
 
 ---
 
 ### Finish
 
-- [ ] `npm test`, `npm run build:ui`, push, `npm run deploy`.
-- [ ] Note for the owner: the first foreign-currency document that appears should be compared with Xero's own base-currency figure to confirm Task 4's direction.
+- [x] `npm test`, `npm run build:ui`, push, `npm run deploy`.
+- [x] Note for the owner: the first foreign-currency document that appears should be compared with Xero's own base-currency figure to confirm Task 4's direction.
