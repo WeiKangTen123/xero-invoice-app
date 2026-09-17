@@ -187,6 +187,15 @@ router.get('/', requireAuth, (req, res) => {
     submittedAt:   inv.submittedAt,
     xeroInvoiceId: inv.xeroInvoiceId,
     errorMsg:      inv.errorMsg,
+    // The Invoices page reads these to tell a claim from a bill, to group a
+    // split photo or an import, and to show a suspected duplicate; they were
+    // left out of the list and the page showed every claim as "PDF/Email".
+    receivedAt:    inv.receivedAt,
+    receiptFile:   inv.receiptFile,
+    receiptGroup:  inv.receiptGroup,
+    receiptPage:   inv.receiptPage,
+    duplicateOf:   inv.duplicateOf,
+    description:   inv.description,
     reportCount:   (inv.reports || []).length,
   }));
   res.json({ invoices });

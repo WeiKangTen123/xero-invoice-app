@@ -285,6 +285,7 @@ function ReportsPanel({ navigate }) {
   const [reports,   setReports]   = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [resolving, setResolving] = useState(null);
+  const [error,     setError]     = useState('');
 
   async function fetchReports() {
     setLoading(true);
@@ -293,12 +294,16 @@ function ReportsPanel({ navigate }) {
     finally { setLoading(false); }
   }
 
-  async function resolve(id) {
-    setResolving(id);
+  // The route is /reports/:userId/:invoiceId/resolve — the owner's id is on
+  // each report as _ownerId. This called it with the invoice id alone, got a
+  // 404 and swallowed it, so the button never did anything.
+  async function resolve(inv) {
+    setResolving(inv.id);
+    setError('');
     try {
-      await api.patch(`/admin/reports/${id}/resolve`, {});
+      await api.patch(`/admin/reports/${inv._ownerId}/${inv.id}/resolve`, {});
       await fetchReports();
-    } catch (_) {}
+    } catch (err) { setError(err.message || 'Could not resolve the report'); }
     setResolving(null);
   }
 
@@ -329,6 +334,12 @@ function ReportsPanel({ navigate }) {
           <button className="btn btn-outline btn-sm" onClick={fetchReports}>↻</button>
         </div>
       </div>
+
+      {error && (
+        <div className="alert alert-error" style={{ marginBottom: 12 }}>
+          <span className="alert-icon">✕</span>{error}
+        </div>
+      )}
 
       {reports.length === 0 ? (
         <div className="empty-state" style={{ padding: '40px 0' }}>
@@ -373,7 +384,7 @@ function ReportsPanel({ navigate }) {
                   <button
                     className="btn btn-success btn-sm"
                     disabled={resolving === inv.id}
-                    onClick={() => resolve(inv.id)}
+                    onClick={() => resolve(inv)}
                   >
                     {resolving === inv.id ? '...' : '✓ Resolve'}
                   </button>

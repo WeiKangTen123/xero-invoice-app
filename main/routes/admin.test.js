@@ -76,6 +76,19 @@ describe('admin routes', () => {
     expect(res.body.users[0].invoices).toEqual({ pending: 0, submitting: 0, posted: 0, error: 0, reviewNeeded: 0 });
   });
 
+  test('PATCH /reports/:userId/:invoiceId/resolve marks the invoice reviewed and records who did it', async () => {
+    const invoiceStore = require('../utils/invoice-store');
+    const owner = await users.createUser('owner@test.com', 'password123', 'user');
+    invoiceStore.forUser(owner.id).add({ id: 'r1', status: 'reported', vendorName: 'A', invoiceNumber: '1', invoiceDate: '2026-09-01', totalAmount: 5, processedAt: new Date().toISOString() });
+    await request(serverFor(app))
+      .patch(`/api/admin/reports/${owner.id}/r1/resolve`)
+      .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
+      .expect(200);
+    const row = invoiceStore.forUser(owner.id).getById('r1');
+    expect(row.status).toBe('reviewed');
+    expect(row.resolvedBy).toBe('admin@test.com');
+  });
+
   test('GET /monitoring reports the requesting admin as online (their own request just touched last_seen_at)', async () => {
     const res = await request(serverFor(app))
       .get('/api/admin/monitoring')

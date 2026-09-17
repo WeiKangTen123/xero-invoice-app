@@ -23,6 +23,20 @@ describe('routes/invoices workflow & batching', () => {
 
   const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
 
+  describe('GET /api/invoices', () => {
+    test('the list carries the claim and duplicate fields the Invoices page reads', async () => {
+      invoiceStore.forUser(testUser.id).add({
+        id: `l1_${Date.now()}`, status: 'review-needed', invoiceType: 'EXPENSE', source: 'phone', vendorName: 'Grab',
+        totalAmount: 5, description: '[Local Travel] ride', receiptFile: 'x.jpg', receiptGroup: 'g1', receiptPage: 2,
+        receivedAt: '2026-09-10T00:00:00.000Z', processedAt: new Date().toISOString(),
+      });
+      const res = await request(serverFor(app)).get('/api/invoices').set('Authorization', auth()).expect(200);
+      const row = res.body.invoices[0];
+      expect(row).toMatchObject({ receiptFile: 'x.jpg', receiptGroup: 'g1', receiptPage: 2, description: '[Local Travel] ride', receivedAt: '2026-09-10T00:00:00.000Z' });
+      expect(row).toHaveProperty('duplicateOf');
+    });
+  });
+
   describe('POST /api/invoices/batch-status', () => {
     test('requires authentication', async () => {
       await request(serverFor(app))
