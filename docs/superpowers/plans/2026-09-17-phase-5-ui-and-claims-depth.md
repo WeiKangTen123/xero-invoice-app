@@ -1,5 +1,7 @@
 # Phase 5 — Claims depth and UI consolidation Implementation Plan
 
+**Status (17 Sep 2026):** every task below is committed (server: 4 commits; UI: 10 commits). Task U9 shipped a `Modal`, `ConfirmDialog`, `ConfirmContext` and `ToastContext`; Task U2's route check found no missing routes once it read template literals properly. Page splits remain deliberately out of scope.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the claim intake tell the truth (PDF receipts are actually read, the phone knows when a read finished or failed, the reader stops inventing business purposes) and pull the UI's duplicated pieces into shared ones.
@@ -21,7 +23,7 @@ Today the PDF branch of `readAndMaybeSplit` only extracts page text to decide wh
 - Modify: `main/routes/receipts.js` (PDF branch of `readAndMaybeSplit`; `/:id/reread`)
 - Test: `main/utils/receipt-parser.test.js`, `main/routes/receipts.test.js`
 
-- [ ] **Step 1: Failing parser tests** — in `receipt-parser.test.js`, a new describe:
+- [x] **Step 1: Failing parser tests** — in `receipt-parser.test.js`, a new describe:
 
 ```js
 describe('receipt-parser — reading a PDF from its text', () => {
@@ -50,9 +52,9 @@ describe('receipt-parser — reading a PDF from its text', () => {
 });
 ```
 
-- [ ] **Step 2: Run** `scratchpad/jt.sh main/utils/receipt-parser.test.js` → FAIL: `parser.parseReceiptText is not a function`.
+- [x] **Step 2: Run** `scratchpad/jt.sh main/utils/receipt-parser.test.js` → FAIL: `parser.parseReceiptText is not a function`.
 
-- [ ] **Step 3: Implement** in `receipt-parser.js`: extract the attempt loop of `parseReceiptImage` into `_readWith(userId, userContent, maxAttempts)` and add:
+- [x] **Step 3: Implement** in `receipt-parser.js`: extract the attempt loop of `parseReceiptImage` into `_readWith(userId, userContent, maxAttempts)` and add:
 
 ```js
 // A PDF with a text layer is read from that text. Same prompt, same
@@ -65,9 +67,9 @@ async function parseReceiptText(userId, text, { maxAttempts = 2 } = {}) {
 }
 ```
 
-- [ ] **Step 4: Run** parser tests → PASS.
+- [x] **Step 4: Run** parser tests → PASS.
 
-- [ ] **Step 5: Failing route tests** — `receipts.test.js`: the module mock becomes `{ parseReceiptImage: jest.fn().mockResolvedValue(null), parseReceiptText: jest.fn().mockResolvedValue(null) }`. In the PDF describe add:
+- [x] **Step 5: Failing route tests** — `receipts.test.js`: the module mock becomes `{ parseReceiptImage: jest.fn().mockResolvedValue(null), parseReceiptText: jest.fn().mockResolvedValue(null) }`. In the PDF describe add:
 
 ```js
     test('a text PDF has its fields read from the text', async () => {
@@ -126,9 +128,9 @@ async function parseReceiptText(userId, text, { maxAttempts = 2 } = {}) {
   });
 ```
 
-- [ ] **Step 6: Run** `scratchpad/jt.sh main/routes/receipts.test.js` → the three new PDF tests and the two reread tests FAIL.
+- [x] **Step 6: Run** `scratchpad/jt.sh main/routes/receipts.test.js` → the three new PDF tests and the two reread tests FAIL.
 
-- [ ] **Step 7: Implement** the PDF branch:
+- [x] **Step 7: Implement** the PDF branch:
 
 ```js
   if (mime === 'application/pdf') {
@@ -166,9 +168,9 @@ async function parseReceiptText(userId, text, { maxAttempts = 2 } = {}) {
 
   and the reread route: drop the 400; when `record.receiptMime === 'application/pdf'` extract pages, take `pages[record.receiptPage - 1]` if the record is a page sibling else all pages joined, `parseReceiptText`, and fall into the same "unreadable / apply first receipt" tail (no box choice for a PDF).
 
-- [ ] **Step 8: Run** both files → PASS. Then `scratchpad/jt.sh main/routes main/utils` for the wider net.
+- [x] **Step 8: Run** both files → PASS. Then `scratchpad/jt.sh main/routes main/utils` for the wider net.
 
-- [ ] **Step 9: Commit** `feat(receipts): PDF receipts are read from their text, page by page`.
+- [x] **Step 9: Commit** `feat(receipts): PDF receipts are read from their text, page by page`.
 
 ### Task 2: Honest phone capture
 
@@ -179,7 +181,7 @@ async function parseReceiptText(userId, text, { maxAttempts = 2 } = {}) {
 - Modify: `ui/src/pages/Capture.jsx` (5 s poll, stop on 401, show unreadable)
 - Test: `main/routes/receipts.test.js` (status describe), `main/middleware/rate-limit-key.test.js`
 
-- [ ] **Step 1: Failing status tests** — replace the test at `receipts.test.js:592` with:
+- [x] **Step 1: Failing status tests** — replace the test at `receipts.test.js:592` with:
 
 ```js
   test('before the read finishes, parsed is false', async () => {
@@ -202,9 +204,9 @@ async function parseReceiptText(userId, text, { maxAttempts = 2 } = {}) {
 
   (use the describe's existing pair/capture helpers by their real names.)
 
-- [ ] **Step 2: Run** → FAIL (`parsed` true before settle is impossible today; `unreadable` undefined).
+- [x] **Step 2: Run** → FAIL (`parsed` true before settle is impossible today; `unreadable` undefined).
 
-- [ ] **Step 3: Implement**: column + store mapping; in `storeReceipt`:
+- [x] **Step 3: Implement**: column + store mapping; in `storeReceipt`:
 
 ```js
       .finally(() => {
@@ -220,9 +222,9 @@ async function parseReceiptText(userId, text, { maxAttempts = 2 } = {}) {
 
   status route: `parsed: !!r.parsedAt, unreadable: !!r.parsedAt && !r.vendorName && !r.totalAmount`.
 
-- [ ] **Step 4: Run** → PASS. Commit `feat(capture): the phone is told when a read finished and whether it found anything`.
+- [x] **Step 4: Run** → PASS. Commit `feat(capture): the phone is told when a read finished and whether it found anything`.
 
-- [ ] **Step 5: Failing limiter-key test** — `main/middleware/rate-limit-key.test.js`:
+- [x] **Step 5: Failing limiter-key test** — `main/middleware/rate-limit-key.test.js`:
 
 ```js
 const jwt = require('jsonwebtoken');
@@ -244,7 +246,7 @@ test('a phone capture link is keyed by its token so one phone cannot drain the o
 });
 ```
 
-- [ ] **Step 6: Run** → FAIL (module missing). **Implement** `rate-limit-key.js`:
+- [x] **Step 6: Run** → FAIL (module missing). **Implement** `rate-limit-key.js`:
 
 ```js
 const jwt = require('jsonwebtoken');
@@ -265,7 +267,7 @@ module.exports = { rateLimitKey };
 
   `index.js`: `keyGenerator: rateLimitKey`.
 
-- [ ] **Step 7: Run** → PASS. Capture.jsx: interval 5000; on `res.status === 401` set state `expired` and return; render `s.unreadable ? "Couldn't read this one — check it on your computer" : "◍ Reading…"`. `npm --prefix ui run lint`. Commit `fix(capture): phone polls by its own bucket, stops on an expired link, and says when a read found nothing`.
+- [x] **Step 7: Run** → PASS. Capture.jsx: interval 5000; on `res.status === 401` set state `expired` and return; render `s.unreadable ? "Couldn't read this one — check it on your computer" : "◍ Reading…"`. `npm --prefix ui run lint`. Commit `fix(capture): phone polls by its own bucket, stops on an expired link, and says when a read found nothing`.
 
 ### Task 3: One category list; the reader stops inventing purposes
 
@@ -274,7 +276,7 @@ module.exports = { rateLimitKey };
 - Modify: `main/utils/receipt-parser.js` (SYSTEM_PROMPT built from the list; `normalise` canonicalises category), `main/claims/category-account.js` (hint keys checked against the list), `docs/CLAIM_INTELLIGENCE_GUIDELINES.md` §1–3
 - Test: `main/utils/receipt-parser.test.js`, `main/claims/category-account.test.js`
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```js
 // categories.test.js
@@ -313,7 +315,7 @@ test('the hint table covers exactly the categories the reader can return', () =>
 });
 ```
 
-- [ ] **Step 2: Run** the three files → FAIL. **Implement** `categories.js` (names as today; scope text from the guideline §2 "Description & Scope" column), rewrite the prompt's category and description sections:
+- [x] **Step 2: Run** the three files → FAIL. **Implement** `categories.js` (names as today; scope text from the guideline §2 "Description & Scope" column), rewrite the prompt's category and description sections:
 
 ```
 - category: one of these exact names, judged from what was bought and when:
@@ -327,7 +329,7 @@ test('the hint table covers exactly the categories the reader can return', () =>
 
   `normalise`: `const category = canonicalCategory(parsed.category);`. `category-account.js`: `const { CATEGORY_NAMES } = require('./categories');` and after the table `for (const n of Object.keys(CATEGORY_HINTS)) if (!CATEGORY_NAMES.includes(n)) throw new Error(...)` (a load-time guard; the test is the real check).
 
-- [ ] **Step 3: Run** → PASS; `scratchpad/jt.sh main/utils main/claims`. Guideline doc: §1 says the claimant supplies the purpose; §2 account column becomes "matched by name against the org's chart — see `main/claims/category-account.js`; no code is fixed"; §3 becomes "time decides the category only"; add a "PDF receipts" note. Commit `feat(claims): one category list; the reader describes what was bought and no longer invents a purpose`.
+- [x] **Step 3: Run** → PASS; `scratchpad/jt.sh main/utils main/claims`. Guideline doc: §1 says the claimant supplies the purpose; §2 account column becomes "matched by name against the org's chart — see `main/claims/category-account.js`; no code is fixed"; §3 becomes "time decides the category only"; add a "PDF receipts" note. Commit `feat(claims): one category list; the reader describes what was bought and no longer invents a purpose`.
 
 ### Task 4: Import pacing lives in one place
 
@@ -335,4 +337,47 @@ test('the hint table covers exactly the categories the reader can return', () =>
 
 ## UI half
 
-(Appended after the UI survey — each task lists file:line targets, the failing check (`npm --prefix ui run lint`, `npm --prefix ui test`, or a build), and the code.)
+The UI has no lint script and no component tests; its gate is `npm run build:ui` plus the static checks in `main/scripts/ui-api-paths.test.js` (hook imports, API path rules). Each task is one commit behind `npm run build:ui && jt main/scripts`.
+
+### Task U1: the API client throws on 401
+
+`ui/src/api/client.js:27-30` returns `undefined` on a 401 after clearing the session. On `/login` (where it does not navigate) a wrong password therefore surfaces as `Cannot read properties of undefined (reading 'token')` from `AuthContext.login`. Change: after `clearSession()`, throw `new Error(data.error || 'Your session has expired. Sign in again.')` with `err.status = 401`. Callers already catch.
+
+### Task U2: every UI API call maps to a server route
+
+Extend `main/scripts/ui-api-paths.test.js`: read the mounts from `main/index.js` (`app.use('/api/<m>', <var>)` + `const <var> = require('./routes/<file>')`), read `router.<verb>('<path>'` from each mounted file, then scan the UI for `api.(get|post|patch|delete)(<literal>)` (template `${…}` → one wildcard segment; query stripped) and assert each resolves, segment by segment, to a route of that verb. Assert more than 40 calls were checked so the scan is proven.
+
+### Task U3: one badge map
+
+Create `ui/src/utils/badges.js` — `STATUS_META` (pending, submitting, reviewed, posted, reported, error, duplicate, review-needed; `cls`, `label`, `long`) and `TYPE_META` (ACCPAY, ACCREC, EXPENSE; `cls`, `label`, `long`) — and `ui/src/components/Badges.jsx` (`StatusBadge`, `TypeBadge`). Replace `Invoices.jsx:44-52` STATUS_MAP and `:128-133` TypeBadge, `InvoiceReview.jsx:127-137` StatusPill and `:526` typeLabel, `InvoiceTable.jsx:12-16` typeInfo and `:67-71` status cell.
+
+### Task U4: one money and one date formatter
+
+`fmtMoney(n, currency)` from `utils/format.js` replaces every `toLocaleString('en', { minimumFractionDigits: 2 })`, `toFixed(2)` money and the local `money` in `InvoiceIntake.jsx:110`. `formatDateTime(iso, timezone)` from `utils/formatDate.js` replaces every `new Date(x).toLocaleString()` (InvoiceTable 65, ProcessToggle 79, Invoices 1100-1101, Admin 410, InvoiceReview 1324/1343/1345, Dashboard 355/357/449), with `timezone` from `useAuth().user?.timezone`. `receivedLabel` in `Invoices.jsx:61-73` stays: its thresholds are deliberately different from `formatRelative`.
+
+### Task U5: group totals per currency
+
+`Invoices.jsx:367-385` and `:276-294` sum `totalAmount` across currencies and label the sum with `invoices[0]?.currency`. Replace `total` with `totals: [{ currency, amount }]` (one entry per currency present, blank currency last) and render them joined by ` · ` with `fmtMoney`.
+
+### Task U6: the log panel fetches the line count it shows
+
+`Admin.jsx:792` calls `setLines(n); fetchLogs();` — the fetch uses the previous `lines`. Add a third override parameter to `fetchLogs(overrideFile, overrideUserId, overrideLines)` and pass `n`.
+
+### Task U7: polling that stops when nobody is looking
+
+`Invoices.jsx:191` (`/claims/active` every 3.5 s forever) → `useVisiblePolling(checkActiveClaim, 3500)`. `PipelineContext.jsx:22-40` hand-rolls the same visibility logic → `useVisiblePolling(refresh, () => busy ? 3000 : 15000)`.
+
+### Task U8: mobile breaks
+
+`globals.css:637-640` sets `.mobile-mode .page-body` padding `14px 12px …` while `InvoiceReview.jsx:1366` cancels it with `-14px`. Define `--page-pad-x: 12px` on `.mobile-mode`, use it in both. `InvoiceIntake.jsx:145` line-item grid is 486 px wide minimum; make it wrap (`display: 'flex', flexWrap: 'wrap'`, description `flex: '1 1 160px'`, numbers `flex: '0 1 90px'`).
+
+### Task U9: one Modal, one confirm dialog, no native alert/confirm
+
+Create `ui/src/components/Modal.jsx` (overlay, Escape, backdrop click guarded by `busy`, `role="dialog" aria-modal`, `aria-labelledby`) and `ui/src/components/ConfirmDialog.jsx` on top of it; a `useConfirm()` hook (`ui/src/context/ConfirmContext.jsx`) returns a promise so the five `confirm(` sites become `if (!(await confirm({ title, message, confirmLabel }))) return;`. A `useToast()` (`ui/src/context/ToastContext.jsx`, mounted in `App.jsx`) replaces the ten `alert(` sites. DeleteConfirmModal, ReportModal, ImportDialog, PhonePairingModal, ClaimImport and InvoiceIntake render inside `Modal`.
+
+### Task U10: labels reach their inputs
+
+Every `<label className="form-label">` in `pages/` (23) gets `htmlFor` and its control the matching `id`, via `useId()` per field.
+
+### Not in this phase
+Page splits (InvoiceReview 1437 lines, XeroInsights 1296, Invoices 1265, PerformancePanels 2015): no tests protect the UI, so a split is a review-by-eye change; do it when one of those pages next needs real work.
