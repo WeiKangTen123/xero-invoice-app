@@ -20,7 +20,7 @@
 - Modify: `main/routes/admin.js:197`, `main/routes/setup.js:33`, `ui/src/pages/Setup.jsx:23`, `main/.env.example:36`, `README.md:98`, `package.json` (drop `bull`, `ioredis`)
 - Test: `main/queue/processor.test.js` (new)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```js
 // main/queue/processor.test.js
@@ -69,12 +69,12 @@ test('bull is no longer a dependency', () => {
 });
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `npx jest main/queue/processor.test.js`
 Expected: first test FAILS (returns null / hangs on Bull), last test FAILS (bull present).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace `main/queue/processor.js` entirely:
 
@@ -161,12 +161,12 @@ In `main/utils/invoice-handler.js` replace lines 219-225 with:
 npm uninstall bull ioredis
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `npx jest main/queue main/routes/admin.test.js main/routes/setup` then `npm test`
 Expected: PASS; lint clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add main/queue/processor.js main/queue/processor.test.js main/utils/invoice-handler.js main/routes/admin.js main/routes/setup.js ui/src/pages/Setup.jsx main/.env.example README.md package.json package-lock.json
@@ -193,7 +193,7 @@ MSG
 - Modify: `main/intake/document.js:84-88` (`addDays` returns null on bad input)
 - Test: `main/email/parser-llm.test.js` (new), `main/intake/intake.test.js`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```js
 // main/email/parser-llm.test.js
@@ -240,12 +240,12 @@ Add to `main/intake/intake.test.js` inside the dates describe:
   });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx jest main/email/parser-llm.test.js main/intake/intake.test.js`
 Expected: FAIL — `parsePDFWithLLM` not exported; `addDays` throws RangeError; totalAmount 1.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `main/intake/document.js` `addDays`:
 
@@ -291,11 +291,11 @@ function addDays(dateStr, days) {
 
 and further down in the returned object: `totalAmount: intake.money(llm.totalAmount) ?? 0`, `subTotal: intake.money(llm.subTotal)`, `taxAmount: intake.money(llm.taxAmount)` (keep the null semantics the comment describes). In `_withQuantity` use `intake.num(quantity)` and `intake.num(unitPrice)` instead of `parseFloat`. Add `parsePDFWithLLM` to `module.exports`.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `npx jest main/email main/intake` — Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add main/email/parser.js main/email/parser-llm.test.js main/intake/document.js main/intake/intake.test.js
@@ -321,7 +321,7 @@ MSG
 - Modify: `main/email/parser.js` (`parsePDFWithLLM` catch → `reviewReason`; `_parseOne` keeps `parsed.reviewReason`; drop filename number fallback)
 - Test: `main/utils/invoice-handler.test.js` (new), `main/email/parser-llm.test.js`
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```js
 // main/utils/invoice-handler.test.js
@@ -352,9 +352,9 @@ test('when the model fails, the regex guess is flagged for review and never numb
 });
 ```
 
-- [ ] **Step 2: Verify failure** — `npx jest main/utils/invoice-handler.test.js main/email/parser-llm.test.js` → FAIL (`holdReason` undefined; `reviewReason` undefined).
+- [x] **Step 2: Verify failure** — `npx jest main/utils/invoice-handler.test.js main/email/parser-llm.test.js` → FAIL (`holdReason` undefined; `reviewReason` undefined).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `main/utils/invoice-handler.js` — add above `createHandler`:
 
@@ -399,9 +399,9 @@ Export: `module.exports = { createHandler, submitInvoiceToXero, holdReason };`
 
 Drop `fallbackInvoiceNumber`; use `invoiceNumber: (llm.invoiceNumber || `INV-${Date.now()}`).slice(0, 100)` so a missing number is auto-shaped and held. In `_parseOne` (line ~536) change `reviewReason,` to `reviewReason: reviewReason || parsed.reviewReason || null,` and in the `noText` branch set `parsed.reviewReason = 'the PDF has no readable text; nothing below was read from it'`.
 
-- [ ] **Step 4: Run** — `npx jest main/utils main/email main/routes/bill-intake.test.js main/routes/invoice-intake.test.js` → PASS.
+- [x] **Step 4: Run** — `npx jest main/utils main/email main/routes/bill-intake.test.js main/routes/invoice-intake.test.js` → PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add main/utils/invoice-handler.js main/utils/invoice-handler.test.js main/email/parser.js main/email/parser-llm.test.js
@@ -426,7 +426,7 @@ MSG
 - Modify: `main/xero/contacts.js:21-31`
 - Test: `main/xero/contacts.test.js` (new)
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```js
 // main/xero/contacts.test.js
@@ -459,9 +459,9 @@ test('a failed search is not an excuse to create a duplicate', async () => {
 });
 ```
 
-- [ ] **Step 2: Verify failure** — `npx jest main/xero/contacts.test.js` → FAIL on `args[7]` and on the rethrow.
+- [x] **Step 2: Verify failure** — `npx jest main/xero/contacts.test.js` → FAIL on `args[7]` and on the rethrow.
 
-- [ ] **Step 3: Implement** — replace lines 18-31:
+- [x] **Step 3: Implement** — replace lines 18-31:
 
 ```js
   // Search for an existing contact by exact name. Positional SDK call: the
@@ -479,8 +479,8 @@ test('a failed search is not an excuse to create a duplicate', async () => {
 
 (no try/catch: a failed search propagates; the queue retries.)
 
-- [ ] **Step 4: Run** — `npx jest main/xero/contacts.test.js main/xero/invoices.test.js` → PASS.
-- [ ] **Step 5: Commit** — `fix(xero): contact lookup passes summaryOnly, and a failed search no longer creates a duplicate`.
+- [x] **Step 4: Run** — `npx jest main/xero/contacts.test.js main/xero/invoices.test.js` → PASS.
+- [x] **Step 5: Commit** — `fix(xero): contact lookup passes summaryOnly, and a failed search no longer creates a duplicate`.
 
 ---
 
@@ -490,7 +490,7 @@ test('a failed search is not an excuse to create a duplicate', async () => {
 - Modify: `main/xero/xero-utils.js` (add `SCOPES`), `main/xero/connect.js:4-8`, `main/xero/oauth.js:15-23`
 - Test: `main/xero/scopes.test.js` (new)
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```js
 // main/xero/scopes.test.js
@@ -505,8 +505,8 @@ test('both connection types ask for the same accounting scopes, budgets included
 });
 ```
 
-- [ ] **Step 2: Verify failure** — FAIL: `connect.SCOPES` undefined.
-- [ ] **Step 3: Implement** — in `xero-utils.js`: 
+- [x] **Step 2: Verify failure** — FAIL: `connect.SCOPES` undefined.
+- [x] **Step 3: Implement** — in `xero-utils.js`: 
 
 ```js
 // Every accounting scope the app uses, in one place. OAuth adds offline_access
@@ -519,8 +519,8 @@ const SCOPES = 'accounting.invoices accounting.contacts accounting.settings.read
 ```
 export it; `connect.js`: `const { SCOPES } = require('./xero-utils');` and export `SCOPES`; `oauth.js`: `const SCOPES = \`offline_access ${require('./xero-utils').SCOPES}\`;` and export it.
 
-- [ ] **Step 4: Run** — `npx jest main/xero` → PASS (oauth.test.js:72 still matches).
-- [ ] **Step 5: Commit** — `fix(xero): one scope list — Custom Connection gets the budget scopes too`.
+- [x] **Step 4: Run** — `npx jest main/xero` → PASS (oauth.test.js:72 still matches).
+- [x] **Step 5: Commit** — `fix(xero): one scope list — Custom Connection gets the budget scopes too`.
 
 ---
 
@@ -530,7 +530,7 @@ export it; `connect.js`: `const { SCOPES } = require('./xero-utils');` and expor
 - Modify: `ui/src/pages/Admin.jsx:296-302`, `main/routes/invoices.js:172-192`
 - Test: `main/routes/admin.test.js`, `main/routes/invoices-workflow.test.js`
 
-- [ ] **Step 1: Failing tests** — admin.test.js:
+- [x] **Step 1: Failing tests** — admin.test.js:
 
 ```js
   test('PATCH /reports/:userId/:invoiceId/resolve marks the invoice reviewed and records who did it', async () => {
@@ -554,8 +554,8 @@ invoices-workflow.test.js (inside its describe, using its own helpers):
   });
 ```
 
-- [ ] **Step 2: Verify failure** — the list test FAILS (keys missing); the admin test passes already (route is correct; the UI was wrong) — keep it as the pin.
-- [ ] **Step 3: Implement** — invoices.js map: add `receivedAt: inv.receivedAt, receiptFile: inv.receiptFile, receiptGroup: inv.receiptGroup, receiptPage: inv.receiptPage, duplicateOf: inv.duplicateOf, description: inv.description,`. Admin.jsx:
+- [x] **Step 2: Verify failure** — the list test FAILS (keys missing); the admin test passes already (route is correct; the UI was wrong) — keep it as the pin.
+- [x] **Step 3: Implement** — invoices.js map: add `receivedAt: inv.receivedAt, receiptFile: inv.receiptFile, receiptGroup: inv.receiptGroup, receiptPage: inv.receiptPage, duplicateOf: inv.duplicateOf, description: inv.description,`. Admin.jsx:
 
 ```js
   async function resolve(inv) {
@@ -569,8 +569,8 @@ invoices-workflow.test.js (inside its describe, using its own helpers):
 ```
 and the call site `onClick={() => resolve(inv)}`; add `const [error, setError] = useState('')` and render it as an `.alert alert-error` above the list if not already present.
 
-- [ ] **Step 4: Run** — `npx jest main/routes/admin.test.js main/routes/invoices-workflow.test.js` and `npm run build:ui`.
-- [ ] **Step 5: Commit** — `fix(admin,invoices): Resolve calls the route that exists; the list carries the fields the page reads`.
+- [x] **Step 4: Run** — `npx jest main/routes/admin.test.js main/routes/invoices-workflow.test.js` and `npm run build:ui`.
+- [x] **Step 5: Commit** — `fix(admin,invoices): Resolve calls the route that exists; the list carries the fields the page reads`.
 
 ---
 
@@ -578,7 +578,7 @@ and the call site `onClick={() => resolve(inv)}`; add `const [error, setError] =
 
 **Files:** `ui/src/App.jsx:61`, `ui/src/pages/InvoiceReview.jsx` (export a keyed wrapper)
 
-- [ ] **Step 1:** At the bottom of `InvoiceReview.jsx` add:
+- [x] **Step 1:** At the bottom of `InvoiceReview.jsx` add:
 
 ```jsx
 // Every piece of state on this page belongs to ONE record. Prev/Next and the
@@ -590,8 +590,8 @@ export function InvoiceReviewKeyed() {
   return <InvoiceReview key={id} />;
 }
 ```
-- [ ] **Step 2:** `App.jsx`: `import InvoiceReview, { InvoiceReviewKeyed } from …` (or adjust the lazy import: `const InvoiceReviewKeyed = lazy(() => import('./pages/InvoiceReview').then(m => ({ default: m.InvoiceReviewKeyed })));`) and use `<InvoiceReviewKeyed />` for `invoices/:id`.
-- [ ] **Step 3:** `npm run build:ui` and `npx eslint ui/src` → clean. Commit: `fix(review): remount per record so edit state and the submit poll never leak into the next one`.
+- [x] **Step 2:** `App.jsx`: `import InvoiceReview, { InvoiceReviewKeyed } from …` (or adjust the lazy import: `const InvoiceReviewKeyed = lazy(() => import('./pages/InvoiceReview').then(m => ({ default: m.InvoiceReviewKeyed })));`) and use `<InvoiceReviewKeyed />` for `invoices/:id`.
+- [x] **Step 3:** `npm run build:ui` and `npx eslint ui/src` → clean. Commit: `fix(review): remount per record so edit state and the submit poll never leak into the next one`.
 
 ---
 
@@ -602,7 +602,7 @@ export function InvoiceReviewKeyed() {
 - Modify: `main/routes/receipts.js:452`, `main/routes/invoices.js:446`, `main/index.js` (before the SPA catch-all)
 - Test: `main/routes/receipts.test.js`
 
-- [ ] **Step 1: Failing test** — in the `GET /:id/image` describe:
+- [x] **Step 1: Failing test** — in the `GET /:id/image` describe:
 
 ```js
     test('a failure while scaling answers 500 instead of crashing the process', async () => {
@@ -612,8 +612,8 @@ export function InvoiceReviewKeyed() {
       await request(server).get(`/api/receipts/${body.receipt.id}/image?w=76&token=${body.imageToken}`).expect(500);
     });
 ```
-- [ ] **Step 2:** Run → FAIL (the request hangs or jest reports an unhandled rejection).
-- [ ] **Step 3:** `async-handler.js`:
+- [x] **Step 2:** Run → FAIL (the request hangs or jest reports an unhandled rejection).
+- [x] **Step 3:** `async-handler.js`:
 
 ```js
 // Express 4 does not catch a rejected async handler; index.js turns every
@@ -622,7 +622,7 @@ export function InvoiceReviewKeyed() {
 module.exports = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 ```
 Wrap the two routes: `router.get('/:id/image', asyncHandler(async (req, res) => { … }))` and `router.post('/submit-all', requireAuth, asyncHandler(async (req, res) => { … }))`. In `index.js` just before `app.get('*', …)` inside the PROD block, and also in the non-PROD branch: `app.all('/api/*', (_req, res) => res.status(404).json({ error: 'Not found' }));`.
-- [ ] **Step 4:** `npx jest main/routes/receipts.test.js` → PASS. Commit: `fix(routes): an async route failure is a 500, not a process restart; /api/* 404s as JSON`.
+- [x] **Step 4:** `npx jest main/routes/receipts.test.js` → PASS. Commit: `fix(routes): an async route failure is a 500, not a process restart; /api/* 404s as JSON`.
 
 ---
 
@@ -630,7 +630,7 @@ Wrap the two routes: `router.get('/:id/image', asyncHandler(async (req, res) => 
 
 **Files:** `main/routes/auth.js:24-41`, `main/.env.example`, `README.md` (the two registration sentences), test `main/routes/auth.test.js:81`
 
-- [ ] **Step 1: Failing test** — replace the `ALLOW_REGISTRATION=false` test with:
+- [x] **Step 1: Failing test** — replace the `ALLOW_REGISTRATION=false` test with:
 
 ```js
     test('once a user exists, registration is closed unless ALLOW_REGISTRATION=true', async () => {
@@ -646,9 +646,9 @@ Wrap the two routes: `router.get('/:id/image', asyncHandler(async (req, res) => 
       await request(serverFor(app)).post('/api/auth/register').send({ email: 'first@test.com', password: 'password123' }).expect(201);
     });
 ```
-- [ ] **Step 2:** FAIL (second registration returns 201).
-- [ ] **Step 3:** auth.js: comment + `if (hasUsers() && process.env.ALLOW_REGISTRATION !== 'true') return 403 …`. `.env.example`: add `# ALLOW_REGISTRATION=true   # off by default: after the first account, admins add users on the Admin page`. README: fix lines 428 and 605.
-- [ ] **Step 4:** `npx jest main/routes/auth.test.js` → PASS. Commit: `fix(auth): registration is opt-in after the first account — the public URL accepted anyone`.
+- [x] **Step 2:** FAIL (second registration returns 201).
+- [x] **Step 3:** auth.js: comment + `if (hasUsers() && process.env.ALLOW_REGISTRATION !== 'true') return 403 …`. `.env.example`: add `# ALLOW_REGISTRATION=true   # off by default: after the first account, admins add users on the Admin page`. README: fix lines 428 and 605.
+- [x] **Step 4:** `npx jest main/routes/auth.test.js` → PASS. Commit: `fix(auth): registration is opt-in after the first account — the public URL accepted anyone`.
 
 ---
 
@@ -656,7 +656,7 @@ Wrap the two routes: `router.get('/:id/image', asyncHandler(async (req, res) => 
 
 **Files:** `main/middleware/auth-middleware.js`, tests `main/routes/auth.test.js`, `main/routes/admin.test.js`
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 auth.test.js:
 ```js
@@ -676,8 +676,8 @@ admin.test.js:
     await request(serverFor(app)).get('/api/admin/users').set('Authorization', `Bearer ${token}`).expect(403);
   });
 ```
-- [ ] **Step 2:** FAIL (200 in both).
-- [ ] **Step 3:** `requireAuth`:
+- [x] **Step 2:** FAIL (200 in both).
+- [x] **Step 3:** `requireAuth`:
 
 ```js
     const claims = jwt.verify(token, jwtSecret());
@@ -691,7 +691,7 @@ admin.test.js:
     next();
 ```
 (`findById` at users.js:98 — confirm it returns `{id, email, role, …}`.)
-- [ ] **Step 4:** `npx jest main/routes main/middleware` → PASS. Commit: `fix(auth): role and existence come from the database on every request`.
+- [x] **Step 4:** `npx jest main/routes main/middleware` → PASS. Commit: `fix(auth): role and existence come from the database on every request`.
 
 ---
 
@@ -699,7 +699,7 @@ admin.test.js:
 
 **Files:** `main/routes/setup.js` (GET/POST), `ui/src/pages/Setup.jsx` (placeholder when set), test `main/routes/setup.test.js` (new)
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```js
 // main/routes/setup.test.js
@@ -737,9 +737,9 @@ describe('routes/setup — secrets', () => {
   });
 });
 ```
-- [ ] **Step 2:** FAIL (value 'hunter2' returned; blank clears it).
-- [ ] **Step 3:** setup.js: `const SECRET_KEYS = new Set(['XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_SECRET', 'IMAP_PASS', 'Gemini_API_KEY']);` GET: `value: SECRET_KEYS.has(key) ? '' : val, isSet: val.length > 0` (both user and global loops; check the global key names too). POST: `if (SECRET_KEYS.has(k) && (v === '' || v == null)) continue;`. Setup.jsx: where a field input is rendered, pass `placeholder={config?.[section]?.[key]?.isSet && isSecret(key) ? 'Saved — leave blank to keep' : undefined}` (find the field render in Setup.jsx; keep it to that one prop).
-- [ ] **Step 4:** `npx jest main/routes/setup.test.js` and `npm run build:ui`. Commit: `fix(setup): stored secrets are never sent to the browser; a blank field keeps the saved one`.
+- [x] **Step 2:** FAIL (value 'hunter2' returned; blank clears it).
+- [x] **Step 3:** setup.js: `const SECRET_KEYS = new Set(['XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_SECRET', 'IMAP_PASS', 'Gemini_API_KEY']);` GET: `value: SECRET_KEYS.has(key) ? '' : val, isSet: val.length > 0` (both user and global loops; check the global key names too). POST: `if (SECRET_KEYS.has(k) && (v === '' || v == null)) continue;`. Setup.jsx: where a field input is rendered, pass `placeholder={config?.[section]?.[key]?.isSet && isSecret(key) ? 'Saved — leave blank to keep' : undefined}` (find the field render in Setup.jsx; keep it to that one prop).
+- [x] **Step 4:** `npx jest main/routes/setup.test.js` and `npm run build:ui`. Commit: `fix(setup): stored secrets are never sent to the browser; a blank field keeps the saved one`.
 
 ---
 
@@ -747,7 +747,7 @@ describe('routes/setup — secrets', () => {
 
 **Files:** `main/db/migrate.js` (new step), `main/utils/users.js:18-20` (drop mappings), test `main/utils/users.test.js`
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```js
   test('provider keys the app no longer uses are wiped on migrate, and every secret column is encrypted', async () => {
@@ -763,8 +763,8 @@ describe('routes/setup — secrets', () => {
   });
 ```
 (`createUser` may not insert a `user_credentials` row — if the UPDATE affects 0 rows, insert one first with `INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)`.)
-- [ ] **Step 2:** FAIL (values remain; `Nvidia_API_KEY` maps to an unencrypted column).
-- [ ] **Step 3:** migrate.js, before the autoprocess step:
+- [x] **Step 2:** FAIL (values remain; `Nvidia_API_KEY` maps to an unencrypted column).
+- [x] **Step 3:** migrate.js, before the autoprocess step:
 
 ```js
   // Nvidia/OpenRouter were removed from the LLM client; their columns still
@@ -775,7 +775,7 @@ describe('routes/setup — secrets', () => {
   } catch (err) { require('../utils/logger').warn('dead provider key wipe skipped', { error: err.message }); }
 ```
 users.js: delete the three mappings; export `CONFIG_KEY_TO_COLUMN` and `ENCRYPTED_COLUMNS` if not already.
-- [ ] **Step 4:** `npx jest main/utils/users.test.js main/db` → PASS. Commit: `fix(users): wipe the dead Nvidia/OpenRouter key columns — they held plaintext credentials`.
+- [x] **Step 4:** `npx jest main/utils/users.test.js main/db` → PASS. Commit: `fix(users): wipe the dead Nvidia/OpenRouter key columns — they held plaintext credentials`.
 
 ---
 
@@ -783,7 +783,7 @@ users.js: delete the three mappings; export `CONFIG_KEY_TO_COLUMN` and `ENCRYPTE
 
 **Files:** `main/queue/email-queue.js:45,140-160`, test `main/queue/email-queue.test.js` (new)
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```js
 // main/queue/email-queue.test.js
@@ -808,9 +808,9 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
 });
 ```
 (Check the real names: `MAX_ATTEMPTS`, `markProcessing`, `getStats` — read `email-queue.js` exports and adjust before running.)
-- [ ] **Step 2:** FAIL (throws on date; dead 0).
-- [ ] **Step 3:** `date: parsedEmail.date && !Number.isNaN(+parsedEmail.date) ? parsedEmail.date.toISOString() : null`; in `markFailed`: when exhausted, `job.status = 'dead'; fs.writeFileSync(file, …)` and keep the attachments; make sure `getPending` ignores `dead` (it filters on `status === 'pending'` already) and the sweeper/recovery never re-queues dead.
-- [ ] **Step 4:** `npx jest main/queue` → PASS. Commit: `fix(email-queue): a bad Date header does not lose the mail; exhausted jobs stay visible as dead`.
+- [x] **Step 2:** FAIL (throws on date; dead 0).
+- [x] **Step 3:** `date: parsedEmail.date && !Number.isNaN(+parsedEmail.date) ? parsedEmail.date.toISOString() : null`; in `markFailed`: when exhausted, `job.status = 'dead'; fs.writeFileSync(file, …)` and keep the attachments; make sure `getPending` ignores `dead` (it filters on `status === 'pending'` already) and the sweeper/recovery never re-queues dead.
+- [x] **Step 4:** `npx jest main/queue` → PASS. Commit: `fix(email-queue): a bad Date header does not lose the mail; exhausted jobs stay visible as dead`.
 
 ---
 
@@ -818,7 +818,7 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
 
 **Files:** `main/email/watcher-registry.js:89-113`, test `main/email/watcher-registry.test.js` (extend `FakeImap`)
 
-- [ ] **Step 1: Failing test** — extend the fake: `fetch(uids, opts) { this.fetchOpts = opts; const f = new EventEmitter(); this._fetch = f; return f; }` and `addFlags(uid, flags, cb) { this.flagged.push({ uid, flags }); cb && cb(null); }` with `this.flagged = []` in the constructor. Test:
+- [x] **Step 1: Failing test** — extend the fake: `fetch(uids, opts) { this.fetchOpts = opts; const f = new EventEmitter(); this._fetch = f; return f; }` and `addFlags(uid, flags, cb) { this.flagged.push({ uid, flags }); cb && cb(null); }` with `this.flagged = []` in the constructor. Test:
 
 ```js
   test('an email is flagged \\Seen only after enqueue succeeds', async () => {
@@ -841,9 +841,9 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
   });
 ```
 (Adjust to the registry's real `start` signature and how existing tests drive a fetch; the existing tests at lines 85-96 show the ready → openBox sequence.)
-- [ ] **Step 2:** FAIL (`markSeen` true; `flagged` empty).
-- [ ] **Step 3:** In `_fetchUnseen`: `s.imap.fetch(uids, { bodies: '', markSeen: false })`; per message capture `let uid = null; msg.once('attributes', a => { uid = a.uid; });` and after `emailQueue.enqueue` succeeds: `if (uid != null) s.imap.addFlags(uid, ['\\Seen'], err => { if (err) logger.warn(…) })`. On enqueue failure the mail stays unseen and is picked up next poll (the queue's hash dedup handles a repeat).
-- [ ] **Step 4:** `npx jest main/email/watcher-registry.test.js` → PASS. Commit: `fix(imap): mark a mail read only once its job is on disk`.
+- [x] **Step 2:** FAIL (`markSeen` true; `flagged` empty).
+- [x] **Step 3:** In `_fetchUnseen`: `s.imap.fetch(uids, { bodies: '', markSeen: false })`; per message capture `let uid = null; msg.once('attributes', a => { uid = a.uid; });` and after `emailQueue.enqueue` succeeds: `if (uid != null) s.imap.addFlags(uid, ['\\Seen'], err => { if (err) logger.warn(…) })`. On enqueue failure the mail stays unseen and is picked up next poll (the queue's hash dedup handles a repeat).
+- [x] **Step 4:** `npx jest main/email/watcher-registry.test.js` → PASS. Commit: `fix(imap): mark a mail read only once its job is on disk`.
 
 ---
 
@@ -851,7 +851,7 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
 
 **Files:** `main/email/watcher-registry.js:163-190, 240-244`, test `main/email/watcher-registry.test.js`
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```js
   test('a failure to open INBOX schedules a reconnect instead of leaving a zombie', () => {
@@ -873,9 +873,9 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
   });
 ```
 (Use the registry's real API names for running/last-error; read `module.exports` first and adapt.)
-- [ ] **Step 2:** FAIL.
-- [ ] **Step 3:** openBox callback: `if (err) { _scheduleReconnect(s, imap, 'openBox failed', err); return; }`. In the `'error'` handler: `if (err.source === 'authentication') { logger.error(…); s.lastError = err.message; stop(s.userId) /* or the internal teardown that sets running false */; return; }` before scheduling a reconnect.
-- [ ] **Step 4:** `npx jest main/email/watcher-registry.test.js` → PASS. Commit: `fix(imap): reconnect when INBOX will not open; stop on a bad password`.
+- [x] **Step 2:** FAIL.
+- [x] **Step 3:** openBox callback: `if (err) { _scheduleReconnect(s, imap, 'openBox failed', err); return; }`. In the `'error'` handler: `if (err.source === 'authentication') { logger.error(…); s.lastError = err.message; stop(s.userId) /* or the internal teardown that sets running false */; return; }` before scheduling a reconnect.
+- [x] **Step 4:** `npx jest main/email/watcher-registry.test.js` → PASS. Commit: `fix(imap): reconnect when INBOX will not open; stop on a bad password`.
 
 ---
 
@@ -883,7 +883,7 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
 
 **Files:** `main/routes/claims.js:109-113`, test `main/routes/claims.test.js`
 
-- [ ] **Step 1: Failing test** (uses the exported `_createClaimRecord`):
+- [x] **Step 1: Failing test** (uses the exported `_createClaimRecord`):
 
 ```js
   describe('account from category', () => {
@@ -900,8 +900,8 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
     });
   });
 ```
-- [ ] **Step 2:** FAIL (accountCode is the default).
-- [ ] **Step 3:**
+- [x] **Step 2:** FAIL (accountCode is the default).
+- [x] **Step 3:**
 
 ```js
   // The form's heading leads the description, but the chart may only know the
@@ -910,7 +910,7 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
   const alt = receipt && receipt.category && receipt.category !== cat ? receipt.category : null;
   const accountCode = (await resolveAccountCode(userId, cat)) || (alt && await resolveAccountCode(userId, alt)) || defaultAccount;
 ```
-- [ ] **Step 4:** `npx jest main/routes/claims.test.js` → PASS. Commit: `fix(claims): resolve the account from the reader's category when the form heading is not in the chart`.
+- [x] **Step 4:** `npx jest main/routes/claims.test.js` → PASS. Commit: `fix(claims): resolve the account from the reader's category when the form heading is not in the chart`.
 
 ---
 
@@ -918,7 +918,7 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
 
 **Files:** `main/utils/invoice-store.js:196-207`, test `main/utils/invoice-store.test.js`
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```js
   test('add ignores undefined fields, so a parser that read nothing does not null a NOT NULL column', () => {
@@ -930,14 +930,14 @@ test('a job that fails MAX_ATTEMPTS times is kept as dead, not deleted', () => {
     expect(row.processedAt).toBeTruthy();
   });
 ```
-- [ ] **Step 2:** FAIL (NOT NULL constraint on has_pdf).
-- [ ] **Step 3:** in the loop: `if (field === 'id' || field === 'userId' || invoice[field] === undefined) continue;` (replaces the `!(field in invoice)` check).
-- [ ] **Step 4:** `npx jest main/utils/invoice-store.test.js` → PASS. Commit: `fix(store): add() skips undefined fields, the same rule update() has`.
+- [x] **Step 2:** FAIL (NOT NULL constraint on has_pdf).
+- [x] **Step 3:** in the loop: `if (field === 'id' || field === 'userId' || invoice[field] === undefined) continue;` (replaces the `!(field in invoice)` check).
+- [x] **Step 4:** `npx jest main/utils/invoice-store.test.js` → PASS. Commit: `fix(store): add() skips undefined fields, the same rule update() has`.
 
 ---
 
 ### Finish
 
-- [ ] `npm test` green (lint included), `npm run build:ui` green.
-- [ ] `git push origin master`, then `npm run deploy` (needs `gcloud auth login` first if the token has expired).
-- [ ] After deploy: confirm the server's `.env` no longer needs `REDIS_URL` (harmless if present — nothing reads it now), and submit one invoice by hand to see it post inline.
+- [x] `npm test` green (lint included), `npm run build:ui` green.
+- [x] `git push origin master`, then `npm run deploy` (needs `gcloud auth login` first if the token has expired).
+- [x] After deploy: confirm the server's `.env` no longer needs `REDIS_URL` (harmless if present — nothing reads it now), and submit one invoice by hand to see it post inline.
