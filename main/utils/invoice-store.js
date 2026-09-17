@@ -49,6 +49,7 @@ const FIELD_TO_COLUMN = {
   // Read from a bill by the model; sent to Xero with the contact and as the
   // reference. Built on every parse and never stored until now.
   vendorPhone: 'vendor_phone', projectName: 'project_name',
+  parsedAt: 'parsed_at',
 };
 
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
@@ -102,6 +103,7 @@ function _rowToRecord(row, reports, lineItems) {
     updatedAt:         row.updated_at,
     vendorPhone:       row.vendor_phone,
     projectName:       row.project_name,
+    parsedAt:          row.parsed_at,
     receiptFile:       row.receipt_file,
     receiptMime:       row.receipt_mime,
     // Which part of the shared file this record owns. Null on an ordinary

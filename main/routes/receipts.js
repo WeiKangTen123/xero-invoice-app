@@ -127,7 +127,15 @@ function storeReceipt(userId, { mime, data, filename, source }) {
   const done = new Promise(resolve => setImmediate(() => {
     readAndMaybeSplit(userId, id, buffer, mime, storedName, hash)
       .catch(err => logger.warn('Receipt read failed', { userId, id, error: err.message }))
-      .finally(resolve);
+      .finally(() => {
+        // However it ended, the read is over. Every row from this upload (the
+        // parent and any page or region siblings) is stamped, so the phone can
+        // tell "still reading" from "read, and nothing was found".
+        const at = new Date().toISOString();
+        const s  = invoiceStore.forUser(userId);
+        for (const r of s.getAll()) if (r.id === id || r.receiptGroup === id) s.update(r.id, { parsedAt: at });
+        resolve();
+      });
   }));
   _inflight.add(done);
   done.finally(() => _inflight.delete(done));
@@ -380,9 +388,10 @@ router.get('/capture/:token/status', (req, res) => {
         vendorName:  r.vendorName  || null,
         totalAmount: r.totalAmount || null,
         currency:    r.currency    || null,
-        // True once parsing has been attempted and produced nothing usable, so
-        // the phone can say "not read" rather than spinning forever.
-        parsed: !!(r.vendorName || r.totalAmount),
+        // parsed: the automatic read has ENDED, whatever it found. unreadable:
+        // it ended and found nothing, so the phone says so instead of spinning.
+        parsed:     !!r.parsedAt,
+        unreadable: !!r.parsedAt && !r.vendorName && !r.totalAmount,
       };
     })
     .filter(Boolean);

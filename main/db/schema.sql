@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS invoices (
   receipt_group     TEXT,     -- ties siblings from one upload together
   received_at       TEXT,     -- when the DOCUMENT reached us, not when we made the row
   receipt_hash      TEXT,     -- SHA-256 of the receipt image
+  parsed_at         TEXT,     -- when the automatic read of this receipt ENDED, found something or not
   -- Read from a bill by the model and sent to Xero with the contact and the
   -- reference; they were built on every parse and never stored, so the review
   -- page's Phone and Project rows were always empty and a manual submit sent

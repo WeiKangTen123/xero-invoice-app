@@ -46,6 +46,7 @@ function run() {
     ['receipt_file', 'receipt_file TEXT'], ['receipt_mime', 'receipt_mime TEXT'], ['receipt_box', 'receipt_box TEXT'],
     ['receipt_page', 'receipt_page INTEGER'], ['receipt_group', 'receipt_group TEXT'], ['received_at', 'received_at TEXT'],
     ['receipt_hash', 'receipt_hash TEXT'], ['vendor_phone', 'vendor_phone TEXT'], ['project_name', 'project_name TEXT'],
+    ['parsed_at', 'parsed_at TEXT'],
   ]) _ensureColumn('invoices', col, ddl);
 
   // 1. SHA-256 of every stored receipt that predates the hash column.

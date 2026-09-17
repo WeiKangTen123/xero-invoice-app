@@ -592,15 +592,25 @@ describe('routes/receipts — phone read-back is narrowly scoped', () => {
     expect(res.body.receipts[0]).toMatchObject({ vendorName: 'Grab', totalAmount: 18.4, currency: 'SGD', parsed: true });
   });
 
-  test('an unread receipt reports parsed:false so the phone can stop spinning', async () => {
+  test('before the read finishes, parsed is false', async () => {
+    // A reader that has not answered yet: the phone asks in the meantime.
+    let answer;
+    parser.parseReceiptImage.mockReturnValue(new Promise(r => { answer = r; }));
+    const { body } = await pair();
+    await send(body.token).expect(201);
+    const res = await request(server).get(`/api/receipts/capture/${body.token}/status`).expect(200);
+    expect(res.body.receipts[0]).toMatchObject({ parsed: false, unreadable: false });
+    answer(null);
+    await settle();
+  });
+
+  test('an unreadable receipt reports parsed with unreadable, so the phone stops spinning and says so', async () => {
     parser.parseReceiptImage.mockResolvedValue(null);
     const { body } = await pair();
     await send(body.token).expect(201);
     await settle();
-
     const res = await request(server).get(`/api/receipts/capture/${body.token}/status`).expect(200);
-    expect(res.body.receipts[0].parsed).toBe(false);
-    expect(res.body.receipts[0].vendorName).toBeNull();
+    expect(res.body.receipts[0]).toMatchObject({ parsed: true, unreadable: true, vendorName: null });
   });
 
   test('NO image is served through the phone token — it has its own copy', async () => {
