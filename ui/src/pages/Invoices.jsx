@@ -8,6 +8,7 @@ import ClaimImport from '../components/receipts/ClaimImport';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
 import { TypeBadge } from '../components/Badges';
 import { statusMeta, ATTENTION_STATUSES } from '../utils/badges';
+import { fmtMoney } from '../utils/format';
 import { useViewMode } from '../context/ViewModeContext';
 
 // The three kinds of document this page holds, in the order they are shown.
@@ -61,6 +62,22 @@ function receivedLabel(iso) {
   if (days < 7)    return `${days} day${days === 1 ? '' : 's'} ago`;
   return then.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: then.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
 }
+
+// One figure per currency present, because adding SGD to USD is not a total.
+// Rows with no amount are skipped; a blank currency sorts last.
+function currencyTotals(rows) {
+  const by = new Map();
+  for (const r of rows) {
+    if (r.totalAmount == null) continue;
+    const c = r.currency || '';
+    by.set(c, (by.get(c) || 0) + (Number(r.totalAmount) || 0));
+  }
+  return [...by.entries()]
+    .filter(([, amount]) => amount)
+    .sort(([a], [b]) => (a === '') - (b === '') || a.localeCompare(b))
+    .map(([currency, amount]) => ({ currency, amount }));
+}
+const totalsLabel = totals => totals.map(t => fmtMoney(t.amount, t.currency)).join(' · ');
 
 // Inclusive lower bound for a preset, or null for "all time".
 function receivedCutoff(preset) {
@@ -262,19 +279,12 @@ export default function Invoices() {
     for (const inv of invoices) {
       if (inv.receiptGroup) {
         if (!map.has(inv.receiptGroup)) {
-          map.set(inv.receiptGroup, {
-            groupId: inv.receiptGroup,
-            items: [],
-            total: 0,
-            currency: inv.currency || 'SGD',
-          });
+          map.set(inv.receiptGroup, { groupId: inv.receiptGroup, items: [] });
         }
-        const b = map.get(inv.receiptGroup);
-        b.items.push(inv);
-        b.total += Number(inv.totalAmount) || 0;
+        map.get(inv.receiptGroup).items.push(inv);
       }
     }
-    return [...map.values()];
+    return [...map.values()].map(b => ({ ...b, totals: currencyTotals(b.items) }));
   }, [invoices]);
 
   async function handleBatchApprove(ids) {
@@ -360,7 +370,7 @@ export default function Invoices() {
       .sort((a, b) => a.rank - b.rank)
       .map(g => ({
         ...g,
-        total: g.rows.reduce((sum, r) => sum + (Number(r.totalAmount) || 0), 0),
+        totals: currencyTotals(g.rows),
         note:  scannedNote(g.rows),
         // Recent buckets open; history collapsed, because everything expanded is
         // the same wall of rows this is meant to fix.
@@ -462,7 +472,7 @@ export default function Invoices() {
                     <strong>Batch: {b.groupId}</strong>
                     <span className="badge badge-gray">{b.items.length} claims</span>
                     <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-                      Total: {b.currency} {b.total.toFixed(2)}
+                      Total: {totalsLabel(b.totals)}
                     </span>
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
@@ -808,9 +818,9 @@ export default function Invoices() {
                     <span style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: '.04em', textTransform: 'uppercase' }}>{g.label}</span>
                     <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {g.rows.length}</span>
                   </div>
-                  {g.total ? (
+                  {g.totals.length ? (
                     <span style={{ fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
-                      {invoices[0]?.currency || ''} {g.total.toLocaleString('en', { minimumFractionDigits: 2 })}
+                      {totalsLabel(g.totals)}
                     </span>
                   ) : null}
                 </div>
@@ -994,7 +1004,7 @@ export default function Invoices() {
                         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {g.rows.length}</span>
                         {/* How much came in — the main reason to group at all. */}
                         <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
-                          {g.total ? `${invoices[0]?.currency || ''} ${g.total.toLocaleString('en', { minimumFractionDigits: 2 })}` : ''}
+                          {totalsLabel(g.totals)}
                         </span>
                       </div>
                       {g.note && (
