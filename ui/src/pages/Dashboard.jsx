@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import { usePipeline } from '../context/PipelineContext';
+import { useAuth } from '../context/AuthContext';
+import { formatDate, formatTime } from '../utils/formatDate';
 import { useVisiblePolling } from '../utils/useVisiblePolling';
 import ProcessToggle from '../components/ProcessToggle';
 import InvoiceTable from '../components/InvoiceTable';
@@ -238,6 +240,7 @@ function PipelinePanel({ queue, xero }) {
 }
 
 export default function Dashboard() {
+  const { user } = useAuth();
   // Status comes from the shared PipelineContext — no need for a separate polling loop here.
   const { status, refresh: refreshStatus } = usePipeline();
 
@@ -352,9 +355,9 @@ export default function Dashboard() {
           icon="🕐"
           iconBg="rgba(245,158,11,0.12)"
           label="Last activity"
-          value={status?.lastActivity ? new Date(status.lastActivity).toLocaleTimeString() : '—'}
+          value={formatTime(status?.lastActivity, user?.timezone)}
           color="var(--warning)"
-          sub={status?.lastActivity ? new Date(status.lastActivity).toLocaleDateString() : 'No activity yet'}
+          sub={status?.lastActivity ? formatDate(status.lastActivity, user?.timezone) : 'No activity yet'}
           delay={120}
         />
       </div>
@@ -446,7 +449,7 @@ export default function Dashboard() {
             )}
             {!rescanMsg && status?.lastScan && (
               <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
-                Last checked {new Date(status.lastScan.checkedAt).toLocaleTimeString()} —{' '}
+                Last checked {formatTime(status.lastScan.checkedAt, user?.timezone)} —{' '}
                 {status.lastScan.emailsFound > 0
                   ? `found ${status.lastScan.emailsFound} email${status.lastScan.emailsFound === 1 ? '' : 's'}`
                   : 'no new emails'}
@@ -477,7 +480,7 @@ export default function Dashboard() {
             ↻ Refresh
           </button>
         </div>
-        <InvoiceTable invoices={invoices.slice(0, 10)} />
+        <InvoiceTable invoices={invoices.slice(0, 10)} timezone={user?.timezone} />
       </div>
     </div>
   );

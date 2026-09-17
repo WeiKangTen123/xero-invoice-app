@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, lazy, Suspense } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useViewMode } from '../context/ViewModeContext';
+import { fmtMoney } from '../utils/format';
 
 // react-markdown + remark-gfm are the heaviest dependency in the bundle and are
 // only needed once an assistant reply is on screen, so the renderer loads on
@@ -108,12 +109,12 @@ function ActionCard({ proposal, invoiceId }) {
                 <span style={{ flex: 1, color: 'var(--text-secondary)' }}>{item.description}</span>
                 {changed ? (
                   <>
-                    <span style={{ color: 'var(--text-muted)', textDecoration: 'line-through' }}>{Number(old.unitAmount).toFixed(2)}</span>
+                    <span style={{ color: 'var(--text-muted)', textDecoration: 'line-through' }}>{fmtMoney(old.unitAmount)}</span>
                     <span style={{ color: 'var(--text-muted)' }}>→</span>
-                    <span style={{ color: 'var(--success)', fontWeight: 700 }}>{Number(item.unitAmount).toFixed(2)}</span>
+                    <span style={{ color: 'var(--success)', fontWeight: 700 }}>{fmtMoney(item.unitAmount)}</span>
                   </>
                 ) : (
-                  <span style={{ color: 'var(--text-muted)' }}>{Number(item.unitAmount).toFixed(2)}</span>
+                  <span style={{ color: 'var(--text-muted)' }}>{fmtMoney(item.unitAmount)}</span>
                 )}
               </div>
             );

@@ -1,7 +1,9 @@
 import { StatusBadge } from './Badges';
 import { typeMeta } from '../utils/badges';
+import { fmtMoney } from '../utils/format';
+import { formatDateTime } from '../utils/formatDate';
 
-export default function InvoiceTable({ invoices }) {
+export default function InvoiceTable({ invoices, timezone }) {
   if (!invoices?.length) {
     return (
       <div className="empty-state">
@@ -51,7 +53,7 @@ export default function InvoiceTable({ invoices }) {
                 </td>
                 <td style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
                   {inv.totalAmount != null
-                    ? `${inv.currency || ''} ${Number(inv.totalAmount).toLocaleString('en', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                    ? fmtMoney(inv.totalAmount, inv.currency)
                     : '—'}
                 </td>
                 <td><span className={`badge ${cls}`}>{label}</span></td>
@@ -59,7 +61,7 @@ export default function InvoiceTable({ invoices }) {
                   {inv.source || '—'}
                 </td>
                 <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                  {inv.processedAt ? new Date(inv.processedAt).toLocaleString() : '—'}
+                  {formatDateTime(inv.processedAt, timezone)}
                 </td>
                 <td><StatusBadge status={inv.status} /></td>
               </tr>

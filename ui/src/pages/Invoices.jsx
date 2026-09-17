@@ -10,6 +10,8 @@ import { TypeBadge } from '../components/Badges';
 import { statusMeta, ATTENTION_STATUSES } from '../utils/badges';
 import { fmtMoney } from '../utils/format';
 import { useViewMode } from '../context/ViewModeContext';
+import { useAuth } from '../context/AuthContext';
+import { formatDateTime } from '../utils/formatDate';
 
 // The three kinds of document this page holds, in the order they are shown.
 //
@@ -135,6 +137,7 @@ function scannedNote(rows) {
 
 export default function Invoices() {
   const { isMobile } = useViewMode();
+  const { user } = useAuth();
   const navigate = useNavigate();
   const [invoices,     setInvoices]     = useState([]);
   const [loading,      setLoading]      = useState(true);
@@ -884,7 +887,7 @@ export default function Invoices() {
                         <div style={{ textAlign: 'right', flexShrink: 0 }}>
                           <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
                             {inv.totalAmount != null
-                              ? `${inv.currency || ''} ${Number(inv.totalAmount).toLocaleString('en', { minimumFractionDigits: 2 })}`
+                              ? fmtMoney(inv.totalAmount, inv.currency)
                               : '—'}
                           </div>
                           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
@@ -1073,7 +1076,7 @@ export default function Invoices() {
                       </td>
                       <td style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
                         {inv.totalAmount != null
-                          ? `${inv.currency || ''} ${Number(inv.totalAmount).toLocaleString('en', { minimumFractionDigits: 2 })}`
+                          ? fmtMoney(inv.totalAmount, inv.currency)
                           : '—'}
                       </td>
                       <td>
@@ -1091,8 +1094,8 @@ export default function Invoices() {
                       </td>
                       <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
                           title={[
-                            inv.receivedAt  ? `Arrived: ${new Date(inv.receivedAt).toLocaleString()}` : null,
-                            inv.processedAt ? `Scanned: ${new Date(inv.processedAt).toLocaleString()}` : null,
+                            inv.receivedAt  ? `Arrived: ${formatDateTime(inv.receivedAt, user?.timezone)}` : null,
+                            inv.processedAt ? `Scanned: ${formatDateTime(inv.processedAt, user?.timezone)}` : null,
                           ].filter(Boolean).join('\n')}>
                         {receivedLabel(inv.receivedAt || inv.processedAt)}
                       </td>

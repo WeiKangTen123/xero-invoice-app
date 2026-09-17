@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { api } from '../../api/client';
 import ImportDialog, { encodeFiles } from '../intake/ImportDialog';
+import { fmtMoney } from '../../utils/format';
 
 // Adding invoices by hand. An invoice is ours to produce, so there is no file
 // to upload: it is either typed into the form here, or read from a spreadsheet
@@ -107,7 +108,7 @@ export function InvoiceForm({ onClose, onSaved }) {
       {errors[k] && <span style={{ color: 'var(--danger)' }}>{errors[k]}</span>}
     </label>
   );
-  const money = n => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = n => fmtMoney(n);
 
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',

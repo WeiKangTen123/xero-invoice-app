@@ -37,6 +37,20 @@ export function formatDateTime(iso, timezone = DEFAULT_TIMEZONE) {
 
 // "3m ago" / "2h ago" / "5d ago" — for recent-activity columns where the relative
 // distance matters more than the exact clock time.
+// The date alone, and the time alone, in the user's timezone — for a card
+// that shows one on the line and the other beneath it.
+function _fmt(iso, timezone, opts, fallback) {
+  if (!iso) return '—';
+  try { return new Intl.DateTimeFormat('en-GB', { timeZone: timezone, ...opts }).format(new Date(iso)); }
+  catch { return fallback(new Date(iso)); }
+}
+export function formatDate(iso, timezone = DEFAULT_TIMEZONE) {
+  return _fmt(iso, timezone, { day: '2-digit', month: 'short', year: 'numeric' }, d => d.toLocaleDateString());
+}
+export function formatTime(iso, timezone = DEFAULT_TIMEZONE) {
+  return _fmt(iso, timezone, { hour: '2-digit', minute: '2-digit', hour12: false }, d => d.toLocaleTimeString());
+}
+
 export function formatRelative(iso) {
   if (!iso) return '—';
   const ms = Date.now() - new Date(iso).getTime();

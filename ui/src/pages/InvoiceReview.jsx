@@ -7,6 +7,9 @@ import DeleteConfirmModal from '../components/DeleteConfirmModal';
 import { StatusBadge } from '../components/Badges';
 import { TYPE_META, typeMeta } from '../utils/badges';
 import { useViewMode } from '../context/ViewModeContext';
+import { useAuth } from '../context/AuthContext';
+import { fmtMoney } from '../utils/format';
+import { formatDateTime } from '../utils/formatDate';
 
 // Statuses that allow the user to trigger a Xero submission.
 // 'posted' is included so a correction can be re-posted — this updates the existing
@@ -145,6 +148,7 @@ function listPathFor(inv) {
 }
 
 function InvoiceReviewPage() {
+  const { user } = useAuth();
   const { isMobile } = useViewMode();
   const { id }   = useParams();
   const navigate = useNavigate();
@@ -673,9 +677,9 @@ function InvoiceReviewPage() {
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700, fontSize: 13.5 }}>Amount Discrepancy Detected</div>
                 <div style={{ fontSize: 13, marginTop: 3, color: 'var(--text-primary)' }}>
-                  The employee claimed <strong>{inv.currency || 'SGD'} {discrepancyMatch.claimed.toFixed(2)}</strong>, but the scanned receipt total is <strong>{inv.currency || 'SGD'} {discrepancyMatch.onReceipt.toFixed(2)}</strong>
+                  The employee claimed <strong>{fmtMoney(discrepancyMatch.claimed, inv.currency || 'SGD')}</strong>, but the scanned receipt total is <strong>{fmtMoney(discrepancyMatch.onReceipt, inv.currency || 'SGD')}</strong>
                   <span style={{ marginLeft: 6, color: 'var(--text-muted)' }}>
-                    ({discrepancyMatch.diff > 0 ? `+${discrepancyMatch.diff.toFixed(2)}` : discrepancyMatch.diff.toFixed(2)})
+                    ({discrepancyMatch.diff > 0 ? '+' : ''}{fmtMoney(discrepancyMatch.diff)})
                   </span>
                 </div>
               </div>
@@ -687,7 +691,7 @@ function InvoiceReviewPage() {
                 disabled={saving}
                 onClick={() => resolveDiscrepancy(discrepancyMatch.onReceipt)}
               >
-                ✓ Use Receipt Total ({inv.currency || 'SGD'} {discrepancyMatch.onReceipt.toFixed(2)})
+                ✓ Use Receipt Total ({fmtMoney(discrepancyMatch.onReceipt, inv.currency || 'SGD')})
               </button>
               <button
                 type="button"
@@ -695,7 +699,7 @@ function InvoiceReviewPage() {
                 disabled={saving}
                 onClick={() => resolveDiscrepancy(discrepancyMatch.claimed)}
               >
-                Keep Claimed Amount ({inv.currency || 'SGD'} {discrepancyMatch.claimed.toFixed(2)})
+                Keep Claimed Amount ({fmtMoney(discrepancyMatch.claimed, inv.currency || 'SGD')})
               </button>
             </div>
           </div>
@@ -1103,12 +1107,12 @@ function InvoiceReviewPage() {
                   <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 16 }}>
                     <div>
                       <div style={{ fontWeight: 700, fontSize: 16 }}>
-                        {inv.currency} {Number(inv.totalAmount || 0).toLocaleString('en', { minimumFractionDigits: 2 })}
+                        {fmtMoney(inv.totalAmount, inv.currency)}
                       </div>
                       {(inv.subTotal != null || inv.taxAmount != null) ? (
                         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3, display: 'flex', gap: 12 }}>
-                          {inv.subTotal != null && <span>Subtotal: {inv.currency} {Number(inv.subTotal).toFixed(2)}</span>}
-                          {inv.taxAmount != null && <span>Tax/GST: {inv.currency} {Number(inv.taxAmount).toFixed(2)}</span>}
+                          {inv.subTotal != null && <span>Subtotal: {fmtMoney(inv.subTotal, inv.currency)}</span>}
+                          {inv.taxAmount != null && <span>Tax/GST: {fmtMoney(inv.taxAmount, inv.currency)}</span>}
                         </div>
                       ) : (
                         <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Total amount</div>
@@ -1250,7 +1254,7 @@ function InvoiceReviewPage() {
                           <div key={i} style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
                             <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 4, lineHeight: 1.4 }}>{li.description}</div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--text-muted)' }}>
-                              <span>{inv.currency} {Number(li.unitAmount || 0).toLocaleString('en', { minimumFractionDigits: 2 })}</span>
+                              <span>{fmtMoney(li.unitAmount, inv.currency)}</span>
                               {li.discountRate > 0 && <span>· {li.discountRate}% disc.</span>}
                               {li.taxType && li.taxType !== 'NONE' && <span className="badge badge-yellow">{li.taxType}</span>}
                             </div>
@@ -1275,13 +1279,13 @@ function InvoiceReviewPage() {
                     ) : inv.subTotal > 0 && inv.taxAmount > 0 && (
                       <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-muted)' }}>
-                          <span>Subtotal</span><span>{inv.currency} {Number(inv.subTotal).toFixed(2)}</span>
+                          <span>Subtotal</span><span>{fmtMoney(inv.subTotal, inv.currency)}</span>
                         </div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-muted)' }}>
-                          <span>Tax</span><span>{inv.currency} {Number(inv.taxAmount).toFixed(2)}</span>
+                          <span>Tax</span><span>{fmtMoney(inv.taxAmount, inv.currency)}</span>
                         </div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', borderTop: '1px solid var(--border)', paddingTop: 6, marginTop: 2 }}>
-                          <span>Total</span><span>{inv.currency} {Number(inv.totalAmount).toFixed(2)}</span>
+                          <span>Total</span><span>{fmtMoney(inv.totalAmount, inv.currency)}</span>
                         </div>
                       </div>
                     )}
@@ -1312,7 +1316,7 @@ function InvoiceReviewPage() {
                   <div key={i} style={{ padding: '8px 0', borderTop: i > 0 ? '1px solid rgba(239,68,68,0.15)' : 'none' }}>
                     <div style={{ fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.5 }}>{r.note}</div>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                      by {r.userEmail} · {r.reportedAt ? new Date(r.reportedAt).toLocaleString() : ''}
+                      by {r.userEmail} · {r.reportedAt ? formatDateTime(r.reportedAt, user?.timezone) : ''}
                     </div>
                   </div>
                 ))}
@@ -1331,9 +1335,9 @@ function InvoiceReviewPage() {
               </button>
               {showMeta && (
                 <div style={{ marginTop: 10 }}>
-                  <InfoRow label="Processed"  value={inv.processedAt  ? new Date(inv.processedAt).toLocaleString()  : '—'} />
+                  <InfoRow label="Processed"  value={formatDateTime(inv.processedAt, user?.timezone)} />
                   {inv.submittedAt && (
-                    <InfoRow label="Submitted" value={new Date(inv.submittedAt).toLocaleString()} />
+                    <InfoRow label="Submitted" value={formatDateTime(inv.submittedAt, user?.timezone)} />
                   )}
                   {inv.xeroInvoiceId && (
                     <InfoRow label="Xero ID"   value={inv.xeroInvoiceId} mono />

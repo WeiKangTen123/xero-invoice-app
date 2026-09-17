@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
+import { fmtMoney } from '../utils/format';
 
 function Avatar({ email }) {
   return (
@@ -102,7 +103,7 @@ export default function Admin() {
       {error   && <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>}
       {success && <div className="alert alert-success"><span className="alert-icon">✓</span>{success}</div>}
 
-      {tab === 'reports'    && <ReportsPanel navigate={navigate} />}
+      {tab === 'reports'    && <ReportsPanel navigate={navigate} timezone={me?.timezone} />}
       {tab === 'monitoring' && <MonitoringPanel timezone={me?.timezone} onViewLogs={viewUserLogs} />}
       {tab === 'logs'       && <LogsPanel timezone={me?.timezone} initialUserId={logsUserId} initialUserEmail={logsUserEmail} />}
 
@@ -281,7 +282,7 @@ export default function Admin() {
 }
 
 // ── Reports panel ─────────────────────────────────────────────────────────────
-function ReportsPanel({ navigate }) {
+function ReportsPanel({ navigate, timezone }) {
   const [reports,   setReports]   = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [resolving, setResolving] = useState(null);
@@ -370,7 +371,7 @@ function ReportsPanel({ navigate }) {
                     </span>
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>
-                    {inv.currency} {Number(inv.totalAmount || 0).toFixed(2)} · {inv.invoiceDate || '—'}
+                    {fmtMoney(inv.totalAmount, inv.currency)} · {inv.invoiceDate || '—'}
                     {inv.hasPdf && <span className="badge badge-green" style={{ marginLeft: 8 }}>📄 PDF</span>}
                   </div>
                 </div>
@@ -407,7 +408,7 @@ function ReportsPanel({ navigate }) {
                     "{r.note}"
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>
-                    Reported by {r.userEmail} · {r.reportedAt ? new Date(r.reportedAt).toLocaleString() : ''}
+                    Reported by {r.userEmail} · {r.reportedAt ? formatDateTime(r.reportedAt, timezone) : ''}
                   </div>
                 </div>
               ))}

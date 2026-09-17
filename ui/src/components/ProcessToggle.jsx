@@ -1,7 +1,10 @@
 import { useState } from 'react';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
+import { formatDateTime } from '../utils/formatDate';
 
 export default function ProcessToggle({ status, onUpdate }) {
+  const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState('');
 
@@ -76,7 +79,7 @@ export default function ProcessToggle({ status, onUpdate }) {
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3 }}>
             {running
               ? status?.startedAt
-                ? `Started ${new Date(status.startedAt).toLocaleString()}`
+                ? `Started ${formatDateTime(status.startedAt, user?.timezone)}`
                 : 'Polling emails every 60s'
               : 'Click the toggle to start monitoring emails'}
           </div>
