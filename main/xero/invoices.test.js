@@ -178,3 +178,17 @@ describe('buildLineItems', () => {
     expect(items[0]).toMatchObject({ discountRate: 10, taxType: 'NONE' });
   });
 });
+
+describe('_submitWithCurrencyRetry', () => {
+  test('an unsubscribed currency is refused with a clear message, never relabelled as base', async () => {
+    // It used to retry with the org's base currency stamped on the same
+    // amounts: USD 1,000 became SGD 1,000 in a Xero draft, with a warn log.
+    const { _submitWithCurrencyRetry } = require('./invoices');
+    const xeroErr = Object.assign(new Error('validation'), { response: { statusCode: 400, body: { Elements: [{ ValidationErrors: [{ Message: 'Organisation is not subscribed to currency USD' }] }] } } });
+    const submitFn = jest.fn().mockRejectedValue(xeroErr);
+    const api = { getOrganisations: jest.fn().mockResolvedValue({ body: { organisations: [{ baseCurrency: 'SGD' }] } }) };
+    await expect(_submitWithCurrencyRetry(submitFn, api, newTenantId(), { invoices: [{ currencyCode: 'USD' }] }, 'USD', 'u1', {}))
+      .rejects.toThrow(/not subscribed to USD/);
+    expect(submitFn).toHaveBeenCalledTimes(1);
+  });
+});

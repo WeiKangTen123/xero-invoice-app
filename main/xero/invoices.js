@@ -209,33 +209,21 @@ async function _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi) {
   };
 }
 
-// Submits with the currency-mismatch retry: if the Xero org isn't subscribed to the
-// attempted currency, detect the org's base currency and retry once with that.
-async function _submitWithCurrencyRetry(submitFn, accountingApi, tenantId, invoiceBody, currencyCode, userId, invoiceData) {
+// Submits, and turns Xero's "not subscribed to currency" into a clear error.
+//
+// This used to retry with the org's base currency stamped on the SAME amounts:
+// USD 1,000 became SGD 1,000 in a Xero draft, with only a warn log to say so.
+// A currency the org has not enabled is a decision for a person — enable it
+// in Xero, or change the invoice — never a silent relabel.
+async function _submitWithCurrencyRetry(submitFn, accountingApi, tenantId, invoiceBody, currencyCode, userId) {
   try {
     return await withRetry(() => submitFn(invoiceBody));
   } catch (err) {
     const msg = xeroErrMsg(err);
     if (!msg.includes('not subscribed to currency')) throw err;
-
     const baseCurrency = await getOrgBaseCurrency(accountingApi, tenantId);
-    if (baseCurrency === currencyCode) throw err;
-
-    logger.warn('Currency not subscribed — retrying with org base currency', {
-      attempted: currencyCode, fallback: baseCurrency, userId,
-    });
-    invoiceBody.invoices[0].currencyCode = baseCurrency;
-    if (invoiceData._invoiceStoreId) {
-      try {
-        const invStore = require('../utils/invoice-store').forUser(userId);
-        await invStore.update(invoiceData._invoiceStoreId, { currency: baseCurrency });
-      } catch (err) {
-        // Cosmetic — the invoice still posts. But leaving it silent means the
-        // stored record disagrees with what was sent and nothing says why.
-        logger.warn('Could not stamp base currency on stored invoice', { userId, id: invoiceData._invoiceStoreId, error: err.message });
-      }
-    }
-    return await withRetry(() => submitFn(invoiceBody));
+    logger.warn('Currency not subscribed by the Xero org — invoice refused, not relabelled', { attempted: currencyCode, base: baseCurrency, userId });
+    throw new Error(`Xero org (base ${baseCurrency}) is not subscribed to ${currencyCode} — enable the currency in Xero or change the invoice's currency`);
   }
 }
 
@@ -379,6 +367,7 @@ async function updateDraftInvoice(userId, tenantId, xeroInvoiceId, invoiceData) 
 }
 
 module.exports = {
+  _submitWithCurrencyRetry,
   createDraftInvoice, updateDraftInvoice,
   // Exposed for tests only — internal to the create/update flow above.
   buildLineItems, resolveTaxType, getOrgTaxRates,

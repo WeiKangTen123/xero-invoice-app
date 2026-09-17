@@ -9,13 +9,21 @@
 // converting with it reproduces exactly what Xero's own reports show. It is set
 // only on non-base-currency documents. Payments carry a rate but no code — for
 // those the rate alone decides.
+//
+// Direction: Xero's CurrencyRate is DOCUMENT units per ONE unit of base ("e.g.
+// 0.7500" in its Payments and BankTransactions docs — a USD document in an
+// SGD org carries ~0.74, and Xero's own screens show "1 SGD = 0.74 USD"). The
+// base amount is therefore the document amount divided by the rate. This used
+// to multiply, which put every converted figure out by the square of the
+// rate. No foreign document existed in the org when this was corrected, so
+// the first one that appears should be compared with Xero's base figure.
 function _toBase(doc, amount, baseCurrency = '') {
   const v = Number(amount || 0);
   if (!v || !doc) return v;
   const code = doc.currencyCode ? String(doc.currencyCode) : '';
   if (code && baseCurrency && code === baseCurrency) return v;   // already base
   const rate = Number(doc.currencyRate || 0);
-  if (rate > 0 && rate !== 1) return v * rate;
+  if (rate > 0 && rate !== 1) return v / rate;
   return v;
 }
 

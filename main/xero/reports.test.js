@@ -69,6 +69,16 @@ describe('xero/reports — _buildSummary (pure)', () => {
     expect(invoices[1]).toMatchObject({ type: 'Bill', currency: 'SGD' }); // falls back to org.baseCurrency
   });
 
+  test('KPIs are in the base currency: a USD invoice is converted, and the note says so', () => {
+    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { kpis, currency } = _buildSummary(ORG, [
+      { type: 'ACCREC', status: 'AUTHORISED', amountDue: 74,  total: 74,  currencyCode: 'USD', currencyRate: 0.74, dueDate: future },
+      { type: 'ACCREC', status: 'AUTHORISED', amountDue: 100, total: 100, currencyCode: 'SGD', dueDate: future },
+    ]);
+    expect(kpis.totalReceivables).toBeCloseTo(200, 2);        // 74 USD is 100 SGD
+    expect(currency).toMatchObject({ mixed: true, currencies: ['USD'], baseCurrency: 'SGD', unconvertible: 0 });
+  });
+
   test('unknown contact falls back to "Unknown", not undefined/blank', () => {
     const { invoices } = _buildSummary(ORG, [{ type: 'ACCREC', status: 'AUTHORISED', amountDue: 1, total: 1 }]);
     expect(invoices[0].contact).toBe('Unknown');
@@ -1852,12 +1862,17 @@ describe('_toBase / _foreignCurrency', () => {
     expect(_toBase({ currencyCode: 'SGD' }, 100, 'SGD')).toBe(100);
   });
 
+  // Xero's CurrencyRate is document units per ONE unit of base ("e.g. 0.7500"
+  // in its docs): a USD invoice in an SGD org carries ~0.74, and the base
+  // amount is the document amount DIVIDED by it. The old fixture (1.35, and
+  // multiply) had the convention backwards, so every converted figure was
+  // off by the square of the rate.
   test('a foreign-currency document is converted at its own stamped rate', () => {
-    expect(_toBase({ currencyCode: 'USD', currencyRate: 1.35 }, 100, 'SGD')).toBeCloseTo(135);
+    expect(_toBase({ currencyCode: 'USD', currencyRate: 0.74 }, 100, 'SGD')).toBeCloseTo(135.14, 1);
   });
 
   test('payments carry a rate but no currency code, so the rate alone decides', () => {
-    expect(_toBase({ currencyRate: 1.35 }, 100, 'SGD')).toBeCloseTo(135);
+    expect(_toBase({ currencyRate: 0.74 }, 100, 'SGD')).toBeCloseTo(135.14, 1);
     expect(_toBase({ currencyRate: 1 }, 100, 'SGD')).toBe(100);
     expect(_toBase({}, 100, 'SGD')).toBe(100);
   });
@@ -1890,24 +1905,24 @@ describe('_toBase / _foreignCurrency', () => {
   test('customer revenue ranks customers on converted amounts, not face value', () => {
     const { _buildCustomerRevenue } = require('./reports');
     const r = _buildCustomerRevenue([
-      { contact: { name: 'US Corp' },  total: 1000, currencyCode: 'USD', currencyRate: 1.35 },
+      { contact: { name: 'US Corp' },  total: 1000, currencyCode: 'USD', currencyRate: 0.74 },
       { contact: { name: 'SG Pte' },   total: 1200, currencyCode: 'SGD', currencyRate: 1 },
     ], 'SGD');
-    // 1000 USD = 1350 SGD, so the US customer outranks the 1200 SGD one.
+    // 1000 USD at 0.74 USD per SGD = 1351.35 SGD, so the US customer outranks the 1200 SGD one.
     expect(r.customers[0].name).toBe('US Corp');
-    expect(r.customers[0].invoiced).toBeCloseTo(1350);
-    expect(r.total).toBeCloseTo(2550);
+    expect(r.customers[0].invoiced).toBeCloseTo(1351.35, 1);
+    expect(r.total).toBeCloseTo(2551.35, 1);
     expect(r.currency.currencies).toEqual(['USD']);
   });
 
   test('working capital converts both the total and the amount due', () => {
     const { _buildWorkingCapital } = require('./reports');
     const r = _buildWorkingCapital({
-      invoices: [{ type: 'ACCREC', total: 1000, amountDue: 1000, currencyCode: 'USD', currencyRate: 1.35, dueDate: '2099-01-01' }],
+      invoices: [{ type: 'ACCREC', total: 1000, amountDue: 1000, currencyCode: 'USD', currencyRate: 0.74, dueDate: '2099-01-01' }],
       baseCurrency: 'SGD',
     });
-    expect(r.receivable).toBeCloseTo(1350);
-    expect(r.invoiced).toBeCloseTo(1350);
+    expect(r.receivable).toBeCloseTo(1351.35, 1);
+    expect(r.invoiced).toBeCloseTo(1351.35, 1);
   });
 
   test('hygiene warns when a foreign invoice has no rate to convert with', () => {
@@ -2540,10 +2555,10 @@ describe('_buildSupplierSpend', () => {
   test('ranks on base currency, so a USD supplier is comparable', () => {
     const r = _buildSupplierSpend([
       bill('SG Co', 1200, '2026-05-01'),
-      bill('US Co', 1000, '2026-05-01', { currencyCode: 'USD', currencyRate: 1.35 }),
+      bill('US Co', 1000, '2026-05-01', { currencyCode: 'USD', currencyRate: 0.74 }),
     ], period);
-    expect(r.suppliers[0].name).toBe('US Co');          // 1350 > 1200
-    expect(r.suppliers[0].spend).toBeCloseTo(1350);
+    expect(r.suppliers[0].name).toBe('US Co');          // 1351.35 > 1200
+    expect(r.suppliers[0].spend).toBeCloseTo(1351.35, 1);
     expect(r.currency.currencies).toEqual(['USD']);
   });
 

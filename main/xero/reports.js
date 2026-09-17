@@ -196,18 +196,22 @@ function _buildSummary(org, invoices) {
   const statusBreakdown = { paid: 0, awaiting: 0, overdue: 0 };
   const aging = { receivables: _emptyAging(), payables: _emptyAging() };
 
+  // Totals are in the org's base currency. Each row keeps its own currency
+  // and face amount; the KPIs used to add USD to SGD and label the sum as base.
+  const base = org.baseCurrency || '';
   const list = invoices.map(inv => {
     const isReceivable = inv.type === 'ACCREC';
     const amountDue     = Number(inv.amountDue || 0);
+    const dueBase       = _toBase(inv, amountDue, base);
     const status         = _statusLabel(inv);
     statusBreakdown[status]++;
-    if (status === 'overdue') overdueAmount += amountDue;
+    if (status === 'overdue') overdueAmount += dueBase;
 
     if (inv.status === 'AUTHORISED' && amountDue > 0) {
-      if (isReceivable) { totalReceivables += amountDue; receivablesCount++; }
-      else               { totalPayables    += amountDue; payablesCount++; }
+      if (isReceivable) { totalReceivables += dueBase; receivablesCount++; }
+      else               { totalPayables    += dueBase; payablesCount++; }
       const bucket = aging[isReceivable ? 'receivables' : 'payables'][_agingBucketOf(inv.dueDate)];
-      bucket.count++; bucket.amount += amountDue;
+      bucket.count++; bucket.amount += dueBase;
     }
 
     return {
@@ -237,6 +241,7 @@ function _buildSummary(org, invoices) {
     kpis: { totalReceivables, totalPayables, receivablesCount, payablesCount, overdueAmount, statusBreakdown },
     aging,
     invoices: list,
+    currency: _foreignCurrency(invoices, base),
   };
 }
 
