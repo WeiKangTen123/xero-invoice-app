@@ -18,7 +18,7 @@
 
 **Files:** create `main/utils/base64.js`, `main/utils/base64.test.js`, `main/utils/ids.js`, `main/utils/ids.test.js`; modify `main/utils/users.js` (+ `getUserDefaults`), `main/utils/users.test.js`; replace the copies in `main/routes/receipts.js`, `main/routes/claims.js`, `main/routes/invoices.js`, `main/intake/record.js`, `main/utils/invoice-handler.js`, `main/queue/email-queue.js`, `main/claims/claim-queue.js`, `main/email/parser.js` (`_userDefaults`), `main/xero/invoices.js:119,144,190`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```js
 // main/utils/base64.test.js
@@ -59,9 +59,9 @@ users.test.js:
     }
   });
 ```
-- [ ] **Step 2:** RED (modules missing; function missing).
-- [ ] **Step 3:** `base64.js` = the function from receipts.js (strict regex, data: prefix). `ids.js`: `newId()` = `${Date.now()}${crypto.randomBytes(6).toString('base64url').replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 8).padEnd(8, '0')}`. `users.getUserDefaults(userId)`: reads config (if userId), env, literals `{ currency: 'SGD', accountCode: { claim: '429', bill: '310', invoice: '200' }, zeroTaxRate: 'NONE', timezone: DEFAULT_TIMEZONE }`; one configured/env account code applies to every kind. Replace every copy; `parser._userDefaults` → `{ currency: d.currency, accountCode: d.accountCode.bill }` (ACCREC template path uses `.invoice`), `xero/invoices.js` picks `.bill`/`.invoice` by `invoiceData.invoiceType`; `record.js` currency default → `defaults.currency` (caller passes). Delete the three `decodeBase64` copies and the `_decodeBase64` export; every ``${Date.now()}${Math.random()…}`` → `newId()`.
-- [ ] **Step 4:** `jt.sh main` → PASS. Commit: `refactor: one base64 decoder, one id generator, one place for user defaults`.
+- [x] **Step 2:** RED (modules missing; function missing).
+- [x] **Step 3:** `base64.js` = the function from receipts.js (strict regex, data: prefix). `ids.js`: `newId()` = `${Date.now()}${crypto.randomBytes(6).toString('base64url').replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 8).padEnd(8, '0')}`. `users.getUserDefaults(userId)`: reads config (if userId), env, literals `{ currency: 'SGD', accountCode: { claim: '429', bill: '310', invoice: '200' }, zeroTaxRate: 'NONE', timezone: DEFAULT_TIMEZONE }`; one configured/env account code applies to every kind. Replace every copy; `parser._userDefaults` → `{ currency: d.currency, accountCode: d.accountCode.bill }` (ACCREC template path uses `.invoice`), `xero/invoices.js` picks `.bill`/`.invoice` by `invoiceData.invoiceType`; `record.js` currency default → `defaults.currency` (caller passes). Delete the three `decodeBase64` copies and the `_decodeBase64` export; every ``${Date.now()}${Math.random()…}`` → `newId()`.
+- [x] **Step 4:** `jt.sh main` → PASS. Commit: `refactor: one base64 decoder, one id generator, one place for user defaults`.
 
 ---
 
@@ -69,7 +69,7 @@ users.test.js:
 
 **Files:** `main/intake/document.js` (+ `normaliseLineItem`), `main/intake/intake.test.js`, `main/utils/receipt-parser.js` (use it), `main/email/parser.js` (LLM path uses it; `_withQuantity` goes).
 
-- [ ] **Step 1: Failing test** (intake.test.js)
+- [x] **Step 1: Failing test** (intake.test.js)
 
 ```js
 describe('normaliseLineItem — every vocabulary the readers have used', () => {
@@ -94,8 +94,8 @@ describe('normaliseLineItem — every vocabulary the readers have used', () => {
   });
 });
 ```
-- [ ] **Step 2:** RED. **Step 3:** implement in document.js; `normaliseDocument` maps through it; `receipt-parser.normalise` uses it (keep its 200-char description cap by slicing after); parser.js LLM path `lineItems = (llm.lineItems || []).map(normaliseLineItem).filter(Boolean)`; delete `_withQuantity` and its export (update `parser-quantity.test.js` to test `normaliseLineItem` instead).
-- [ ] **Step 4:** `jt.sh main/intake main/utils/receipt-parser.test.js main/email` → PASS. Commit: `refactor(intake): one line-item normaliser for receipts, bills and templates`.
+- [x] **Step 2:** RED. **Step 3:** implement in document.js; `normaliseDocument` maps through it; `receipt-parser.normalise` uses it (keep its 200-char description cap by slicing after); parser.js LLM path `lineItems = (llm.lineItems || []).map(normaliseLineItem).filter(Boolean)`; delete `_withQuantity` and its export (update `parser-quantity.test.js` to test `normaliseLineItem` instead).
+- [x] **Step 4:** `jt.sh main/intake main/utils/receipt-parser.test.js main/email` → PASS. Commit: `refactor(intake): one line-item normaliser for receipts, bills and templates`.
 
 ---
 
@@ -103,7 +103,7 @@ describe('normaliseLineItem — every vocabulary the readers have used', () => {
 
 **Files:** create `main/claims/claim-record.js`; modify `main/routes/receipts.js` (storeReceipt, both sibling loops, `_applyFields`, reread), `main/routes/claims.js` (createClaimRecord moves; route keeps `_createClaimRecord` re-export for one release), `main/claims/claim-worker.js:38` (require `../claims/claim-record`), tests `main/routes/receipts.test.js`, `main/routes/claims.test.js`.
 
-- [ ] **Step 1: Failing tests** (receipts.test.js, in "one upload, several records › a photo of two receipts"):
+- [x] **Step 1: Failing tests** (receipts.test.js, in "one upload, several records › a photo of two receipts"):
 
 ```js
     test('a split sibling is a complete claim: same source, a default currency and account, its own number, a received time', async () => {
@@ -122,8 +122,8 @@ describe('normaliseLineItem — every vocabulary the readers have used', () => {
     });
 ```
 claims.test.js: `test('claim numbers are unique across imports and claimants', …)` — two `_createClaimRecord` calls with `row.no: '1'` and different `groupId` → different `invoiceNumber`s.
-- [ ] **Step 2:** RED. **Step 3:** `claim-record.js` exports `newClaimRow({ userId, id, source, groupId, receipt, row, extras })` (one shape: status from `profileFor('EXPENSE')`, `EXP-${groupId ? groupId.slice(-4) + '-' : ''}${row?.no || id.slice(-6).toUpperCase()}`, defaults from `getUserDefaults`, description composition from createClaimRecord, `receivedAt`), `claimPatch(receipt)` (the `?? undefined` shape incl. `accountCode` when resolved), and `createClaimRecord` (moved verbatim, using `newClaimRow`). receipts.js uses `newClaimRow` for the first row and both sibling loops (siblings inherit `source`), `claimPatch` in `_applyFields` and reread (reread now also resolves the account). claim-worker requires `../claims/claim-record`.
-- [ ] **Step 4:** `jt.sh main/routes/receipts.test.js main/routes/claims.test.js main/claims` → PASS. Commit: `refactor(claims): one builder for every claim record — siblings stop losing source, currency, account and number`.
+- [x] **Step 2:** RED. **Step 3:** `claim-record.js` exports `newClaimRow({ userId, id, source, groupId, receipt, row, extras })` (one shape: status from `profileFor('EXPENSE')`, `EXP-${groupId ? groupId.slice(-4) + '-' : ''}${row?.no || id.slice(-6).toUpperCase()}`, defaults from `getUserDefaults`, description composition from createClaimRecord, `receivedAt`), `claimPatch(receipt)` (the `?? undefined` shape incl. `accountCode` when resolved), and `createClaimRecord` (moved verbatim, using `newClaimRow`). receipts.js uses `newClaimRow` for the first row and both sibling loops (siblings inherit `source`), `claimPatch` in `_applyFields` and reread (reread now also resolves the account). claim-worker requires `../claims/claim-record`.
+- [x] **Step 4:** `jt.sh main/routes/receipts.test.js main/routes/claims.test.js main/claims` → PASS. Commit: `refactor(claims): one builder for every claim record — siblings stop losing source, currency, account and number`.
 
 ---
 
@@ -131,8 +131,8 @@ claims.test.js: `test('claim numbers are unique across imports and claimants', �
 
 **Files:** `main/routes/xero-reports.js`, `main/xero/reports.js` (delete `_buildPeriod`, `_getPeriodRaw`, `getPeriod`, `_flattenReportRows`, `_findRow`, `_buildProfitAndLoss`, `_getProfitAndLossRaw`, `getProfitAndLoss`; keep `_parseReportNumber` for bank summary; drop the four unused periods imports), `main/xero/periods.js` (delete `computeRange`, `RANGE_PRESETS`, `ALL_TIME_START`), `main/routes/dashboard.js` (delete the tenants route), `main/routes/setup.js` (`/status`), `main/routes/receipts.js` (`DELETE /:id`), `main/routes/admin.js` (`PATCH /users/:id`), tests: `main/routes/xero-reports.test.js` (period/profit-loss/bank-summary blocks), `main/xero/reports.test.js` (computeRange/_buildPeriod/_buildProfitAndLoss/_flattenReportRows blocks), `main/routes/receipts.test.js` (DELETE /:id block), README rows.
 
-- [ ] **Step 1: Failing test** (xero-reports.test.js): `test('the removed report routes are gone', …)` → `GET /api/xero-reports/period|profit-loss|bank-summary` → 404 (with the JSON 404 the router does not have, expect 404 status). And `test('every report handler answers the same envelope', …)` hits `/accounts`, `/bank-accounts`, `/contacts` and expects `{ connected: true, tenants, activeTenantId }` keys.
-- [ ] **Step 2:** RED (routes exist → 200/400). **Step 3:** factory:
+- [x] **Step 1: Failing test** (xero-reports.test.js): `test('the removed report routes are gone', …)` → `GET /api/xero-reports/period|profit-loss|bank-summary` → 404 (with the JSON 404 the router does not have, expect 404 status). And `test('every report handler answers the same envelope', …)` hits `/accounts`, `/bank-accounts`, `/contacts` and expects `{ connected: true, tenants, activeTenantId }` keys.
+- [x] **Step 2:** RED (routes exist → 200/400). **Step 3:** factory:
 
 ```js
 // One shape for every report route: resolve the tenant, answer connected:false
@@ -154,7 +154,7 @@ function report(label, fetch, { scopeAware = true, needs = [] } = {}) {
 }
 ```
 and each of summary, accounts, bank-accounts, contacts, bank-transactions (`needs: ['accountId']`), budget-variance, performance, cash-flow becomes `router.get('/x', requireAuth, report('X', (req, tenantId) => reports.getX(req.user.id, tenantId, {...})))`. `/variance-insights` and `/narrative` keep their own shapes (no tenants in the envelope; narrative never 500s).
-- [ ] **Step 4:** `jt.sh main/routes/xero-reports.test.js main/xero main/routes/receipts.test.js main/routes/admin.test.js main/scripts` → PASS. Commit: `refactor(reports): one handler shape; three unreachable report routes and their engine removed`.
+- [x] **Step 4:** `jt.sh main/routes/xero-reports.test.js main/xero main/routes/receipts.test.js main/routes/admin.test.js main/scripts` → PASS. Commit: `refactor(reports): one handler shape; three unreachable report routes and their engine removed`.
 
 ---
 
@@ -162,7 +162,7 @@ and each of summary, accounts, bank-accounts, contacts, bank-transactions (`need
 
 **Files:** `main/utils/invoice-store.js` (delete `COLUMNS`, `getReported`, dead exports; add `vendorPhone`, `projectName`, `updatedAt` to the record), `main/db/schema.sql` (receipt columns + the two new columns), `main/db/migrate.js` (`user_version` runner; fold the plaintext-encrypt step in), delete `main/db/migrate-from-json.js`, `migrate-invoices-v2.js`, `migrate-encrypt-secrets.js`, `migrate-gemini-keys.js`; `main/email/parser.js` (drop `emailBodyText`); `main/utils/invoice-handler.js` (auto-post submits the stored row); tests: `main/db/migrate.test.js` (new), `main/utils/invoice-store.test.js` (round-trip picks the new fields up automatically).
 
-- [ ] **Step 1: Failing test** (migrate.test.js):
+- [x] **Step 1: Failing test** (migrate.test.js):
 
 ```js
 const db = require('./index');
@@ -183,8 +183,8 @@ test('a plaintext credential left from before encryption is encrypted on boot', 
   expect(users.getUserConfig(u.id).IMAP_PASS).toBe('legacy-plain');
 });
 ```
-- [ ] **Step 2:** RED. **Step 3:** as described; `_step(n, fn)` runs `fn` when `user_version < n` then sets it; steps: 1 receipt_hash backfill, 2 autoprocess default rebuild, 3 encrypt plaintext credentials, 4 drop provider columns; `_ensureColumn` calls stay unconditional (cheap). Parser: remove `emailBodyText`; keep `vendorPhone`/`projectName` and persist them; handler's `scheduleXeroSubmit` receives `{ ...invStore.getById(id), _invoiceStoreId: id }`.
-- [ ] **Step 4:** `jt.sh main/db main/utils main/email main/routes` → PASS. Commit: `refactor(db): versioned one-off migrations; dead store code out; phone and project persisted; both submit paths send the stored row`.
+- [x] **Step 2:** RED. **Step 3:** as described; `_step(n, fn)` runs `fn` when `user_version < n` then sets it; steps: 1 receipt_hash backfill, 2 autoprocess default rebuild, 3 encrypt plaintext credentials, 4 drop provider columns; `_ensureColumn` calls stay unconditional (cheap). Parser: remove `emailBodyText`; keep `vendorPhone`/`projectName` and persist them; handler's `scheduleXeroSubmit` receives `{ ...invStore.getById(id), _invoiceStoreId: id }`.
+- [x] **Step 4:** `jt.sh main/db main/utils main/email main/routes` → PASS. Commit: `refactor(db): versioned one-off migrations; dead store code out; phone and project persisted; both submit paths send the stored row`.
 
 ---
 
@@ -192,11 +192,11 @@ test('a plaintext credential left from before encryption is encrypted on boot', 
 
 **Files:** delete `unused/`, `testing/`, `prototype/`, `Procfile`, `railway.json`, `nodemon.json`; `git mv documentation docs/archive/postgres-era` + `docs/archive/README.md` banner; `eslint.config.js` ignores; `npm uninstall express-session pg pino pino-pretty`; `README.md` sections: Deployment (→ `npm run deploy`, runbook), Data isolation/storage (SQLite), LLM (Gemini keys), Claim API rows, File structure, API tables (drop removed routes; add compose/import/llm-keys/monitoring/export), Security (registration), Troubleshooting pointer.
 
-- [ ] **Step 1:** `main/scripts/lint.test.js` still passes after the ignore change; `main/scripts/ui-api-paths.test.js` passes.
-- [ ] **Step 2:** Commit: `chore(repo): Postgres/Railway-era folders and configs removed, four unused dependencies dropped, README matches the code`.
+- [x] **Step 1:** `main/scripts/lint.test.js` still passes after the ignore change; `main/scripts/ui-api-paths.test.js` passes.
+- [x] **Step 2:** Commit: `chore(repo): Postgres/Railway-era folders and configs removed, four unused dependencies dropped, README matches the code`.
 
 ---
 
 ### Finish
 
-- [ ] `npm test`, `npm run build:ui`, push, `npm run deploy`.
+- [x] `npm test`, `npm run build:ui`, push, `npm run deploy`.

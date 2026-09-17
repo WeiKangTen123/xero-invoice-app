@@ -129,10 +129,8 @@ Each user fills in their own:
 - Click **Test IMAP** to verify
 
 **LLM (invoice parser)**
-- `Gemini_API_KEY` — recommended (free tier: 15 RPM, 500 RPD)
-- `Nvidia_API_KEY` — fallback if Gemini not set
-- `OPENROUTER_API_KEY` — second fallback
-- Priority: Gemini → Nvidia → OpenRouter
+- Add one or more Gemini API keys (free tier: 15 RPM, 500 RPD each)
+- Keys are rotated: every model is tried on one key before the next key is used, so a second key is real extra quota
 
 **Defaults**
 - `DEFAULT_ACCOUNT_CODE` — your Xero chart-of-accounts code (e.g. `310`)
@@ -581,8 +579,8 @@ Also verify the Xero org is added under Connection Management on developer.xero.
 **No invoices appearing** — Check that `IMAP_FILTER_FROM` is not set too restrictively.  
 Also confirm the email contains a PDF attachment or structured template format.
 
-**LLM quota exceeded** — Gemini free tier allows 500 RPD. If you process many emails per day,  
-add a paid Gemini key or configure a Nvidia/OpenRouter fallback key in Setup.
+**LLM quota exceeded** — Gemini free tier allows 500 RPD per key. If you process many emails per day,  
+add a second Gemini key (or a paid one) in Setup; keys are rotated automatically.
 
 **Wrong account code** — Get valid codes from Xero → Accounting → Chart of Accounts.  
 Set `DEFAULT_ACCOUNT_CODE` to a code that exists in your Xero org.
