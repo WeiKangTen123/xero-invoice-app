@@ -220,6 +220,20 @@ describe('routes/claims', () => {
     });
   });
 
+  describe('claim numbers', () => {
+    test('are unique across imports and claimants, not "EXP-1" for every first line', async () => {
+      const make = groupId => require('./claims')._createClaimRecord({
+        userId: testUser.id, groupId,
+        row: { no: '1', description: 'Taxi', amount: 12, currency: 'SGD', date: '2026-09-01' },
+        receipt: null, match: null, category: null, store: async () => null,
+      });
+      const a = await make('import-aaaa1111');
+      const b = await make('import-bbbb2222');
+      expect(a.invoiceNumber).toMatch(/^EXP-/);
+      expect(a.invoiceNumber).not.toBe(b.invoiceNumber);
+    });
+  });
+
   describe('account from category', () => {
     test("the form's own heading loses to the reader's category when only the latter matches the chart", async () => {
       // A spreadsheet column heading ("LOCAL TRAVEL COST") leads the

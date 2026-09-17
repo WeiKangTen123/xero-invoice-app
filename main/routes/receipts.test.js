@@ -777,6 +777,27 @@ describe('routes/receipts — one upload, several records', () => {
     });
   });
 
+  describe('a split sibling is a complete claim', () => {
+    test('same source as the upload, a default currency and account, its own number, a received time', async () => {
+      // Siblings were hand-assembled with source 'upload' even for a phone
+      // capture, no currency, no account (Xero then fell to the sales
+      // account), no number and no received time.
+      parser.parseReceiptImage.mockResolvedValue({ split: true, receipts: TWO });
+      const { body } = await request(server).post('/api/receipts').set('Authorization', auth()).send({ mime: 'image/jpeg', data: jpeg(), source: 'phone' }).expect(201);
+      await settle();
+      const rows = invoiceStore.forUser(testUser.id).getReceiptGroup(body.receipt.id);
+      expect(rows).toHaveLength(2);
+      for (const r of rows) {
+        expect(r.source).toBe('phone');
+        expect(r.currency).toBeTruthy();
+        expect(r.accountCode).toBeTruthy();
+        expect(r.invoiceNumber).toMatch(/^EXP-/);
+        expect(r.receivedAt).toBeTruthy();
+      }
+      expect(new Set(rows.map(r => r.invoiceNumber)).size).toBe(2);
+    });
+  });
+
   describe('a PDF with a receipt on each page', () => {
     test('becomes one record per page, sharing the file', async () => {
       jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['a'.repeat(80), 'b'.repeat(80), 'c'.repeat(80)], numPages: 3, hasText: true, textPageCount: 3 });

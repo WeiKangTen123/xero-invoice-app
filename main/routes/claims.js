@@ -1,5 +1,4 @@
 const express      = require('express');
-const { newId } = require('../utils/ids');
 const router       = express.Router();
 const { decodeBase64 } = require('../utils/base64');
 const { requireAuth } = require('../middleware/auth-middleware');
@@ -10,8 +9,6 @@ const claimQueue   = require('../claims/claim-queue');
 const claimWorker  = require('../claims/claim-worker');
 const { parseReceiptBatch } = require('../utils/receipt-parser');
 const { suggestCategories } = require('../claims/claim-categories');
-const { hashBuffer, findDuplicate } = require('../claims/claim-dedup');
-const { resolveAccountCode } = require('../claims/category-account');
 const logger       = require('../utils/logger');
 
 // Importing a batch expense claim: a zip of receipts plus the claim form.
@@ -40,126 +37,9 @@ const logger       = require('../utils/logger');
 const MAX_UPLOAD_BYTES = 7 * 1024 * 1024;
 
 
-// Turns one matched claim line into a local record. Injected into the job so the
-// job itself stays testable without a database.
-//
-// Dedup happens HERE rather than earlier because it needs the finished figures —
-// the claimant's amount and date, not the model's guess — and because doing it
-// one record at a time means a repeat inside a single archive is caught too: the
-// first row is committed before the second is checked.
-async function createClaimRecord({ userId, groupId, row, receipt, match, category, categorySuggested, store }) {
-  const id = newId();
-  const invStore = invoiceStore.forUser(userId);
-
-  const hash = receipt && receipt.buffer ? hashBuffer(receipt.buffer) : null;
-  const dup = findDuplicate({
-    store: invStore,
-    hash,
-    vendorName: (receipt && receipt.merchant) || null,
-    // The claim line's own date and amount, falling back to the receipt for a
-    // loose receipt with no line.
-    date:   row.date ?? (receipt && receipt.date) ?? null,
-    amount: row.amount ?? (receipt && receipt.total) ?? null,
-  });
-
-  let storedName = null;
-  let mime = null;
-
-  if (dup && dup.certain) {
-    // Byte-identical to something already held, so writing the file again would
-    // put a second identical copy on disk for no gain. Point at the original's
-    // file instead; countByReceiptFile already refuses to delete a file another
-    // row still references, so neither record can orphan the other's image.
-    storedName = dup.match.receiptFile || null;
-    mime = dup.match.receiptMime || (receipt && receipt.mime) || null;
-  } else if (receipt && receipt.buffer) {
-    try {
-      mime = receipt.mime;
-      storedName = await store(userId, id, receipt.buffer, receipt.mime);
-    } catch (err) {
-      // A receipt that will not store is not a reason to lose the claim line.
-      logger.warn('Claim receipt could not be stored', { userId, id, error: err.message });
-    }
-  }
-
-  // A discrepancy is recorded on the row so it survives the job expiring. A
-  // suspected duplicate is recorded the same way, and takes precedence: it is
-  // the more urgent of the two things to look at.
-  const matchRef = dup ? (dup.match.invoiceNumber || dup.match.id) : null;
-  const note =
-    dup && !dup.certain
-      ? `Possible duplicate of ${matchRef} — ${dup.reason}. Check before approving.`
-    : dup
-      ? `Duplicate of ${matchRef} — ${dup.reason}`
-    : match && match.discrepancy
-      ? `Claimed ${match.discrepancy.claimed} but the receipt says ${match.discrepancy.onReceipt}`
-      // A receipt with no claim line is not an error — it is simply a claim that
-      // arrived without a form. Only a line MISSING its receipt is a problem.
-      : (!receipt && row.no ? 'No receipt found for this claim line' : null);
-
-  const defaults = require('../utils/users').getUserDefaults(userId);
-  const defaultCurrency = defaults.currency;
-  const defaultAccount  = defaults.accountCode.claim;
-  // The account follows what the claim was for, matched against the org's own
-  // chart (claims/category-account). The form's heading leads the description,
-  // but the chart may only know the reader's wording ("Local Travel" against a
-  // column called "LOCAL TRAVEL COST"), so both are tried. No match, or no
-  // connected org, and the default stands.
-  const cat = category || (receipt && receipt.category) || null;
-  const alt = receipt && receipt.category && receipt.category !== cat ? receipt.category : null;
-  const accountCode = (await resolveAccountCode(userId, cat))
-    || (alt ? await resolveAccountCode(userId, alt) : null)
-    || defaultAccount;
-  const invDate = row.date || (receipt && receipt.date) || new Date().toISOString().split('T')[0];
-  const claimNum = (receipt && receipt.receiptNumber) || (row.no ? `EXP-${row.no}` : `EXP-${id.slice(-6).toUpperCase()}`);
-
-  return invStore.add({
-    id,
-    // Exact image match is auto-marked 'duplicate'. Field match stays 'review-needed'
-    // with duplicateOf linked so the reviewer can see and settle it.
-    status: dup && dup.certain ? 'duplicate' : 'review-needed',
-    duplicateOf: dup ? dup.match.id : null,
-    invoiceType: 'EXPENSE',
-    source: 'claim',
-    invoiceNumber: claimNum,
-    invoiceDate: invDate,
-    dueDate: invDate,
-    accountCode,
-    // The claimant's own figures are what is recorded. The receipt read is
-    // evidence, and a disagreement is reported rather than silently preferred.
-    vendorName:  (receipt && receipt.merchant) || null,
-    currency:    row.currency || (receipt && receipt.currency) || defaultCurrency,
-    totalAmount: row.amount ?? (receipt && receipt.total) ?? null,
-    subTotal:    receipt && receipt.subTotal != null ? receipt.subTotal : null,
-    taxAmount:   receipt && receipt.tax != null ? receipt.tax : null,
-    lineItems:   (receipt && Array.isArray(receipt.lineItems) && receipt.lineItems.length) ? receipt.lineItems : [],
-    description: (() => {
-      if (receipt && receipt.description && (!row.description || row.description === receipt.merchant)) {
-        return receipt.description;
-      }
-      if (row.description) {
-        const parts = [];
-        if (cat && !row.description.startsWith('[')) parts.push(`[${cat}]`);
-        parts.push(row.description);
-        if (receipt && receipt.time && !row.description.includes(receipt.time)) parts.push(`(${receipt.time})`);
-        return parts.join(' ').slice(0, 250);
-      }
-      if (receipt && receipt.merchant) {
-        const catPrefix = cat ? `[${cat}] ` : '';
-        const timeSuffix = receipt.time ? ` (${receipt.time})` : '';
-        return `${catPrefix}Expense claim @ ${receipt.merchant}${timeSuffix}`.slice(0, 250);
-      }
-      return cat ? `[${cat}] Expense claim` : null;
-    })(),
-    receiptFile: storedName,
-    receiptMime: mime,
-    receiptHash: hash,
-    receiptGroup: groupId,
-    processedAt: new Date().toISOString(),
-    receivedAt:  new Date().toISOString(),
-    errorMsg: note,
-  });
-}
+// The claim record itself is built in claims/claim-record.js, one builder
+// for every path; the import job receives it as a dependency.
+const { createClaimRecord } = require('../claims/claim-record');
 
 // POST /api/claims/import  { archives: [{name,data}], forms: [{name,data}], label }
 router.post('/import', requireAuth, async (req, res) => {

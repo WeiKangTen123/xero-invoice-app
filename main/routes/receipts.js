@@ -15,7 +15,7 @@ const { parseReceiptImage } = require('../utils/receipt-parser');
 const pdfPages = require('../utils/pdf-pages');
 const thumbnailer = require('../utils/thumbnailer');
 const { hashBuffer, findDuplicate } = require('../claims/claim-dedup');
-const { resolveAccountCode } = require('../claims/category-account');
+const { newClaimRow, claimPatch, accountFor } = require('../claims/claim-record');
 const QRCode       = require('qrcode');
 const logger       = require('../utils/logger');
 
@@ -98,28 +98,17 @@ function storeReceipt(userId, { mime, data, filename, source }) {
   // pointing at an image that was never saved.
   const storedName = receiptStore.forUser(userId).save(id, buffer, mime);
 
-  const defaults = require('../utils/users').getUserDefaults(userId);
-  const defaultCurrency = defaults.currency;
-  const defaultAccount  = defaults.accountCode.claim;
-  const today = new Date().toISOString().split('T')[0];
-
-  const record = invoiceStore.forUser(userId).add({
-    id,
-    status:        'review-needed',   // nothing is known until it is read or typed
-    invoiceType:   'EXPENSE',
-    source:        source === 'phone' ? 'phone' : 'upload',
-    invoiceNumber: `EXP-${id.slice(-6).toUpperCase()}`,
-    invoiceDate:   today,
-    dueDate:       today,
-    currency:      defaultCurrency,
-    accountCode:   defaultAccount,
-    receiptFile:   storedName,
-    receiptMime:   mime,
-    receiptHash:   hash,
-    description:   filename ? String(filename).slice(0, 200) : null,
-    processedAt:   new Date().toISOString(),
-    receivedAt:    new Date().toISOString(),   // an upload arrives when it is uploaded
-  });
+  // Nothing is known until it is read or typed; the row starts at review-needed
+  // with the user's defaults, and the read fills it in (claims/claim-record.js).
+  const record = invoiceStore.forUser(userId).add(newClaimRow({
+    userId, id, source: source === 'phone' ? 'phone' : 'upload',
+    extras: {
+      receiptFile: storedName,
+      receiptMime: mime,
+      receiptHash: hash,
+      description: filename ? String(filename).slice(0, 200) : null,
+    },
+  }));
 
   logger.info('Receipt stored', { userId, id, bytes: buffer.length, mime, source: source || 'upload' });
 
@@ -179,20 +168,8 @@ function _flagIfSuspected(userId, id) {
 // reader already names a category and the org's chart of accounts already
 // names its accounts, so the two are matched. No match keeps the default.
 async function _applyFields(userId, id, r, extra = {}) {
-  const accountCode = r.category ? (await resolveAccountCode(userId, r.category)) || undefined : undefined;
-  invoiceStore.forUser(userId).update(id, {
-    accountCode,
-    vendorName:  r.merchant    ?? undefined,
-    invoiceDate: r.date        ?? undefined,
-    dueDate:     r.date        ?? undefined,
-    currency:    r.currency    ?? undefined,
-    totalAmount: r.total       ?? undefined,
-    taxAmount:   r.tax         ?? undefined,
-    subTotal:    r.subTotal    ?? undefined,
-    description: r.description ?? undefined,
-    lineItems:   Array.isArray(r.lineItems) && r.lineItems.length ? r.lineItems : undefined,
-    ...extra,
-  });
+  const accountCode = (await accountFor(userId, null, r)) || undefined;
+  invoiceStore.forUser(userId).update(id, claimPatch(r, { accountCode, ...extra }));
 }
 
 // Reads an upload and, when the evidence is unambiguous, turns one upload into
@@ -221,24 +198,16 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = nu
       return;
     }
 
-    const group = id;
+    const group  = id;
+    const parent = store.getById(id);
     const [first, ...rest] = decision.pageNumbers;
     store.update(id, { receiptPage: first, receiptGroup: group });
     for (const page of rest) {
-      const sibId = newId();
-      store.add({
-        id: sibId,
-        status: 'review-needed',
-        invoiceType: 'EXPENSE',
-        source: 'upload',
-        receiptFile: storedName,      // the SAME file
-        receiptMime: mime,
-        receiptHash: hash,            // ...so the same bytes, and the same hash
-        receiptPage: page,
-        receiptGroup: group,
-        processedAt: new Date().toISOString(),
-        receivedAt:  new Date().toISOString(),
-      });
+      // A sibling is a complete claim of the same source as the upload,
+      // pointing at the SAME file — the same bytes, so the same hash.
+      store.add(newClaimRow({ userId, source: parent.source, groupId: group, extras: {
+        receiptFile: storedName, receiptMime: mime, receiptHash: hash, receiptPage: page,
+      } }));
     }
     logger.info('PDF split by page', { userId, id, pages: decision.pageNumbers.length });
     return;
@@ -259,26 +228,19 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = nu
     return;
   }
 
-  const group = id;
+  const group  = id;
+  const parent = store.getById(id);
   const [first, ...rest] = receipts;
   await _applyFields(userId, id, first, { receiptBox: JSON.stringify(first.box), receiptGroup: group });
   _flagIfSuspected(userId, id);
   for (const r of rest) {
-    const sibId = newId();
-    store.add({
-      id: sibId,
-      status: 'review-needed',
-      invoiceType: 'EXPENSE',
-      source: 'upload',
-      receiptFile: storedName,        // the SAME file
-      receiptMime: mime,
-      receiptHash: hash,              // ...so the same bytes, and the same hash
-      receiptBox: JSON.stringify(r.box),
-      receiptGroup: group,
-      processedAt: new Date().toISOString(),
-    });
-    await _applyFields(userId, sibId, r);
-    _flagIfSuspected(userId, sibId);
+    // A sibling is a complete claim of the same source as the upload,
+    // pointing at the SAME file — the same bytes, so the same hash.
+    const sib = store.add(newClaimRow({ userId, source: parent.source, groupId: group, extras: {
+      receiptFile: storedName, receiptMime: mime, receiptHash: hash, receiptBox: JSON.stringify(r.box),
+    } }));
+    await _applyFields(userId, sib.id, r);
+    _flagIfSuspected(userId, sib.id);
   }
   logger.info('Photo split into separate receipts', { userId, id, count: receipts.length });
 }
@@ -554,17 +516,10 @@ router.post('/:id/reread', requireAuth, async (req, res) => {
       }
     }
 
-    const updated = store.update(req.params.id, {
-      vendorName:  chosen.merchant    ?? undefined,
-      invoiceDate: chosen.date        ?? undefined,
-      dueDate:     chosen.date        ?? undefined,
-      currency:    chosen.currency    ?? undefined,
-      totalAmount: chosen.total       ?? undefined,
-      taxAmount:   chosen.tax         ?? undefined,
-      subTotal:    chosen.subTotal    ?? undefined,
-      description: chosen.description ?? undefined,
-      lineItems:   Array.isArray(chosen.lineItems) && chosen.lineItems.length ? chosen.lineItems : undefined,
-    });
+    // The same patch a first read applies — including the account, which a
+    // re-read that finally makes out a category used to leave unchanged.
+    const accountCode = (await accountFor(req.user.id, null, chosen)) || undefined;
+    const updated = store.update(req.params.id, claimPatch(chosen, { accountCode }));
 
     logger.info('Receipt re-read', { userId: req.user.id, id: req.params.id, confidence: chosen.confidence, found: parsed.receipts.length });
     res.json({ ok: true, receipt: updated, confidence: chosen.confidence, found: parsed.receipts.length });

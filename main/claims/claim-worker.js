@@ -35,11 +35,11 @@ function _handlerFor(job) {
 
 registerJobType('claim-import', {
   defaultDeps(userId) {
-    const claimsRoute = require('../routes/claims');
+    const { createClaimRecord } = require('./claim-record');
     return {
       parseReceipts: (uid, images) => parseReceiptBatch(uid, images),
       storeReceipt: (uid, id, buffer, mime) => receiptStore.forUser(uid).save(id, buffer, mime),
-      createRecord: (params) => claimsRoute._createClaimRecord(params),
+      createRecord: (params) => createClaimRecord(params),
       suggest: (uid, matches, categories) => suggestCategories(uid, matches, categories),
     };
   },
