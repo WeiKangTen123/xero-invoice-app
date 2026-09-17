@@ -1,3 +1,6 @@
+import { StatusBadge } from './Badges';
+import { typeMeta } from '../utils/badges';
+
 export default function InvoiceTable({ invoices }) {
   if (!invoices?.length) {
     return (
@@ -7,12 +10,6 @@ export default function InvoiceTable({ invoices }) {
         <div style={{ fontSize: 13 }}>Processed invoices will appear here once the watcher is running</div>
       </div>
     );
-  }
-
-  function typeInfo(type) {
-    if (type === 'ACCPAY') return { label: 'Bill',    cls: 'badge-blue' };
-    if (type === 'ACCREC') return { label: 'Invoice', cls: 'badge-purple' };
-    return { label: type || '—', cls: 'badge-gray' };
   }
 
   return (
@@ -31,7 +28,7 @@ export default function InvoiceTable({ invoices }) {
         </thead>
         <tbody>
           {invoices.map((inv, i) => {
-            const { label, cls } = typeInfo(inv.invoiceType);
+            const { label, cls } = typeMeta(inv.invoiceType);
             return (
               <tr key={inv.id} style={{ animation: `fadeUp 0.2s ease ${i * 0.03}s both` }}>
                 <td>
@@ -64,11 +61,7 @@ export default function InvoiceTable({ invoices }) {
                 <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                   {inv.processedAt ? new Date(inv.processedAt).toLocaleString() : '—'}
                 </td>
-                <td>
-                  <span className={`badge ${inv.status === 'created' ? 'badge-green' : 'badge-gray'}`}>
-                    {inv.status === 'created' ? '✓ Created' : inv.status || '—'}
-                  </span>
-                </td>
+                <td><StatusBadge status={inv.status} /></td>
               </tr>
             );
           })}

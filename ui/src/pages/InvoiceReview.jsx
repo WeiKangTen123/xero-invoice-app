@@ -4,6 +4,8 @@ import { api } from '../api/client';
 import CroppedImage from '../components/receipts/CroppedImage';
 import AccountCodeSelect, { useAccountName } from '../components/AccountCodeSelect';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
+import { StatusBadge } from '../components/Badges';
+import { TYPE_META, typeMeta } from '../utils/badges';
 import { useViewMode } from '../context/ViewModeContext';
 
 // Statuses that allow the user to trigger a Xero submission.
@@ -123,18 +125,7 @@ function MiniField({ label, value, mono }) {
 
 // ── Status pill ───────────────────────────────────────────────────────────────
 function StatusPill({ status }) {
-  const map = {
-    pending:        { cls: 'badge-yellow', label: '⏳ Pending Review' },
-    submitting:     { cls: 'badge-blue',   label: '⟳ Submitting to Xero…' },
-    reviewed:       { cls: 'badge-blue',   label: '✓ Reviewed' },
-    posted:         { cls: 'badge-green',  label: '✓ Posted to Xero' },
-    reported:       { cls: 'badge-red',    label: '⚠ Issue Reported' },
-    error:          { cls: 'badge-red',    label: '✕ Submission Error' },
-    duplicate:      { cls: 'badge-gray',   label: 'Duplicate' },
-    'review-needed': { cls: 'badge-yellow', label: '⚠ Needs Review' },
-  };
-  const { cls, label } = map[status] || { cls: 'badge-gray', label: status };
-  return <span className={`badge ${cls}`} style={{ fontSize: 12, padding: '4px 12px' }}>{label}</span>;
+  return <StatusBadge status={status} long style={{ fontSize: 12, padding: '4px 12px' }} />;
 }
 
 // ── Spinner ───────────────────────────────────────────────────────────────────
@@ -523,7 +514,7 @@ function InvoiceReviewPage() {
   }
 
   const isExpense  = inv.invoiceType === 'EXPENSE' || !!inv.receiptFile;
-  const typeLabel  = isExpense ? 'Expense Claim' : (inv.invoiceType === 'ACCPAY' ? 'Bill (ACCPAY)' : 'Invoice (ACCREC)');
+  const typeLabel  = isExpense ? TYPE_META.EXPENSE.long : typeMeta(inv.invoiceType).long;
   const canSubmit  = SUBMITTABLE.has(inv.status) && !submitOk && !editing;
   const canReview  = MARKABLE.has(inv.status) && !editing;
   const canEdit    = SUBMITTABLE.has(inv.status); // same set the backend allows PATCH /:id for

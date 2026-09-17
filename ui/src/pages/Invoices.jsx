@@ -6,6 +6,8 @@ import BillIntake from '../components/bills/BillIntake';
 import InvoiceIntake from '../components/invoices/InvoiceIntake';
 import ClaimImport from '../components/receipts/ClaimImport';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
+import { TypeBadge } from '../components/Badges';
+import { statusMeta, ATTENTION_STATUSES } from '../utils/badges';
 import { useViewMode } from '../context/ViewModeContext';
 
 // The three kinds of document this page holds, in the order they are shown.
@@ -38,18 +40,6 @@ const TABS = [
 const DEFAULT_TAB = 'ap';
 const tabByKey = key => TABS.find(t => t.key === key) || TABS.find(t => t.key === DEFAULT_TAB);
 
-// reviewed is blue (not yet in Xero), posted is green (done).
-// Keeping them visually distinct prevents the "I clicked Reviewed and it looked
-// the same as Posted" confusion.
-const STATUS_MAP = {
-  pending:        { cls: 'badge-yellow', label: 'Pending' },
-  posted:         { cls: 'badge-green',  label: '✓ Posted' },
-  reviewed:       { cls: 'badge-blue',   label: '● Ready to Post' },
-  reported:       { cls: 'badge-red',    label: '⚠ Reported' },
-  error:          { cls: 'badge-red',    label: '✕ Error' },
-  duplicate:      { cls: 'badge-purple', label: '⚠ Duplicate' },
-  'review-needed': { cls: 'badge-yellow', label: '⚠ Needs Review' },
-};
 
 // "Received" is when the document entered THIS system — the moment an email was
 // parsed or a receipt was photographed. Distinct from the date printed on the
@@ -125,12 +115,6 @@ function scannedNote(rows) {
   return `${late.length} scanned ${word}`;
 }
 
-function TypeBadge({ type }) {
-  if (type === 'ACCPAY') return <span className="badge badge-blue">Bill</span>;
-  if (type === 'ACCREC') return <span className="badge badge-purple">Invoice</span>;
-  if (type === 'EXPENSE') return <span className="badge badge-yellow">Expense Claim</span>;
-  return <span className="badge badge-gray">{type || '—'}</span>;
-}
 
 export default function Invoices() {
   const { isMobile } = useViewMode();
@@ -321,7 +305,7 @@ export default function Invoices() {
   // 'needs-action' is a virtual filter covering review-needed + error
   const filtered = tabRows.filter(inv => {
     if (statusFilter === 'needs-action') {
-      if (!['review-needed', 'error'].includes(inv.status)) return false;
+      if (!ATTENTION_STATUSES.includes(inv.status)) return false;
     } else if (statusFilter === 'duplicate') {
       if (inv.status !== 'duplicate' && !inv.duplicateOf && !(inv.errorMsg && /duplicate/i.test(inv.errorMsg))) return false;
     } else if (statusFilter !== 'all' && inv.status !== statusFilter) {
@@ -406,7 +390,7 @@ export default function Invoices() {
   const posted      = tabRows.filter(i => i.status === 'posted').length;
   const reviewed    = tabRows.filter(i => i.status === 'reviewed').length;
   const reported    = tabRows.filter(i => i.status === 'reported').length;
-  const needsAction = tabRows.filter(i => ['review-needed', 'error'].includes(i.status)).length;
+  const needsAction = tabRows.filter(i => ATTENTION_STATUSES.includes(i.status)).length;
   const duplicates  = tabRows.filter(isDuplicate).length;
 
   return (
@@ -832,10 +816,10 @@ export default function Invoices() {
                 </div>
 
                 {isOpen(g) && g.rows.map((inv) => {
-                  const { cls, label } = STATUS_MAP[inv.status] || { cls: 'badge-gray', label: inv.status };
+                  const { cls, label } = statusMeta(inv.status);
                   const isSelected = selected.has(inv.id);
                   const isDeleting = deleting.has(inv.id);
-                  const needsAttention = ['review-needed', 'error'].includes(inv.status);
+                  const needsAttention = ATTENTION_STATUSES.includes(inv.status);
                   const isDup = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
 
                   return (
@@ -1019,10 +1003,10 @@ export default function Invoices() {
                     </td>
                   </tr>,
                   ...(isOpen(g) ? g.rows : []).map((inv, i) => {
-                  const { cls, label } = STATUS_MAP[inv.status] || { cls: 'badge-gray', label: inv.status };
+                  const { cls, label } = statusMeta(inv.status);
                   const isSelected    = selected.has(inv.id);
                   const isDeleting    = deleting.has(inv.id);
-                  const needsAttention = ['review-needed', 'error'].includes(inv.status);
+                  const needsAttention = ATTENTION_STATUSES.includes(inv.status);
                   const isDup         = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
                   return (
                     <tr
