@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import Modal from '../Modal';
+import { useConfirm } from '../../context/ConfirmContext';
 // api/client prepends BASE = '/api', so paths here start after it.
 import { api } from '../../api/client';
 
@@ -34,6 +36,7 @@ function fileToBase64(file) {
 }
 
 export default function ClaimImport({ onClose, onImported, initialJobId = null }) {
+  const confirm = useConfirm();
   const fileRef = useRef(null);
   const [files, setFiles]   = useState([]);
   const [job, setJob]       = useState(initialJobId ? { id: initialJobId, stage: 'reading receipts' } : null);
@@ -95,11 +98,7 @@ export default function ClaimImport({ onClose, onImported, initialJobId = null }
   const s = job?.result?.summary;
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, animation: 'fadeIn 0.15s ease' }}
-         onClick={e => { if (e.target === e.currentTarget && !active) onClose(); }}>
-      <div className="card" style={{ width: '100%', maxWidth: 560, maxHeight: '90vh', overflowY: 'auto',
-                                     borderRadius: 18, boxShadow: 'var(--shadow-lg)', animation: 'scaleIn 0.2s ease' }}>
+    <Modal onClose={onClose} busy={active} maxWidth={560} card label="Import an expense claim">
 
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 14 }}>
           <div>
@@ -294,7 +293,7 @@ export default function ClaimImport({ onClose, onImported, initialJobId = null }
                 {/* An import that went wrong should not need twenty-seven deletions. */}
                 <button className="btn btn-outline"
                         onClick={async () => {
-                          if (!confirm(`Remove all ${totalClaims} claims from this import?`)) return;
+                          if (!(await confirm({ title: `Remove all ${totalClaims} claims?`, message: 'They are removed from this import together with their receipt files.', confirmLabel: 'Remove all', danger: true }))) return;
                           try { await api.delete(`/claims/group/${job.result.groupId}`); onImported?.(); onClose(); }
                           catch (err) { setError(err.message); }
                         }}>
@@ -304,8 +303,7 @@ export default function ClaimImport({ onClose, onImported, initialJobId = null }
             </div>
           );
         })()}
-      </div>
-    </div>
+    </Modal>
   );
 }
 

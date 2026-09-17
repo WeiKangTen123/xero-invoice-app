@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import Modal from '../Modal';
 import { api } from '../../api/client';
 import { blobToBase64, humanSize } from '../receipts/receipt-upload';
 
@@ -63,10 +64,7 @@ export default function ImportDialog({
 
   const r = job?.result;
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, animation: 'fadeIn 0.15s ease' }}
-         onClick={e => { if (e.target === e.currentTarget && !active) onClose(); }}>
-      <div className="card" style={{ width: '100%', maxWidth: 560, maxHeight: '90vh', overflowY: 'auto', borderRadius: 18, boxShadow: 'var(--shadow-lg)', animation: 'scaleIn 0.2s ease' }}>
+    <Modal onClose={onClose} busy={active} maxWidth={560} card label={title}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 14 }}>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>{title}</div>
@@ -147,7 +145,6 @@ export default function ImportDialog({
             <button className="btn btn-primary" style={{ width: '100%', marginTop: 14 }} onClick={onClose}>Done</button>
           </div>
         )}
-      </div>
-    </div>
+    </Modal>
   );
 }

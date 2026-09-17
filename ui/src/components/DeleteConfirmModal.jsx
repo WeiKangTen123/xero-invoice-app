@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import Modal from './Modal';
 
 /**
  * Reusable modal for confirming destructive deletions.
@@ -16,15 +16,6 @@ export default function DeleteConfirmModal({
   onConfirm,
   onClose,
 }) {
-  useEffect(() => {
-    if (!isOpen) return;
-    function handleKeyDown(e) {
-      if (e.key === 'Escape' && !loading) onClose();
-    }
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, loading, onClose]);
-
   if (!isOpen) return null;
 
   const defaultMessage = count > 1
@@ -32,35 +23,7 @@ export default function DeleteConfirmModal({
     : `Are you sure you want to delete this ${isExpense ? 'expense receipt' : 'invoice'}${itemName ? ` ("${itemName}")` : ''}? This will permanently remove the record and any uploaded image or PDF.`;
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 1100,
-        background: 'rgba(0, 0, 0, 0.65)',
-        backdropFilter: 'blur(4px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 20,
-        animation: 'fadeIn 0.15s ease',
-      }}
-      onClick={e => {
-        if (e.target === e.currentTarget && !loading) onClose();
-      }}
-    >
-      <div
-        style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border)',
-          borderRadius: 18,
-          padding: '24px 26px',
-          width: '100%',
-          maxWidth: 440,
-          boxShadow: 'var(--shadow-lg)',
-          animation: 'scaleIn 0.2s ease',
-        }}
-      >
+    <Modal onClose={onClose} busy={loading} maxWidth={440} zIndex={1100} label={title} style={{ padding: '24px 26px', maxHeight: 'none' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14, marginBottom: 16 }}>
           <div
             style={{
@@ -146,7 +109,6 @@ export default function DeleteConfirmModal({
             )}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

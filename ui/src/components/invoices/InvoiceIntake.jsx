@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { api } from '../../api/client';
 import ImportDialog, { encodeFiles } from '../intake/ImportDialog';
+import Modal from '../Modal';
 import { fmtMoney } from '../../utils/format';
 
 // Adding invoices by hand. An invoice is ours to produce, so there is no file
@@ -111,10 +112,7 @@ export function InvoiceForm({ onClose, onSaved }) {
   const money = n => fmtMoney(n);
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, animation: 'fadeIn 0.15s ease' }}
-         onClick={e => { if (e.target === e.currentTarget && !saving) onClose(); }}>
-      <div className="card" style={{ width: '100%', maxWidth: 720, maxHeight: '92vh', overflowY: 'auto', borderRadius: 18, boxShadow: 'var(--shadow-lg)', animation: 'scaleIn 0.2s ease' }}>
+    <Modal onClose={onClose} busy={saving} maxWidth={720} card label="New invoice" style={{ maxHeight: '92vh' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 14 }}>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>New invoice</div>
@@ -167,7 +165,6 @@ export function InvoiceForm({ onClose, onSaved }) {
             {saving ? <><span className="btn-spinner" /> Saving…</> : 'Save for review'}
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

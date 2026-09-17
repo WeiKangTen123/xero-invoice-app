@@ -5,6 +5,9 @@ import CroppedImage from '../components/receipts/CroppedImage';
 import AccountCodeSelect, { useAccountName } from '../components/AccountCodeSelect';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
 import { StatusBadge } from '../components/Badges';
+import Modal from '../components/Modal';
+import { useConfirm } from '../context/ConfirmContext';
+import { useToast } from '../context/ToastContext';
 import { TYPE_META, typeMeta } from '../utils/badges';
 import { useViewMode } from '../context/ViewModeContext';
 import { useAuth } from '../context/AuthContext';
@@ -38,11 +41,7 @@ function ReportModal({ invoiceId, onClose, onDone }) {
   }
 
   return (
-    <div
-      style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, animation: 'fadeIn 0.15s ease' }}
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 18, padding: '28px 28px 24px', width: '100%', maxWidth: 440, boxShadow: 'var(--shadow-lg)', animation: 'scaleIn 0.2s ease' }}>
+    <Modal onClose={onClose} busy={loading} maxWidth={440} label="Report an issue" style={{ padding: '28px 28px 24px' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20 }}>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700 }}>Report an Issue</div>
@@ -71,8 +70,7 @@ function ReportModal({ invoiceId, onClose, onDone }) {
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -149,6 +147,8 @@ function listPathFor(inv) {
 
 function InvoiceReviewPage() {
   const { user } = useAuth();
+  const confirm = useConfirm();
+  const toast   = useToast();
   const { isMobile } = useViewMode();
   const { id }   = useParams();
   const navigate = useNavigate();
@@ -322,7 +322,7 @@ function InvoiceReviewPage() {
       window.location.reload();
     } catch (err) {
       setMerging(false);
-      alert(err.message || 'Could not merge');
+      toast.error(err.message || 'Could not merge');
     }
   }
 
@@ -346,7 +346,7 @@ function InvoiceReviewPage() {
         if (next) { navigate(`/invoices/${next.id}`); return; }
       }
     } catch (err) {
-      alert(err.message || 'Could not mark as reviewed');
+      toast.error(err.message || 'Could not mark as reviewed');
     } finally {
       setApprovingNext(false);
     }
@@ -360,7 +360,7 @@ function InvoiceReviewPage() {
       await api.patch(`/invoices/${id}/status`, { status: 'reviewed' });
       setInv(prev => ({ ...prev, status: 'reviewed' }));
     } catch (err) {
-      alert(err.message);
+      toast.error(err.message);
     } finally {
       setMarking(false);
     }
@@ -736,11 +736,11 @@ function InvoiceReviewPage() {
                   <button
                     className="btn btn-outline btn-sm"
                     onClick={async () => {
-                      if (!confirm('Keep this receipt as a separate expense and mark it for review?')) return;
+                      if (!(await confirm({ title: 'Keep as a separate expense?', message: 'This receipt stays its own claim and is marked for review.', confirmLabel: 'Keep separate' }))) return;
                       try {
                         await api.patch(`/invoices/${id}/status`, { status: 'review-needed', force: true, clearDuplicate: true });
                         fetchInvoice();
-                      } catch (err) { alert(err.message); }
+                      } catch (err) { toast.error(err.message); }
                     }}
                     style={{ fontSize: 12 }}
                   >

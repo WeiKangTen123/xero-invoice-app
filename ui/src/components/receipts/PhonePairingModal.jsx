@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import Modal from '../Modal';
 import { api } from '../../api/client';
 import { fmtMoney } from '../../utils/format';
 
@@ -73,14 +74,7 @@ export default function PhonePairingModal({ onClose, onArrived }) {
   ];
 
   return (
-    <div
-      style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
-               display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, animation: 'fadeIn 0.15s ease' }}
-      onClick={e => { if (e.target === e.currentTarget) close(); }}
-    >
-      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 18,
-                    padding: '26px 28px 22px', width: '100%', maxWidth: 430, boxShadow: 'var(--shadow-lg)',
-                    animation: 'scaleIn 0.2s ease', maxHeight: '90vh', overflowY: 'auto' }}>
+    <Modal onClose={close} maxWidth={430} label="Scan with your phone">
 
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 18 }}>
           <div>
@@ -170,7 +164,6 @@ export default function PhonePairingModal({ onClose, onArrived }) {
                       borderTop: '1px solid var(--border)', lineHeight: 1.55 }}>
           The link uploads only — it cannot read your data, and it stops working when you close this.
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

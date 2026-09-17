@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { useConfirm } from '../context/ConfirmContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney } from '../utils/format';
 
@@ -20,6 +21,7 @@ function Avatar({ email }) {
 
 export default function Admin() {
   const { user: me } = useAuth();
+  const confirm = useConfirm();
   const navigate     = useNavigate();
   const [tab, setTab] = useState('users');
   // Set when the admin clicks a user in Monitoring's per-user table to drill into
@@ -66,7 +68,7 @@ export default function Admin() {
   }
 
   async function handleDelete(id, userEmail) {
-    if (!confirm(`Delete ${userEmail}?\nThis cannot be undone.`)) return;
+    if (!(await confirm({ title: `Delete ${userEmail}?`, message: 'Their account, credentials and files are removed. This cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
     setDeleting(id); setError('');
     try {
       await api.delete(`/admin/users/${id}`);

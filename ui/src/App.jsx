@@ -4,6 +4,8 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { ViewModeProvider } from './context/ViewModeContext';
 import { PipelineProvider } from './context/PipelineContext';
+import { ConfirmProvider } from './context/ConfirmContext';
+import { ToastProvider } from './context/ToastContext';
 import Layout from './components/layout/Layout';
 // Login stays eager: it is the first paint for anyone signed out, and making it
 // wait on a chunk to render a single form trades a real delay for no saving.
@@ -83,9 +85,13 @@ export default function App() {
       <ViewModeProvider>
         <AuthProvider>
           <PipelineProvider>
-            <BrowserRouter>
-              <AppRoutes />
-            </BrowserRouter>
+            <ToastProvider>
+              <ConfirmProvider>
+                <BrowserRouter>
+                  <AppRoutes />
+                </BrowserRouter>
+              </ConfirmProvider>
+            </ToastProvider>
           </PipelineProvider>
         </AuthProvider>
       </ViewModeProvider>

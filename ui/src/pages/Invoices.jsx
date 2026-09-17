@@ -11,6 +11,8 @@ import { statusMeta, ATTENTION_STATUSES } from '../utils/badges';
 import { fmtMoney } from '../utils/format';
 import { useViewMode } from '../context/ViewModeContext';
 import { useAuth } from '../context/AuthContext';
+import { useConfirm } from '../context/ConfirmContext';
+import { useToast } from '../context/ToastContext';
 import { formatDateTime } from '../utils/formatDate';
 import { useVisiblePolling } from '../utils/useVisiblePolling';
 
@@ -139,6 +141,8 @@ function scannedNote(rows) {
 export default function Invoices() {
   const { isMobile } = useViewMode();
   const { user } = useAuth();
+  const confirm = useConfirm();
+  const toast   = useToast();
   const navigate = useNavigate();
   const [invoices,     setInvoices]     = useState([]);
   const [loading,      setLoading]      = useState(true);
@@ -214,14 +218,14 @@ export default function Invoices() {
   }
 
   async function handleClearCache() {
-    if (!confirm(`Clear all ${invoices.length} invoice record${invoices.length !== 1 ? 's' : ''} and stored PDFs?\n\nThis cannot be undone.`)) return;
+    if (!(await confirm({ title: `Clear all ${invoices.length} invoice record${invoices.length !== 1 ? 's' : ''}?`, message: 'Every record and its stored PDF is removed. This cannot be undone.', confirmLabel: 'Clear all', danger: true }))) return;
     setClearing(true);
     try {
       await api.delete('/invoices');
       setInvoices([]);
       setSelected(new Set());
     } catch (err) {
-      alert(err.message);
+      toast.error(err.message);
     } finally {
       setClearing(false);
     }
@@ -254,7 +258,7 @@ export default function Invoices() {
       }
       setDeleteTarget(null);
     } catch (err) {
-      alert(err.message);
+      toast.error(err.message);
       if (deleteTarget.type === 'bulk') fetchInvoices();
     } finally {
       setDeleteLoading(false);
@@ -289,17 +293,17 @@ export default function Invoices() {
       await api.post('/invoices/batch-status', { ids, status: 'reviewed' });
       fetchInvoices();
     } catch (err) {
-      alert(err.message || 'Could not approve batch');
+      toast.error(err.message || 'Could not approve batch');
     }
   }
 
   async function handleUndoBatch(groupId) {
-    if (!confirm('Undo this batch and remove all its claims and receipt files?\n\nThis cannot be undone.')) return;
+    if (!(await confirm({ title: 'Undo this batch?', message: 'All its claims and receipt files are removed. This cannot be undone.', confirmLabel: 'Undo batch', danger: true }))) return;
     try {
       await api.delete(`/claims/group/${groupId}`);
       fetchInvoices();
     } catch (err) {
-      alert(err.message || 'Could not undo batch');
+      toast.error(err.message || 'Could not undo batch');
     }
   }
 
