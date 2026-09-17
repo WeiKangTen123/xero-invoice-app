@@ -4,8 +4,12 @@
 // backups beyond KEEP_COUNT so this can't quietly fill the disk the way the old
 // unrotated log files did.
 //
-// Not run automatically — schedule it externally, e.g. a daily cron job:
-//   0 2 * * * cd /path/to/main && node db/backup.js >> logs/backup.log 2>&1
+// Scheduled by deploy.sh as a daily cron job on the box, and run by it before
+// every restart. `npm run backup:pull` copies the newest backup, the per-user
+// files and .env off the box — see docs/RUNBOOK.md for the restore.
+//
+// The copy is opened and checked with integrity_check before it counts: a
+// backup that would not open is worse than none, because it looks like one.
 //
 // Usage: node db/backup.js
 
@@ -18,40 +22,53 @@ const db       = require('./index');
 const KEEP_COUNT = 14; // ~2 weeks of daily backups
 const BACKUP_DIR = require('../utils/paths').backupsDir();
 
-function _prune() {
-  const files = fs.readdirSync(BACKUP_DIR)
+function _prune(dir) {
+  const files = fs.readdirSync(dir)
     .filter(f => f.startsWith('app-') && f.endsWith('.db'))
     .sort(); // ISO timestamps in the filename sort chronologically as strings
   const excess = files.length - KEEP_COUNT;
   for (const f of files.slice(0, Math.max(excess, 0))) {
-    fs.unlinkSync(path.join(BACKUP_DIR, f));
+    fs.unlinkSync(path.join(dir, f));
     console.log(`Pruned old backup ${f}`);
   }
 }
 
-async function run() {
-  if (db.path === ':memory:') {
+// Returns the path of the verified backup. `db` and `destDir` are arguments
+// so a test can back up a temp file database; production callers pass none.
+async function run({ db: source = db, destDir = BACKUP_DIR } = {}) {
+  if (source.path === ':memory:') {
     console.log('In-memory DB (test mode) — nothing to back up.');
-    return;
+    return null;
   }
-  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  fs.mkdirSync(destDir, { recursive: true });
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const dest  = path.join(BACKUP_DIR, `app-${stamp}.db`);
+  const dest  = path.join(destDir, `app-${stamp}.db`);
 
-  await db.backup(dest);
+  await source.backup(dest);
 
   // The backup inherits WAL mode from the source, which leaves -wal/-shm sidecar
   // files next to it — a backup isn't really "one file" until those are folded
   // back in. Switching the copy to DELETE mode checkpoints and removes them,
   // leaving a single portable .db file and letting _prune()'s filename filter
   // (which only tracks *.db) actually account for everything on disk.
-  const copy = new Database(dest);
-  copy.pragma('journal_mode = DELETE');
-  copy.close();
+  let result;
+  try {
+    const copy = new Database(dest);
+    copy.pragma('journal_mode = DELETE');
+    result = copy.pragma('integrity_check', { simple: true });
+    copy.close();
+  } catch (err) {
+    result = err.message;
+  }
+  if (result !== 'ok') {
+    try { fs.unlinkSync(dest); } catch {}
+    throw new Error(`Backup failed integrity_check: ${result}`);
+  }
 
   console.log(`Backed up DB to ${dest}`);
-  _prune();
+  _prune(destDir);
+  return dest;
 }
 
 if (require.main === module) {
@@ -61,4 +78,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { run };
+module.exports = { run, KEEP_COUNT };

@@ -11,6 +11,7 @@
     "build:ui": "npm --prefix ui run build",
     "test": "jest --runInBand --forceExit",
     "backup": "node main/db/backup.js",
+    "backup:pull": "bash main/scripts/backup-pull.sh",
     "smoke": "node main/scripts/smoke-xero.js",
     "deploy": "bash main/scripts/deploy.sh"
   },
