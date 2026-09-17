@@ -527,7 +527,6 @@ async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email
     reviewReason: reviewReason || parsed.reviewReason || null,
     pdfBuffer:     pdfBuffer   || null,
     pdfFilename:   pdfFilename || null,
-    emailBodyText: text.slice(0, 50000),
   };
 
   logger.info('Invoice parsed', {

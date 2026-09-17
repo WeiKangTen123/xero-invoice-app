@@ -140,6 +140,8 @@ function createHandler(userId) {
         invoiceNumber: invoiceData.invoiceNumber  || '—',
         invoiceDate:   invoiceData.invoiceDate    || null,
         dueDate:       invoiceData.dueDate        || null,
+        vendorPhone:   invoiceData.vendorPhone    || '',
+        projectName:   invoiceData.projectName    || '',
         totalAmount:   invoiceData.totalAmount    || 0,
         currency:      invoiceData.currency       || getUserDefaults(userId).currency,
         lineItems:     invoiceData.lineItems      || [],
@@ -181,11 +183,10 @@ function createHandler(userId) {
     // it in front of them and will review it (intake/profiles.js).
     const mayAutoPost = profileFor(record.invoiceType).autoPost(record.source);
     if (settingsUser.get('autoProcess') && mayAutoPost) {
-      // Strip the binary PDF buffer before passing into the queue closure — the PDF
-      // is already saved to disk and will be read back via pdfStore when attaching to Xero.
-      // eslint-disable-next-line no-unused-vars
-      const { pdfBuffer: _buf, ...invoiceDataClean } = invoiceData;
-      scheduleXeroSubmit(invoiceDataClean, id);
+      // What goes to Xero is the STORED row — the same payload a manual submit
+      // sends. The raw parser object used to go instead, so the two paths
+      // could differ (and the PDF is read back from disk by id anyway).
+      scheduleXeroSubmit({ ...invStore.getById(id), _invoiceStoreId: id }, id);
       logger.info('Invoice queued for Xero submission', { id, vendor: record.vendorName, userId });
     } else if (!mayAutoPost) {
       logger.info('Stored for review — this source never auto-posts', { id, source: record.source, userId });

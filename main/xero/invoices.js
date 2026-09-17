@@ -269,19 +269,6 @@ async function createDraftInvoice(userId, tenantId, invoiceData) {
     }
   }
 
-  // Attach original email body as plain text — best-effort, non-fatal
-  if (invoiceData.emailBodyText) {
-    try {
-      const buf = Buffer.from(invoiceData.emailBodyText, 'utf8');
-      await accountingApi.createInvoiceAttachmentByFileName(
-        tenantId, created.invoiceID, 'original-email.txt', buf, false
-      );
-      logger.info('Email body attached to invoice', { invoiceID: created.invoiceID });
-    } catch (err) {
-      logger.warn('Failed to attach email body', { error: xeroErrMsg(err), invoiceID: created.invoiceID });
-    }
-  }
-
   // Attach original PDF from per-user disk store — best-effort, non-fatal
   const pdfPath = invoiceData._invoiceStoreId ? pdfStore.getPath(invoiceData._invoiceStoreId) : null;
   if (pdfPath && invoiceData.pdfFilename) {

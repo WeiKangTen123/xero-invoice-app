@@ -101,7 +101,25 @@ CREATE TABLE IF NOT EXISTS invoices (
   resolved_at       TEXT,
   submitted_at      TEXT,
   processed_at      TEXT NOT NULL,
-  updated_at        TEXT
+  updated_at        TEXT,
+  -- Expense claims: a receipt is an attached FILE the way a bill has a PDF, but
+  -- it is usually an image and Xero needs the mime type to attach it. One
+  -- upload can hold several receipts; every split record points at the SAME
+  -- stored file and carries the region it owns — a box for a photo, a page
+  -- for a PDF. (Older databases gain these through migrate.js.)
+  receipt_file      TEXT,
+  receipt_mime      TEXT,
+  receipt_box       TEXT,     -- JSON [ymin,xmin,ymax,xmax], 0-1000
+  receipt_page      INTEGER,  -- 1-based page of a multi-page PDF
+  receipt_group     TEXT,     -- ties siblings from one upload together
+  received_at       TEXT,     -- when the DOCUMENT reached us, not when we made the row
+  receipt_hash      TEXT,     -- SHA-256 of the receipt image
+  -- Read from a bill by the model and sent to Xero with the contact and the
+  -- reference; they were built on every parse and never stored, so the review
+  -- page's Phone and Project rows were always empty and a manual submit sent
+  -- a different payload from an automatic one.
+  vendor_phone      TEXT,
+  project_name      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(user_id, status);

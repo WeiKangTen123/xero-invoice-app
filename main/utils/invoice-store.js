@@ -28,15 +28,6 @@ function normalizeInvoiceNumber(raw) {
 // DB columns are snake_case; every field the rest of the app reads/writes on an
 // invoice record is camelCase (unchanged from the old invoices.json shape).
 
-const COLUMNS = [
-  'id', 'user_id', 'status', 'has_pdf', 'pdf_filename', 'vendor_name', 'contact_name',
-  'contact_email', 'contact_address', 'invoice_number', 'invoice_date', 'due_date',
-  'total_amount', 'currency', 'invoice_type', 'source', 'source_email',
-  'description', 'account_code', 'tax_amount', 'sub_total', 'payment_reference',
-  'xero_invoice_id', 'error_msg', 'duplicate_of', 'resolved_by', 'resolved_at',
-  'submitted_at', 'processed_at', 'updated_at',
-];
-
 const FIELD_TO_COLUMN = {
   id: 'id', userId: 'user_id', status: 'status', hasPdf: 'has_pdf',
   pdfFilename: 'pdf_filename', vendorName: 'vendor_name', contactName: 'contact_name',
@@ -55,6 +46,9 @@ const FIELD_TO_COLUMN = {
   receiptFile: 'receipt_file', receiptMime: 'receipt_mime',
   receiptBox: 'receipt_box', receiptPage: 'receipt_page', receiptGroup: 'receipt_group',
   receivedAt: 'received_at', receiptHash: 'receipt_hash',
+  // Read from a bill by the model; sent to Xero with the contact and as the
+  // reference. Built on every parse and never stored until now.
+  vendorPhone: 'vendor_phone', projectName: 'project_name',
 };
 
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
@@ -105,6 +99,9 @@ function _rowToRecord(row, reports, lineItems) {
     resolvedAt:        row.resolved_at,
     submittedAt:       row.submitted_at,
     processedAt:       row.processed_at,
+    updatedAt:         row.updated_at,
+    vendorPhone:       row.vendor_phone,
+    projectName:       row.project_name,
     receiptFile:       row.receipt_file,
     receiptMime:       row.receipt_mime,
     // Which part of the shared file this record owns. Null on an ordinary
@@ -251,11 +248,6 @@ function forUser(userId) {
     return update(id, { status: 'reported' });
   }
 
-  function getReported() {
-    const rows = db.prepare('SELECT * FROM invoices WHERE user_id = ? AND status = ?').all(userId, 'reported');
-    return _hydrateMany(rows);
-  }
-
   // Returns all invoices that need human attention: user-flagged reports and
   // system-flagged parsing failures that could not be submitted to Xero.
   function getFlagged() {
@@ -381,8 +373,8 @@ function forUser(userId) {
       .get(userId, filename).n;
   }
 
-  return { getAll, getById, add, update, addReport, getReported, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
+  return { getAll, getById, add, update, addReport, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
            count, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash };
 }
 
-module.exports = { forUser, FIELD_TO_COLUMN, _toBindable, normalizeInvoiceNumber, _normalizeVendor }; // exposed for tests and callers
+module.exports = { forUser, FIELD_TO_COLUMN, normalizeInvoiceNumber };

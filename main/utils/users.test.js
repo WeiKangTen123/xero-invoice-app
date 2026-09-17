@@ -75,6 +75,7 @@ describe('users store (SQLite)', () => {
     const u = await users.createUser('old@test.com', 'password123', 'user');
     db.prepare('INSERT OR IGNORE INTO user_credentials (user_id) VALUES (?)').run(u.id);
     db.prepare('UPDATE user_credentials SET nvidia_api_key = ?, openrouter_api_key = ?, openrouter_model = ? WHERE user_id = ?').run('nv-key', 'or-key', 'm', u.id);
+    db.pragma('user_version = 3');   // an older database: the drop step has not run yet
     require('../db/migrate').run();
     expect(cols()).toEqual(expect.not.arrayContaining(['nvidia_api_key', 'openrouter_api_key', 'openrouter_model']));
     expect(users.getUserConfig(u.id)).toEqual({});           // nothing else was disturbed
