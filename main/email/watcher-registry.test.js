@@ -215,3 +215,29 @@ describe('IMAP reconnect is de-duplicated per disconnect', () => {
     expect(watcherRegistry.isRunning('storm-5')).toBe(false);
   });
 });
+
+describe('watcher-registry — failures that must not leave a zombie', () => {
+  afterEach(() => { watcherRegistry.stopAll(); jest.useRealTimers(); });
+
+  test('a failure to open INBOX schedules a reconnect instead of a connected-but-idle watcher', () => {
+    jest.useFakeTimers();
+    watcherRegistry.start('zombie-1', CREDS, () => {});
+    const before = Imap.mock.results.length;
+    const first  = lastImapInstance();
+    first.emit('ready');
+    first.resolveOpenBox(new Error('Mailbox does not exist'));
+    jest.advanceTimersByTime(5 * 60 * 1000);
+    expect(Imap.mock.results.length).toBeGreaterThan(before);   // a new connection was built
+  });
+
+  test('an authentication failure stops the watcher rather than retrying a bad password for an hour', () => {
+    jest.useFakeTimers();
+    watcherRegistry.start('badpw-1', CREDS, () => {});
+    const before = Imap.mock.results.length;
+    const fake   = lastImapInstance();
+    fake.emit('error', Object.assign(new Error('Invalid credentials (Failure)'), { source: 'authentication' }));
+    jest.advanceTimersByTime(5 * 60 * 1000);
+    expect(Imap.mock.results.length).toBe(before);              // no reconnect attempted
+    expect(watcherRegistry.isRunning('badpw-1')).toBe(false);
+  });
+});

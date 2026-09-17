@@ -239,7 +239,9 @@ function _connect(s) {
 
     imap.openBox('INBOX', false, (err) => {
       if (err) {
-        logger.error(`[user:${userId}] Failed to open inbox`, { error: err.message });
+        // Connected but no mailbox is a zombie: isRunning() true, no poll, no
+        // reconnect. Treat it like any other dropped connection.
+        _scheduleReconnect(s, imap, 'openBox failed', err);
         return;
       }
 
@@ -270,7 +272,17 @@ function _connect(s) {
 
   // Both of these fire for a single dropped socket. Neither decides anything;
   // _scheduleReconnect de-duplicates them.
-  imap.on('error', (err) => _scheduleReconnect(s, imap, 'error', err));
+  imap.on('error', (err) => {
+    // A rejected password will not fix itself. Retrying it through the full
+    // backoff was ~1.5 hours of bad logins against the mail server; stop, and
+    // say why in the log so the user reconfigures.
+    if (err && err.source === 'authentication') {
+      logger.error(`[user:${s.userId}] IMAP authentication failed — watcher stopped; check IMAP_USER / IMAP_PASS`, { error: err.message });
+      stop(s.userId);
+      return;
+    }
+    _scheduleReconnect(s, imap, 'error', err);
+  });
 
   imap.once('end', () => {
     if (s.intentionalStop) {
