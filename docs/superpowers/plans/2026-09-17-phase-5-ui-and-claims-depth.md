@@ -379,5 +379,6 @@ Create `ui/src/components/Modal.jsx` (overlay, Escape, backdrop click guarded by
 
 Every `<label className="form-label">` in `pages/` (23) gets `htmlFor` and its control the matching `id`, via `useId()` per field.
 
-### Not in this phase
-Page splits (InvoiceReview 1437 lines, XeroInsights 1296, Invoices 1265, PerformancePanels 2015): no tests protect the UI, so a split is a review-by-eye change; do it when one of those pages next needs real work.
+### Page splits (done 17 Sep 2026, after the rest of the phase)
+
+Four files split mechanically, code moved verbatim, one commit each: `components/performance/PerformancePanels.jsx` (2,015 lines → a barrel plus one file per panel, primitives, charts, MonthRange), `pages/XeroInsights.jsx` (1,296 → 607 plus `xero-insights/` helpers and one component per tab), `pages/Invoices.jsx` (1,260 → 611 plus `invoices/` helpers, the two list renderings and three banners), `pages/InvoiceReview.jsx` (1,432 → 689 plus `invoice-review/` cards, banners and bars). Gates: every original line lands in exactly one file; eslint `no-undef` on `ui/src`; `npm run build:ui`; and twenty page screenshots (desktop and mobile, each list tab, both review pages) captured through headless Chrome against a throwaway server and compared pixel by pixel before and after each split. The insights tabs need a connected Xero org to render, so for those two files the lint and build gates are the check.
