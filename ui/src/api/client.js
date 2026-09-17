@@ -24,11 +24,12 @@ async function request(path, options = {}) {
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    if (res.status === 401) {
-      clearSession();
-      return; // navigation in progress — caller will never see this return
-    }
-    const err    = new Error(data.error || `HTTP ${res.status}`);
+    if (res.status === 401) clearSession();
+    // A 401 throws too. On most pages the navigation above wins the race and
+    // the caller never runs; on /login (no navigation) a wrong password used to
+    // come back as `undefined` and blow up as "cannot read 'token'" instead of
+    // the server's own message.
+    const err    = new Error(data.error || (res.status === 401 ? 'Your session has expired. Sign in again.' : `HTTP ${res.status}`));
     err.status   = res.status;
     throw err;
   }
