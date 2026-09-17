@@ -1,149 +1,28 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
-import CroppedImage from '../components/receipts/CroppedImage';
-import AccountCodeSelect, { useAccountName } from '../components/AccountCodeSelect';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
-import { StatusBadge } from '../components/Badges';
-import Modal from '../components/Modal';
 import { useConfirm } from '../context/ConfirmContext';
 import { useToast } from '../context/ToastContext';
 import { TYPE_META, typeMeta } from '../utils/badges';
 import { useViewMode } from '../context/ViewModeContext';
 import { useAuth } from '../context/AuthContext';
-import { fmtMoney } from '../utils/format';
 import { formatDateTime } from '../utils/formatDate';
+import DiscrepancyBanner from './invoice-review/DiscrepancyBanner';
+import DuplicateBanner from './invoice-review/DuplicateBanner';
+import EmailBodyCard from './invoice-review/EmailBodyCard';
+import LineItemsCard from './invoice-review/LineItemsCard';
+import PdfViewer from './invoice-review/PdfViewer';
+import ReceiptViewer from './invoice-review/ReceiptViewer';
+import { ReportModal } from './invoice-review/ReportModal';
+import StickyActionBar from './invoice-review/StickyActionBar';
+import SummaryCard from './invoice-review/SummaryCard';
+import TopBar from './invoice-review/TopBar';
+import { InfoRow } from './invoice-review/bits';
+import { MARKABLE, SUBMITTABLE, listPathFor } from './invoice-review/helpers';
 
-// Statuses that allow the user to trigger a Xero submission.
-// 'posted' is included so a correction can be re-posted — this updates the existing
-// Xero bill in place rather than creating a duplicate (see backend submitDraftInvoice).
-const SUBMITTABLE = new Set(['pending', 'review-needed', 'error', 'reviewed', 'posted']);
-// Statuses that allow the user to mark as reviewed (i.e. not yet finalised)
-const MARKABLE    = new Set(['pending', 'review-needed', 'error', 'reported']);
 
-// ── Report modal ──────────────────────────────────────────────────────────────
-function ReportModal({ invoiceId, onClose, onDone }) {
-  const [note,    setNote]    = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState('');
 
-  async function submit(e) {
-    e.preventDefault();
-    if (!note.trim()) { setError('Please describe the issue.'); return; }
-    setLoading(true); setError('');
-    try {
-      await api.post(`/invoices/${invoiceId}/report`, { note });
-      onDone();
-    } catch (err) {
-      setError(err.message);
-      setLoading(false);
-    }
-  }
-
-  return (
-    <Modal onClose={onClose} busy={loading} maxWidth={440} label="Report an issue" style={{ padding: '28px 28px 24px' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20 }}>
-          <div>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>Report an Issue</div>
-            <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 4 }}>Describe the problem and an admin will review it.</div>
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 20, lineHeight: 1, padding: 2 }}>×</button>
-        </div>
-        {error && <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>}
-        <form onSubmit={submit}>
-          <div className="form-group">
-            <label htmlFor="report-note" className="form-label">What's wrong?</label>
-            <textarea id="report-note"
-              className="form-input"
-              placeholder="e.g. Wrong vendor name extracted, incorrect total amount, missing line items..."
-              value={note}
-              onChange={e => setNote(e.target.value)}
-              rows={4}
-              style={{ resize: 'vertical', minHeight: 100, fontFamily: 'inherit', lineHeight: 1.5 }}
-              autoFocus
-            />
-          </div>
-          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 4 }}>
-            <button type="button" className="btn btn-outline" onClick={onClose} disabled={loading}>Cancel</button>
-            <button type="submit" className="btn btn-danger" disabled={loading}>
-              {loading ? <><span className="btn-spinner" /> Sending...</> : '⚠ Send Report'}
-            </button>
-          </div>
-        </form>
-    </Modal>
-  );
-}
-
-// ── Info row ──────────────────────────────────────────────────────────────────
-function InfoRow({ label, value, mono }) {
-  if (!value && value !== 0) return null;
-  return (
-    <div style={{ display: 'flex', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
-      <div style={{ width: 140, flexShrink: 0, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', paddingTop: 1 }}>
-        {label}
-      </div>
-      <div style={{ flex: 1, fontSize: 13, color: 'var(--text-primary)', fontFamily: mono ? 'monospace' : 'inherit', wordBreak: 'break-word' }}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-// ── Mini field (compact 2-per-row variant of InfoRow, for the summary grid) ─────
-// The read-only twin of the account picker: leads with the account NAME and keeps
-// the code as a quiet monospace suffix, so the summary reads the same way the
-// editor does. Falls back to the bare code when the name can't be resolved —
-// no Xero connection, or a code this org doesn't have.
-function AccountMiniField({ code }) {
-  const name = useAccountName(code);
-  if (!code) return null;
-  return (
-    <div>
-      <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: 3 }}>
-        Account
-      </div>
-      <div style={{ fontSize: 13, color: 'var(--text-primary)', wordBreak: 'break-word' }}>
-        {name || <span style={{ fontFamily: 'monospace' }}>{code}</span>}
-        {name && <span style={{ fontFamily: 'monospace', fontSize: 11.5, color: 'var(--text-muted)', marginLeft: 6 }}>{code}</span>}
-      </div>
-    </div>
-  );
-}
-
-function MiniField({ label, value, mono }) {
-  if (!value && value !== 0) return null;
-  return (
-    <div>
-      <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: 3 }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: mono ? 'monospace' : 'inherit', wordBreak: 'break-word' }}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-// ── Status pill ───────────────────────────────────────────────────────────────
-function StatusPill({ status }) {
-  return <StatusBadge status={status} long style={{ fontSize: 12, padding: '4px 12px' }} />;
-}
-
-// ── Spinner ───────────────────────────────────────────────────────────────────
-function Spinner() {
-  return <span style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.35)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.65s linear infinite', display: 'inline-block' }} />;
-}
-
-// ── Main page ─────────────────────────────────────────────────────────────────
-// Back to the list, on the tab this document belongs to. Returning to a bare
-// /invoices dropped you on the default tab, so reviewing an expense claim and
-// pressing Back showed you payables instead of where you had been.
-function listPathFor(inv) {
-  const tab = inv?.invoiceType === 'ACCREC' ? 'ar'
-            : inv?.invoiceType === 'EXPENSE' ? 'claims'
-            : 'ap';
-  return tab === 'ap' ? '/invoices' : `/invoices?tab=${tab}`;
-}
 
 function InvoiceReviewPage() {
   const { user } = useAuth();
@@ -522,7 +401,6 @@ function InvoiceReviewPage() {
   const canSubmit  = SUBMITTABLE.has(inv.status) && !submitOk && !editing;
   const canReview  = MARKABLE.has(inv.status) && !editing;
   const canEdit    = SUBMITTABLE.has(inv.status); // same set the backend allows PATCH /:id for
-  const isError    = inv.status === 'error' || inv.status === 'review-needed';
 
   return (
     <>
@@ -540,100 +418,7 @@ function InvoiceReviewPage() {
       <div style={{ animation: 'fadeUp 0.3s ease' }}>
 
         {/* Top bar */}
-        <div style={{
-          display: 'flex',
-          alignItems: isMobile ? 'stretch' : 'center',
-          justifyContent: 'space-between',
-          marginBottom: 16,
-          flexDirection: isMobile ? 'column' : 'row',
-          gap: 12
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button className="btn btn-ghost btn-sm" onClick={() => navigate(listPathFor(inv))} style={{ gap: 6 }}>← Back</button>
-            <div>
-              <h1 style={{ fontSize: isMobile ? 18 : 20, fontWeight: 700, letterSpacing: '-0.4px' }}>
-                {inv.vendorName || 'Unknown Vendor'}
-              </h1>
-              <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 2 }}>
-                {inv.pdfFilename || inv.invoiceNumber}
-              </div>
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', width: isMobile ? '100%' : 'auto' }}>
-            <StatusPill status={inv.status} />
-
-            {/* Post to Xero — creates a new draft, or (for an already-posted invoice)
-                updates the existing Xero bill in place rather than duplicating it */}
-            {canSubmit && (
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={submitToXero}
-                disabled={submitting}
-                style={{ gap: 6 }}
-                title={inv.status === 'posted' ? 'Updates the existing Xero bill — does not create a duplicate' : undefined}
-              >
-                {submitting
-                  ? <><Spinner /> {inv.status === 'posted' ? 'Updating...' : 'Posting...'}</>
-                  : inv.status === 'posted'
-                    ? '↻ Re-post to Xero'
-                    : inv.status === 'error'
-                      ? '↺ Retry Xero'
-                      : '→ Post to Xero'}
-              </button>
-            )}
-
-            {/* Mark Reviewed — only available while not yet finalized */}
-            {canReview && (
-              <button
-                className="btn btn-success btn-sm"
-                onClick={markReviewed}
-                disabled={marking}
-              >
-                {marking ? '...' : '✓ Mark Reviewed'}
-              </button>
-            )}
-
-            {!editing && (
-              <button
-                className="btn btn-sm"
-                style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
-                onClick={() => setReporting(true)}
-              >
-                ⚠ Report Issue
-              </button>
-            )}
-
-            {!editing && (
-              <button
-                className="btn btn-sm"
-                style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
-                onClick={() => setShowDeleteModal(true)}
-                disabled={deleting}
-                title={`Delete this ${isExpense ? 'receipt' : 'invoice'}`}
-              >
-                🗑 Delete
-              </button>
-            )}
-
-            {/* Edit — correct LLM-extracted fields before/instead of posting to Xero */}
-            {canEdit && !editing && (
-              <button className="btn btn-outline btn-sm" onClick={startEdit}>
-                ✎ Edit
-              </button>
-            )}
-            {editing && (
-              <>
-                <button className="btn btn-outline btn-sm" onClick={cancelEdit} disabled={saving}>
-                  Cancel
-                </button>
-                <button className="btn btn-primary btn-sm" onClick={saveEdit} disabled={saving} style={{ gap: 6 }}>
-                  {saving ? <><Spinner /> Saving...</> : '✓ Save Changes'}
-                </button>
-              </>
-            )}
-          </div>
-        </div>
+        <TopBar isMobile={isMobile} navigate={navigate} inv={inv} setReporting={setReporting} marking={marking} submitting={submitting} editing={editing} saving={saving} setShowDeleteModal={setShowDeleteModal} deleting={deleting} markReviewed={markReviewed} submitToXero={submitToXero} startEdit={startEdit} cancelEdit={cancelEdit} saveEdit={saveEdit} isExpense={isExpense} canSubmit={canSubmit} canReview={canReview} canEdit={canEdit} />
 
         {deleteErr && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
@@ -670,94 +455,10 @@ function InvoiceReviewPage() {
         )}
 
         {/* 1-Click Discrepancy Resolver Banner */}
-        {discrepancyMatch && !submitErr && (
-          <div className="alert alert-warning" style={{ marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 10, border: '1px solid #f59e0b', background: 'rgba(245, 158, 11, 0.08)' }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-              <span className="alert-icon" style={{ fontSize: 18, marginTop: 1 }}>⚠️</span>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 13.5 }}>Amount Discrepancy Detected</div>
-                <div style={{ fontSize: 13, marginTop: 3, color: 'var(--text-primary)' }}>
-                  The employee claimed <strong>{fmtMoney(discrepancyMatch.claimed, inv.currency || 'SGD')}</strong>, but the scanned receipt total is <strong>{fmtMoney(discrepancyMatch.onReceipt, inv.currency || 'SGD')}</strong>
-                  <span style={{ marginLeft: 6, color: 'var(--text-muted)' }}>
-                    ({discrepancyMatch.diff > 0 ? '+' : ''}{fmtMoney(discrepancyMatch.diff)})
-                  </span>
-                </div>
-              </div>
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginLeft: 28 }}>
-              <button
-                type="button"
-                className="btn btn-sm btn-primary"
-                disabled={saving}
-                onClick={() => resolveDiscrepancy(discrepancyMatch.onReceipt)}
-              >
-                ✓ Use Receipt Total ({fmtMoney(discrepancyMatch.onReceipt, inv.currency || 'SGD')})
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                disabled={saving}
-                onClick={() => resolveDiscrepancy(discrepancyMatch.claimed)}
-              >
-                Keep Claimed Amount ({fmtMoney(discrepancyMatch.claimed, inv.currency || 'SGD')})
-              </button>
-            </div>
-          </div>
-        )}
+        {discrepancyMatch && !submitErr && <DiscrepancyBanner inv={inv} saving={saving} discrepancyMatch={discrepancyMatch} resolveDiscrepancy={resolveDiscrepancy} />}
 
         {/* Dedicated Duplicate Receipt Detected Banner */}
-        {(inv.status === 'duplicate' || inv.duplicateOf || (inv.errorMsg && /duplicate/i.test(inv.errorMsg))) && (
-          <div className="alert" style={{ marginBottom: 14, background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: 12, padding: '14px 18px' }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap' }}>
-              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-                <span style={{ fontSize: 24, lineHeight: 1 }}>⚠</span>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--danger)' }}>
-                    Duplicate Receipt Detected
-                  </div>
-                  <div style={{ fontSize: 12.5, color: 'var(--text-primary)', marginTop: 4, lineHeight: 1.5 }}>
-                    {inv.errorMsg || 'This claim matches an existing receipt already in your system.'}
-                  </div>
-                  {inv.duplicateOf && (
-                    <div style={{ marginTop: 8 }}>
-                      <button
-                        className="btn btn-outline btn-sm"
-                        onClick={() => navigate(`/invoices/${inv.duplicateOf}`)}
-                        style={{ padding: '4px 10px', fontSize: 11.5, background: 'var(--bg-card)' }}
-                      >
-                        View Original Receipt (#{inv.duplicateOf.slice(-6)}) →
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginLeft: 'auto' }}>
-                {(inv.status === 'duplicate' || inv.duplicateOf) && (
-                  <button
-                    className="btn btn-outline btn-sm"
-                    onClick={async () => {
-                      if (!(await confirm({ title: 'Keep as a separate expense?', message: 'This receipt stays its own claim and is marked for review.', confirmLabel: 'Keep separate' }))) return;
-                      try {
-                        await api.patch(`/invoices/${id}/status`, { status: 'review-needed', force: true, clearDuplicate: true });
-                        fetchInvoice();
-                      } catch (err) { toast.error(err.message); }
-                    }}
-                    style={{ fontSize: 12 }}
-                  >
-                    Keep Anyway (Not a duplicate)
-                  </button>
-                )}
-                <button
-                  className="btn btn-sm"
-                  onClick={() => setShowDeleteModal(true)}
-                  style={{ fontSize: 12, background: 'var(--danger)', color: '#fff', border: 'none' }}
-                >
-                  🗑 Delete Duplicate
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        {(inv.status === 'duplicate' || inv.duplicateOf || (inv.errorMsg && /duplicate/i.test(inv.errorMsg))) && <DuplicateBanner confirm={confirm} toast={toast} id={id} navigate={navigate} inv={inv} setShowDeleteModal={setShowDeleteModal} fetchInvoice={fetchInvoice} />}
 
         {/* Why this record is waiting: a payment schedule the parser set aside,
             a figure the verifier read differently, a failed submission. The
@@ -804,226 +505,7 @@ function InvoiceReviewPage() {
           {/* PDF Viewer — fills its full grid column; the #zoom=page-width fragment on
               the iframe src (below) tells the native PDF viewer to fit-scale itself,
               so it never letterboxes no matter how wide the column is */}
-          {inv.receiptFile ? (
-            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 16 }}>🧾</span>
-                  <span style={{ fontWeight: 600, fontSize: 13 }}>
-                    Expense claim
-                    {group?.split ? ` · ${group.index} of ${group.total}` : ''}
-                    {inv.source === 'phone' ? ' · from phone' : ''}
-                    {inv.receiptPage ? ` · page ${inv.receiptPage}` : ''}
-                  </span>
-                </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  {/* A receipt is photographed one-handed and often lands sideways. */}
-                  <button className="btn btn-outline btn-sm" onClick={() => setReceiptRot(r => (r + 90) % 360)} title="Rotate">↻</button>
-                  {inv.receiptMime !== 'application/pdf' && (
-                    <button className="btn btn-outline btn-sm" onClick={rereadReceipt} disabled={rereading}
-                            title="Ask the reader to look at this photo again">
-                      {rereading ? <><span className="btn-spinner" /> Reading…</> : '✦ Re-read'}
-                    </button>
-                  )}
-                  {receiptUrl && (
-                    <a href={receiptUrl} target="_blank" rel="noopener noreferrer" className="btn btn-outline btn-sm">↗ Full size</a>
-                  )}
-                </div>
-              </div>
-              {receiptUrl ? (
-                <div style={{ background: '#1b1b1f', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: isMobile ? 8 : 14, minHeight: isMobile ? 260 : 420, maxHeight: isMobile ? 360 : 'calc(100vh - 240px)', overflow: 'auto' }}>
-                  {/* A split record owns one region of a shared photo, so only
-                      that region is drawn. The file itself was never cut. */}
-                  {inv.receiptMime === 'application/pdf' ? (
-                    <iframe
-                      src={`${receiptUrl}#page=${inv.receiptPage || 1}&zoom=page-width`}
-                      title="Receipt PDF"
-                      style={{ width: '100%', height: isMobile ? 340 : 'calc(100vh - 300px)', minHeight: isMobile ? 260 : 420, border: 'none', background: '#525659' }}
-                    />
-                  ) : (
-                    <CroppedImage
-                      src={receiptUrl}
-                      box={receiptBox}
-                      alt="Receipt"
-                      style={{ maxWidth: '100%', maxHeight: isMobile ? 340 : 'calc(100vh - 280px)', objectFit: 'contain',
-                               transform: `rotate(${receiptRot}deg)`, transition: 'transform .2s ease' }}
-                    />
-                  )}
-                </div>
-              ) : (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 300, color: 'var(--text-muted)', gap: 10 }}>
-                  <span style={{ width: 16, height: 16, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.65s linear infinite', display: 'inline-block' }} />
-                  Loading receipt...
-                </div>
-              )}
-              {group?.split && (() => {
-                const isBatch = group.groupType === 'batch';
-                const currentIdx = group.index - 1; // 0-based
-                const prevSib = currentIdx > 0 ? group.siblings[currentIdx - 1] : null;
-                const nextSib = currentIdx < group.total - 1 ? group.siblings[currentIdx + 1] : null;
-                const canApprove = MARKABLE.has(inv?.status);
-
-                if (isBatch) {
-                  // ── Batch folder navigation bar ───────────────────────────
-                  return (
-                    <div style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
-                      {/* Top bar: label + Prev / index / Next */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.04em', textTransform: 'uppercase', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          📁 {group.batchLabel || 'Batch Import'}
-                        </span>
-                        <button
-                          disabled={!prevSib}
-                          onClick={() => prevSib && navigate(`/invoices/${prevSib.id}`)}
-                          style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 8px', cursor: prevSib ? 'pointer' : 'not-allowed', opacity: prevSib ? 1 : 0.35, fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.2 }}
-                          title="Previous (←)"
-                        >← Prev</button>
-                        <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-primary)', minWidth: 52, textAlign: 'center' }}>
-                          {group.index} / {group.total}
-                        </span>
-                        <button
-                          disabled={!nextSib}
-                          onClick={() => nextSib && navigate(`/invoices/${nextSib.id}`)}
-                          style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '3px 8px', cursor: nextSib ? 'pointer' : 'not-allowed', opacity: nextSib ? 1 : 0.35, fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.2 }}
-                          title="Next (→)"
-                        >Next →</button>
-                      </div>
-
-                      {/* Pill filmstrip — click navigates instantly via SPA */}
-                      <div className={isMobile ? "mobile-scroll-x" : ""} style={{ display: 'flex', gap: 5, flexWrap: isMobile ? 'nowrap' : 'wrap', padding: '8px 14px' }}>
-                        {group.siblings.map((sib, i) => {
-                          const isCurrent = sib.id === id;
-                          const isDone    = sib.status === 'reviewed' || sib.status === 'posted';
-                          return (
-                            <button key={sib.id}
-                              onClick={() => !isCurrent && navigate(`/invoices/${sib.id}`)}
-                              style={{
-                                fontSize: 11, padding: '4px 9px', borderRadius: 6, border: 'none', cursor: isCurrent ? 'default' : 'pointer',
-                                background: isCurrent ? 'var(--accent)' : isDone ? 'var(--bg-success, #e6f4ea)' : 'var(--bg-primary)',
-                                color: isCurrent ? '#fff' : isDone ? 'var(--success, #1a7f37)' : 'var(--text-secondary)',
-                                outline: isCurrent ? 'none' : '1px solid var(--border)',
-                                fontWeight: isCurrent ? 700 : 400,
-                                flexShrink: 0,
-                                whiteSpace: 'nowrap',
-                              }}
-                              title={sib.vendorName || `Claim ${i + 1}`}
-                            >
-                              {isDone && !isCurrent ? '✓ ' : ''}{i + 1}. {sib.vendorName || 'Unread'}{sib.totalAmount ? ` · ${sib.totalAmount}` : ''}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      {/* Approve & Next */}
-                      {canApprove && (
-                        <div style={{ padding: '0 14px 10px', display: 'flex', gap: 8, alignItems: 'center' }}>
-                          <button
-                            className="btn btn-primary btn-sm"
-                            onClick={approveAndNext}
-                            disabled={approvingNext}
-                            style={{ fontSize: 12 }}
-                          >
-                            {approvingNext ? 'Marking…' : nextSib ? '✓ Approve & Next →' : '✓ Approve'}
-                          </button>
-                          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                            Use ← → to navigate · Approved claims shown in green
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  );
-                }
-
-                // ── Genuine photo/PDF split panel (unchanged behaviour) ───────
-                return (
-                  <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
-                    <div style={{ fontSize: 11.5, fontWeight: 700, marginBottom: 8 }}>
-                      {inv.receiptPage ? `Split from a ${group.total}-page PDF` : `Split from one photo of ${group.total} claims`}
-                    </div>
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-                      {group.siblings.map((sib, i) => (
-                        <button key={sib.id}
-                          onClick={() => sib.id !== id && navigate(`/invoices/${sib.id}`)}
-                          style={{ fontSize: 11, padding: '4px 9px', borderRadius: 6, border: '1px solid var(--border)', cursor: sib.id === id ? 'default' : 'pointer',
-                                   background: sib.id === id ? 'var(--accent)' : 'transparent',
-                                   color: sib.id === id ? '#fff' : 'var(--text-secondary)' }}>
-                          {i + 1}. {sib.vendorName || 'Unread'}{sib.totalAmount ? ` · ${sib.totalAmount}` : ''}
-                        </button>
-                      ))}
-                    </div>
-                    <button className="btn btn-outline btn-sm" onClick={mergeBack} disabled={merging}>
-                      {merging ? 'Merging…' : '⇤ Merge back into one'}
-                    </button>
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 }}>
-                      The original upload is intact — merging deletes the other {group.total - 1} record
-                      {group.total - 1 === 1 ? '' : 's'} and restores the whole {inv.receiptPage ? 'PDF' : 'photo'} here.
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {rereadMsg && (
-                <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border)', fontSize: 11.5, color: 'var(--warning)', lineHeight: 1.5 }}>
-                  {rereadMsg}
-                </div>
-              )}
-              <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border)', fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                Fields on the right were read from this {inv.receiptMime === 'application/pdf' ? 'PDF' : 'photo'} automatically. Check them against the
-                image before saving — anything unreadable was left blank rather than guessed.
-              </div>
-            </div>
-          ) : inv.hasPdf ? (
-            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 16 }}>📄</span>
-                  <span style={{ fontWeight: 600, fontSize: 13 }}>{inv.pdfFilename || 'Invoice PDF'}</span>
-                </div>
-                {pdfUrl && (
-                  <a href={pdfUrl} target="_blank" rel="noopener noreferrer" className="btn btn-outline btn-sm" style={{ gap: 5 }}>
-                    ↗ Open in tab
-                  </a>
-                )}
-              </div>
-              {pdfUrl ? (
-                <iframe
-                  src={`${pdfUrl}#zoom=page-width`}
-                  title="Invoice PDF"
-                  style={{ width: '100%', height: isMobile ? 360 : 'calc(100vh - 240px)', minHeight: isMobile ? 300 : 500, border: 'none', display: 'block', background: '#525659' }}
-                />
-              ) : pdfErr ? (
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: 300, gap: 14, padding: 24 }}>
-                  <span style={{ fontSize: 28, opacity: 0.4 }}>📄</span>
-                  <div style={{ fontSize: 13, color: 'var(--danger)', fontWeight: 600 }}>PDF could not be loaded</div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', maxWidth: 280 }}>{pdfErr}</div>
-                  <button
-                    className="btn btn-outline btn-sm"
-                    onClick={() => setPdfRetry(n => n + 1)}
-                  >
-                    ↻ Retry
-                  </button>
-                </div>
-              ) : (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 300, color: 'var(--text-muted)', gap: 10 }}>
-                  <span style={{ width: 16, height: 16, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.65s linear infinite', display: 'inline-block' }} />
-                  Loading PDF...
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="card">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-                <span style={{ fontSize: 18 }}>✉</span>
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>Email Body</div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No PDF attachment — invoice was extracted from email text</div>
-                </div>
-              </div>
-              <pre style={{ fontSize: 12, color: 'var(--text-secondary)', background: 'var(--bg-secondary)', borderRadius: 8, padding: '14px 16px', overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 400, overflowY: 'auto', border: '1px solid var(--border)', lineHeight: 1.6 }}>
-                {inv.description || 'No content available'}
-              </pre>
-            </div>
-          )}
+          {inv.receiptFile ? <ReceiptViewer isMobile={isMobile} id={id} navigate={navigate} inv={inv} receiptUrl={receiptUrl} receiptRot={receiptRot} setReceiptRot={setReceiptRot} group={group} merging={merging} approvingNext={approvingNext} rereading={rereading} rereadMsg={rereadMsg} saving={saving} receiptBox={receiptBox} rereadReceipt={rereadReceipt} mergeBack={mergeBack} approveAndNext={approveAndNext} /> : inv.hasPdf ? <PdfViewer isMobile={isMobile} inv={inv} pdfUrl={pdfUrl} pdfErr={pdfErr} setPdfRetry={setPdfRetry} /> : <EmailBodyCard inv={inv} />}
 
           {/* Info panel — sticky + independently scrollable so it stays visible while
               you scroll a multi-page PDF, instead of scrolling away with the page */}
@@ -1036,110 +518,7 @@ function InvoiceReviewPage() {
           }}>
 
             {/* Summary card */}
-            <div className="card">
-              {editing ? (
-                <>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <div className="form-group" style={{ width: 90 }}>
-                      <label htmlFor="rv-currency" className="form-label">Currency</label>
-                      <input id="rv-currency" className="form-input" value={form.currency} maxLength={3}
-                        onChange={e => updateField('currency', e.target.value.toUpperCase())} />
-                    </div>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="rv-total" className="form-label">Total Amount</label>
-                      <input id="rv-total" className="form-input" type="number" step="0.01" value={form.totalAmount}
-                        onChange={e => updateField('totalAmount', e.target.value)} />
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="rv-subtotal" className="form-label">Subtotal</label>
-                      <input id="rv-subtotal" className="form-input" type="number" step="0.01" value={form.subTotal ?? ''}
-                        placeholder="0.00"
-                        onChange={e => updateField('subTotal', e.target.value !== '' ? Number(e.target.value) : null)} />
-                    </div>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="rv-tax" className="form-label">Tax / GST</label>
-                      <input id="rv-tax" className="form-input" type="number" step="0.01" value={form.taxAmount ?? ''}
-                        placeholder="0.00"
-                        onChange={e => updateField('taxAmount', e.target.value !== '' ? Number(e.target.value) : null)} />
-                    </div>
-                  </div>
-                  <div className="form-group">
-                    <label htmlFor="rv-type" className="form-label">Type</label>
-                    <select id="rv-type" className="form-input" value={form.invoiceType}
-                      onChange={e => updateField('invoiceType', e.target.value)}>
-                      <option value="EXPENSE">Expense Claim</option>
-                      <option value="ACCPAY">Bill (ACCPAY)</option>
-                      <option value="ACCREC">Invoice (ACCREC)</option>
-                    </select>
-                  </div>
-                  <div className="form-group">
-                    <label htmlFor="rv-number" className="form-label">{isExpense ? 'Claim ref' : 'Invoice #'}</label>
-                    <input id="rv-number" className="form-input" value={form.invoiceNumber}
-                      onChange={e => updateField('invoiceNumber', e.target.value)} />
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="rv-date" className="form-label">{isExpense ? 'Receipt date' : 'Invoice Date'}</label>
-                      <input id="rv-date" className="form-input" type="date" value={form.invoiceDate || ''}
-                        onChange={e => updateField('invoiceDate', e.target.value)} />
-                    </div>
-                    {!isExpense && <div className="form-group" style={{ flex: 1 }}>
-                      <label htmlFor="rv-due" className="form-label">Due Date</label>
-                      <input id="rv-due" className="form-input" type="date" value={form.dueDate || ''}
-                        onChange={e => updateField('dueDate', e.target.value)} />
-                    </div>}
-                  </div>
-                  <div className="form-group" style={{ marginBottom: 0 }}>
-                    <label className="form-label">Account</label>
-                    {/* invoiceType floats the relevant account types to the top —
-                        cost accounts for a bill, revenue accounts for a sale. */}
-                    <AccountCodeSelect
-                      value={form.accountCode}
-                      onChange={v => updateField('accountCode', v)}
-                      invoiceType={form.invoiceType}
-                    />
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 16 }}>
-                    <div>
-                      <div style={{ fontWeight: 700, fontSize: 16 }}>
-                        {fmtMoney(inv.totalAmount, inv.currency)}
-                      </div>
-                      {(inv.subTotal != null || inv.taxAmount != null) ? (
-                        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 3, display: 'flex', gap: 12 }}>
-                          {inv.subTotal != null && <span>Subtotal: {fmtMoney(inv.subTotal, inv.currency)}</span>}
-                          {inv.taxAmount != null && <span>Tax/GST: {fmtMoney(inv.taxAmount, inv.currency)}</span>}
-                        </div>
-                      ) : (
-                        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Total amount</div>
-                      )}
-                    </div>
-                    <span className="badge badge-gray" style={{ fontSize: 11 }}>{typeLabel}</span>
-                  </div>
-                  {/* Compact 2-col grid instead of one full-width row per field */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px' }}>
-                    {/* A claim is a receipt: it has a reference and a receipt date, and no due date. */}
-                    <MiniField label={isExpense ? 'Claim ref' : 'Invoice #'} value={inv.invoiceNumber} mono />
-                    <AccountMiniField code={inv.accountCode} />
-                    <MiniField label={isExpense ? 'Receipt date' : 'Invoice Date'} value={inv.invoiceDate} />
-                    {!isExpense && <MiniField label="Due Date" value={inv.dueDate} />}
-                  </div>
-                  <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
-                    Source: {
-                      inv.source === 'claim' ? 'Expense Claim (Imported)' :
-                      inv.source === 'phone' ? 'Mobile Camera Upload' :
-                      inv.source === 'upload' ? 'Direct Receipt Upload' :
-                      inv.source === 'pdf' ? 'PDF Attachment' :
-                      (inv.receiptFile ? 'Receipt Upload' : 'Email Body')
-                    }
-                  </div>
-                </>
-              )}
-            </div>
+            <SummaryCard id={id} inv={inv} editing={editing} form={form} updateField={updateField} isExpense={isExpense} typeLabel={typeLabel} />
 
             {/* Claim Purpose / Description card */}
             {(inv.description || editing || inv.invoiceType === 'EXPENSE') && (
@@ -1234,79 +613,7 @@ function InvoiceReviewPage() {
 
             {/* Line items + payment reference — merged into one card since both relate
                 to "what am I actually paying for" and payment ref is short */}
-            {((editing ? form.lineItems : inv.lineItems)?.length > 0 || inv.paymentReference || editing) && (
-              <div className="card">
-                {(editing ? form.lineItems : inv.lineItems)?.length > 0 && (
-                  <>
-                    <div className="card-title" style={{ marginBottom: 12 }}>
-                      Line Items ({(editing ? form.lineItems : inv.lineItems).length})
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {(editing ? form.lineItems : inv.lineItems).map((li, i) => (
-                        editing ? (
-                          <div key={i} style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            <input className="form-input" value={li.description || ''} placeholder="Description"
-                              onChange={e => updateLineItem(i, 'description', e.target.value)} />
-                            <input className="form-input" type="number" step="0.01" value={li.unitAmount ?? ''} placeholder="Amount"
-                              onChange={e => updateLineItem(i, 'unitAmount', e.target.value)} />
-                          </div>
-                        ) : (
-                          <div key={i} style={{ padding: '10px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
-                            <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 4, lineHeight: 1.4 }}>{li.description}</div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, color: 'var(--text-muted)' }}>
-                              <span>{fmtMoney(li.unitAmount, inv.currency)}</span>
-                              {li.discountRate > 0 && <span>· {li.discountRate}% disc.</span>}
-                              {li.taxType && li.taxType !== 'NONE' && <span className="badge badge-yellow">{li.taxType}</span>}
-                            </div>
-                          </div>
-                        )
-                      ))}
-                    </div>
-
-                    {editing ? (
-                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                        <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-                          <label htmlFor="rv-li-subtotal" className="form-label">Subtotal</label>
-                          <input id="rv-li-subtotal" className="form-input" type="number" step="0.01" value={form.subTotal}
-                            onChange={e => updateField('subTotal', e.target.value)} />
-                        </div>
-                        <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-                          <label htmlFor="rv-li-tax" className="form-label">Tax</label>
-                          <input id="rv-li-tax" className="form-input" type="number" step="0.01" value={form.taxAmount}
-                            onChange={e => updateField('taxAmount', e.target.value)} />
-                        </div>
-                      </div>
-                    ) : inv.subTotal > 0 && inv.taxAmount > 0 && (
-                      <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-muted)' }}>
-                          <span>Subtotal</span><span>{fmtMoney(inv.subTotal, inv.currency)}</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-muted)' }}>
-                          <span>Tax</span><span>{fmtMoney(inv.taxAmount, inv.currency)}</span>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', borderTop: '1px solid var(--border)', paddingTop: 6, marginTop: 2 }}>
-                          <span>Total</span><span>{fmtMoney(inv.totalAmount, inv.currency)}</span>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {(inv.paymentReference || editing) && (
-                  <div style={{ marginTop: (editing ? form.lineItems : inv.lineItems)?.length > 0 ? 14 : 0, paddingTop: (editing ? form.lineItems : inv.lineItems)?.length > 0 ? 14 : 0, borderTop: (editing ? form.lineItems : inv.lineItems)?.length > 0 ? '1px solid var(--border)' : 'none' }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: 6 }}>
-                      Payment Reference
-                    </div>
-                    {editing ? (
-                      <input className="form-input" value={form.paymentReference}
-                        onChange={e => updateField('paymentReference', e.target.value)} />
-                    ) : (
-                      <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>{inv.paymentReference}</div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+            {((editing ? form.lineItems : inv.lineItems)?.length > 0 || inv.paymentReference || editing) && <LineItemsCard id={id} inv={inv} editing={editing} form={form} updateField={updateField} updateLineItem={updateLineItem} />}
 
             {/* Reports */}
             {inv.reports?.length > 0 && (
@@ -1351,61 +658,7 @@ function InvoiceReviewPage() {
         {isMobile && <div style={{ height: 24 }} />}
 
         {/* Sticky action bar on mobile */}
-        {isMobile && (
-          <div style={{
-            position: 'sticky',
-            bottom: 'var(--bottom-nav-total)',
-            // Negative bottom margin cancels .page-body's bottom padding so the
-            // bar can sit flush on the nav; it has to track that padding, which
-            // is now derived from the same variable.
-            margin: '16px calc(-1 * var(--page-pad-x)) calc(-1 * (var(--bottom-nav-total) + 16px))',
-            padding: '10px var(--page-pad-x)',
-            background: 'var(--bg-card)',
-            borderTop: '1px solid var(--border)',
-            boxShadow: '0 -4px 16px rgba(0,0,0,0.1)',
-            display: 'flex',
-            gap: 8,
-            zIndex: 40,
-            backdropFilter: 'blur(8px)',
-            alignItems: 'center',
-          }}>
-            {canSubmit && (
-              <button
-                className="btn btn-primary btn-sm"
-                style={{ flex: 1, padding: '8px 10px', fontSize: 12 }}
-                onClick={submitToXero}
-                disabled={submitting}
-              >
-                {submitting ? 'Posting...' : inv.status === 'posted' ? '↻ Re-post' : '→ Post to Xero'}
-              </button>
-            )}
-            {canReview && (
-              <button
-                className="btn btn-success btn-sm"
-                style={{ flex: 1, padding: '8px 10px', fontSize: 12 }}
-                onClick={markReviewed}
-                disabled={marking}
-              >
-                {marking ? '...' : '✓ Reviewed'}
-              </button>
-            )}
-            {!editing && canEdit && (
-              <button className="btn btn-outline btn-sm" style={{ padding: '8px 12px', fontSize: 12 }} onClick={startEdit}>
-                ✎ Edit
-              </button>
-            )}
-            {editing && (
-              <>
-                <button className="btn btn-outline btn-sm" onClick={cancelEdit} disabled={saving}>
-                  Cancel
-                </button>
-                <button className="btn btn-primary btn-sm" style={{ flex: 1, padding: '8px 10px', fontSize: 12 }} onClick={saveEdit} disabled={saving}>
-                  {saving ? 'Saving...' : '✓ Save'}
-                </button>
-              </>
-            )}
-          </div>
-        )}
+        {isMobile && <StickyActionBar inv={inv} marking={marking} submitting={submitting} editing={editing} saving={saving} markReviewed={markReviewed} submitToXero={submitToXero} startEdit={startEdit} cancelEdit={cancelEdit} saveEdit={saveEdit} canSubmit={canSubmit} canReview={canReview} canEdit={canEdit} />}
       </div>
 
       <DeleteConfirmModal

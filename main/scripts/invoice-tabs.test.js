@@ -16,7 +16,15 @@ const path = require('path');
 const ROOT       = path.join(__dirname, '../..');
 const INVOICES   = path.join(ROOT, 'ui/src/pages/Invoices.jsx');
 const REVIEW     = path.join(ROOT, 'ui/src/pages/InvoiceReview.jsx');
-const src        = () => fs.readFileSync(INVOICES, 'utf8');
+// Each page is one file plus a folder of the pieces split out of it (helpers,
+// tabs, cards). What these tests pin is the page as a whole, so read both.
+function pageSource(pageFile, folder) {
+  const dir = path.join(ROOT, 'ui/src/pages', folder);
+  const parts = fs.existsSync(dir) ? fs.readdirSync(dir).sort().map(f => fs.readFileSync(path.join(dir, f), 'utf8')) : [];
+  return [fs.readFileSync(pageFile, 'utf8'), ...parts].join('\n');
+}
+const src        = () => pageSource(INVOICES, 'invoices');
+const reviewSrc  = () => pageSource(REVIEW, 'invoice-review');
 
 describe('AR / AP / Claims tabs — the source is the thing being read', () => {
   test('the file is present and is the page it claims to be', () => {
@@ -69,7 +77,7 @@ describe('AR / AP / Claims tabs — the labels match what Xero calls them', () =
   // is pinned here rather than left to whoever edits the array next. It has
   // already been renamed once by accident.
   const tabBlock = () => {
-    const s = fs.readFileSync(INVOICES, 'utf8');
+    const s = src();
     return s.slice(s.indexOf('const TABS'), s.indexOf('const DEFAULT_TAB'));
   };
   const longFor = type => {
@@ -169,7 +177,7 @@ describe('AR / AP / Claims tabs — claim controls live only on the claims tab',
   });
 
   test('the review page labels the contact by document kind', () => {
-    const r = fs.readFileSync(path.join(ROOT, 'ui/src/pages/InvoiceReview.jsx'), 'utf8');
+    const r = reviewSrc();
     expect(r).toContain("isExpense ? 'Merchant' : inv.invoiceType === 'ACCREC' ? 'Client / Contact' : 'Vendor / Contact'");
     expect(r).toContain("isExpense ? 'Claim ref' : 'Invoice #'");
     expect(r).toContain("isExpense ? 'Receipt date' : 'Invoice Date'");
@@ -207,7 +215,7 @@ describe('AR / AP / Claims tabs — the tab survives navigation', () => {
   });
 
   test('Back from a review returns to the tab that document belongs to', () => {
-    const r = fs.readFileSync(REVIEW, 'utf8');
+    const r = reviewSrc();
     expect(r).toContain('listPathFor');
     // No bare navigations left, which would land on the default tab instead.
     expect(r).not.toMatch(/navigate\('\/invoices'[,)]/);
