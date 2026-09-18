@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const db     = require('../db');
 const { encrypt, decrypt } = require('./crypto');
+const { resolveImapSettings } = require('../email/imap-settings');
 
 // Maps config.json-style keys (as used throughout routes/setup.js and xero/connect.js)
 // to their user_credentials column names.
@@ -222,11 +223,21 @@ function sanitize(u) {
   };
 }
 
+// This user's effective mailbox settings: what they typed, filled in from the
+// account where nothing was typed. The one place anything IMAP should read.
+function getImapSettings(userId, config = null) {
+  const user = findById(userId);
+  return resolveImapSettings(config || getUserConfig(userId), user ? user.email : '');
+}
+
 // Returns which setup sections are configured for a user, and whether the
 // system is ready to start (imap + xero are both required; llm is optional).
 function getSetupStatus(userId) {
   const config = getUserConfig(userId);
-  const imap   = !!(config.IMAP_HOST && config.IMAP_USER && config.IMAP_PASS);
+  // Host, mailbox, port, polling and lookback are worked out from the account
+  // unless they were typed in, so an ordinary Gmail or Outlook user only has to
+  // supply an app password. See email/imap-settings.js.
+  const imap   = getImapSettings(userId, config).ready;
   // Either connection method counts as "configured" — Custom Connection (client ID +
   // secret) or OAuth (connection type flipped to 'oauth' once a user has completed
   // the consent flow; see xero/oauth.js).
@@ -287,7 +298,7 @@ function ensureUserDirectories() {
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
   getAllUsers, updateUserRole, deleteUser, readUsers,
-  getUserConfig, saveUserConfig, getUserDefaults, defaultsFrom, getSetupStatus, ensureUserDirectories,
+  getUserConfig, saveUserConfig, getUserDefaults, defaultsFrom, getSetupStatus, getImapSettings, ensureUserDirectories,
   getGeminiKeys, addGeminiKey, removeGeminiKey,
   touchLastSeen, isOnline, DEFAULT_TIMEZONE,
   CONFIG_KEY_TO_COLUMN, ENCRYPTED_COLUMNS, // exposed for the one-time JSON->SQLite importer

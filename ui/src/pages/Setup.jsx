@@ -37,7 +37,7 @@ const SECTION_META = {
   },
   imap: {
     label: 'Email / IMAP', icon: '✉',
-    desc: 'Mailbox credentials for watching invoice emails',
+    desc: 'The mailbox to watch. Most settings are worked out from your email address — fill in what is asked below.',
     testKey: 'imap', testLabel: 'Test IMAP',
     helpUrl: 'https://myaccount.google.com/apppasswords', helpLabel: 'Generate a Gmail App Password ↗',
   },
@@ -124,7 +124,13 @@ function Field({ name, meta, value, onChange }) {
           className="form-input"
           // A stored secret never comes back from the server; the field is
           // blank and a blank save keeps it. Say so, or it looks unset.
-          placeholder={isSecret && meta.isSet ? 'Saved — leave blank to keep, or enter a new one' : `Enter ${name}`}
+          // Three states: a stored secret the server will not send back, a value
+          // that will be worked out if this is left blank, and a plain empty box.
+          placeholder={
+            isSecret && meta.isSet ? 'Saved — leave blank to keep, or enter a new one'
+              : meta.auto           ? `${meta.auto} — used automatically`
+              : `Enter ${name}`
+          }
           value={value}
           onChange={e => onChange(name, e.target.value)}
           readOnly={isReadOnly}
@@ -172,8 +178,21 @@ function TestResult({ msg }) {
   );
 }
 
+// Settings that are a choice rather than a requirement: blank is a real answer,
+// so they belong with the automatic ones rather than in a user's face.
+const OPTIONAL_KEYS = new Set(['IMAP_FILTER_FROM']);
+
 // ── One generic Xero/IMAP/defaults/optional card ────────────────────────────────
 function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, testing, msgs, onTest }) {
+  const entries = Object.entries(sectionData);
+  // A section where the server can work values out (today: the mailbox) shows
+  // only what it genuinely needs, and folds the rest away. A field keeps its
+  // place at the front when there is nothing to offer for it — an app password
+  // always, and the server name for a provider we do not know.
+  const hasAutomatic = entries.some(([, m]) => m.auto);
+  const needed   = hasAutomatic ? entries.filter(([k, m]) => !m.auto && !OPTIONAL_KEYS.has(k)) : entries;
+  const decided  = hasAutomatic ? entries.filter(([k, m]) => m.auto || OPTIONAL_KEYS.has(k)) : [];
+
   return (
     <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16 }}>
@@ -215,10 +234,28 @@ function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, tes
       <div style={{ height: 1, background: 'var(--border)', marginBottom: 20 }} />
 
       <div className="grid-2">
-        {Object.entries(sectionData).map(([name, fieldMeta]) => (
+        {needed.map(([name, fieldMeta]) => (
           <Field key={name} name={name} meta={fieldMeta} value={values[name] || ''} onChange={onChange} />
         ))}
       </div>
+
+      {decided.length > 0 && (
+        <details style={{ marginTop: 14 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 13, color: 'var(--text-secondary)', userSelect: 'none' }}>
+            Advanced — {decided.length} settings you do not need to fill in
+          </summary>
+          <div style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '8px 0 14px', lineHeight: 1.55 }}>
+            Each box shows the value that will be used while it is empty. Fill one in only to
+            watch a different mailbox, to reach a company mail server, or to change how often
+            and how far back the inbox is searched.
+          </div>
+          <div className="grid-2">
+            {decided.map(([name, fieldMeta]) => (
+              <Field key={name} name={name} meta={fieldMeta} value={values[name] || ''} onChange={onChange} />
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 }

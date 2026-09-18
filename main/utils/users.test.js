@@ -158,6 +158,23 @@ describe('users store (SQLite)', () => {
     expect(users.getSetupStatus(u.id).ready).toBe(true);
   });
 
+  test('a Gmail account needs only an app password — host and mailbox follow from the address', async () => {
+    const u = await users.createUser('mailbox-auto@gmail.com', 'password123', 'user');
+    users.saveUserConfig(u.id, { XERO_CONNECTION_TYPE: 'oauth' });
+    expect(users.getSetupStatus(u.id).imap.configured).toBe(false);
+    users.saveUserConfig(u.id, { IMAP_PASS: 'app-password' });
+    expect(users.getSetupStatus(u.id).imap.configured).toBe(true);
+    expect(users.getSetupStatus(u.id).ready).toBe(true);
+  });
+
+  test('an address whose provider is unknown still has to be told its server', async () => {
+    const u = await users.createUser('finance@acme-corp.example', 'password123', 'user');
+    users.saveUserConfig(u.id, { XERO_CONNECTION_TYPE: 'oauth', IMAP_PASS: 'app-password' });
+    expect(users.getSetupStatus(u.id).imap.configured).toBe(false);
+    users.saveUserConfig(u.id, { IMAP_HOST: 'mail.acme-corp.example' });
+    expect(users.getSetupStatus(u.id).imap.configured).toBe(true);
+  });
+
   test('getSetupStatus treats an OAuth connection as configured, with no Custom Connection fields at all', async () => {
     const u = await users.createUser('oauth-setup@test.com', 'password123', 'user');
     expect(users.getSetupStatus(u.id).xero.configured).toBe(false);

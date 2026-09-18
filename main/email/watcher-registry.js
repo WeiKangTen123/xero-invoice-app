@@ -4,14 +4,12 @@ const emailQueue        = require('../queue/email-queue');
 const emailWorker       = require('../queue/email-worker');
 const processState      = require('../utils/process-state');
 const logger            = require('../utils/logger');
+const { resolveImapSettings } = require('./imap-settings');
 
-const MIN_POLL_MS         = 30000;
 const RECONNECT_BASE_MS   = 10000;
 const RECONNECT_MAX_MS    = 300000; // 5 min cap
 const RECONNECT_MAX_TRIES = 20;
 const UPDATE_DEBOUNCE_MS  = 3000;
-const DEFAULT_LOOKBACK_DAYS = 100;
-const MAX_LOOKBACK_DAYS     = 365; // guards against an accidentally huge/slow IMAP SINCE search
 
 // registry: userId → WatcherState object
 const _registry = new Map();
@@ -46,25 +44,17 @@ function _getState(userId) {
 
 // ── Fetch ─────────────────────────────────────────────────────────────────────
 
-// Clamped so a blank/invalid/zero/negative value falls back to the default rather
-// than searching since the epoch, and an absurdly large one (e.g. a typo'd extra
-// zero) can't turn every poll into a multi-year IMAP SINCE search.
-function _resolveLookbackDays(raw) {
-  return Math.min(Math.max(parseInt(raw, 10) || DEFAULT_LOOKBACK_DAYS, 1), MAX_LOOKBACK_DAYS);
-}
-
 function _fetchUnseen(s) {
   if (!s.mailboxReady) { logger.warn(`[user:${s.userId}] Fetch skipped — mailbox not open yet`); return; }
   if (s.fetchInProgress) { s.fetchPending = true; return; }
   s.fetchInProgress = true;
 
-  const lookbackDays = _resolveLookbackDays(s.credentials?.IMAP_LOOKBACK_DAYS);
   const since = new Date();
-  since.setDate(since.getDate() - lookbackDays);
+  since.setDate(since.getDate() - s.settings.lookbackDays);
   const sinceStr = since.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' });
   const criteria = ['UNSEEN', ['SINCE', sinceStr]];
-  if (s.credentials?.IMAP_FILTER_FROM) {
-    criteria.push(['FROM', s.credentials.IMAP_FILTER_FROM]);
+  if (s.settings.filterFrom) {
+    criteria.push(['FROM', s.settings.filterFrom]);
   }
 
   s.imap.search(criteria, (err, uids) => {
@@ -217,7 +207,7 @@ function _teardown(imap) {
 }
 
 function _connect(s) {
-  const { userId, credentials, onInvoice } = s;
+  const { userId, settings, onInvoice } = s;
 
   if (s.reconnectAttempt >= RECONNECT_MAX_TRIES) {
     logger.error(`[user:${userId}] IMAP: max reconnect attempts reached — stop and reconfigure`);
@@ -230,13 +220,13 @@ function _connect(s) {
   s.mailboxReady    = false;
   s.onInvoice       = onInvoice;
 
-  const pollMs = Math.max(parseInt(credentials.IMAP_POLL_INTERVAL_MS) || 60000, MIN_POLL_MS);
+  const pollMs = settings.pollMs;
 
   const imap = new Imap({
-    user:        credentials.IMAP_USER,
-    password:    credentials.IMAP_PASS,
-    host:        credentials.IMAP_HOST || 'imap.gmail.com',
-    port:        Number(credentials.IMAP_PORT) || 993,
+    user:        settings.user,
+    password:    settings.password,
+    host:        settings.host,
+    port:        settings.port,
     tls:         true,
     tlsOptions:  { rejectUnauthorized: false },
     keepalive:   true,
@@ -308,13 +298,16 @@ function _connect(s) {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-function start(userId, credentials, onInvoice) {
+// `credentials` is this user's stored settings; anything they left blank is
+// worked out from `loginEmail` (see email/imap-settings.js), so an ordinary
+// mailbox needs nothing but an app password.
+function start(userId, credentials, onInvoice, { loginEmail = '' } = {}) {
   const s = _getState(userId);
   if (s.imap) {
     logger.warn(`[user:${userId}] Watcher already running`);
     return;
   }
-  s.credentials     = credentials;
+  s.settings        = resolveImapSettings(credentials, loginEmail);
   s.onInvoice       = onInvoice;
   s.reconnectAttempt = 0;
   _connect(s);
@@ -366,4 +359,4 @@ function stopAll() {
   return ids.length;
 }
 
-module.exports = { start, stop, stopAll, rescan, isRunning, _resolveLookbackDays }; // last one exposed for tests
+module.exports = { start, stop, stopAll, rescan, isRunning };

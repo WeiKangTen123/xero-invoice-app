@@ -38,7 +38,6 @@ const Imap = require('imap');
 Imap.mockImplementation(opts => new FakeImap(opts));
 
 const watcherRegistry = require('./watcher-registry');
-const { _resolveLookbackDays } = watcherRegistry;
 
 function lastImapInstance() {
   return Imap.mock.results[Imap.mock.results.length - 1].value;
@@ -46,29 +45,24 @@ function lastImapInstance() {
 
 const CREDS = { IMAP_USER: 'a@test.com', IMAP_PASS: 'pw', IMAP_HOST: 'imap.test.com', IMAP_PORT: 993 };
 
-describe('_resolveLookbackDays', () => {
-  test('uses the configured value when it is a valid positive integer', () => {
-    expect(_resolveLookbackDays('30')).toBe(30);
-    expect(_resolveLookbackDays(7)).toBe(7);
+// The lookback clamp, the poll floor and the port/host/mailbox defaults moved
+// to email/imap-settings.js, which is where they are now tested. What belongs
+// here is that the watcher CONNECTS with whatever that resolver decided.
+describe('what the watcher connects with', () => {
+  afterEach(() => watcherRegistry.stop('conn-1'));
+
+  test('a mailbox left unconfigured is filled in from the account', () => {
+    watcherRegistry.start('conn-1', { IMAP_PASS: 'pw' }, jest.fn(), { loginEmail: 'person@gmail.com' });
+    expect(lastImapInstance().opts).toMatchObject({
+      user: 'person@gmail.com', password: 'pw', host: 'imap.gmail.com', port: 993, tls: true,
+    });
   });
 
-  test('falls back to the default (100) when unset', () => {
-    expect(_resolveLookbackDays(undefined)).toBe(100);
-    expect(_resolveLookbackDays(null)).toBe(100);
-    expect(_resolveLookbackDays('')).toBe(100);
-  });
-
-  test('falls back to the default for a non-numeric value', () => {
-    expect(_resolveLookbackDays('not-a-number')).toBe(100);
-  });
-
-  test('clamps zero/negative values up to at least 1 day', () => {
-    expect(_resolveLookbackDays('0')).toBe(100); // 0 is falsy, so it hits the default fallback like unset
-    expect(_resolveLookbackDays('-5')).toBe(1);
-  });
-
-  test('clamps an excessive value down to the 365-day cap', () => {
-    expect(_resolveLookbackDays('5000')).toBe(365);
+  test('settings typed by hand are used as given', () => {
+    watcherRegistry.start('conn-1', { ...CREDS, IMAP_PORT: 143 }, jest.fn(), { loginEmail: 'person@gmail.com' });
+    expect(lastImapInstance().opts).toMatchObject({
+      user: 'a@test.com', password: 'pw', host: 'imap.test.com', port: 143,
+    });
   });
 });
 

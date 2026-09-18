@@ -4,10 +4,11 @@ const fs      = require('fs');
 const path    = require('path');
 const { requireAuth, requireAdmin } = require('../middleware/auth-middleware');
 const {
-  getUserConfig, saveUserConfig, getSetupStatus,
+  getUserConfig, saveUserConfig, getSetupStatus, getImapSettings,
   getGeminiKeys, addGeminiKey, removeGeminiKey,
 } = require('../utils/users');
 const logger  = require('../utils/logger');
+const { automaticImapValues } = require('../email/imap-settings');
 
 // ── Field definitions ─────────────────────────────────────────────────────────
 
@@ -93,6 +94,11 @@ router.get('/', requireAuth, (req, res) => {
   const globalEnv  = readEnvFile();
   const result     = {};
 
+  // What a blank mailbox box will actually use, so the form can offer the value
+  // instead of demanding it. Null means there is nothing to work out and the
+  // field has to be filled in by hand.
+  const auto = automaticImapValues(req.user.email);
+
   for (const [section, keys] of Object.entries(USER_SECTIONS)) {
     result[section] = {};
     for (const key of keys) {
@@ -100,6 +106,7 @@ router.get('/', requireAuth, (req, res) => {
       result[section][key] = {
         value: SECRET_KEYS.has(key) ? '' : val,
         isSet: val.length > 0,
+        auto:  auto[key] ?? null,
       };
     }
   }
@@ -198,22 +205,23 @@ router.post('/test/xero', requireAuth, async (req, res) => {
 // ── POST /api/setup/test/imap — test this user's IMAP connection ──────────────
 router.post('/test/imap', requireAuth, async (req, res) => {
   try {
-    const config   = getUserConfig(req.user.id);
-    const imapUser = config.IMAP_USER;
-    const imapPass = config.IMAP_PASS;
-    const imapHost = config.IMAP_HOST || 'imap.gmail.com';
-    const imapPort = Number(config.IMAP_PORT) || 993;
+    // The same settings the watcher will use, so a passing test means a working
+    // watcher — including everything filled in from the account.
+    const settings = getImapSettings(req.user.id);
 
-    if (!imapUser || !imapPass) {
-      return res.status(400).json({ success: false, message: 'IMAP credentials not configured — go to Setup and enter your email and password first' });
+    if (!settings.ready) {
+      const missing = !settings.password ? 'an app password'
+                    : !settings.host     ? 'the mailbox server (we do not know it for this email provider)'
+                    : 'a mailbox address';
+      return res.status(400).json({ success: false, message: `Mailbox not configured — go to Setup and add ${missing}.` });
     }
 
     const Imap = require('imap');
     const imap = new Imap({
-      user:       imapUser,
-      password:   imapPass,
-      host:       imapHost,
-      port:       imapPort,
+      user:       settings.user,
+      password:   settings.password,
+      host:       settings.host,
+      port:       settings.port,
       tls:        true,
       tlsOptions: { rejectUnauthorized: false },
       authTimeout: 10000,

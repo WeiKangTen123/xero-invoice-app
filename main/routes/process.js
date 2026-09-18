@@ -80,7 +80,8 @@ router.post('/start', requireAuth, (req, res, next) => {
 
     const config  = getUserConfig(userId);
     const handler = createHandler(userId);
-    watcherRegistry.start(userId, config, handler.onInvoiceEmail);
+    // Whatever the user left blank is worked out from their address.
+    watcherRegistry.start(userId, config, handler.onInvoiceEmail, { loginEmail: req.user.email });
     emailWorker.startWorker(userId, handler.onInvoiceEmail);
     processState.forUser(userId).notifyStarted();
     logger.info('Email watcher started', { by: req.user.email, userId });
