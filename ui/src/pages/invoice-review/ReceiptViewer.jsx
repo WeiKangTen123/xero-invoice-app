@@ -1,7 +1,15 @@
+import { useState, useEffect, useCallback } from 'react';
 import CroppedImage from '../../components/receipts/CroppedImage';
 import { MARKABLE } from './helpers';
 
 export default function ReceiptViewer({ isMobile, id, navigate, inv, receiptUrl, receiptRot, setReceiptRot, group, merging, approvingNext, rereading, rereadMsg, saving, receiptBox, rereadReceipt, mergeBack, approveAndNext }) {
+  // A picture that cannot load used to leave a silent dark box. Say so, and
+  // point at the two ways out. Reset whenever the link changes (a re-issued
+  // token, a different sibling of the same photo).
+  const [imgErr, setImgErr] = useState(false);
+  useEffect(() => { setImgErr(false); }, [receiptUrl]);
+  const onImgError = useCallback(() => setImgErr(true), []);
+
   return (
             <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
@@ -38,11 +46,18 @@ export default function ReceiptViewer({ isMobile, id, navigate, inv, receiptUrl,
                       title="Receipt PDF"
                       style={{ width: '100%', height: isMobile ? 340 : 'calc(100vh - 300px)', minHeight: isMobile ? 260 : 420, border: 'none', background: '#525659' }}
                     />
+                  ) : imgErr ? (
+                    <div role="alert" style={{ padding: '28px 20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.6, maxWidth: 360 }}>
+                      <div style={{ fontSize: 26, marginBottom: 6 }}>🖼</div>
+                      <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>This image could not be displayed</div>
+                      <div style={{ marginTop: 4 }}>The file may be missing or damaged. Open <strong>Full size</strong> to check it, or delete this claim and upload the receipt again.</div>
+                    </div>
                   ) : (
                     <CroppedImage
                       src={receiptUrl}
                       box={receiptBox}
                       alt="Receipt"
+                      onError={onImgError}
                       style={{ maxWidth: '100%', maxHeight: isMobile ? 340 : 'calc(100vh - 280px)', objectFit: 'contain',
                                transform: `rotate(${receiptRot}deg)`, transition: 'transform .2s ease' }}
                     />
