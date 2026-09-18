@@ -34,9 +34,7 @@ export default function Invoices() {
   const [clearing,      setClearing]      = useState(false);
   const [submittingAll, setSubmittingAll] = useState(false);
   const [submitMsg,     setSubmitMsg]     = useState('');
-  const [deleting,      setDeleting]      = useState(new Set());
   const [selected,      setSelected]      = useState(new Set());
-  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [deleteTarget,  setDeleteTarget]  = useState(null); // { type: 'single', invoice } | { type: 'bulk', count, ids } | { type: 'clear' }
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [filter,       setFilter]       = useState('');
@@ -581,7 +579,7 @@ export default function Invoices() {
                     : 'They arrive as the emailed template — or type one in, or import a spreadsheet, above'}
             </div>
           </div>
-        ) : isMobile ? <MobileList navigate={navigate} invoices={invoices} deleting={deleting} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} filtered={filtered} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} /> : <DesktopTable user={user} navigate={navigate} invoices={invoices} deleting={deleting} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} />}
+        ) : isMobile ? <MobileList navigate={navigate} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} filtered={filtered} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} /> : <DesktopTable user={user} navigate={navigate} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} />}
       </div>
 
       {/* Floating Mobile Selection Bar */}

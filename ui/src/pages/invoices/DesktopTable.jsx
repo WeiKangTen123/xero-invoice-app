@@ -4,7 +4,7 @@ import { TypeBadge } from '../../components/Badges';
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { receivedLabel, totalsLabel } from './helpers';
 
-export default function DesktopTable({ user, navigate, invoices, deleting, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
+export default function DesktopTable({ user, navigate, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
   return (
           <div style={{ overflowX: 'auto' }}>
             <table className="data-table">
@@ -54,7 +54,6 @@ export default function DesktopTable({ user, navigate, invoices, deleting, selec
                   ...(isOpen(g) ? g.rows : []).map((inv, i) => {
                   const { cls, label } = statusMeta(inv.status);
                   const isSelected    = selected.has(inv.id);
-                  const isDeleting    = deleting.has(inv.id);
                   const needsAttention = ATTENTION_STATUSES.includes(inv.status);
                   const isDup         = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
                   return (
@@ -66,7 +65,6 @@ export default function DesktopTable({ user, navigate, invoices, deleting, selec
                         background: isSelected
                           ? 'var(--accent-subtle)'
                           : isDup ? 'rgba(239,68,68,0.04)' : needsAttention ? 'rgba(245,158,11,0.04)' : undefined,
-                        opacity: isDeleting ? 0.4 : 1,
                         transition: 'background 0.15s, opacity 0.2s',
                       }}
                       onClick={() => navigate(`/invoices/${inv.id}`)}

@@ -3,7 +3,7 @@ import { TypeBadge } from '../../components/Badges';
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { totalsLabel } from './helpers';
 
-export default function MobileList({ navigate, invoices, deleting, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, filtered, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
+export default function MobileList({ navigate, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, filtered, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
   return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {/* Mobile Select-all row if items exist */}
@@ -49,7 +49,6 @@ export default function MobileList({ navigate, invoices, deleting, selected, del
                 {isOpen(g) && g.rows.map((inv) => {
                   const { cls, label } = statusMeta(inv.status);
                   const isSelected = selected.has(inv.id);
-                  const isDeleting = deleting.has(inv.id);
                   const needsAttention = ATTENTION_STATUSES.includes(inv.status);
                   const isDup = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
 
@@ -62,7 +61,6 @@ export default function MobileList({ navigate, invoices, deleting, selected, del
                         borderRadius: 12,
                         background: isSelected ? 'var(--accent-subtle)' : 'var(--bg-secondary)',
                         border: `1px solid ${isSelected ? 'var(--accent)' : isDup ? 'rgba(239,68,68,0.3)' : 'var(--border)'}`,
-                        opacity: isDeleting ? 0.4 : 1,
                         cursor: 'pointer',
                         display: 'flex',
                         flexDirection: 'column',
