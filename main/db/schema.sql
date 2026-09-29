@@ -14,7 +14,15 @@ CREATE TABLE IF NOT EXISTS users (
   -- app right now"), distinct from process-state.js's lastActivity, which tracks the
   -- EMAIL PIPELINE's activity (an invoice was processed) and says nothing about
   -- whether anyone is actually looking at the app.
-  last_seen_at TEXT
+  last_seen_at TEXT,
+  -- Tokens issued before this instant are refused (auth-middleware.js). Moved
+  -- forward by a password change or reset and by an admin's "sign out
+  -- everywhere". JWTs are stateless and live seven days; this is the one
+  -- revocation lever.
+  sessions_valid_from TEXT,
+  -- Set while the account is disabled: sign-in and existing tokens are refused
+  -- and the mailbox watcher is stopped. Rows and files stay. NULL = active.
+  disabled_at TEXT
 );
 
 -- 1:1 with users — Xero/IMAP/LLM credentials (was data/users/<id>/config.json)

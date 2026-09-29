@@ -193,6 +193,48 @@ async function validatePassword(email, password) {
   return ok ? sanitize(user) : null;
 }
 
+// Every place that accepts a password checks this — register, the admin's Add
+// User and Reset password, and Change password. The Add User form said six
+// while the server refused under eight.
+const PASSWORD_MIN_LENGTH = 8;
+
+function passwordProblem(password) {
+  if (typeof password !== 'string' || password.length < PASSWORD_MIN_LENGTH) {
+    return `Password must be at least ${PASSWORD_MIN_LENGTH} characters`;
+  }
+  return null;
+}
+
+// Sets a new password and signs the user out everywhere. Tokens are stateless
+// and live seven days, so without the cutoff a reset would leave the old
+// session valid for up to a week — the opposite of what a reset is for.
+async function setPassword(id, newPassword) {
+  const problem = passwordProblem(newPassword);
+  if (problem) throw new Error(problem);
+  if (!findById(id)) throw new Error('User not found');
+  const hash = await bcrypt.hash(newPassword, 10);
+  db.prepare('UPDATE users SET password = ?, sessions_valid_from = ? WHERE id = ?')
+    .run(hash, new Date().toISOString(), id);
+}
+
+// Every token issued before now is refused from here on (auth-middleware.js).
+function invalidateSessions(id) {
+  const at = new Date().toISOString();
+  db.prepare('UPDATE users SET sessions_valid_from = ? WHERE id = ?').run(at, id);
+  return at;
+}
+
+// A disabled account cannot sign in and its existing tokens are refused; the
+// rows and files stay, so this is the reversible alternative to deleting.
+function setDisabled(id, disabled) {
+  const user = findById(id);
+  if (!user) throw new Error('User not found');
+  const at = disabled ? new Date().toISOString() : null;
+  db.prepare('UPDATE users SET disabled_at = ? WHERE id = ?').run(at, id);
+  if (disabled) invalidateSessions(id);
+  return sanitize({ ...user, disabled_at: at });
+}
+
 function getAllUsers() {
   return db.prepare('SELECT * FROM users ORDER BY created_at').all().map(sanitize);
 }
@@ -220,6 +262,7 @@ function sanitize(u) {
   return {
     id: u.id, email: u.email, role: u.role, createdAt: u.created_at || u.createdAt,
     lastSeenAt, online: isOnline(lastSeenAt),
+    disabledAt: u.disabled_at ?? u.disabledAt ?? null,
   };
 }
 
@@ -297,6 +340,7 @@ function ensureUserDirectories() {
 
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
+  passwordProblem, setPassword, invalidateSessions, setDisabled, PASSWORD_MIN_LENGTH,
   getAllUsers, updateUserRole, deleteUser, readUsers,
   getUserConfig, saveUserConfig, getUserDefaults, defaultsFrom, getSetupStatus, getImapSettings, ensureUserDirectories,
   getGeminiKeys, addGeminiKey, removeGeminiKey,

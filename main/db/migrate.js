@@ -42,6 +42,8 @@ function run() {
   _ensureColumn('user_credentials', 'xero_oauth_connected_at',  'xero_oauth_connected_at TEXT');
   _ensureColumn('user_credentials', 'timezone', 'timezone TEXT');
   _ensureColumn('users', 'last_seen_at', 'last_seen_at TEXT');
+  _ensureColumn('users', 'sessions_valid_from', 'sessions_valid_from TEXT');
+  _ensureColumn('users', 'disabled_at', 'disabled_at TEXT');
   for (const [col, ddl] of [
     ['receipt_file', 'receipt_file TEXT'], ['receipt_mime', 'receipt_mime TEXT'], ['receipt_box', 'receipt_box TEXT'],
     ['receipt_page', 'receipt_page INTEGER'], ['receipt_group', 'receipt_group TEXT'], ['received_at', 'received_at TEXT'],

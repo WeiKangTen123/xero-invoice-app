@@ -27,6 +27,16 @@ function requireAuth(req, res, next) {
   const users = require('../utils/users');
   const live  = users.findById(claims.id);
   if (!live) return res.status(401).json({ error: 'Account no longer exists' });
+  if (live.disabled_at) return res.status(401).json({ error: 'This account has been disabled' });
+  // A password change or reset, or an admin's "sign out everywhere", moves
+  // sessions_valid_from forward and every token minted before it is refused.
+  // Compared at whole seconds, the precision of a JWT's iat: a token issued in
+  // the same second as the cutoff (signing straight back in after a reset)
+  // must still be accepted.
+  if (live.sessions_valid_from && claims.iat !== undefined
+      && claims.iat < Math.floor(Date.parse(live.sessions_valid_from) / 1000)) {
+    return res.status(401).json({ error: 'You have been signed out. Sign in again.' });
+  }
   req.user = { ...claims, id: live.id, email: live.email, role: live.role };
   // Throttled to at most one DB write per user per minute — see
   // users.js#touchLastSeen. Failure here must never turn into a 401 — it's
