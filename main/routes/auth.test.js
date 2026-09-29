@@ -119,3 +119,75 @@ describe('routes/auth', () => {
     });
   });
 });
+
+// ── Password change, session cutoff and disabled accounts ───────────────────
+describe('routes/auth password and account state', () => {
+  let app, users, jwtSecret;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users = require('../utils/users');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    app = express();
+    app.use(express.json());
+    app.use('/api/auth', require('./auth'));
+  });
+
+  // See admin.test.js: a token that must be refused is minted a little in the past.
+  function tokenFor(user, secondsAgo = 0) {
+    const iat = Math.floor(Date.now() / 1000) - secondsAgo;
+    return jwt.sign({ id: user.id, email: user.email, role: user.role, iat }, jwtSecret());
+  }
+  const login  = (email, password) => request(serverFor(app)).post('/api/auth/login').send({ email, password });
+  const me     = token => request(serverFor(app)).get('/api/auth/me').set('Authorization', `Bearer ${token}`);
+  const change = (token, body) => request(serverFor(app)).post('/api/auth/change-password').set('Authorization', `Bearer ${token}`).send(body);
+
+  describe('POST /change-password', () => {
+    test('needs the current password, both fields and at least 8 characters', async () => {
+      const u = await users.createUser('cp@test.com', 'password123', 'user');
+      const t = tokenFor(u);
+      // A wrong current password is a 400, not a 401: a 401 would bounce the
+      // browser to the login page.
+      const wrong = await change(t, { currentPassword: 'wrong', newPassword: 'newpassword1' }).expect(400);
+      expect(wrong.body.error).toMatch(/current password/i);
+      await change(t, { currentPassword: 'password123', newPassword: 'short' }).expect(400);
+      await change(t, { newPassword: 'newpassword1' }).expect(400);
+      await change(t, { currentPassword: 'password123' }).expect(400);
+      await login('cp@test.com', 'password123').expect(200);
+    });
+
+    test('changes the password, keeps this session via the returned token and signs out the others', async () => {
+      const u = await users.createUser('cp@test.com', 'password123', 'user');
+      const stale = tokenFor(u, 5);
+      const res = await change(stale, { currentPassword: 'password123', newPassword: 'newpassword1' }).expect(200);
+      expect(res.body.token).toBeTruthy();
+      await me(stale).expect(401);
+      await me(res.body.token).expect(200);
+      await login('cp@test.com', 'password123').expect(401);
+      await login('cp@test.com', 'newpassword1').expect(200);
+    });
+  });
+
+  test('POST /login refuses a disabled account, and only once the password is right', async () => {
+    const u = await users.createUser('off@test.com', 'password123', 'user');
+    users.setDisabled(u.id, true);
+    const res = await login('off@test.com', 'password123').expect(403);
+    expect(res.body.error).toMatch(/disabled/);
+    await login('off@test.com', 'nope').expect(401);
+    users.setDisabled(u.id, false);
+    await login('off@test.com', 'password123').expect(200);
+  });
+
+  test('requireAuth refuses a token minted before the cutoff and accepts one from the cutoff\'s own second', async () => {
+    const u = await users.createUser('cut@test.com', 'password123', 'user');
+    const stale = tokenFor(u, 5);
+    await me(stale).expect(200);
+    const at = users.invalidateSessions(u.id);
+    // Signing straight back in after a reset lands in the same second as the
+    // cutoff; iat has no sub-second precision, so that token must be accepted.
+    const sameSecond = jwt.sign({ id: u.id, email: u.email, role: u.role, iat: Math.floor(Date.parse(at) / 1000) }, jwtSecret());
+    await me(stale).expect(401);
+    await me(sameSecond).expect(200);
+  });
+});

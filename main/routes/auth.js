@@ -2,7 +2,7 @@ const express = require('express');
 const router  = express.Router();
 const jwt     = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const { hasUsers, createUser, validatePassword, getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
+const { hasUsers, createUser, validatePassword, passwordProblem, setPassword, getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
 const logger  = require('../utils/logger');
 
@@ -32,9 +32,8 @@ router.post('/register', authLimiter, async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
-    }
+    const problem = passwordProblem(password);
+    if (problem) return res.status(400).json({ error: problem });
 
     if (hasUsers() && process.env.ALLOW_REGISTRATION !== 'true') {
       return res.status(403).json({ error: 'Public registration is disabled. Contact your administrator.' });
@@ -62,6 +61,11 @@ router.post('/login', authLimiter, async (req, res) => {
     }
     const user = await validatePassword(email, password);
     if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+    // Said only once the password is right, so the message reaches the account's
+    // owner and does not tell a guesser which addresses exist.
+    if (user.disabledAt) {
+      return res.status(403).json({ error: 'This account has been disabled. Contact your administrator.' });
+    }
 
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
@@ -105,6 +109,38 @@ router.post('/logout', requireAuth, (req, res) => {
 router.get('/me', requireAuth, (req, res) => {
   const config = getUserConfig(req.user.id);
   res.json({ user: { ...req.user, timezone: config.TIMEZONE || DEFAULT_TIMEZONE } });
+});
+
+// POST /api/auth/change-password — the signed-in user sets their own password.
+// The current one is required, so an unattended signed-in browser cannot lock
+// its owner out. Every other session is signed out by the cutoff setPassword
+// moves (auth-middleware.js); THIS one is kept by returning a fresh token,
+// which the client stores in place of the old one.
+//
+// A wrong current password is a 400, not a 401: the client treats every 401
+// as an expired session and bounces to the login page.
+router.post('/change-password', requireAuth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body || {};
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new password are required' });
+    }
+    const problem = passwordProblem(newPassword);
+    if (problem) return res.status(400).json({ error: problem });
+    if (!(await validatePassword(req.user.email, currentPassword))) {
+      return res.status(400).json({ error: 'Current password is incorrect' });
+    }
+    await setPassword(req.user.id, newPassword);
+    const token = jwt.sign(
+      { id: req.user.id, email: req.user.email, role: req.user.role },
+      jwtSecret(),
+      { expiresIn: '7d' }
+    );
+    logger.info('Password changed', { email: req.user.email });
+    res.json({ success: true, token });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 module.exports = router;

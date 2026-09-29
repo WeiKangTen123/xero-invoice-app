@@ -3,7 +3,10 @@ const router       = express.Router();
 const fs           = require('fs');
 const path         = require('path');
 const { requireAdmin } = require('../middleware/auth-middleware');
-const { getAllUsers, createUser, updateUserRole, deleteUser, readUsers, getSetupStatus, isOnline } = require('../utils/users');
+const {
+  getAllUsers, createUser, updateUserRole, deleteUser, readUsers, findById, getSetupStatus, isOnline,
+  passwordProblem, setPassword, invalidateSessions, setDisabled,
+} = require('../utils/users');
 const invoiceStore     = require('../utils/invoice-store');
 const settingsStore    = require('../utils/settings-store');
 const processState     = require('../utils/process-state');
@@ -34,9 +37,8 @@ router.post('/users', requireAdmin, async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
-    }
+    const problem = passwordProblem(password);
+    if (problem) return res.status(400).json({ error: problem });
     const user = await createUser(email, password, role === 'admin' ? 'admin' : 'user');
     logger.info('Admin created user', { email, role: user.role, by: req.user.email });
     res.status(201).json({ success: true, user });
@@ -52,11 +54,9 @@ router.delete('/users/:id', requireAdmin, (req, res) => {
     if (id === req.user.id) {
       return res.status(400).json({ error: 'Cannot delete your own account' });
     }
-    const users  = readUsers();
-    const admins = users.filter(u => u.role === 'admin');
-    const target = users.find(u => u.id === id);
+    const target = findById(id);
     if (!target) return res.status(404).json({ error: 'User not found' });
-    if (target.role === 'admin' && admins.length <= 1) {
+    if (lastActiveAdmin(target)) {
       return res.status(400).json({ error: 'Cannot delete the last admin account' });
     }
     deleteUser(id);
@@ -72,6 +72,131 @@ router.delete('/users/:id', requireAdmin, (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ── Account controls ─────────────────────────────────────────────────────────
+// Admins who could not sign in do not count towards "is anyone left to undo
+// this": a disabled admin is no safeguard.
+function activeAdmins() {
+  return readUsers().filter(u => u.role === 'admin' && !u.disabled_at);
+}
+
+// Would deleting, demoting or disabling this account leave nobody who can sign
+// in as an admin? Never, while the actor is an active admin acting on someone
+// else; kept as the guard for when that rule changes.
+function lastActiveAdmin(target) {
+  return target.role === 'admin' && !activeAdmins().some(a => a.id !== target.id);
+}
+
+// The account a /users/:id/* control acts on. Acting on yourself is refused:
+// an admin who demotes, disables or signs out their own account has nobody
+// left to undo it, and your own password has its own route
+// (POST /api/auth/change-password) that asks for the current one first.
+function findTarget(req, res, selfError) {
+  const target = findById(req.params.id);
+  if (!target) { res.status(404).json({ error: 'User not found' }); return null; }
+  if (target.id === req.user.id) { res.status(400).json({ error: selfError }); return null; }
+  return target;
+}
+
+// Mirrors POST /api/process/stop for another user's watcher.
+function stopWatcher(userId) {
+  const wasRunning = watcherRegistry.isRunning(userId);
+  if (wasRunning) {
+    watcherRegistry.stop(userId);
+    try { processState.forUser(userId).notifyStopped(); } catch (_) {}
+  }
+  return wasRunning;
+}
+
+// PATCH /api/admin/users/:id/role — promote or demote. updateUserRole existed in
+// users.js from the start and nothing called it, so making a second admin took
+// a SQL statement on the server.
+router.patch('/users/:id/role', requireAdmin, (req, res) => {
+  const { role } = req.body;
+  if (role !== 'admin' && role !== 'user') {
+    return res.status(400).json({ error: "Role must be 'admin' or 'user'" });
+  }
+  const target = findTarget(req, res, 'You cannot change your own role');
+  if (!target) return;
+  if (role === 'user' && lastActiveAdmin(target)) {
+    return res.status(400).json({ error: 'Cannot demote the last admin account' });
+  }
+  const user = updateUserRole(target.id, role);
+  logger.info('Admin changed user role', { email: target.email, role, by: req.user.email });
+  res.json({ success: true, user });
+});
+
+// PATCH /api/admin/users/:id/password — set a new password for an account.
+// Passwords are bcrypt hashes: there is nothing to view, only replace. The
+// account's other sessions are signed out by the same cutoff a self-service
+// change uses (users.js#setPassword).
+router.patch('/users/:id/password', requireAdmin, async (req, res) => {
+  try {
+    const target = findTarget(req, res, 'Change your own password from Setup');
+    if (!target) return;
+    await setPassword(target.id, req.body.password);
+    logger.info('Admin reset user password', { email: target.email, by: req.user.email });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/users/:id/sign-out — every token this account holds is
+// refused from now on. For a lost laptop or a shared password: the account is
+// otherwise untouched and they can sign straight back in.
+router.post('/users/:id/sign-out', requireAdmin, (req, res) => {
+  const target = findTarget(req, res, 'Use Sign out for your own session');
+  if (!target) return;
+  invalidateSessions(target.id);
+  logger.info('Admin signed user out everywhere', { email: target.email, by: req.user.email });
+  res.json({ success: true });
+});
+
+// PATCH /api/admin/users/:id/disabled — { disabled: true | false }. The
+// reversible alternative to delete: sign-in and existing tokens are refused
+// and the mailbox watcher is stopped, but invoices, receipts and credentials
+// stay for when the account is enabled again.
+router.patch('/users/:id/disabled', requireAdmin, (req, res) => {
+  const { disabled } = req.body;
+  if (typeof disabled !== 'boolean') {
+    return res.status(400).json({ error: 'disabled must be true or false' });
+  }
+  const target = findTarget(req, res, 'You cannot disable your own account');
+  if (!target) return;
+  if (disabled && lastActiveAdmin(target)) {
+    return res.status(400).json({ error: 'Cannot disable the last admin account' });
+  }
+  const user = setDisabled(target.id, disabled);
+  const watcherStopped = disabled ? stopWatcher(target.id) : false;
+  logger.info(disabled ? 'Admin disabled user' : 'Admin enabled user', { email: target.email, watcherStopped, by: req.user.email });
+  res.json({ success: true, user });
+});
+
+// PATCH /api/admin/users/:id/auto-process — { autoProcess: false }. A kill
+// switch only: an admin can stop an account posting to a live Xero, but
+// turning it on stays that user's own decision (routes/process.js).
+router.patch('/users/:id/auto-process', requireAdmin, (req, res) => {
+  if (req.body.autoProcess !== false) {
+    return res.status(400).json({ error: 'Admins can only turn auto-submit off; the user turns it on' });
+  }
+  const target = findById(req.params.id);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  settingsStore.forUser(target.id).set({ autoProcess: false });
+  logger.info('Admin turned auto-submit off', { email: target.email, by: req.user.email });
+  res.json({ success: true, autoProcess: false });
+});
+
+// POST /api/admin/users/:id/watcher/stop — stop an account's mailbox watcher,
+// for a mailbox that is stuck, misconfigured or hammering IMAP. Starting one
+// needs that account's credentials to be complete and stays with its owner.
+router.post('/users/:id/watcher/stop', requireAdmin, (req, res) => {
+  const target = findById(req.params.id);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  const wasRunning = stopWatcher(target.id);
+  logger.info('Admin stopped mailbox watcher', { email: target.email, wasRunning, by: req.user.email });
+  res.json({ success: true, wasRunning });
 });
 
 // GET /api/admin/reports — all invoices needing human attention across all users.
@@ -138,6 +263,7 @@ router.get('/monitoring', requireAdmin, (_req, res) => {
       id:             u.id,
       email:          u.email,
       role:           u.role,
+      disabled:       !!u.disabled_at,
       watcherRunning: watcherRegistry.isRunning(u.id),
       autoProcess:    settingsStore.forUser(u.id).get('autoProcess'),
       queue:          emailQueue.getStats(u.id),

@@ -290,3 +290,150 @@ describe('admin routes', () => {
     });
   });
 });
+
+// ── Account controls ────────────────────────────────────────────────────────
+// Role, password reset, sign-out everywhere, disable/enable, the auto-submit
+// kill switch and stopping a watcher. Auth routes are mounted too, because the
+// proof for most of these is what the account can and cannot do afterwards.
+describe('admin account controls', () => {
+  let app, users, jwtSecret, admin, target;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users = require('../utils/users');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    app = express();
+    app.use(express.json());
+    app.use('/api/admin', require('./admin'));
+    app.use('/api/auth',  require('./auth'));
+    admin  = await users.createUser('admin@test.com', 'password123', 'auto'); // first user -> admin
+    target = await users.createUser('user@test.com',  'password123', 'user');
+  });
+
+  // iat is whole seconds and a token minted in the cutoff's own second is meant
+  // to survive it, so a token that must be refused is minted a little in the past.
+  function tokenFor(user, secondsAgo = 0) {
+    const iat = Math.floor(Date.now() / 1000) - secondsAgo;
+    return jwt.sign({ id: user.id, email: user.email, role: user.role, iat }, jwtSecret());
+  }
+  const asAdmin = req => req.set('Authorization', `Bearer ${tokenFor(admin)}`);
+  const login   = (email, password) => request(serverFor(app)).post('/api/auth/login').send({ email, password });
+  const me      = token => request(serverFor(app)).get('/api/auth/me').set('Authorization', `Bearer ${token}`);
+
+  describe('PATCH /users/:id/role', () => {
+    test('promotes a user to admin and demotes them back', async () => {
+      let res = await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/role`)).send({ role: 'admin' }).expect(200);
+      expect(res.body.user.role).toBe('admin');
+      expect(users.findById(target.id).role).toBe('admin');
+      res = await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/role`)).send({ role: 'user' }).expect(200);
+      expect(res.body.user.role).toBe('user');
+    });
+
+    test('refuses an unknown role, your own account and a missing user', async () => {
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/role`)).send({ role: 'owner' }).expect(400);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${admin.id}/role`)).send({ role: 'user' }).expect(400);
+      await asAdmin(request(serverFor(app)).patch('/api/admin/users/nope/role')).send({ role: 'admin' }).expect(404);
+      expect(users.findById(admin.id).role).toBe('admin');
+    });
+
+    test('a plain user cannot change roles', async () => {
+      await request(serverFor(app)).patch(`/api/admin/users/${admin.id}/role`)
+        .set('Authorization', `Bearer ${tokenFor(target)}`).send({ role: 'user' }).expect(403);
+    });
+  });
+
+  describe('PATCH /users/:id/password', () => {
+    test('sets a new password and signs out the sessions that existed before', async () => {
+      const stale = tokenFor(target, 5);
+      await me(stale).expect(200);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'newpassword1' }).expect(200);
+      await login('user@test.com', 'password123').expect(401);
+      const fresh = await login('user@test.com', 'newpassword1').expect(200);
+      await me(stale).expect(401);
+      await me(fresh.body.token).expect(200);
+    });
+
+    test('refuses a short password, your own account and a missing user, changing nothing', async () => {
+      const res = await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'short' }).expect(400);
+      expect(res.body.error).toMatch(/8 characters/);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${admin.id}/password`)).send({ password: 'newpassword1' }).expect(400);
+      await asAdmin(request(serverFor(app)).patch('/api/admin/users/nope/password')).send({ password: 'newpassword1' }).expect(404);
+      await login('user@test.com', 'password123').expect(200);
+    });
+  });
+
+  describe('POST /users/:id/sign-out', () => {
+    test('refuses existing tokens but lets the user sign in again', async () => {
+      const stale = tokenFor(target, 5);
+      await me(stale).expect(200);
+      await asAdmin(request(serverFor(app)).post(`/api/admin/users/${target.id}/sign-out`)).expect(200);
+      await me(stale).expect(401);
+      const fresh = await login('user@test.com', 'password123').expect(200);
+      await me(fresh.body.token).expect(200);
+    });
+
+    test('cannot be used on yourself', async () => {
+      await asAdmin(request(serverFor(app)).post(`/api/admin/users/${admin.id}/sign-out`)).expect(400);
+    });
+  });
+
+  describe('PATCH /users/:id/disabled', () => {
+    test('a disabled account cannot sign in or use an existing token; enabling restores both', async () => {
+      const stale = tokenFor(target, 5);
+      let res = await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/disabled`)).send({ disabled: true }).expect(200);
+      expect(res.body.user.disabledAt).toBeTruthy();
+      const denied = await login('user@test.com', 'password123').expect(403);
+      expect(denied.body.error).toMatch(/disabled/);
+      await me(stale).expect(401);
+      expect(users.getAllUsers().find(u => u.id === target.id).disabledAt).toBeTruthy();
+
+      res = await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/disabled`)).send({ disabled: false }).expect(200);
+      expect(res.body.user.disabledAt).toBeNull();
+      const fresh = await login('user@test.com', 'password123').expect(200);
+      await me(fresh.body.token).expect(200);
+    });
+
+    test('keeps the rows: disabling is not deleting', async () => {
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/disabled`)).send({ disabled: true }).expect(200);
+      expect(users.findById(target.id)).not.toBeNull();
+    });
+
+    test('refuses a non-boolean and your own account', async () => {
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/disabled`)).send({ disabled: 'yes' }).expect(400);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${admin.id}/disabled`)).send({ disabled: true }).expect(400);
+      expect(users.findById(admin.id).disabled_at).toBeNull();
+    });
+
+    test('a disabled admin can still be deleted while another admin remains', async () => {
+      const other = await users.createUser('other@test.com', 'password123', 'admin');
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${other.id}/disabled`)).send({ disabled: true }).expect(200);
+      await asAdmin(request(serverFor(app)).delete(`/api/admin/users/${other.id}`)).expect(200);
+    });
+
+    test('GET /monitoring reports a disabled account', async () => {
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/disabled`)).send({ disabled: true }).expect(200);
+      const res = await asAdmin(request(serverFor(app)).get('/api/admin/monitoring')).expect(200);
+      expect(res.body.users.find(u => u.id === target.id).disabled).toBe(true);
+      expect(res.body.users.find(u => u.id === admin.id).disabled).toBe(false);
+    });
+  });
+
+  describe('auto-submit kill switch and watcher', () => {
+    test('PATCH /users/:id/auto-process turns auto-submit off and refuses to turn it on', async () => {
+      const settings = require('../utils/settings-store');
+      settings.forUser(target.id).set({ autoProcess: true });
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/auto-process`)).send({ autoProcess: true }).expect(400);
+      expect(settings.forUser(target.id).get('autoProcess')).toBe(true);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/auto-process`)).send({ autoProcess: false }).expect(200);
+      expect(settings.forUser(target.id).get('autoProcess')).toBe(false);
+      await asAdmin(request(serverFor(app)).patch('/api/admin/users/nope/auto-process')).send({ autoProcess: false }).expect(404);
+    });
+
+    test('POST /users/:id/watcher/stop reports whether anything was running', async () => {
+      const res = await asAdmin(request(serverFor(app)).post(`/api/admin/users/${target.id}/watcher/stop`)).expect(200);
+      expect(res.body.wasRunning).toBe(false);
+      await asAdmin(request(serverFor(app)).post('/api/admin/users/nope/watcher/stop')).expect(404);
+    });
+  });
+});
