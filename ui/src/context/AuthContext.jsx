@@ -40,6 +40,13 @@ export function AuthProvider({ children }) {
     setUser(null);
   }
 
+  // The server signs this account's other sessions out and hands back a fresh
+  // token for this one; storing it is what keeps the user signed in here.
+  async function changePassword(currentPassword, newPassword) {
+    const data = await api.post('/auth/change-password', { currentPassword, newPassword });
+    if (data.token) localStorage.setItem('token', data.token);
+  }
+
   async function register(email, password) {
     await api.post('/auth/register', { email, password });
     // Register doesn't return a token — immediately log in
@@ -50,7 +57,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, register, refreshUser }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, register, refreshUser, changePassword }}>
       {children}
     </AuthContext.Provider>
   );

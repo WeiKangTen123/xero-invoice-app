@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import Modal from '../components/Modal';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
@@ -16,6 +17,66 @@ function Avatar({ email }) {
     }}>
       {email?.slice(0, 2).toUpperCase()}
     </div>
+  );
+}
+
+const EYE_BUTTON = {
+  position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)',
+  background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 13,
+};
+
+// An admin cannot see a password (it is a bcrypt hash), only set a new one and
+// pass it on. The server signs out every session that account has open.
+function ResetPasswordDialog({ user, onClose, onDone }) {
+  const [password, setPassword] = useState('');
+  const [show,     setShow]     = useState(false);
+  const [error,    setError]    = useState('');
+  const [saving,   setSaving]   = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setSaving(true); setError('');
+    try {
+      await api.patch(`/admin/users/${user.id}/password`, { password });
+      onDone();
+    } catch (err) {
+      setError(err.message);
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal onClose={onClose} busy={saving} label={`Reset password for ${user.email}`}>
+      <div className="card-title">Reset password</div>
+      <div className="card-subtitle">
+        Set a new password for <strong>{user.email}</strong> and pass it on to them.
+        The current one cannot be shown. Every session they have open is signed out.
+      </div>
+      <form onSubmit={submit}>
+        <div className="form-group">
+          <label htmlFor="reset-password" className="form-label">New password</label>
+          <div style={{ position: 'relative' }}>
+            <input id="reset-password"
+              type={show ? 'text' : 'password'}
+              className="form-input"
+              placeholder="Min. 8 characters"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required minLength={8} autoFocus autoComplete="new-password"
+              style={{ paddingRight: 38 }}
+            />
+            <button type="button" onClick={() => setShow(v => !v)} style={EYE_BUTTON}>{show ? '🙈' : '👁'}</button>
+          </div>
+        </div>
+        {error && <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
+          <button type="button" className="btn btn-outline" onClick={onClose} disabled={saving}>Cancel</button>
+          <button type="submit" className="btn btn-primary" disabled={saving || password.length < 8}>
+            {saving ? 'Saving…' : 'Set password'}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -43,7 +104,11 @@ export default function Admin() {
   const [role,    setRole]    = useState('user');
   const [error,   setError]   = useState('');
   const [success, setSuccess] = useState('');
-  const [deleting, setDeleting] = useState(null);
+  // Which account's controls are open, which control is in flight (`key:id`),
+  // and the account the Reset password dialog is for.
+  const [selectedId, setSelectedId] = useState(null);
+  const [busy,       setBusy]       = useState(null);
+  const [resetting,  setResetting]  = useState(null);
 
   async function fetchUsers() {
     try { const d = await api.get('/admin/users'); setUsers(d.users || []); } catch (_) {}
@@ -67,20 +132,48 @@ export default function Admin() {
     }
   }
 
-  async function handleDelete(id, userEmail) {
-    if (!(await confirm({ title: `Delete ${userEmail}?`, message: 'Their account, credentials and files are removed. This cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
-    setDeleting(id); setError('');
+  // One request per control, then the list is refetched so the row shows the
+  // server's view rather than an optimistic guess.
+  async function control(key, u, send, done) {
+    setBusy(`${key}:${u.id}`); setError(''); setSuccess('');
     try {
-      await api.delete(`/admin/users/${id}`);
+      await send();
+      if (done) { setSuccess(done); setTimeout(() => setSuccess(''), 4000); }
       await fetchUsers();
     } catch (err) {
       setError(err.message);
     } finally {
-      setDeleting(null);
+      setBusy(null);
     }
   }
 
-  const admins = users.filter(u => u.role === 'admin');
+  async function handleDelete(u) {
+    if (!(await confirm({ title: `Delete ${u.email}?`, message: 'Their account, credentials and files are removed. This cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
+    await control('delete', u, () => api.delete(`/admin/users/${u.id}`));
+  }
+
+  async function handleRole(u) {
+    const role = u.role === 'admin' ? 'user' : 'admin';
+    const ok = await confirm(role === 'admin'
+      ? { title: `Make ${u.email} an admin?`, message: 'They will see every account, every flagged invoice and the server logs, and can do everything on this page.', confirmLabel: 'Make admin' }
+      : { title: `Remove admin from ${u.email}?`, message: 'They keep their account and data, and lose access to this page.', confirmLabel: 'Make user' });
+    if (!ok) return;
+    await control('role', u, () => api.patch(`/admin/users/${u.id}/role`, { role }), `${u.email} is now ${role === 'admin' ? 'an admin' : 'a user'}.`);
+  }
+
+  async function handleSignOut(u) {
+    if (!(await confirm({ title: `Sign ${u.email} out everywhere?`, message: 'Every device they are signed in on is signed out. They can sign in again straight away.', confirmLabel: 'Sign out' }))) return;
+    await control('signout', u, () => api.post(`/admin/users/${u.id}/sign-out`, {}), `${u.email} has been signed out everywhere.`);
+  }
+
+  async function handleDisabled(u) {
+    const disabled = !u.disabledAt;
+    if (disabled && !(await confirm({ title: `Disable ${u.email}?`, message: 'They cannot sign in and their mailbox watcher stops. Invoices, receipts and credentials are kept, and you can enable the account again at any time.', confirmLabel: 'Disable', danger: true }))) return;
+    await control('disabled', u, () => api.patch(`/admin/users/${u.id}/disabled`, { disabled }), `${u.email} has been ${disabled ? 'disabled' : 'enabled'}.`);
+  }
+
+  // A disabled admin cannot sign in, so they do not count as the last one.
+  const admins = users.filter(u => u.role === 'admin' && !u.disabledAt);
 
   return (
     <div>
@@ -137,63 +230,95 @@ export default function Admin() {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              {users.map((u, i) => (
-                <div
-                  key={u.id}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 12,
-                    padding: '11px 12px', borderRadius: 10,
-                    background: u.id === me?.id ? 'var(--accent-subtle)' : 'transparent',
-                    border: u.id === me?.id ? '1px solid rgba(99,102,241,0.2)' : '1px solid transparent',
-                    transition: 'all 0.15s',
-                    animation: `fadeUp 0.25s ease ${i * 40}ms both`,
-                  }}
-                  onMouseEnter={e => { if (u.id !== me?.id) e.currentTarget.style.background = 'var(--bg-hover)'; }}
-                  onMouseLeave={e => { if (u.id !== me?.id) e.currentTarget.style.background = 'transparent'; }}
-                >
-                  <Avatar email={u.email} />
-
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                      <span style={{ fontWeight: 500, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {u.email}
-                      </span>
-                      {u.id === me?.id && (
-                        <span style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 600 }}>you</span>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 3 }}>
-                      <span className={`badge ${u.role === 'admin' ? 'badge-yellow' : 'badge-gray'}`}>
-                        {u.role === 'admin' ? '★ ' : ''}{u.role}
-                      </span>
-                      {u.createdAt && (
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                          Joined {formatDateTime(u.createdAt, me?.timezone)}
-                        </span>
-                      )}
-                      <span className={`badge ${u.online ? 'badge-green' : 'badge-gray'}`} title={u.lastSeenAt ? `Last seen ${formatDateTime(u.lastSeenAt, me?.timezone)}` : 'Never signed in'}>
-                        {u.online ? '● Online' : formatRelative(u.lastSeenAt) === '—' ? 'Never online' : `Offline · ${formatRelative(u.lastSeenAt)}`}
-                      </span>
-                    </div>
-                  </div>
-
-                  {u.id !== me?.id && (
-                    <button
-                      className="btn btn-sm"
-                      disabled={deleting === u.id}
-                      onClick={() => handleDelete(u.id, u.email)}
+              {users.map((u, i) => {
+                const isMe      = u.id === me?.id;
+                const open      = selectedId === u.id;
+                // The server refuses these too; dimming the button says why first.
+                const lastAdmin = u.role === 'admin' && !u.disabledAt && admins.length <= 1;
+                const inFlight  = key => busy === `${key}:${u.id}`;
+                return (
+                  <div key={u.id} style={{ animation: `fadeUp 0.25s ease ${i * 40}ms both` }}>
+                    {/* Clicking a row opens its controls below it. Your own row has
+                        none: every control here is refused on yourself, and your own
+                        password is changed from Setup. */}
+                    <div
+                      onClick={() => { if (!isMe) setSelectedId(open ? null : u.id); }}
                       style={{
-                        background: 'var(--danger-subtle)', color: 'var(--danger)',
-                        border: '1px solid rgba(239,68,68,0.2)',
-                        opacity: (u.role === 'admin' && admins.length <= 1) ? 0.3 : 1,
+                        display: 'flex', alignItems: 'center', gap: 12,
+                        padding: '11px 12px', borderRadius: open ? '10px 10px 0 0' : 10,
+                        background: isMe ? 'var(--accent-subtle)' : open ? 'var(--bg-hover)' : 'transparent',
+                        border: isMe ? '1px solid rgba(99,102,241,0.2)' : '1px solid transparent',
+                        cursor: isMe ? 'default' : 'pointer',
+                        opacity: u.disabledAt ? 0.65 : 1,
+                        transition: 'all 0.15s',
                       }}
-                      title={u.role === 'admin' && admins.length <= 1 ? 'Cannot delete last admin' : 'Delete user'}
+                      onMouseEnter={e => { if (!isMe) e.currentTarget.style.background = 'var(--bg-hover)'; }}
+                      onMouseLeave={e => { if (!isMe && !open) e.currentTarget.style.background = 'transparent'; }}
+                      title={isMe ? undefined : open ? 'Hide controls' : 'Show controls'}
                     >
-                      {deleting === u.id ? '...' : '✕'}
-                    </button>
-                  )}
-                </div>
-              ))}
+                      <Avatar email={u.email} />
+
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                          <span style={{ fontWeight: 500, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {u.email}
+                          </span>
+                          {isMe && (
+                            <span style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 600 }}>you</span>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 3, flexWrap: 'wrap' }}>
+                          <span className={`badge ${u.role === 'admin' ? 'badge-yellow' : 'badge-gray'}`}>
+                            {u.role === 'admin' ? '★ ' : ''}{u.role}
+                          </span>
+                          {u.disabledAt && (
+                            <span className="badge badge-red" title={`Disabled ${formatDateTime(u.disabledAt, me?.timezone)}`}>⏸ Disabled</span>
+                          )}
+                          {u.createdAt && (
+                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                              Joined {formatDateTime(u.createdAt, me?.timezone)}
+                            </span>
+                          )}
+                          <span className={`badge ${u.online ? 'badge-green' : 'badge-gray'}`} title={u.lastSeenAt ? `Last seen ${formatDateTime(u.lastSeenAt, me?.timezone)}` : 'Never signed in'}>
+                            {u.online ? '● Online' : formatRelative(u.lastSeenAt) === '—' ? 'Never online' : `Offline · ${formatRelative(u.lastSeenAt)}`}
+                          </span>
+                        </div>
+                      </div>
+
+                      {!isMe && <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{open ? '▴' : '▾'}</span>}
+                    </div>
+
+                    {open && !isMe && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '8px 12px 10px', background: 'var(--bg-hover)', borderRadius: '0 0 10px 10px' }}>
+                        <button className="btn btn-outline btn-sm" disabled={!!busy || lastAdmin}
+                          title={lastAdmin ? 'Cannot demote the last admin' : u.role === 'admin' ? 'Back to an ordinary user' : 'Give them this page'}
+                          onClick={() => handleRole(u)}>
+                          {inFlight('role') ? '…' : u.role === 'admin' ? '◦ Make user' : '★ Make admin'}
+                        </button>
+                        <button className="btn btn-outline btn-sm" disabled={!!busy} title="Set a new password for this account"
+                          onClick={() => setResetting(u)}>
+                          🔑 Reset password
+                        </button>
+                        <button className="btn btn-outline btn-sm" disabled={!!busy} title="Every device they are signed in on is signed out"
+                          onClick={() => handleSignOut(u)}>
+                          {inFlight('signout') ? '…' : '⇥ Sign out everywhere'}
+                        </button>
+                        <button className="btn btn-outline btn-sm" disabled={!!busy || lastAdmin}
+                          title={lastAdmin ? 'Cannot disable the last admin' : u.disabledAt ? 'Let them sign in again' : 'Block sign-in and stop their watcher, keeping their data'}
+                          onClick={() => handleDisabled(u)}>
+                          {inFlight('disabled') ? '…' : u.disabledAt ? '✓ Enable' : '⏸ Disable'}
+                        </button>
+                        <button className="btn btn-sm" disabled={!!busy || lastAdmin}
+                          onClick={() => handleDelete(u)}
+                          style={{ marginLeft: 'auto', background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
+                          title={lastAdmin ? 'Cannot delete the last admin' : 'Remove the account and everything in it'}>
+                          {inFlight('delete') ? '…' : '✕ Delete'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -229,16 +354,16 @@ export default function Admin() {
                 <input id="admin-password"
                   type={showPass ? 'text' : 'password'}
                   className="form-input"
-                  placeholder="Min. 6 characters"
+                  placeholder="Min. 8 characters"
                   value={pass}
                   onChange={e => setPass(e.target.value)}
-                  required minLength={6}
+                  required minLength={8}
                   style={{ paddingRight: 38 }}
                 />
                 <button
                   type="button"
                   onClick={() => setShowPass(v => !v)}
-                  style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 13 }}
+                  style={EYE_BUTTON}
                 >
                   {showPass ? '🙈' : '👁'}
                 </button>
@@ -279,6 +404,18 @@ export default function Admin() {
           </form>
         </div>
       </div>}
+
+      {resetting && (
+        <ResetPasswordDialog
+          user={resetting}
+          onClose={() => setResetting(null)}
+          onDone={() => {
+            setSuccess(`Password for ${resetting.email} updated. Their other sessions were signed out.`);
+            setTimeout(() => setSuccess(''), 5000);
+            setResetting(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -439,15 +576,42 @@ function formatUptime(seconds) {
 }
 
 function MonitoringPanel({ timezone, onViewLogs }) {
+  const confirm = useConfirm();
   const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
   const [daily,   setDaily]   = useState(null);
+  const [busy,    setBusy]    = useState(null);   // `key:userId` while a control is in flight
+  const [actionError, setActionError] = useState('');
 
-  async function fetchMonitoring() {
-    setLoading(true);
+  // `silent` refreshes the table in place after a control, instead of
+  // replacing the whole panel with the spinner.
+  async function fetchMonitoring({ silent = false } = {}) {
+    if (!silent) setLoading(true);
     try { setData(await api.get('/admin/monitoring')); }
     catch (_) {}
-    finally { setLoading(false); }
+    finally { if (!silent) setLoading(false); }
+  }
+
+  // A control sits inside a row whose own click opens that user's logs, so
+  // the click must not bubble.
+  async function control(e, key, u, send) {
+    e.stopPropagation();
+    setBusy(`${key}:${u.id}`); setActionError('');
+    try { await send(); await fetchMonitoring({ silent: true }); }
+    catch (err) { setActionError(err.message); }
+    finally { setBusy(null); }
+  }
+
+  async function stopWatcher(e, u) {
+    e.stopPropagation();
+    if (!(await confirm({ title: `Stop ${u.email}'s mailbox watcher?`, message: 'Their inbox stops being polled until they start it again from their Dashboard.', confirmLabel: 'Stop watcher' }))) return;
+    await control(e, 'watcher', u, () => api.post(`/admin/users/${u.id}/watcher/stop`, {}));
+  }
+
+  async function autoSubmitOff(e, u) {
+    e.stopPropagation();
+    if (!(await confirm({ title: `Turn off auto-submit for ${u.email}?`, message: 'New invoices wait for manual review instead of posting to Xero. Only they can turn it back on.', confirmLabel: 'Turn off', danger: true }))) return;
+    await control(e, 'auto', u, () => api.patch(`/admin/users/${u.id}/auto-process`, { autoProcess: false }));
   }
 
   async function fetchDaily() {
@@ -504,6 +668,7 @@ function MonitoringPanel({ timezone, onViewLogs }) {
       <div className="card">
         <div className="card-title" style={{ marginBottom: 2 }}>Per-User Activity</div>
         <div className="card-subtitle">Click a row to view that user's logs</div>
+        {actionError && <div className="alert alert-error"><span className="alert-icon">✕</span>{actionError}</div>}
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
@@ -511,6 +676,7 @@ function MonitoringPanel({ timezone, onViewLogs }) {
                 <th style={{ padding: '6px 10px' }}>User</th>
                 <th style={{ padding: '6px 10px' }}>Online</th>
                 <th style={{ padding: '6px 10px' }}>Watcher</th>
+                <th style={{ padding: '6px 10px' }}>Auto-submit</th>
                 <th style={{ padding: '6px 10px' }}>Xero</th>
                 <th style={{ padding: '6px 10px' }}>IMAP</th>
                 <th style={{ padding: '6px 10px' }}>Queue (pend/proc/dead)</th>
@@ -529,16 +695,38 @@ function MonitoringPanel({ timezone, onViewLogs }) {
                   onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
                   title="View this user's logs"
                 >
-                  <td style={{ padding: '8px 10px' }}>{u.email}</td>
+                  <td style={{ padding: '8px 10px', whiteSpace: 'nowrap' }}>
+                    {u.email}
+                    {u.disabled && <span className="badge badge-red" style={{ marginLeft: 6 }}>Disabled</span>}
+                  </td>
                   <td style={{ padding: '8px 10px' }}>
                     <span className={`badge ${u.online ? 'badge-green' : 'badge-gray'}`}>
                       {u.online ? '● Online' : 'Offline'}
                     </span>
                   </td>
-                  <td style={{ padding: '8px 10px' }}>
+                  <td style={{ padding: '8px 10px', whiteSpace: 'nowrap' }}>
                     <span className={`badge ${u.watcherRunning ? 'badge-green' : 'badge-gray'}`}>
                       {u.watcherRunning ? 'Running' : 'Stopped'}
                     </span>
+                    {u.watcherRunning && (
+                      <button className="btn btn-outline btn-sm" style={{ marginLeft: 6 }} disabled={!!busy}
+                        title="Stop polling this mailbox" onClick={e => stopWatcher(e, u)}>
+                        {busy === `watcher:${u.id}` ? '…' : 'Stop'}
+                      </button>
+                    )}
+                  </td>
+                  {/* Only OFF is offered: turning auto-submit on posts to a live
+                      Xero and stays that user's own decision. */}
+                  <td style={{ padding: '8px 10px', whiteSpace: 'nowrap' }}>
+                    <span className={`badge ${u.autoProcess ? 'badge-yellow' : 'badge-gray'}`}>
+                      {u.autoProcess ? 'On' : 'Off'}
+                    </span>
+                    {u.autoProcess && (
+                      <button className="btn btn-outline btn-sm" style={{ marginLeft: 6 }} disabled={!!busy}
+                        title="Stop this account posting to Xero automatically" onClick={e => autoSubmitOff(e, u)}>
+                        {busy === `auto:${u.id}` ? '…' : 'Turn off'}
+                      </button>
+                    )}
                   </td>
                   <td style={{ padding: '8px 10px' }}>
                     <span className={`badge ${u.xeroConnected ? 'badge-green' : 'badge-gray'}`}>

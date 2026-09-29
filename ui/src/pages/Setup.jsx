@@ -585,6 +585,79 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
   );
 }
 
+// The one thing on this page that is not a setting: the signed-in account's own
+// password. Its own form, so it saves separately from the credentials above. The
+// server signs out every other session this account has open; this one is kept
+// because changePassword stores the fresh token it returns.
+function ChangePasswordCard({ idx }) {
+  const { changePassword } = useAuth();
+  const [current, setCurrent] = useState('');
+  const [next,    setNext]    = useState('');
+  const [again,   setAgain]   = useState('');
+  const [show,    setShow]    = useState(false);
+  const [saving,  setSaving]  = useState(false);
+  const [msg,     setMsg]     = useState(null);
+
+  const fields = [
+    { id: 'cp-current', label: 'Current password',   value: current, set: setCurrent, autoComplete: 'current-password' },
+    { id: 'cp-next',    label: 'New password',       value: next,    set: setNext,    autoComplete: 'new-password', minLength: 8, placeholder: 'Min. 8 characters' },
+    { id: 'cp-again',   label: 'New password again', value: again,   set: setAgain,   autoComplete: 'new-password', minLength: 8 },
+  ];
+
+  async function submit(e) {
+    e.preventDefault();
+    if (next !== again) { setMsg({ ok: false, text: 'The new passwords do not match' }); return; }
+    setSaving(true); setMsg(null);
+    try {
+      await changePassword(current, next);
+      setCurrent(''); setNext(''); setAgain('');
+      setMsg({ ok: true, text: 'Password changed. Any other device you were signed in on has been signed out.' });
+    } catch (err) {
+      setMsg({ ok: false, text: err.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 8 }}>
+        <div style={{
+          width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: 'var(--accent-subtle)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
+        }}>🔑</div>
+        <div>
+          <div className="card-title">Account Password</div>
+          <div className="card-subtitle" style={{ marginBottom: 0 }}>Change the password you sign in with. Other devices are signed out.</div>
+        </div>
+      </div>
+      <form onSubmit={submit} style={{ marginTop: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+          {fields.map(f => (
+            <div className="form-group" key={f.id} style={{ marginBottom: 0 }}>
+              <label htmlFor={f.id} className="form-label">{f.label}</label>
+              <input
+                id={f.id} type={show ? 'text' : 'password'} className="form-input"
+                value={f.value} onChange={e => f.set(e.target.value)}
+                required minLength={f.minLength} autoComplete={f.autoComplete} placeholder={f.placeholder}
+              />
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 14, flexWrap: 'wrap' }}>
+          <button type="submit" className="btn btn-primary" disabled={saving || !current || next.length < 8}>
+            {saving ? <><span className="btn-spinner" /> Saving...</> : 'Change password'}
+          </button>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => setShow(v => !v)}>
+            {show ? '🙈 Hide' : '👁 Show'}
+          </button>
+          <TestResult msg={msg} />
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function Setup() {
   const { user, refreshUser } = useAuth();
   const [config,  setConfig]  = useState(null);
@@ -737,6 +810,12 @@ export default function Setup() {
           </button>
         </div>
       </form>
+
+      {/* Outside the settings form: it has its own submit and its own server
+          call, and a nested form is not valid HTML. */}
+      <div style={{ marginTop: 24 }}>
+        <ChangePasswordCard idx={0} />
+      </div>
 
       {/* Reference, not a setting: nothing here is saved. It lives in Settings
           because "are my account codes right?" is a setup question, and a list
