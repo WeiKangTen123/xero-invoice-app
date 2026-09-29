@@ -175,8 +175,12 @@ echo "$BUILD" | grep -E 'built in' | sed 's/^/    /'
 # ── 5b. A verified backup before anything restarts ──────────────────────────
 echo
 echo "Backing up"
-BACKUP=$(remote 'node main/db/backup.js 2>&1 | tail -1' || true)
-info "$BACKUP"
+# The whole output, not its last line. Once more than KEEP_COUNT backups exist
+# the script prunes AFTER it reports "Backed up", so the last line was "Pruned
+# old backup …" and a successful backup read as a failure, which left the
+# server pulled and built but never restarted.
+BACKUP=$(remote 'node main/db/backup.js 2>&1' || true)
+echo "$BACKUP" | sed 's/^/    /'
 echo "$BACKUP" | grep -q 'Backed up' || die "backup did not succeed — not restarting"
 
 echo
