@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import ChartOfAccounts from '../components/ChartOfAccounts';
 import HelpTooltip from '../components/HelpTooltip';
@@ -260,6 +260,84 @@ function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, tes
   );
 }
 
+// ── Which Xero company documents are sent to ─────────────────────────────────────
+// Shown only with two or more companies connected; with one there is nothing to
+// choose. With several, the server does not guess: until a default is chosen it
+// sends nothing and marks each document "Choose a default Xero company in Setup
+// before sending." (the review page links back here). Saved the moment it
+// changes, through the processing settings rather than the Save button below,
+// because it is not one of the credential fields that form sends.
+function DefaultTenantPicker({ tenants }) {
+  const [value,  setValue]  = useState(null);   // null = loading; '' = none chosen
+  const [saving, setSaving] = useState(false);
+  const [msg,    setMsg]    = useState(null);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    let active = true;
+    api.get('/process/settings')
+      .then(d => { if (active) setValue(d.defaultTenantId || ''); })
+      .catch(() => { if (active) setValue(''); });
+    return () => { active = false; };
+  }, []);
+
+  // The review page links to #default-xero-company. This only renders after
+  // the connection check, long after the browser looked for the anchor, so it
+  // brings itself into view.
+  useEffect(() => {
+    if (window.location.hash === '#default-xero-company') ref.current?.scrollIntoView({ block: 'center' });
+  }, []);
+
+  async function choose(next) {
+    const before = value;
+    setValue(next);
+    setSaving(true);
+    setMsg(null);
+    try {
+      const d = await api.patch('/process/settings', { defaultTenantId: next || null });
+      setValue(d.defaultTenantId || '');
+      setMsg({ ok: true, text: next ? 'Saved' : 'Cleared' });
+    } catch (err) {
+      setValue(before);
+      setMsg({ ok: false, text: err.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // A default saved before that company was disconnected matches no option;
+  // the select would silently show the first company as if it were chosen.
+  const stale = !!value && !tenants.some(t => t.tenantId === value);
+
+  return (
+    <div id="default-xero-company" ref={ref} className="form-group" style={{ marginTop: 14, marginBottom: 0 }}>
+      <label htmlFor="default-tenant" className="form-label">Default Xero company for sending</label>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <select
+          id="default-tenant" className="form-input" style={{ maxWidth: 360 }}
+          value={stale ? '' : (value ?? '')}
+          disabled={value === null || saving}
+          onChange={e => choose(e.target.value)}
+        >
+          <option value="">{value === null ? 'Loading…' : '— Choose a company —'}</option>
+          {tenants.map(t => <option key={t.tenantId} value={t.tenantId}>{t.tenantName}</option>)}
+        </select>
+        <TestResult msg={msg} />
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6, lineHeight: 1.55 }}>
+        Invoices, bills and expense claims are sent only to this company — never to the others connected here.
+        {value === '' && ' Until one is chosen, nothing is sent to Xero.'}
+      </div>
+      {stale && (
+        <div className="alert alert-warning" style={{ marginTop: 8, marginBottom: 0 }}>
+          <span className="alert-icon">⚠</span>
+          The company chosen before is no longer connected — choose one of these.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Xero Connection — two coexisting connection methods, not a flat field list ──
 // Custom Connection (existing Client ID/Secret fields + Test button, unchanged)
 // and OAuth2 "Web app" (new — connect via Xero's consent screen) are both shown at
@@ -404,6 +482,7 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
               </div>
             ))}
           </div>
+          {tenants.length >= 2 && <DefaultTenantPicker tenants={tenants} />}
         </div>
       ) : null}
 

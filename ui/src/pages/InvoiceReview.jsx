@@ -15,11 +15,12 @@ import LineItemsCard from './invoice-review/LineItemsCard';
 import PdfViewer from './invoice-review/PdfViewer';
 import ReceiptViewer from './invoice-review/ReceiptViewer';
 import { ReportModal } from './invoice-review/ReportModal';
+import SendProblemBanner from './invoice-review/SendProblemBanner';
 import StickyActionBar from './invoice-review/StickyActionBar';
 import SummaryCard from './invoice-review/SummaryCard';
 import TopBar from './invoice-review/TopBar';
 import { InfoRow } from './invoice-review/bits';
-import { MARKABLE, SUBMITTABLE, listPathFor } from './invoice-review/helpers';
+import { MARKABLE, SUBMITTABLE, listPathFor, sendProblem } from './invoice-review/helpers';
 
 
 
@@ -148,6 +149,19 @@ function InvoiceReviewPage() {
       .catch(() => { if (active) { setGroup(null); groupRef.current = null; } });
     return () => { active = false; };
   }, [inv?.receiptFile, inv?.receiptGroup, id]);
+
+  // Which Xero company a sent record is in. The record holds the company's id;
+  // its name comes from the connected companies, asked for only once there is
+  // an id to look up.
+  const [tenants, setTenants] = useState(null);   // null = not loaded
+  useEffect(() => {
+    if (!inv?.xeroTenantId) return undefined;
+    let active = true;
+    api.get('/xero/tenants')
+      .then(d => { if (active) setTenants(d.tenants || []); })
+      .catch(() => { if (active) setTenants([]); });
+    return () => { active = false; };
+  }, [inv?.xeroTenantId]);
 
   // Keyboard ← / → to step through siblings instantly (SPA navigation, no reload).
   // Only fires when no input/textarea/select is focused, so typing fields still work.
@@ -401,6 +415,13 @@ function InvoiceReviewPage() {
   const canSubmit  = SUBMITTABLE.has(inv.status) && !submitOk && !editing;
   const canReview  = MARKABLE.has(inv.status) && !editing;
   const canEdit    = SUBMITTABLE.has(inv.status); // same set the backend allows PATCH /:id for
+  // A company disconnected since still names the record's home, just not by
+  // name; saying so beats showing nothing and implying it never went anywhere.
+  const xeroCompany = !inv.xeroTenantId || tenants === null ? null
+    : tenants.find(t => t.tenantId === inv.xeroTenantId)?.tenantName || 'a company no longer connected';
+  // This visit's failed send first, then whatever the record already holds.
+  const problemMsg = submitErr || inv.errorMsg;
+  const problem    = sendProblem(problemMsg);
 
   return (
     <>
@@ -437,12 +458,14 @@ function InvoiceReviewPage() {
           <div className="alert alert-success" style={{ marginBottom: 12 }}>
             <span className="alert-icon">✓</span>
             {wasRepost ? 'Existing Xero bill updated successfully.' : 'Invoice posted to Xero successfully.'}
+            {xeroCompany && <span>Company: <strong>{xeroCompany}</strong></span>}
             {inv.xeroInvoiceId && (
               <span style={{ marginLeft: 8, opacity: 0.7, fontSize: 12 }}>ID: {inv.xeroInvoiceId}</span>
             )}
           </div>
         )}
-        {submitErr && (
+        {problem && <SendProblemBanner kind={problem} message={problemMsg} />}
+        {submitErr && !problem && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
             <span className="alert-icon">✕</span>
             <div>
@@ -465,7 +488,7 @@ function InvoiceReviewPage() {
             server prefixes its review reasons with "Please check:", which the
             heading already says. Duplicates and amount discrepancies have their
             own banners above. */}
-        {!discrepancyMatch && inv.errorMsg && !submitErr && !(/duplicate/i.test(inv.errorMsg)) && (
+        {!discrepancyMatch && inv.errorMsg && !submitErr && !problem && !(/duplicate/i.test(inv.errorMsg)) && (
           <div className="alert alert-warning" style={{ marginBottom: 12 }}>
             <span className="alert-icon">⚠</span>
             <div>
@@ -495,7 +518,12 @@ function InvoiceReviewPage() {
         {inv.status === 'posted' && inv.xeroInvoiceId && !submitOk && (
           <div className="alert alert-success" style={{ marginBottom: 12 }}>
             <span className="alert-icon">✓</span>
-            Posted to Xero — Invoice ID: <span style={{ fontFamily: 'monospace', marginLeft: 4 }}>{inv.xeroInvoiceId}</span>
+            {/* One span: .alert is a flex row, and loose text runs would each
+                become a separately spaced item. */}
+            <span>
+              Posted to Xero{xeroCompany && <> — <strong>{xeroCompany}</strong></>} — Invoice ID:{' '}
+              <span style={{ fontFamily: 'monospace' }}>{inv.xeroInvoiceId}</span>
+            </span>
           </div>
         )}
 
@@ -649,6 +677,7 @@ function InvoiceReviewPage() {
                   {inv.xeroInvoiceId && (
                     <InfoRow label="Xero ID"   value={inv.xeroInvoiceId} mono />
                   )}
+                  <InfoRow label="Xero company" value={xeroCompany} />
                   <InfoRow label="Project"   value={inv.projectName} />
                 </div>
               )}

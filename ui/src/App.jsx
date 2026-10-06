@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { ViewModeProvider } from './context/ViewModeContext';
@@ -7,6 +7,7 @@ import { PipelineProvider } from './context/PipelineContext';
 import { ConfirmProvider } from './context/ConfirmContext';
 import { ToastProvider } from './context/ToastContext';
 import Layout from './components/layout/Layout';
+import ErrorBoundary from './components/ErrorBoundary';
 // Login stays eager: it is the first paint for anyone signed out, and making it
 // wait on a chunk to render a single form trades a real delay for no saving.
 // Every other page is loaded on demand — the financial dashboard alone pulls in
@@ -38,44 +39,54 @@ function PrivateRoute({ children, adminOnly }) {
 
 function AppRoutes() {
   const { user, loading } = useAuth();
+  const { pathname } = useLocation();
   if (loading) return null;
 
+  // Two layers. Each page inside the layout gets its own boundary, so a page
+  // that fails (most often a chunk deleted by a deploy) is replaced by the
+  // reload message while the sidebar stays usable. The outer one catches the
+  // rest — the layout itself, Login, Capture — which would otherwise leave a
+  // blank screen. Both reset when the path changes.
+  const page = el => <ErrorBoundary resetKey={pathname}>{el}</ErrorBoundary>;
+
   return (
-    <Suspense fallback={PageLoading}>
-      <Routes>
-        <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
-        {/* Outside the auth guard on purpose: the pairing token in the URL is the
-            phone's only credential, and it grants upload and nothing else. */}
-        <Route path="/capture/:token" element={<Capture />} />
-        <Route
-          path="/"
-          element={
-            <PrivateRoute>
-              <Layout />
-            </PrivateRoute>
-          }
-        >
-          <Route index element={<Navigate to="/dashboard" replace />} />
-          <Route path="dashboard"        element={<Dashboard />} />
-          <Route path="automation"       element={<Automation />} />
-          <Route path="setup"            element={<Setup />} />
-          <Route path="invoices"         element={<Invoices />} />
-          <Route path="invoices/:id"     element={<InvoiceReview />} />
-          {/* /xero-insights was the financial page's path before the rename —
-              kept as a redirect so existing bookmarks still land somewhere real. */}
-          <Route path="xero-insights"    element={<Navigate to="/dashboard" replace />} />
+    <ErrorBoundary resetKey={pathname}>
+      <Suspense fallback={PageLoading}>
+        <Routes>
+          <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
+          {/* Outside the auth guard on purpose: the pairing token in the URL is the
+              phone's only credential, and it grants upload and nothing else. */}
+          <Route path="/capture/:token" element={<Capture />} />
           <Route
-            path="admin"
+            path="/"
             element={
-              <PrivateRoute adminOnly>
-                <Admin />
+              <PrivateRoute>
+                <Layout />
               </PrivateRoute>
             }
-          />
-        </Route>
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
-      </Routes>
-    </Suspense>
+          >
+            <Route index element={<Navigate to="/dashboard" replace />} />
+            <Route path="dashboard"        element={page(<Dashboard />)} />
+            <Route path="automation"       element={page(<Automation />)} />
+            <Route path="setup"            element={page(<Setup />)} />
+            <Route path="invoices"         element={page(<Invoices />)} />
+            <Route path="invoices/:id"     element={page(<InvoiceReview />)} />
+            {/* /xero-insights was the financial page's path before the rename —
+                kept as a redirect so existing bookmarks still land somewhere real. */}
+            <Route path="xero-insights"    element={<Navigate to="/dashboard" replace />} />
+            <Route
+              path="admin"
+              element={page(
+                <PrivateRoute adminOnly>
+                  <Admin />
+                </PrivateRoute>
+              )}
+            />
+          </Route>
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
+      </Suspense>
+    </ErrorBoundary>
   );
 }
 

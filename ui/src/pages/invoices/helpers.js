@@ -19,12 +19,17 @@ import { fmtMoney } from '../../utils/format';
 // supplier, not because Xero files it differently.
 //
 // `label` is the phone version. Invoices and Bills are short enough to keep
-// their real names there; only Expense Claims needs shortening.
+// their real names there; only Expense Claims needs shortening. `one` and
+// `many` are the words for counting rows in a sentence ("Send 3 bills"), so a
+// question about the open tab names the kind it is about.
 export const TABS = [
-  { key: 'ar',     label: 'Invoices', long: 'Invoices',       match: i => i.invoiceType === 'ACCREC'  },
-  { key: 'ap',     label: 'Bills',    long: 'Bills',          match: i => i.invoiceType === 'ACCPAY'  },
-  { key: 'claims', label: 'Claims',   long: 'Expense Claims', match: i => i.invoiceType === 'EXPENSE' },
+  { key: 'ar',     label: 'Invoices', long: 'Invoices',       one: 'invoice',       many: 'invoices',       match: i => i.invoiceType === 'ACCREC'  },
+  { key: 'ap',     label: 'Bills',    long: 'Bills',          one: 'bill',          many: 'bills',          match: i => i.invoiceType === 'ACCPAY'  },
+  { key: 'claims', label: 'Claims',   long: 'Expense Claims', one: 'expense claim', many: 'expense claims', match: i => i.invoiceType === 'EXPENSE' },
 ];
+// "1 bill", "3 bills".
+export const countOf = (n, tab) => `${n} ${n === 1 ? tab.one : tab.many}`;
+
 // Bills are the volume in an email-ingesting system; AR is usually near empty,
 // and opening on an empty tab reads as a broken page.
 export const DEFAULT_TAB = 'ap';

@@ -18,10 +18,14 @@ import DesktopTable from './invoices/DesktopTable';
 import { FilterPill } from './invoices/FilterPill';
 import MobileList from './invoices/MobileList';
 import MobileSelectionBar from './invoices/MobileSelectionBar';
-import { DEFAULT_TAB, TABS, currencyTotals, receivedBucket, receivedCutoff, scannedNote, tabByKey } from './invoices/helpers';
+import { DEFAULT_TAB, TABS, countOf, currencyTotals, receivedBucket, receivedCutoff, scannedNote, tabByKey } from './invoices/helpers';
 
-
-
+// What "Clear all" did, in the server's words. The server decides what is kept
+// (anything in Xero or mid-send) and replies { removed, kept, message }, so its
+// message is the account to show, not the counts this page had before asking.
+function clearedMessage(r) {
+  return r?.message || 'Cleared. Anything already posted to Xero was kept.';
+}
 
 export default function Invoices() {
   const { isMobile } = useViewMode();
@@ -85,12 +89,35 @@ export default function Invoices() {
     });
   }, [invoices]);
 
+  // The banner counts the pending rows on the open tab, so exactly those are
+  // sent: their ids are listed rather than leaving the server to post
+  // "everything pending", which used to include the other two kinds as well.
+  // The question names the count and the kind, so "Send 3 bills" cannot turn
+  // out to mean seven documents. The ids are taken when the button is pressed;
+  // the server skips any that stopped being pending in the meantime and says
+  // how many.
   async function handleSubmitAll() {
+    const tabNow = activeTab;
+    const ids = tabRows.filter(i => i.status === 'pending').map(i => i.id);
+    if (!ids.length) return;
+    const what = countOf(ids.length, tabNow);
+    if (!(await confirm({
+      title:        `Send ${what} to Xero?`,
+      message:      `Each pending ${tabNow.one} on this tab is posted to Xero, one after another. Pending items on the other tabs are not sent.`,
+      confirmLabel: `Send ${what}`,
+    }))) return;
+
     setSubmittingAll(true);
     setSubmitMsg('');
     try {
-      const r = await api.post('/invoices/submit-all', {});
-      setSubmitMsg(r.message || 'Submitted');
+      const r = await api.post('/invoices/submit-all', { ids });
+      // { submitted, skipped }: how many of these ids went, and how many had
+      // stopped being pending (sent, edited or deleted) since the page loaded.
+      const sent = Number(r.submitted) || 0, skipped = Number(r.skipped) || 0;
+      setSubmitMsg([
+        sent ? `sending ${countOf(sent, tabNow)}` : 'nothing sent',
+        skipped ? `${skipped} skipped — no longer pending` : '',
+      ].filter(Boolean).join(', '));
       setTimeout(() => { setSubmitMsg(''); fetchInvoices(); }, 4000);
     } catch (err) {
       setSubmitMsg(err.message);
@@ -100,13 +127,33 @@ export default function Invoices() {
     }
   }
 
+  // "Clear all" does more than its name says, so the question lists all of it
+  // before anything happens: it reaches every tab, not just the open one; it
+  // stops the mailbox watcher and empties the email queue; and it keeps
+  // whatever is already posted to Xero. The counts in the question are this
+  // page's view; what the server actually kept is in its reply, so that is
+  // what the toast reports.
   async function handleClearCache() {
-    if (!(await confirm({ title: `Clear all ${invoices.length} invoice record${invoices.length !== 1 ? 's' : ''}?`, message: 'Every record and its stored PDF is removed. This cannot be undone.', confirmLabel: 'Clear all', danger: true }))) return;
+    // Across every tab, unlike the tab-scoped status counts further down. The
+    // same rule the server keeps by: a row holding a Xero invoice ID is in Xero
+    // whatever its status says, and a row mid-send may be about to be.
+    const kept          = i => i.status === 'posted' || i.status === 'submitting' || !!i.xeroInvoiceId;
+    const unposted      = invoices.filter(i => !kept(i)).length;
+    const alreadyPosted = invoices.length - unposted;
+    const records       = n => `${n} record${n === 1 ? '' : 's'}`;
+    const message       = [
+      `Deletes ${records(unposted)} not yet posted to Xero — invoices, bills and expense claims, on every tab, not just this one — with their stored PDFs and receipt photos.`,
+      'Stops the mailbox watcher and clears the queue of emails waiting to be read. Start the watcher again from Automation.',
+      alreadyPosted ? `Keeps the ${records(alreadyPosted)} already in Xero or being sent to it.` : 'Keeps anything already in Xero or being sent to it.',
+      'This cannot be undone.',
+    ].join('\n\n');
+    if (!(await confirm({ title: `Clear ${records(unposted)}?`, message, confirmLabel: 'Clear all', danger: true }))) return;
     setClearing(true);
     try {
-      await api.delete('/invoices');
-      setInvoices([]);
+      const r = await api.delete('/invoices');
       setSelected(new Set());
+      fetchInvoices();
+      toast.success(clearedMessage(r));
     } catch (err) {
       toast.error(err.message);
     } finally {
@@ -134,15 +181,28 @@ export default function Invoices() {
         setInvoices(prev => prev.filter(i => i.id !== id));
         setSelected(prev => { const n = new Set(prev); n.delete(id); return n; });
       } else if (deleteTarget.type === 'bulk') {
-        const ids = deleteTarget.ids;
-        await Promise.all(ids.map(id => api.delete(`/invoices/${id}`)));
-        setInvoices(prev => prev.filter(i => !selected.has(i.id)));
-        setSelected(new Set());
+        // Settled one by one rather than Promise.all: a selection can include
+        // something already posted to Xero, which the server refuses (409), and
+        // that refusal must not hide that the rest were deleted — nor leave
+        // them on screen as if they were not.
+        const ids     = deleteTarget.ids;
+        const results = await Promise.allSettled(ids.map(id => api.delete(`/invoices/${id}`)));
+        const gone    = new Set(ids.filter((_, k) => results[k].status === 'fulfilled'));
+        const refused = results.filter(r => r.status === 'rejected').map(r => r.reason);
+        setInvoices(prev => prev.filter(i => !gone.has(i.id)));
+        setSelected(prev => new Set([...prev].filter(id => !gone.has(id))));
+        if (refused.length) {
+          toast.error(refused.length === 1
+            ? refused[0].message
+            : `${refused.length} of ${ids.length} were not deleted — ${refused[0].message}`);
+        }
       }
       setDeleteTarget(null);
     } catch (err) {
+      // The server's own reason, e.g. that a posted document cannot be deleted
+      // here. The dialog closes, because asking again gets the same answer.
       toast.error(err.message);
-      if (deleteTarget.type === 'bulk') fetchInvoices();
+      setDeleteTarget(null);
     } finally {
       setDeleteLoading(false);
     }
@@ -347,7 +407,7 @@ export default function Invoices() {
         <div className="alert alert-info" style={{ marginBottom: 16, background: 'rgba(99,102,241,0.06)', borderColor: 'rgba(99,102,241,0.2)', color: 'var(--text-primary)' }}>
           <span className="alert-icon" style={{ color: 'var(--accent)' }}>⟳</span>
           <span>
-            <strong>{pending} invoice{pending !== 1 ? 's' : ''}</strong> pending Xero submission
+            <strong>{countOf(pending, activeTab)}</strong> pending Xero submission
             {submitMsg && <span style={{ marginLeft: 8, color: 'var(--accent)', fontWeight: 500 }}>— {submitMsg}</span>}
           </span>
           <button
@@ -356,7 +416,7 @@ export default function Invoices() {
             onClick={handleSubmitAll}
             style={{ marginLeft: 'auto', background: 'rgba(99,102,241,0.12)', color: 'var(--accent)', border: '1px solid rgba(99,102,241,0.3)', flexShrink: 0 }}
           >
-            {submittingAll ? '...' : 'Submit all to Xero →'}
+            {submittingAll ? '...' : `Send ${countOf(pending, activeTab)} to Xero →`}
           </button>
         </div>
       )}

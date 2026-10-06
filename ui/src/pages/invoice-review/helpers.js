@@ -15,3 +15,19 @@ export function listPathFor(inv) {
             : 'ap';
   return tab === 'ap' ? '/invoices' : `/invoices?tab=${tab}`;
 }
+
+// Send problems this page answers with something other than "fix the fields
+// and try again", recognised by the server's own wording (main/queue/
+// processor.js, and the boot-time release of sends a restart cut off). Matched
+// on the phrase that carries the meaning, so a reworded tail still lands here.
+//
+// 'choose' and 'gone' are fixed in Setup, not in this record, so their banner
+// links there. An interrupted send may already be in Xero, so its banner says
+// to look there before sending again.
+export function sendProblem(msg) {
+  if (!msg) return null;
+  if (/choose a default xero company/i.test(msg)) return 'choose';
+  if (/xero company this was sent to is no longer connected/i.test(msg)) return 'gone';
+  if (/interrupted/i.test(msg)) return 'interrupted';
+  return null;
+}
