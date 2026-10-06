@@ -205,16 +205,37 @@ function passwordProblem(password) {
   return null;
 }
 
+// The stored hash when `password` matches it, else null. Change password
+// passes it back to setPassword as the hash it expects to replace.
+async function verifiedPasswordHash(id, password) {
+  const user = findById(id);
+  if (!user || typeof password !== 'string') return null;
+  return (await bcrypt.compare(password, user.password)) ? user.password : null;
+}
+
 // Sets a new password and signs the user out everywhere. Tokens are stateless
 // and live seven days, so without the cutoff a reset would leave the old
 // session valid for up to a week — the opposite of what a reset is for.
-async function setPassword(id, newPassword) {
+//
+// `ifCurrentHash` makes the write conditional on the password still being the
+// one just verified. Changing your own password checks the current one and
+// then hashes the new one, and an admin's reset can land in between; written
+// unconditionally, the user's change silently replaced the password the admin
+// had just set. Returns false when that happened and nothing was written. An
+// admin's reset passes no hash and always writes.
+async function setPassword(id, newPassword, { ifCurrentHash = null } = {}) {
   const problem = passwordProblem(newPassword);
   if (problem) throw new Error(problem);
   if (!findById(id)) throw new Error('User not found');
   const hash = await bcrypt.hash(newPassword, 10);
-  db.prepare('UPDATE users SET password = ?, sessions_valid_from = ? WHERE id = ?')
-    .run(hash, new Date().toISOString(), id);
+  const at   = new Date().toISOString();
+  if (ifCurrentHash) {
+    const { changes } = db.prepare('UPDATE users SET password = ?, sessions_valid_from = ? WHERE id = ? AND password = ?')
+      .run(hash, at, id, ifCurrentHash);
+    return changes > 0;
+  }
+  db.prepare('UPDATE users SET password = ?, sessions_valid_from = ? WHERE id = ?').run(hash, at, id);
+  return true;
 }
 
 // Every token issued before now is refused from here on (auth-middleware.js).
@@ -233,6 +254,15 @@ function setDisabled(id, disabled) {
   db.prepare('UPDATE users SET disabled_at = ? WHERE id = ?').run(at, id);
   if (disabled) invalidateSessions(id);
   return sanitize({ ...user, disabled_at: at });
+}
+
+// Whether anything may still be done for this account in the background: it
+// exists and is not disabled. Disabling once only refused sign-in, while the
+// mail and job workers, boot recovery and phone-capture links carried on for
+// the account — queued mail still posted to its Xero.
+function isActive(id) {
+  const user = findById(id);
+  return !!user && !user.disabled_at;
 }
 
 function getAllUsers() {
@@ -340,7 +370,7 @@ function ensureUserDirectories() {
 
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
-  passwordProblem, setPassword, invalidateSessions, setDisabled, PASSWORD_MIN_LENGTH,
+  passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, PASSWORD_MIN_LENGTH,
   getAllUsers, updateUserRole, deleteUser, readUsers,
   getUserConfig, saveUserConfig, getUserDefaults, defaultsFrom, getSetupStatus, getImapSettings, ensureUserDirectories,
   getGeminiKeys, addGeminiKey, removeGeminiKey,

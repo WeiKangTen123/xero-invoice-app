@@ -1,5 +1,6 @@
 const emailQueue       = require('./email-queue');
 const { parseInvoice } = require('../email/parser');
+const users            = require('../utils/users');
 const logger           = require('../utils/logger');
 
 const POLL_MS = 5000; // idle poll interval — catches jobs that land while worker is between ticks
@@ -14,12 +15,29 @@ function _getWorker(userId) {
   return _workers.get(userId);
 }
 
+// Whether this account's queued mail may be worked on. Disabling an account
+// stops its worker (routes/admin.js), but a tick already scheduled, a kick
+// from a watcher mid-fetch or boot recovery can still get here, and a job that
+// ran would store invoices and post them to a disabled account's Xero. A
+// lookup that throws is not taken as a refusal: parsing and storing read the
+// same database, so the job fails there and is retried.
+function _accountActive(userId) {
+  try { return users.isActive(userId); } catch (_) { return true; }
+}
+
+// Leaves the account's jobs on disk, untouched, for if it is enabled again.
+function _holdForInactiveAccount(userId, queued) {
+  logger.info(`[email-worker:${userId}] Account is disabled or deleted — worker stopped, ${queued} job(s) left queued`);
+  stopWorker(userId);
+}
+
 async function _processNext(userId) {
   const w = _getWorker(userId);
   if (!w.running || w.busy) return;
 
   const jobs = emailQueue.getPending(userId);
   if (!jobs.length) return;
+  if (!_accountActive(userId)) return _holdForInactiveAccount(userId, jobs.length);
 
   w.busy = true;
   const job = jobs[0];
@@ -29,6 +47,11 @@ async function _processNext(userId) {
 
     const email    = emailQueue.reconstructEmail(userId, job);
     const invoices = await parseInvoice(email, userId);
+
+    // Parsing is seconds of LLM calls, the likeliest moment for a disable to
+    // land, and everything after it stores and submits. The job is left as
+    // 'processing', which getPending still returns, so nothing is lost.
+    if (!_accountActive(userId)) return _holdForInactiveAccount(userId, jobs.length);
 
     if (invoices?.length) {
       for (const invoice of invoices) await w.onInvoice(invoice);
@@ -97,6 +120,12 @@ async function recoverPendingJobs(makeOnInvoice) {
   for (const userId of userIds) {
     const pending = emailQueue.getPending(userId);
     if (!pending.length) continue;
+    // A restart must not undo a disable: the jobs stay queued for if the
+    // account is enabled again, and no worker or handler is built for it.
+    if (!_accountActive(userId)) {
+      logger.info(`[email-worker] Recovery skipped — account is disabled or deleted`, { userId, pending: pending.length });
+      continue;
+    }
     logger.info(`[email-worker] Recovering ${pending.length} pending job(s)`, { userId });
     try {
       const onInvoice = await makeOnInvoice(userId);

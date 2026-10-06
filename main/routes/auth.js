@@ -2,7 +2,7 @@ const express = require('express');
 const router  = express.Router();
 const jwt     = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const { hasUsers, createUser, validatePassword, passwordProblem, setPassword, getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
+const { hasUsers, createUser, validatePassword, verifiedPasswordHash, passwordProblem, setPassword, getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
 const logger  = require('../utils/logger');
 
@@ -12,6 +12,20 @@ const authLimiter = rateLimit({
   max: process.env.NODE_ENV === 'test' ? 1000 : 10,
   keyGenerator: req => req.ip,
   message: { error: 'Too many login or registration attempts from this IP. Please try again in 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Five tries per signed-in account per 15 minutes, counted whatever the
+// outcome. Keyed by the account rather than the IP: whoever this stops already
+// holds a session — a borrowed laptop, a copied token — and is guessing the
+// current password to take the account over for good. It runs after
+// requireAuth, which is what puts the account on the request.
+const changePasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyGenerator: req => `change-password:${req.user.id}`,
+  message: { error: 'Too many password change attempts. Please try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -90,15 +104,17 @@ router.post('/login', authLimiter, async (req, res) => {
 //
 // Deliberately best-effort: a failure to stop must not block the user from
 // logging out, so it never returns an error for that.
+//
+// stop() is called whether or not isRunning() says so: a watcher waiting out a
+// reconnect backoff has no connection, so isRunning() is false, and skipping
+// the stop left its pending reconnect to start it again after logout.
 router.post('/logout', requireAuth, (req, res) => {
   try {
     const registry = require('../email/watcher-registry');
     const wasRunning = registry.isRunning(req.user.id);
-    if (wasRunning) {
-      registry.stop(req.user.id);
-      try { require('../utils/process-state').forUser(req.user.id).notifyStopped(); } catch (_) {}
-      logger.info('Logout — mailbox watcher stopped', { userId: req.user.id });
-    }
+    registry.stop(req.user.id);
+    try { require('../utils/process-state').forUser(req.user.id).notifyStopped(); } catch (_) {}
+    if (wasRunning) logger.info('Logout — mailbox watcher stopped', { userId: req.user.id });
     res.json({ ok: true, watcherStopped: wasRunning });
   } catch (err) {
     logger.warn('Logout: could not stop watcher', { userId: req.user.id, error: err.message });
@@ -119,7 +135,7 @@ router.get('/me', requireAuth, (req, res) => {
 //
 // A wrong current password is a 400, not a 401: the client treats every 401
 // as an expired session and bounces to the login page.
-router.post('/change-password', requireAuth, async (req, res) => {
+router.post('/change-password', requireAuth, changePasswordLimiter, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body || {};
     if (!currentPassword || !newPassword) {
@@ -127,10 +143,16 @@ router.post('/change-password', requireAuth, async (req, res) => {
     }
     const problem = passwordProblem(newPassword);
     if (problem) return res.status(400).json({ error: problem });
-    if (!(await validatePassword(req.user.email, currentPassword))) {
+    const verifiedHash = await verifiedPasswordHash(req.user.id, currentPassword);
+    if (!verifiedHash) {
       return res.status(400).json({ error: 'Current password is incorrect' });
     }
-    await setPassword(req.user.id, newPassword);
+    // Written only over the password just checked. A change that landed in
+    // between — an admin's reset, or this account in another tab — wins, and
+    // this says so rather than silently replacing it.
+    if (!(await setPassword(req.user.id, newPassword, { ifCurrentHash: verifiedHash }))) {
+      return res.status(409).json({ error: 'Your password was changed elsewhere (for example, reset by an administrator) while this was being saved, so this change was not applied. Sign in with the current password and try again.' });
+    }
     const token = jwt.sign(
       { id: req.user.id, email: req.user.email, role: req.user.role },
       jwtSecret(),

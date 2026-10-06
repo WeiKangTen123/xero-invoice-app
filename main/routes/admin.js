@@ -11,6 +11,8 @@ const invoiceStore     = require('../utils/invoice-store');
 const settingsStore    = require('../utils/settings-store');
 const processState     = require('../utils/process-state');
 const emailQueue       = require('../queue/email-queue');
+const emailWorker      = require('../queue/email-worker');
+const claimWorker      = require('../claims/claim-worker');
 const watcherRegistry  = require('../email/watcher-registry');
 const tokenCache       = require('../utils/token-cache');
 const db               = require('../db');
@@ -59,6 +61,10 @@ router.delete('/users/:id', requireAdmin, (req, res) => {
     if (lastActiveAdmin(target)) {
       return res.status(400).json({ error: 'Cannot delete the last admin account' });
     }
+    // Stopped before anything is removed. Nothing used to be: the watcher kept
+    // polling for the deleted account, its next mail recreated the folder just
+    // removed, and the workers carried on with the account's queued jobs.
+    const watcherStopped = stopAutomation(id);
     deleteUser(id);
     // The rows cascade in the database; the files (receipts, PDFs, queues)
     // do not. users.js had said this route removed them — it never did.
@@ -67,7 +73,7 @@ router.delete('/users/:id', requireAdmin, (req, res) => {
     } catch (err) {
       logger.warn("Could not remove the deleted user's files", { id, error: err.message });
     }
-    logger.info('Admin deleted user', { id, by: req.user.email });
+    logger.info('Admin deleted user', { id, watcherStopped, by: req.user.email });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -99,13 +105,32 @@ function findTarget(req, res, selfError) {
   return target;
 }
 
-// Mirrors POST /api/process/stop for another user's watcher.
+// Mirrors POST /api/process/stop for another user's watcher. Returns whether a
+// connection was up, for the response and the log.
+//
+// stop() is called whatever isRunning() says. isRunning() means "a connection
+// exists", and a watcher waiting out a reconnect backoff has none — so the
+// stop was skipped and the pending reconnect brought the watcher back, for an
+// account that had just been disabled. stop() is safe to repeat and is what
+// cancels that timer.
 function stopWatcher(userId) {
   const wasRunning = watcherRegistry.isRunning(userId);
-  if (wasRunning) {
-    watcherRegistry.stop(userId);
-    try { processState.forUser(userId).notifyStopped(); } catch (_) {}
-  }
+  watcherRegistry.stop(userId);
+  try { processState.forUser(userId).notifyStopped(); } catch (_) {}
+  return wasRunning;
+}
+
+// Everything that works for an account in the background: the mailbox
+// watcher, the worker that turns queued mail into invoices (and posts them to
+// Xero when auto-submit is on) and the import job worker. Disabling stopped
+// only the watcher, so mail already queued still posted. The account's
+// auto-submit setting is left alone: it is the user's choice, and is still
+// theirs if the account is enabled again. The workers also refuse a disabled
+// account themselves, for a tick already scheduled when this runs.
+function stopAutomation(userId) {
+  const wasRunning = stopWatcher(userId);
+  emailWorker.stopWorker(userId);
+  claimWorker.stopWorker(userId);
   return wasRunning;
 }
 
@@ -156,8 +181,9 @@ router.post('/users/:id/sign-out', requireAdmin, (req, res) => {
 
 // PATCH /api/admin/users/:id/disabled — { disabled: true | false }. The
 // reversible alternative to delete: sign-in and existing tokens are refused
-// and the mailbox watcher is stopped, but invoices, receipts and credentials
-// stay for when the account is enabled again.
+// and the watcher and workers are stopped, but invoices, receipts, queued mail
+// and credentials stay for when the account is enabled again. Enabling starts
+// nothing; the user starts their watcher again from the dashboard.
 router.patch('/users/:id/disabled', requireAdmin, (req, res) => {
   const { disabled } = req.body;
   if (typeof disabled !== 'boolean') {
@@ -169,7 +195,7 @@ router.patch('/users/:id/disabled', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'Cannot disable the last admin account' });
   }
   const user = setDisabled(target.id, disabled);
-  const watcherStopped = disabled ? stopWatcher(target.id) : false;
+  const watcherStopped = disabled ? stopAutomation(target.id) : false;
   logger.info(disabled ? 'Admin disabled user' : 'Admin enabled user', { email: target.email, watcherStopped, by: req.user.email });
   res.json({ success: true, user });
 });

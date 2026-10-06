@@ -268,11 +268,11 @@ export default function Login() {
                   <input id="login-password"
                     type={showPass ? 'text' : 'password'}
                     className="form-input has-icon"
-                    placeholder={mode === 'register' ? 'Min. 6 characters' : 'Enter your password'}
+                    placeholder={mode === 'register' ? 'Min. 8 characters' : 'Enter your password'}
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     required
-                    minLength={mode === 'register' ? 6 : 1}
+                    minLength={mode === 'register' ? 8 : 1}
                     style={{ paddingRight: 42 }}
                   />
                   <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontSize: 15 }}>🔒</span>

@@ -1,4 +1,16 @@
+require('../db/migrate').run();
+const db      = require('../db');
+const users   = require('./users');
 const pairing = require('./pairing');
+
+// verify() reads the owning account on every use, so the ids this file pairs
+// for have to be real, enabled accounts.
+const ACCOUNTS = ['u1', 'u2', 'alice', 'bob', '12345'];
+function seedAccount(id) {
+  db.prepare('INSERT OR IGNORE INTO users (id, email, password, role, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(id, `${id}@pairing.test`, 'not-a-hash', 'user', new Date().toISOString());
+}
+ACCOUNTS.forEach(seedAccount);
 
 // A pairing token is a bearer credential that travels in a URL and is displayed
 // on screen as a QR code. Everything below exists to pin the properties that
@@ -196,5 +208,39 @@ describe('utils/pairing — the link follows the work', () => {
     pairing.revoke(t);
     expect(pairing.verify(t)).toBeNull();
     expect(pairing.status(t)).toBeNull();
+  });
+});
+
+// ── The account behind the link ────────────────────────────────────────────
+// A capture link carries no session, so the checks that refuse a disabled or
+// deleted account's sign-in and tokens never saw it: an open QR code kept
+// taking uploads for the account. verify() gates every capture route.
+describe('utils/pairing — the account behind the link', () => {
+  beforeEach(() => { pairing._reset(); jest.useRealTimers(); seedAccount('owner'); users.setDisabled('owner', false); });
+  afterAll(() => { pairing._reset(); });
+
+  test("a disabled account's link is refused, and stays dead after it is enabled again", () => {
+    const t = pairing.create('owner');
+    expect(pairing.verify(t)).not.toBeNull();
+    users.setDisabled('owner', true);
+    expect(pairing.verify(t)).toBeNull();
+    // Dropped, not paused: re-enabling the account must not revive a QR code
+    // that was on screen when it was disabled.
+    users.setDisabled('owner', false);
+    expect(pairing.verify(t)).toBeNull();
+    expect(pairing.status(t)).toBeNull();
+  });
+
+  test("a deleted account's link is refused", () => {
+    const t = pairing.create('owner');
+    users.deleteUser('owner');
+    expect(pairing.verify(t)).toBeNull();
+  });
+
+  test("disabling one account leaves another account's link working", () => {
+    const mine = pairing.create('owner'), theirs = pairing.create('u2');
+    users.setDisabled('owner', true);
+    expect(pairing.verify(mine)).toBeNull();
+    expect(pairing.verify(theirs)).not.toBeNull();
   });
 });

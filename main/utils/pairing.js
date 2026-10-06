@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const users  = require('./users');
 
 // Short-lived pairing tokens that let a phone upload receipts without logging in.
 //
@@ -47,6 +48,12 @@ function verify(token) {
   if (!entry) return null;
   if (entry.expiresAt <= Date.now()) { _pairings.delete(token); return null; }
   if (entry.uses >= MAX_USES) return null;
+  // The account is read on every use, not only when the code was made. A link
+  // carries no session, so disabling or deleting the account refused its
+  // sign-in and tokens but left an open capture link taking uploads for it.
+  // The pairing is dropped rather than paused: enabling the account again
+  // does not bring an old QR code back to life.
+  if (!users.isActive(entry.userId)) { _pairings.delete(token); return null; }
   return {
     userId: entry.userId,
     usesLeft: MAX_USES - entry.uses,

@@ -8,14 +8,22 @@ function jwtSecret() {
   return secret || 'dev-secret-change-in-production';
 }
 
-function requireAuth(req, res, next) {
-  const token = req.headers.authorization?.replace('Bearer ', '').trim();
-  if (!token) return res.status(401).json({ error: 'Authentication required' });
+// Every check a session token must pass, in one place: signature and expiry,
+// the account still existing, not disabled, and not issued before the
+// account's sign-out cutoff. requireAuth uses it, and so must any route that
+// reads a session token itself — the invoice PDF route called jwt.verify on
+// its own and so still served a disabled account, and a token a password
+// reset had signed out.
+//
+// Returns { user, claims } with the live database row, or { error } with what
+// the 401 should say.
+function sessionUser(token) {
+  if (!token) return { error: 'Authentication required' };
   let claims;
   try {
     claims = jwt.verify(token, jwtSecret());
   } catch {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+    return { error: 'Invalid or expired token' };
   }
   // The token says who; the database says whether they still exist and what
   // they may do. Tokens live seven days, and role/existence used to be read
@@ -24,10 +32,9 @@ function requireAuth(req, res, next) {
   //
   // users.js is required lazily to avoid a require-cycle at module load
   // (users.js doesn't need this module, but plenty of routes require both).
-  const users = require('../utils/users');
-  const live  = users.findById(claims.id);
-  if (!live) return res.status(401).json({ error: 'Account no longer exists' });
-  if (live.disabled_at) return res.status(401).json({ error: 'This account has been disabled' });
+  const live = require('../utils/users').findById(claims.id);
+  if (!live) return { error: 'Account no longer exists' };
+  if (live.disabled_at) return { error: 'This account has been disabled' };
   // A password change or reset, or an admin's "sign out everywhere", moves
   // sessions_valid_from forward and every token minted before it is refused.
   // Compared at whole seconds, the precision of a JWT's iat: a token issued in
@@ -35,13 +42,20 @@ function requireAuth(req, res, next) {
   // must still be accepted.
   if (live.sessions_valid_from && claims.iat !== undefined
       && claims.iat < Math.floor(Date.parse(live.sessions_valid_from) / 1000)) {
-    return res.status(401).json({ error: 'You have been signed out. Sign in again.' });
+    return { error: 'You have been signed out. Sign in again.' };
   }
+  return { user: live, claims };
+}
+
+function requireAuth(req, res, next) {
+  const token = req.headers.authorization?.replace('Bearer ', '').trim();
+  const { user: live, claims, error } = sessionUser(token);
+  if (error) return res.status(401).json({ error });
   req.user = { ...claims, id: live.id, email: live.email, role: live.role };
   // Throttled to at most one DB write per user per minute — see
   // users.js#touchLastSeen. Failure here must never turn into a 401 — it's
   // presence tracking, not auth.
-  try { users.touchLastSeen(req.user.id); } catch {}
+  try { require('../utils/users').touchLastSeen(req.user.id); } catch {}
   next();
 }
 
@@ -54,4 +68,4 @@ function requireAdmin(req, res, next) {
   });
 }
 
-module.exports = { requireAuth, requireAdmin, jwtSecret };
+module.exports = { requireAuth, requireAdmin, sessionUser, jwtSecret };

@@ -25,6 +25,13 @@ const EYE_BUTTON = {
   background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 13,
 };
 
+// A click focuses a focusable row too, and a ring there is only noise; the ring
+// is for someone moving through the list with the keyboard. A browser too old
+// to know :focus-visible throws on the selector, and gets the ring every time.
+function keyboardFocused(el) {
+  try { return el.matches(':focus-visible'); } catch (_) { return true; }
+}
+
 // An admin cannot see a password (it is a bcrypt hash), only set a new one and
 // pass it on. The server signs out every session that account has open.
 function ResetPasswordDialog({ user, onClose, onDone }) {
@@ -65,7 +72,8 @@ function ResetPasswordDialog({ user, onClose, onDone }) {
               required minLength={8} autoFocus autoComplete="new-password"
               style={{ paddingRight: 38 }}
             />
-            <button type="button" onClick={() => setShow(v => !v)} style={EYE_BUTTON}>{show ? '🙈' : '👁'}</button>
+            <button type="button" onClick={() => setShow(v => !v)} style={EYE_BUTTON}
+              aria-label={show ? 'Hide password' : 'Show password'}>{show ? '🙈' : '👁'}</button>
           </div>
         </div>
         {error && <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>}
@@ -109,6 +117,20 @@ export default function Admin() {
   const [selectedId, setSelectedId] = useState(null);
   const [busy,       setBusy]       = useState(null);
   const [resetting,  setResetting]  = useState(null);
+  // One timer for the success banner. Each message used to start its own and
+  // none was ever cancelled, so the timer of an earlier message cleared a newer
+  // one after a second or two.
+  const successTimer = useRef(null);
+  useEffect(() => () => clearTimeout(successTimer.current), []);
+
+  // A success also clears any error still showing from an earlier attempt, so
+  // the page never says both at once.
+  function showSuccess(message, ms = 4000) {
+    clearTimeout(successTimer.current);
+    setError('');
+    setSuccess(message);
+    successTimer.current = setTimeout(() => setSuccess(''), ms);
+  }
 
   async function fetchUsers() {
     try { const d = await api.get('/admin/users'); setUsers(d.users || []); } catch (_) {}
@@ -124,8 +146,7 @@ export default function Admin() {
     try {
       await api.post('/admin/users', { email, password: pass, role });
       setEmail(''); setPass(''); setRole('user');
-      setSuccess(`User ${email} created.`);
-      setTimeout(() => setSuccess(''), 4000);
+      showSuccess(`User ${email} created.`);
       await fetchUsers();
     } catch (err) {
       setError(err.message);
@@ -138,7 +159,7 @@ export default function Admin() {
     setBusy(`${key}:${u.id}`); setError(''); setSuccess('');
     try {
       await send();
-      if (done) { setSuccess(done); setTimeout(() => setSuccess(''), 4000); }
+      if (done) showSuccess(done);
       await fetchUsers();
     } catch (err) {
       setError(err.message);
@@ -149,7 +170,7 @@ export default function Admin() {
 
   async function handleDelete(u) {
     if (!(await confirm({ title: `Delete ${u.email}?`, message: 'Their account, credentials and files are removed. This cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
-    await control('delete', u, () => api.delete(`/admin/users/${u.id}`));
+    await control('delete', u, () => api.delete(`/admin/users/${u.id}`), `${u.email} deleted.`);
   }
 
   async function handleRole(u) {
@@ -240,9 +261,22 @@ export default function Admin() {
                   <div key={u.id} style={{ animation: `fadeUp 0.25s ease ${i * 40}ms both` }}>
                     {/* Clicking a row opens its controls below it. Your own row has
                         none: every control here is refused on yourself, and your own
-                        password is changed from Setup. */}
+                        password is changed from Setup. The other rows are buttons to
+                        the keyboard and to a screen reader too, since the controls
+                        cannot be reached any other way. */}
                     <div
+                      role={isMe ? undefined : 'button'}
+                      tabIndex={isMe ? undefined : 0}
+                      aria-expanded={isMe ? undefined : open}
                       onClick={() => { if (!isMe) setSelectedId(open ? null : u.id); }}
+                      onKeyDown={e => {
+                        if (isMe || (e.key !== 'Enter' && e.key !== ' ')) return;
+                        // Space would otherwise scroll the page as well.
+                        e.preventDefault();
+                        setSelectedId(open ? null : u.id);
+                      }}
+                      onFocus={e => { if (!isMe && keyboardFocused(e.currentTarget)) e.currentTarget.style.outline = '2px solid var(--accent)'; }}
+                      onBlur={e => { e.currentTarget.style.outline = ''; }}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 12,
                         padding: '11px 12px', borderRadius: open ? '10px 10px 0 0' : 10,
@@ -251,6 +285,7 @@ export default function Admin() {
                         cursor: isMe ? 'default' : 'pointer',
                         opacity: u.disabledAt ? 0.65 : 1,
                         transition: 'all 0.15s',
+                        outlineOffset: -2,
                       }}
                       onMouseEnter={e => { if (!isMe) e.currentTarget.style.background = 'var(--bg-hover)'; }}
                       onMouseLeave={e => { if (!isMe && !open) e.currentTarget.style.background = 'transparent'; }}
@@ -364,6 +399,7 @@ export default function Admin() {
                   type="button"
                   onClick={() => setShowPass(v => !v)}
                   style={EYE_BUTTON}
+                  aria-label={showPass ? 'Hide password' : 'Show password'}
                 >
                   {showPass ? '🙈' : '👁'}
                 </button>
@@ -410,8 +446,7 @@ export default function Admin() {
           user={resetting}
           onClose={() => setResetting(null)}
           onDone={() => {
-            setSuccess(`Password for ${resetting.email} updated. Their other sessions were signed out.`);
-            setTimeout(() => setSuccess(''), 5000);
+            showSuccess(`Password for ${resetting.email} updated. Their other sessions were signed out.`, 5000);
             setResetting(null);
           }}
         />

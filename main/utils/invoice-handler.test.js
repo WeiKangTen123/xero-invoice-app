@@ -18,3 +18,23 @@ test('an auto-generated number with a real total is held too', () => {
 test('a real number and a real total pass', () => {
   expect(holdReason({ invoiceNumber: 'A-1', totalAmount: 120 })).toBeNull();
 });
+
+// The last hold before Xero. Disabling an account stops its watcher and
+// workers, but a submit queued moments earlier waits in the per-account chain;
+// this decides whether it may still go.
+describe('accountMayPost', () => {
+  beforeEach(() => { jest.resetModules(); require('../db/migrate').run(); });
+
+  test('an active account may post; a disabled or deleted one may not', async () => {
+    const users = require('./users');
+    const { accountMayPost } = require('./invoice-handler');
+    const u = await users.createUser('post@test.com', 'password123', 'user');
+    expect(accountMayPost(u.id)).toBe(true);
+    users.setDisabled(u.id, true);
+    expect(accountMayPost(u.id)).toBe(false);
+    users.setDisabled(u.id, false);
+    expect(accountMayPost(u.id)).toBe(true);
+    users.deleteUser(u.id);
+    expect(accountMayPost(u.id)).toBe(false);
+  });
+});

@@ -37,7 +37,7 @@ const morgan      = require('morgan');
 const logger      = require('./utils/logger');
 
 require('./db/migrate').run();
-const { ensureUserDirectories, getAllUsers } = require('./utils/users');
+const { ensureUserDirectories, getAllUsers, isActive } = require('./utils/users');
 const emailWorker               = require('./queue/email-worker');
 const claimWorker               = require('./claims/claim-worker');
 const { createHandler, submitInvoiceToXero } = require('./utils/invoice-handler');
@@ -171,7 +171,7 @@ if (PROD) {
 } else {
   app.all('/api/*', (_req, res) => res.status(404).json({ error: 'Not found' }));
   app.get('/', (_req, res) => res.json({
-    app:    'Xero Invoice Automation API',
+    app:    'Financial Automation API',
     status: 'running',
     ui:     'Run `npm run dev:ui` in the ui/ folder for the web interface',
     links:  { auth: '/api/auth/status', process: '/api/process/status', health: '/dashboard/health' }
@@ -179,10 +179,63 @@ if (PROD) {
 }
 
 // ── Error handler ────────────────────────────────────────────────────────────
-app.use((err, _req, res, _next) => {
+// A body that is not valid JSON is the client's mistake, not ours, and its
+// error message must not be logged: JSON.parse quotes the text around the
+// fault, so a mistyped sign-in request wrote part of a password into the log,
+// which admins read from inside the app (GET /api/admin/logs).
+app.use((err, req, res, _next) => {
+  if (err.type === 'entity.parse.failed') {
+    logger.warn('Malformed request body', { method: req.method, path: req.path });
+    return res.status(400).json({ error: 'Malformed request body' });
+  }
   logger.error('Unhandled error', { error: err.message });
   res.status(500).json({ error: 'Internal server error' });
 });
+
+// Retry any invoices stuck in 'pending' or 'submitting' from a previous run.
+// The Xero submission chain lives in-memory, so any restart orphans pending invoices.
+// Sequential retry with a 1.5s gap to stay inside Xero's 60 calls/minute limit.
+// Firing all at once causes 429 rate-limit errors that then also fail silently.
+async function retryStuckSubmissions({ gapMs = 1500 } = {}) {
+  try {
+    const settingsStore = require('./utils/settings-store');
+    for (const user of getAllUsers()) {
+      const userId = String(user.id);
+      // Nothing is posted for a disabled account. A restart is not the admin
+      // changing their mind, and the invoices are still there, pending, if
+      // the account is enabled again.
+      if (user.disabledAt) {
+        logger.info('Boot retry skipped — account is disabled', { userId });
+        continue;
+      }
+      // Respect the same switch the live pipeline does. This retry used to run
+      // unconditionally, so a user who had deliberately turned auto-process OFF
+      // still had their queued invoices posted to Xero by the next restart —
+      // the toggle held right up until the server bounced.
+      if (!settingsStore.forUser(userId).get('autoProcess')) {
+        logger.info('Boot retry skipped — auto-process is off for this user', { userId });
+        continue;
+      }
+      const stuck = invoiceStore.forUser(userId).getAll()
+        .filter(i => i.status === 'pending' || i.status === 'submitting');
+      if (!stuck.length) continue;
+      logger.info(`Retrying ${stuck.length} pending Xero submission(s) on boot`, { userId });
+      for (const inv of stuck) {
+        // Read again per invoice: the gaps add up, and a disable that lands
+        // part-way through must stop the rest.
+        if (!isActive(userId)) break;
+        try {
+          await submitInvoiceToXero(userId, inv.id);
+        } catch (err) {
+          logger.warn('Boot-time Xero retry failed', { id: inv.id, error: xeroErrMsg(err), userId });
+        }
+        await new Promise(r => setTimeout(r, gapMs));
+      }
+    }
+  } catch (err) {
+    logger.error('Boot-time Xero retry scan failed', { error: err.message });
+  }
+}
 
 // ── Start ────────────────────────────────────────────────────────────────────
 // Backstop for abandoned sessions — logout stops a watcher immediately, this
@@ -209,41 +262,9 @@ const server = app.listen(PORT, HOST, () => {
   claimWorker.recoverPendingJobs();
   logger.info('Claim queue recovery check complete');
 
-  // Retry any invoices stuck in 'pending' or 'submitting' from a previous run.
-  // The Xero submission chain lives in-memory, so any restart orphans pending invoices.
-  // We give email recovery a 3s head-start so it can dedup before we submit.
-  // Sequential retry with 1.5s gap to stay inside Xero's 60 calls/minute limit.
-  // Firing all at once causes 429 rate-limit errors that then also fail silently.
-  setTimeout(async () => {
-    try {
-      const settingsStore = require('./utils/settings-store');
-      const userIds = getAllUsers().map(u => String(u.id));
-      for (const userId of userIds) {
-        // Respect the same switch the live pipeline does. This retry used to run
-        // unconditionally, so a user who had deliberately turned auto-process OFF
-        // still had their queued invoices posted to Xero by the next restart —
-        // the toggle held right up until the server bounced.
-        if (!settingsStore.forUser(userId).get('autoProcess')) {
-          logger.info('Boot retry skipped — auto-process is off for this user', { userId });
-          continue;
-        }
-        const stuck = invoiceStore.forUser(userId).getAll()
-          .filter(i => i.status === 'pending' || i.status === 'submitting');
-        if (!stuck.length) continue;
-        logger.info(`Retrying ${stuck.length} pending Xero submission(s) on boot`, { userId });
-        for (const inv of stuck) {
-          try {
-            await submitInvoiceToXero(userId, inv.id);
-          } catch (err) {
-            logger.warn('Boot-time Xero retry failed', { id: inv.id, error: xeroErrMsg(err), userId });
-          }
-          await new Promise(r => setTimeout(r, 1500));
-        }
-      }
-    } catch (err) {
-      logger.error('Boot-time Xero retry scan failed', { error: err.message });
-    }
-  }, 3000);
+  // Both recoveries above skip disabled accounts themselves. Email recovery
+  // gets a 3s head-start so it can dedup before stuck invoices are resubmitted.
+  setTimeout(retryStuckSubmissions, 3000);
 });
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────
@@ -274,3 +295,4 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
 
 module.exports = app;
+module.exports.retryStuckSubmissions = retryStuckSubmissions;

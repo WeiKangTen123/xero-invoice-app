@@ -1,5 +1,5 @@
 const { enqueueInvoice }  = require('../queue/processor');
-const { getUserDefaults } = require('./users');
+const { getUserDefaults, isActive } = require('./users');
 const { newId } = require('./ids');
 const { reconnectXero }   = require('../xero/reconnect');
 const { xeroErrMsg }      = require('../xero/xero-utils');
@@ -31,6 +31,15 @@ function holdReason(record) {
   return null;
 }
 
+// Whether an invoice already waiting in this account's Xero chain may still go.
+// Disabling stops the watcher and the workers, but a submit queued just before
+// sits here for a few seconds; this is the last point it can be held back. A
+// failed lookup lets it through: the store writes around it read the same
+// database and would fail the same way, and refusing would strand the record.
+function accountMayPost(userId) {
+  try { return isActive(userId); } catch (_) { return true; }
+}
+
 function createHandler(userId) {
   const invStore      = invoiceStore.forUser(userId);
   const pdfStoreUser  = pdfStore.forUser(userId);
@@ -42,6 +51,14 @@ function createHandler(userId) {
   function scheduleXeroSubmit(invoiceData, id) {
     _xeroChain = _xeroChain.then(async () => {
       await new Promise(r => setTimeout(r, XERO_SUBMIT_DELAY_MS));
+
+      // Disabled or deleted while it waited: back to pending for a person to
+      // review, never posted. A deleted account's row is already gone with it.
+      if (!accountMayPost(userId)) {
+        logger.info('Account disabled before Xero submit — held as pending', { id, userId });
+        try { await invStore.update(id, { status: 'pending' }); } catch (_) {}
+        return;
+      }
 
       // Re-check for duplicates just before submitting — a concurrent scan may
       // have already posted this invoice while it was waiting in the queue.
@@ -244,4 +261,4 @@ async function submitInvoiceToXero(userId, invoiceId) {
   }
 }
 
-module.exports = { createHandler, submitInvoiceToXero, holdReason };
+module.exports = { createHandler, submitInvoiceToXero, holdReason, accountMayPost };

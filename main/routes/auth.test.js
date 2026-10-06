@@ -157,6 +157,44 @@ describe('routes/auth password and account state', () => {
       await login('cp@test.com', 'password123').expect(200);
     });
 
+    test('a sixth attempt inside 15 minutes is refused, for that account only', async () => {
+      // Whoever this stops already holds a session and is guessing the current
+      // password, so the limit follows the account, not the IP.
+      const u = await users.createUser('guess@test.com', 'password123', 'user');
+      const other = await users.createUser('bystander@test.com', 'password123', 'user');
+      const t = tokenFor(u);
+      for (let i = 0; i < 5; i++) {
+        await change(t, { currentPassword: `guess-${i}`, newPassword: 'newpassword1' }).expect(400);
+      }
+      const limited = await change(t, { currentPassword: 'password123', newPassword: 'newpassword1' }).expect(429);
+      expect(limited.body.error).toMatch(/too many/i);
+      await login('guess@test.com', 'password123').expect(200);   // the right answer, sixth, changed nothing
+      await change(tokenFor(other), { currentPassword: 'password123', newPassword: 'newpassword1' }).expect(200);
+    });
+
+    test("an admin's reset that lands mid-change wins: 409, and the admin's password stands", async () => {
+      const u = await users.createUser('race@test.com', 'password123', 'user');
+      // The reset is made to land in the window this route has: after the
+      // current password has been checked, before the new one is written.
+      const bcrypt = require('bcryptjs');
+      const realCompare = bcrypt.compare;
+      jest.spyOn(bcrypt, 'compare').mockImplementationOnce(async (pw, hash) => {
+        const ok = await realCompare(pw, hash);
+        await users.setPassword(u.id, 'adminset123');   // what PATCH /api/admin/users/:id/password calls
+        return ok;
+      });
+      try {
+        const res = await change(tokenFor(u), { currentPassword: 'password123', newPassword: 'mychoice123' }).expect(409);
+        expect(res.body.error).toMatch(/changed elsewhere/i);
+        expect(res.body.token).toBeUndefined();
+      } finally {
+        jest.restoreAllMocks();
+      }
+      await login('race@test.com', 'adminset123').expect(200);
+      await login('race@test.com', 'mychoice123').expect(401);
+      await login('race@test.com', 'password123').expect(401);
+    });
+
     test('changes the password, keeps this session via the returned token and signs out the others', async () => {
       const u = await users.createUser('cp@test.com', 'password123', 'user');
       const stale = tokenFor(u, 5);
@@ -167,6 +205,20 @@ describe('routes/auth password and account state', () => {
       await login('cp@test.com', 'password123').expect(401);
       await login('cp@test.com', 'newpassword1').expect(200);
     });
+  });
+
+  test('POST /logout stops the watcher even when it reports not running — a reconnect may be pending', async () => {
+    const registry = require('../email/watcher-registry');
+    const stop = jest.spyOn(registry, 'stop');
+    try {
+      const u = await users.createUser('bye@test.com', 'password123', 'user');
+      expect(registry.isRunning(u.id)).toBe(false);
+      const res = await request(serverFor(app)).post('/api/auth/logout').set('Authorization', `Bearer ${tokenFor(u)}`).expect(200);
+      expect(res.body).toEqual({ ok: true, watcherStopped: false });
+      expect(stop).toHaveBeenCalledWith(u.id);
+    } finally {
+      jest.restoreAllMocks();
+    }
   });
 
   test('POST /login refuses a disabled account, and only once the password is right', async () => {

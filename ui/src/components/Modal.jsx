@@ -5,8 +5,9 @@ import { useEffect, useRef } from 'react';
 // differences between them. This owns: the backdrop, Escape and click-outside
 // (both refused while `busy`, so a dialog mid-save cannot be dismissed), the
 // dialog semantics a screen reader needs, and initial focus on the panel so
-// Escape works without clicking into it first. The caller draws its own
-// header and body; only the frame is shared.
+// Escape works without clicking into it first (unless a child already took
+// focus with autoFocus). The caller draws its own header and body; only the
+// frame is shared.
 //
 // `card` uses the .card class (the import and intake dialogs); otherwise the
 // panel paints its own surface. `style` lands on the panel for padding and
@@ -20,7 +21,14 @@ export default function Modal({ onClose, busy = false, maxWidth = 440, zIndex = 
     return () => window.removeEventListener('keydown', onKey);
   }, [busy, onClose]);
 
-  useEffect(() => { panelRef.current?.focus(); }, []);
+  // React applies a child's autoFocus while committing, before this effect
+  // runs, so by now the reset-password input or ConfirmDialog's confirm button
+  // may already hold focus. Taking it back to the panel would make the user
+  // click into the field they were meant to be typing in.
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (panel && !panel.contains(document.activeElement)) panel.focus();
+  }, []);
 
   const panel = {
     width: '100%', maxWidth, maxHeight: '90vh', overflowY: 'auto', borderRadius: 18,

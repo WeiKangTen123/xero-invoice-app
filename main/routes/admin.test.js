@@ -6,6 +6,18 @@ const fs      = require('fs');
 const os      = require('os');
 const path    = require('path');
 
+// The real watcher registry runs against this stand-in for node-imap, so a test
+// can drop a watcher's connection and see whether its reconnect comes back.
+// Nothing else in this file starts a watcher.
+jest.mock('imap', () => {
+  const EventEmitter = require('events');
+  class FakeImap extends EventEmitter {
+    connect() {}
+    end() { this.emit('end'); }
+  }
+  return jest.fn(() => new FakeImap());
+});
+
 describe('admin routes', () => {
   let app, users, jwtSecret, adminUser;
 
@@ -435,5 +447,121 @@ describe('admin account controls', () => {
       expect(res.body.wasRunning).toBe(false);
       await asAdmin(request(serverFor(app)).post('/api/admin/users/nope/watcher/stop')).expect(404);
     });
+  });
+});
+
+// ── Stopping an account's automation ───────────────────────────────────────
+// Disabling or deleting an account has to stop everything that acts for it in
+// the background, not only refuse its sign-in: the mailbox watcher (including
+// one waiting to reconnect), the mail worker that posts to Xero and the job
+// worker.
+describe("admin: disabling or deleting stops the account's automation", () => {
+  let app, users, jwtSecret, admin, target, registry, emailWorker, claimWorker, Imap;
+
+  const CREDS = { IMAP_USER: 'user@test.com', IMAP_PASS: 'pw', IMAP_HOST: 'imap.test.com', IMAP_PORT: 993 };
+  // Only setTimeout is faked: the reconnect backoff is one, and the HTTP
+  // requests these tests make need the real ticks and immediates.
+  const FAKE_TIMEOUTS_ONLY = { doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'queueMicrotask', 'Date', 'hrtime', 'performance'] };
+  const PAST_ANY_BACKOFF = 60 * 60 * 1000;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users = require('../utils/users');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    app = express();
+    app.use(express.json());
+    app.use('/api/admin', require('./admin'));
+    registry    = require('../email/watcher-registry');
+    emailWorker = require('../queue/email-worker');
+    claimWorker = require('../claims/claim-worker');
+    Imap        = require('imap');
+    admin  = await users.createUser('admin@test.com', 'password123', 'auto');
+    target = await users.createUser('user@test.com',  'password123', 'user');
+  });
+  afterEach(() => {
+    registry.stopAll();
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  const asAdmin = req => req.set('Authorization', `Bearer ${jwt.sign({ id: admin.id, email: admin.email, role: admin.role }, jwtSecret())}`);
+  const disable = () => asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/disabled`)).send({ disabled: true });
+
+  // A watcher whose connection has dropped: no connection, so isRunning() is
+  // false, and a reconnect timer pending.
+  function watcherInBackoff(userId) {
+    registry.start(userId, CREDS, jest.fn());
+    Imap.mock.results[Imap.mock.results.length - 1].value.emit('end');
+    expect(registry.isRunning(userId)).toBe(false);
+    return Imap.mock.calls.length;
+  }
+
+  test('disabling during a reconnect backoff leaves no reconnect pending', async () => {
+    jest.useFakeTimers(FAKE_TIMEOUTS_ONLY);
+    watcherInBackoff(target.id);
+    // The control: an account left alone does reconnect after its backoff.
+    const other = await users.createUser('other@test.com', 'password123', 'user');
+    const otherConnections = watcherInBackoff(other.id);
+
+    const res = await disable().expect(200);
+    expect(res.body.user.disabledAt).toBeTruthy();
+
+    jest.advanceTimersByTime(PAST_ANY_BACKOFF);
+    expect(Imap.mock.calls.length).toBe(otherConnections + 1);   // one reconnect: the other account's
+    expect(registry.isRunning(target.id)).toBe(false);
+    expect(registry.isRunning(other.id)).toBe(true);
+  });
+
+  test('disabling stops the mail and job workers and leaves auto-submit as the user set it', async () => {
+    const settings = require('../utils/settings-store');
+    settings.forUser(target.id).set({ autoProcess: true });
+    const stopMail = jest.spyOn(emailWorker, 'stopWorker');
+    const stopJobs = jest.spyOn(claimWorker, 'stopWorker');
+    await disable().expect(200);
+    expect(stopMail).toHaveBeenCalledWith(target.id);
+    expect(stopJobs).toHaveBeenCalledWith(target.id);
+    expect(settings.forUser(target.id).get('autoProcess')).toBe(true);
+  });
+
+  test('POST /users/:id/watcher/stop cancels a reconnect even though nothing reports running', async () => {
+    jest.useFakeTimers(FAKE_TIMEOUTS_ONLY);
+    const connections = watcherInBackoff(target.id);
+    const res = await asAdmin(request(serverFor(app)).post(`/api/admin/users/${target.id}/watcher/stop`)).expect(200);
+    expect(res.body.wasRunning).toBe(false);
+    jest.advanceTimersByTime(PAST_ANY_BACKOFF);
+    expect(Imap.mock.calls.length).toBe(connections);
+  });
+
+  test('DELETE /users/:id stops the watcher and both workers before the account and its files go', async () => {
+    const dir = require('../utils/paths').userDir(target.id);
+    fs.mkdirSync(dir, { recursive: true });
+    const seen = [];
+    const recordThenRun = (name, mod, fn) => {
+      const real = mod[fn];
+      jest.spyOn(mod, fn).mockImplementation(id => {
+        seen.push({ name, id, accountThere: !!users.findById(id), filesThere: fs.existsSync(dir) });
+        return real(id);
+      });
+    };
+    recordThenRun('watcher', registry, 'stop');
+    recordThenRun('mail', emailWorker, 'stopWorker');
+    recordThenRun('jobs', claimWorker, 'stopWorker');
+
+    await asAdmin(request(serverFor(app)).delete(`/api/admin/users/${target.id}`)).expect(200);
+
+    expect(seen.map(s => s.name).sort()).toEqual(['jobs', 'mail', 'watcher']);
+    for (const s of seen) expect(s).toMatchObject({ id: target.id, accountThere: true, filesThere: true });
+    expect(users.findById(target.id)).toBeNull();
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  test('DELETE /users/:id during a reconnect backoff: the watcher does not come back for the deleted account', async () => {
+    jest.useFakeTimers(FAKE_TIMEOUTS_ONLY);
+    const connections = watcherInBackoff(target.id);
+    await asAdmin(request(serverFor(app)).delete(`/api/admin/users/${target.id}`)).expect(200);
+    jest.advanceTimersByTime(PAST_ANY_BACKOFF);
+    expect(Imap.mock.calls.length).toBe(connections);
+    expect(registry.isRunning(target.id)).toBe(false);
   });
 });

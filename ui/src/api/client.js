@@ -15,7 +15,7 @@ function clearSession() {
   }
 }
 
-async function request(path, options = {}) {
+async function request(path, options = {}, retried = false) {
   const token   = getToken();
   const headers = { 'Content-Type': 'application/json', ...options.headers };
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -24,7 +24,24 @@ async function request(path, options = {}) {
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    if (res.status === 401) clearSession();
+    if (res.status === 401) {
+      // A 401 is about the token this request carried, which may no longer be
+      // the one stored. Changing the password moves a cutoff on the server that
+      // rejects the old token; a status poll sent with it (from this tab or any
+      // other, they share localStorage) can get its 401 back after the new token
+      // was stored, and clearing then would throw away a good session. So when
+      // the token has changed under us, ask again once with the current one: the
+      // auth middleware answers 401 before any handler runs, so nothing happened
+      // the first time. Only a rejection of the token still stored ends the
+      // session; if it moved yet again during the retry, the newer one is left
+      // for its own requests to judge.
+      const current = getToken();
+      if (current && current !== token) {
+        if (!retried) return request(path, options, true);
+      } else {
+        clearSession();
+      }
+    }
     // A 401 throws too. On most pages the navigation above wins the race and
     // the caller never runs; on /login (no navigation) a wrong password used to
     // come back as `undefined` and blow up as "cannot read 'token'" instead of

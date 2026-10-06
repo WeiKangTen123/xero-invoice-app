@@ -3,6 +3,7 @@ const claimImport     = require('./claim-import');
 const receiptStore    = require('../utils/receipt-store');
 const { parseReceiptBatch } = require('../utils/receipt-parser');
 const { suggestCategories } = require('./claim-categories');
+const users           = require('../utils/users');
 const logger          = require('../utils/logger');
 
 const POLL_MS = 5000;
@@ -51,9 +52,26 @@ registerJobType('claim-import', {
   },
 });
 
+// Whether this account's jobs may run. Disabling an account stops its worker
+// (routes/admin.js), but a tick already scheduled, a kick or boot recovery can
+// still get here, and an import that ran would create records for a disabled
+// account. A lookup that throws is not taken as a refusal: the job reads and
+// writes the same database, so it fails there instead.
+function _accountActive(userId) {
+  try { return users.isActive(userId); } catch (_) { return true; }
+}
+
 async function _processNext(userId) {
   const w = _getWorker(userId);
   if (!w.running || w.busy) return;
+
+  // Checked before anything is touched, so the account's jobs stay exactly as
+  // they were — queued, attempts unspent — for if it is enabled again.
+  if (!_accountActive(userId)) {
+    logger.info(`[claim-worker:${userId}] Account is disabled or deleted — worker stopped, jobs left queued`);
+    stopWorker(userId);
+    return;
+  }
 
   // 1. Poison check: if an interrupted job exceeded max attempts, fail it so it cannot loop
   const poisoned = claimQueue.getPoisoned(userId);
@@ -165,6 +183,11 @@ function kickWorker(userId) {
 async function recoverPendingJobs(makeDeps = null) {
   const userIds = claimQueue.getAllUserIds();
   for (const userId of userIds) {
+    // A restart must not undo a disable; the jobs wait for the account.
+    if (!_accountActive(userId)) {
+      logger.info(`[claim-worker] Recovery skipped — account is disabled or deleted`, { userId });
+      continue;
+    }
     claimQueue.sweep(userId);
     const pending = claimQueue.getPending(userId);
     if (!pending.length) continue;

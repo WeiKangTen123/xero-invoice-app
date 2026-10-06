@@ -2,8 +2,9 @@ const express      = require('express');
 const router       = express.Router();
 const { decodeBase64 } = require('../utils/base64');
 const jwt          = require('jsonwebtoken');
-const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
+const { requireAuth, sessionUser, jwtSecret } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
+const { isActive }  = require('../utils/users');
 const invoiceStore = require('../utils/invoice-store');
 const pdfStore     = require('../utils/pdf-store');
 const receiptStore = require('../utils/receipt-store');
@@ -239,15 +240,19 @@ router.get('/:id/pdf', (req, res, next) => {
     } catch {
       return res.status(401).json({ error: 'PDF link has expired — request a new one' });
     }
-  } else {
-    const bearerToken = (req.headers.authorization || '').replace('Bearer ', '').trim();
-    if (!bearerToken) return res.status(401).json({ error: 'Authentication required' });
-    try {
-      const payload = jwt.verify(bearerToken, jwtSecret());
-      userId = payload.id;
-    } catch {
-      return res.status(401).json({ error: 'Invalid or expired token' });
+    // A link lives five minutes; one minted just before the account was
+    // disabled or deleted must not outlast that.
+    if (!isActive(userId)) {
+      return res.status(401).json({ error: 'PDF link has expired — request a new one' });
     }
+  } else {
+    // The same checks requireAuth makes. This used to be a bare jwt.verify,
+    // which still served PDFs to a disabled account and to a token that a
+    // password reset or "sign out everywhere" had revoked.
+    const bearerToken = (req.headers.authorization || '').replace('Bearer ', '').trim();
+    const session = sessionUser(bearerToken);
+    if (session.error) return res.status(401).json({ error: session.error });
+    userId = session.user.id;
   }
 
   const pdfPath = pdfStore.forUser(userId).getPath(id);
