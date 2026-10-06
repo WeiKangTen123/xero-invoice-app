@@ -26,7 +26,7 @@ async function notifyInvoiceCreated({ tenantName, vendorName, invoiceNumber, tot
 
 async function notifyError({ context, error, email }) {
   const msg = [
-    `*Xero Invoice App Error*`,
+    `*Financial Automation error*`,
     `Context: ${context}`,
     `Error: ${error}`,
     email ? `Source email: ${email}` : ''

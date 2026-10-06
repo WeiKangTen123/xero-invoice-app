@@ -68,7 +68,7 @@ function budgetVsActualWorkbook(payload, opts = {}) {
   const generated = opts.generatedAt || Date.now();
 
   const wb    = new ExcelJS.Workbook();
-  wb.creator  = 'Xero Invoice Automation';
+  wb.creator  = 'Financial Automation';
   wb.created  = new Date(generated);
   const sheet = wb.addWorksheet('Budget vs Actual', { views: [{ state: 'frozen', xSplit: 1, ySplit: 4 }] });
 
@@ -119,7 +119,7 @@ function budgetVarianceWorkbook(payload, opts = {}) {
     : (r.monthly || [])[idx] || { actual: 0, budget: 0, variance: 0, variancePct: null });
 
   const wb    = new ExcelJS.Workbook();
-  wb.creator  = 'Xero Invoice Automation';
+  wb.creator  = 'Financial Automation';
   wb.created  = new Date(generated);
   const sheet = wb.addWorksheet('Budget Variance', { views: [{ state: 'frozen', xSplit: 1, ySplit: 3 }] });
 

@@ -160,7 +160,7 @@ export default function Login() {
               marginBottom:  6,
               animation:     'fadeUp 0.4s ease 0.15s both',
             }}>
-              Xero Automation
+              Financial Automation
             </h1>
             <p style={{
               fontSize:  14, color: isDark ? '#4e4e62' : '#9399b0', lineHeight: 1.5,

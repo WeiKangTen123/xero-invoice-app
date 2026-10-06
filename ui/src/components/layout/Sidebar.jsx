@@ -243,10 +243,12 @@ export default function Sidebar() {
             letterSpacing: '-0.2px',
             lineHeight:    1.2,
           }}>
-            Xero Automation
+            Financial Automation
           </div>
+          {/* The name no longer says Xero, so the line under it does: it is
+              the one system everything here reads from and posts to. */}
           <div style={{ fontSize: 10, color: isDark ? 'rgba(255,255,255,0.3)' : '#9399b0', marginTop: 1 }}>
-            Invoice Pipeline
+            for Xero
           </div>
         </div>
 
