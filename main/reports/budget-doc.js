@@ -116,7 +116,39 @@ const STYLES = {
   section:  { fontSize: 7.5, bold: true },
   account:  { fontSize: 7 },
   strong:   { fontSize: 7, bold: true },
+  note:     { fontSize: 7.5, color: MUTED },
 };
+
+// '2026-10-06' -> '6 Oct 2026'. Read from the string, not through Date, so no
+// timezone can move it a day.
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function dayLabel(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  return m ? `${Number(m[3])} ${MONTH_ABBR[Number(m[2]) - 1]} ${m[1]}` : '';
+}
+
+// Which months the report covers, in words: the title the server gave the
+// period, or failing that its first and last month. An export has to say this
+// itself — "Year to date" alone reads the same for this year and last year.
+function periodText(payload) {
+  const months = payload?.months || [];
+  if (payload?.fiscalYear?.label) return payload.fiscalYear.label;
+  if (!months.length) return '';
+  const first = months[0].label, last = months[months.length - 1].label;
+  return first === last ? first : `${first} – ${last}`;
+}
+
+// The month still in progress, which the grid shows as budget because it has
+// not closed. The screen reports what has been booked against it beside the
+// grid; an export without it was missing a figure the reader had just seen.
+// Stated as outside the totals, because it is.
+function soFarNote(payload) {
+  const cur = payload?.kpis?.currentMonth;
+  if (!cur) return '';
+  const asOf = cur.asOf ? `, as of ${dayLabel(cur.asOf)}` : '';
+  return `${cur.label} so far${asOf}: net profit ${money(cur.actualNet)} booked against ${money(cur.budgetNet)} budgeted. `
+    + 'Not included in the figures above.';
+}
 
 // ── Budget vs Actual ────────────────────────────────────────────────────────
 // Landscape, because the grid is one column per month plus a total and there is
@@ -125,6 +157,7 @@ function budgetVsActualDoc(payload, opts = {}) {
   const { months = [], rows = [], organisation = {}, fiscalYear = {} } = payload || {};
   const currency  = organisation.currency && organisation.currency !== '—' ? organisation.currency : '';
   const generated = opts.generatedAt || Date.now();
+  const soFar     = soFarNote(payload);
 
   const firstBudgetIdx = months.findIndex(m => m.source === 'budget');
   const actualCount    = firstBudgetIdx === -1 ? months.length : firstBudgetIdx;
@@ -226,50 +259,63 @@ function budgetVsActualDoc(payload, opts = {}) {
         paddingTop:    () => 2.5,
         paddingBottom: () => 2.5,
       },
-    }],
+    },
+    ...(soFar ? [{ text: latin1(soFar), style: 'note', margin: [0, 8, 0, 0] }] : [])],
   };
 }
 
 // ── Budget Variance ─────────────────────────────────────────────────────────
 // Portrait: five columns fit comfortably, and it is the report someone is more
 // likely to read on a phone.
-const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-// '2026-10-06' -> '6 Oct 2026'. Read from the string, not through Date, so no
-// timezone can move it a day.
-function dayLabel(iso) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
-  return m ? `${Number(m[3])} ${MONTH_ABBR[Number(m[2]) - 1]} ${m[1]}` : '';
-}
 
 // Periods that are a year, so their rollup is a "year to date". Anything else
 // the reader picked (a quarter, the last six months) is a period to date.
 const YEAR_PERIODS = new Set(['fy', 'fy-ytd', 'prev-fy', 'next-fy', 'cy', 'cy-ytd']);
 
+// The variance month an export reports, decided once and then used for its
+// figures, its title and its filename alike. A key that is not one of the
+// report's months — a selection left over from another organisation or
+// period — means the year to date. It used to put the first month's figures
+// under a filename naming the month asked for, so the file said one thing and
+// held another.
+function resolveMonth(payload, month) {
+  const months = payload?.months || [];
+  return month && month !== 'ytd' && months.some(m => m.key === month) ? month : 'ytd';
+}
+
 // What the variance figures cover, in words. Shared by the PDF and the
 // workbook, and matched by the screen. A month still in progress says so and
 // when it was read: titling it "Oct 2026" alone reads as a closed month.
 function varianceLabel(payload, month = 'ytd') {
-  const months = payload?.months || [];
   const key    = payload?.period?.key;
   const ytd    = !key || YEAR_PERIODS.has(key) ? 'Year to date' : 'Period to date';
-  if (month === 'ytd') return ytd;
-  const m = months.find(x => x.key === month) || months[0];
-  if (!m) return ytd;
+  const k      = resolveMonth(payload, month);
+  if (k === 'ytd') return ytd;
+  const m   = payload.months.find(x => x.key === k);
   const cur = payload?.kpis?.currentMonth;
   return cur && cur.key === m.key && cur.asOf ? `${m.label} so far, as of ${dayLabel(cur.asOf)}` : m.label;
+}
+
+// The variance export's subtitle, before the currency. A single month names
+// itself; the rollup also names the period, since "Year to date" alone is the
+// same words for this financial year and the last one.
+function varianceSubtitle(payload, month = 'ytd') {
+  const label = varianceLabel(payload, month);
+  return resolveMonth(payload, month) === 'ytd'
+    ? [label, periodText(payload)].filter(Boolean).join(' · ')
+    : label;
 }
 
 function budgetVarianceDoc(payload, opts = {}) {
   const { rows = [], organisation = {}, months = [] } = payload || {};
   const currency  = organisation.currency && organisation.currency !== '—' ? organisation.currency : '';
   const generated = opts.generatedAt || Date.now();
-  const month     = opts.month || 'ytd';
+  const month     = resolveMonth(payload, opts.month);
 
   // 'ytd' rolls up the fully elapsed months; a month key reports that month
   // alone. Same two choices the screen offers, resolved the same way.
-  const idx   = month === 'ytd' ? -1 : Math.max(0, months.findIndex(m => m.key === month));
-  const label = varianceLabel(payload, month);
+  const idx   = month === 'ytd' ? -1 : months.findIndex(m => m.key === month);
+  const label = varianceSubtitle(payload, month);
   const figuresFor = r => (month === 'ytd'
     ? { actual: r.actualToDate, budget: r.budgetToDate, variance: r.variance, variancePct: r.variancePct }
     : (r.monthly || [])[idx] || { actual: 0, budget: 0, variance: 0, variancePct: null });
@@ -349,16 +395,23 @@ function budgetVarianceDoc(payload, opts = {}) {
 }
 
 // Filenames end up in a Content-Disposition header and on someone's desktop, so
-// they carry the organisation and period rather than being "export.pdf".
+// they carry the organisation and period rather than being "export.pdf". A
+// rollup names its period as well, or this year's and last year's downloads
+// arrive under one name and the second overwrites the first.
 function exportFilename(kind, payload, opts = {}) {
-  const org = (payload?.organisation?.name || 'organisation')
-    .replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 40) || 'organisation';
-  const months = payload?.months || [];
-  const span = kind === 'variance'
-    ? (opts.month === 'ytd' || !opts.month ? 'year-to-date' : (months.find(m => m.key === opts.month)?.label || opts.month))
-    : (payload?.fiscalYear?.label || 'financial-year');
+  const slug = s => String(s).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+  const org  = slug(payload?.organisation?.name || 'organisation').slice(0, 40) || 'organisation';
   const title = kind === 'variance' ? 'Budget-Variance' : 'Budget-vs-Actual';
-  return `${title}_${org}_${String(span).replace(/[^\p{L}\p{N}]+/gu, '-')}`;
+  let span;
+  if (kind === 'variance') {
+    const month = resolveMonth(payload, opts.month);
+    span = month === 'ytd'
+      ? [slug(varianceLabel(payload, 'ytd').toLowerCase()), slug(periodText(payload))].filter(Boolean).join('_')
+      : slug(payload.months.find(m => m.key === month).label);
+  } else {
+    span = slug(payload?.fiscalYear?.label || 'financial-year');
+  }
+  return `${title}_${org}_${span}`;
 }
 
 module.exports = {
@@ -366,6 +419,10 @@ module.exports = {
   budgetVarianceDoc,
   exportFilename,
   varianceLabel,
+  varianceSubtitle,
+  resolveMonth,
+  periodText,
+  soFarNote,
   dayLabel,
   // exported for tests
   _cell: cell, _money: money, _pct: pct, _currencyNote: currencyNote, _latin1: latin1,

@@ -124,17 +124,35 @@ describe('reports/budget-doc — Budget Variance', () => {
     expect(sales[2].text).toBe('24.00'); // monthly[3].budget
   });
 
-  test('an unknown month key falls back to the first month, never to undefined', () => {
-    // A tenant switched mid-render leaves a stale selection behind. Clamping is
-    // the safe direction: showing the first month is wrong but readable, where
-    // indexing past the array would put "undefined" or NaN on a financial page.
-    const stale = tableOf(doc.budgetVarianceDoc(varPayload, { month: 'nope' })).body;
-    const first = tableOf(doc.budgetVarianceDoc(varPayload, { month: 'm0' })).body;
-    const salesOf = b => b.find(r => r[0] && r[0].text === 'Sales');
-    expect(salesOf(stale)[1].text).toBe(salesOf(first)[1].text);
-    for (const c of salesOf(stale).slice(1)) {
-      expect(c.text).not.toMatch(/undefined|NaN/);
-    }
+  test('an unknown month key reports the year to date — figures, title and filename alike', () => {
+    // A tenant switched mid-render leaves a stale selection behind. It used to
+    // show the first month's figures under a filename naming the month asked
+    // for, so the file said one thing and held another.
+    const stale = doc.budgetVarianceDoc(varPayload, { month: 'nope' });
+    const ytd   = doc.budgetVarianceDoc(varPayload, { month: 'ytd' });
+    const salesOf = d => tableOf(d).body.find(r => r[0] && r[0].text === 'Sales');
+    expect(salesOf(stale).map(c => c.text)).toEqual(salesOf(ytd).map(c => c.text));
+    expect(salesOf(stale)[1].text).toBe('100.00');   // actualToDate, not monthly[0]
+    for (const c of salesOf(stale).slice(1)) expect(c.text).not.toMatch(/undefined|NaN/);
+
+    expect(JSON.stringify(stale.header)).toBe(JSON.stringify(ytd.header));
+    expect(doc.varianceLabel(varPayload, 'nope')).toBe('Year to date');
+    expect(doc.exportFilename('variance', varPayload, { month: 'nope' }))
+      .toBe(doc.exportFilename('variance', varPayload, { month: 'ytd' }));
+    expect(doc.exportFilename('variance', varPayload, { month: 'nope' })).not.toContain('nope');
+  });
+
+  test('the workbook resolves an unknown month the same way', () => {
+    const render = require('./budget-render');
+    const cellsOf = wb => {
+      const out = [];
+      wb.getWorksheet('Budget Variance').eachRow(r => out.push(r.values.slice(1)));
+      return out;
+    };
+    const stale = cellsOf(render.budgetVarianceWorkbook(varPayload, { month: 'nope', generatedAt: 0 }));
+    const ytd   = cellsOf(render.budgetVarianceWorkbook(varPayload, { month: 'ytd', generatedAt: 0 }));
+    expect(stale).toEqual(ytd);
+    expect(stale.find(r => r[0] === 'Sales')[1]).toBe(100);
   });
 
   test('is portrait — five columns do not need a landscape page', () => {
@@ -172,7 +190,9 @@ describe('reports/budget-doc — filenames and character coverage', () => {
   test('carries the organisation and period, so a download is identifiable', () => {
     expect(doc.exportFilename('grid', payload, {})).toBe('Budget-vs-Actual_Flovon-Pte-Ltd_FY-to-Mar-2027');
     expect(doc.exportFilename('variance', payload, { month: 'ytd' }))
-      .toBe('Budget-Variance_Flovon-Pte-Ltd_year-to-date');
+      .toBe('Budget-Variance_Flovon-Pte-Ltd_year-to-date_FY-to-Mar-2027');
+    expect(doc.exportFilename('variance', payload, { month: 'm3' }))
+      .toBe('Budget-Variance_Flovon-Pte-Ltd_M3');
   });
 
   test('survives an organisation with no name', () => {
@@ -220,5 +240,102 @@ describe('reports/budget-doc — what the variance figures cover', () => {
   test('dayLabel reads the date as written, and refuses anything else', () => {
     expect(doc.dayLabel('2026-01-31')).toBe('31 Jan 2026');
     expect(doc.dayLabel('nope')).toBe('');
+  });
+});
+
+// A rollup export said only "Year to date", under a filename ending
+// _year-to-date, whatever the period: this year's and last year's were the
+// same title and the same file name, and the second download overwrote the first.
+describe('reports/budget-doc — a rollup export names its period', () => {
+  const base = { organisation: { name: 'Org', currency: 'SGD' }, rows: [] };
+  const thisYear = {
+    ...base,
+    period: { key: 'fy' },
+    fiscalYear: { label: 'For the year ended 31 December 2026' },
+    months: [{ key: '2026-01', label: 'Jan 2026' }, { key: '2026-12', label: 'Dec 2026' }],
+  };
+  const lastYear = {
+    ...base,
+    period: { key: 'prev-fy' },
+    fiscalYear: { label: 'Previous financial year · Jan 2025 – Dec 2025' },
+    months: [{ key: '2025-01', label: 'Jan 2025' }, { key: '2025-12', label: 'Dec 2025' }],
+  };
+
+  test('the subtitle carries the period after the year-to-date wording', () => {
+    expect(doc.varianceSubtitle(thisYear, 'ytd')).toBe('Year to date · For the year ended 31 December 2026');
+    expect(doc.varianceSubtitle(lastYear, 'ytd')).toBe('Year to date · Previous financial year · Jan 2025 – Dec 2025');
+  });
+
+  test('without a period title it names the first and last month', () => {
+    const bare = { ...thisYear, fiscalYear: {} };
+    expect(doc.varianceSubtitle(bare, 'ytd')).toBe('Year to date · Jan 2026 – Dec 2026');
+    expect(doc.periodText({ months: [{ key: '2026-03', label: 'Mar 2026' }] })).toBe('Mar 2026');
+  });
+
+  test('a single month names itself and nothing more', () => {
+    expect(doc.varianceSubtitle(thisYear, '2026-12')).toBe('Dec 2026');
+  });
+
+  test('this year and last year export under different titles and filenames', () => {
+    const header = p => JSON.stringify(doc.budgetVarianceDoc(p, { month: 'ytd', generatedAt: 0 }).header);
+    expect(header(thisYear)).toContain('For the year ended 31 December 2026');
+    expect(header(lastYear)).toContain('Previous financial year');
+    expect(header(thisYear)).not.toBe(header(lastYear));
+
+    expect(doc.exportFilename('variance', thisYear, { month: 'ytd' }))
+      .toBe('Budget-Variance_Org_year-to-date_For-the-year-ended-31-December-2026');
+    expect(doc.exportFilename('variance', lastYear, { month: 'ytd' }))
+      .toBe('Budget-Variance_Org_year-to-date_Previous-financial-year-Jan-2025-Dec-2025');
+  });
+
+  test('a period that is not a year says period to date, in the title and the filename', () => {
+    const six = { ...thisYear, period: { key: 'last-6' }, fiscalYear: { label: 'Last 6 months · May 2026 – Oct 2026' } };
+    expect(doc.varianceSubtitle(six, 'ytd')).toBe('Period to date · Last 6 months · May 2026 – Oct 2026');
+    expect(doc.exportFilename('variance', six, {})).toBe('Budget-Variance_Org_period-to-date_Last-6-months-May-2026-Oct-2026');
+  });
+
+  test('the workbook subtitle carries the period too', () => {
+    const render = require('./budget-render');
+    const wb = render.budgetVarianceWorkbook(lastYear, { month: 'ytd', generatedAt: 0 });
+    expect(String(wb.getWorksheet('Budget Variance').getCell(2, 1).value)).toContain('Previous financial year · Jan 2025 – Dec 2025');
+  });
+});
+
+// The screen shows what has been booked so far in the month in progress,
+// beside the grid; the grid itself shows that month as budget. The export had
+// the grid and not the note, so it lacked a figure the reader had just seen.
+describe('reports/budget-doc — the month in progress, in the grid export', () => {
+  const render = require('./budget-render');
+  const withCurrent = {
+    ...payload,
+    kpis: { currentMonth: { key: 'm5', label: 'Oct 2026', asOf: '2026-10-06', actualNet: 12345, budgetNet: 17615 } },
+  };
+  const NOTE = 'Oct 2026 so far, as of 6 Oct 2026: net profit 12,345.00 booked against 17,615.00 budgeted. Not included in the figures above.';
+  const sheetText = wb => {
+    const out = [];
+    wb.getWorksheet('Budget vs Actual').eachRow(r => out.push(r.values.filter(v => typeof v === 'string').join(' ')));
+    return out.join('\n');
+  };
+
+  test('the note is written from the payload, with the figures formatted as money', () => {
+    expect(doc.soFarNote(withCurrent)).toBe(NOTE);
+    expect(doc.soFarNote(payload)).toBe('');
+  });
+
+  test('the PDF carries it below the grid when a month is in progress, and not otherwise', () => {
+    const notes = d => d.content.filter(c => c.style === 'note').map(c => c.text);
+    expect(notes(doc.budgetVsActualDoc(withCurrent))).toEqual([NOTE]);
+    expect(notes(doc.budgetVsActualDoc(payload))).toEqual([]);
+    expect(notes(doc.budgetVsActualDoc({ ...payload, kpis: { currentMonth: null } }))).toEqual([]);
+  });
+
+  test('the workbook carries the same line when a month is in progress, and not otherwise', () => {
+    expect(sheetText(render.budgetVsActualWorkbook(withCurrent, { generatedAt: 0 }))).toContain(NOTE);
+    expect(sheetText(render.budgetVsActualWorkbook(payload, { generatedAt: 0 }))).not.toMatch(/so far/);
+  });
+
+  test('without a read date it still says so far, just not when', () => {
+    const noDate = { ...withCurrent, kpis: { currentMonth: { ...withCurrent.kpis.currentMonth, asOf: null } } };
+    expect(doc.soFarNote(noDate)).toMatch(/^Oct 2026 so far: net profit 12,345.00/);
   });
 });

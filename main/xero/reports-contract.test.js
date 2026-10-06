@@ -258,3 +258,132 @@ describe('Xero call budget — directory data and statements', () => {
     expect(api.getPayments.mock.calls[0][2]).toMatch(/Date >= DateTime\(/);
   });
 });
+
+// Identical work was fetched twice whenever two callers spelled the same
+// request differently. The dedupe key was JSON.stringify(args), which follows
+// property order: the /cash-flow route builds { timezone, period, force } and
+// the commentary builds { timezone, force, period }; getPerformance added a
+// `window` the /budget-variance route never sends. Each pair missed the other
+// and both went to Xero.
+describe('Xero call budget — one request spelled two ways is fetched once', () => {
+  const P = { preset: 'fy' };
+
+  test('cash flow asked for in two property orders makes one set of calls', async () => {
+    const T2 = 't-order-cf';
+    await Promise.all([
+      reports.getCashFlow(U, T2, { timezone: 'UTC', period: P, force: false }),   // the /cash-flow route
+      reports.getCashFlow(U, T2, { timezone: 'UTC', force: false, period: P }),   // getVarianceInsights, getFinancialNarrative
+    ]);
+    expect(api.getPayments).toHaveBeenCalledTimes(1);
+    expect(api.getBankTransactions).toHaveBeenCalledTimes(1);
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
+  });
+
+  test('budget variance from its route and from getPerformance makes one pair of report calls', async () => {
+    const T2 = 't-order-bv';
+    await Promise.all([
+      reports.getBudgetVariance(U, T2, { timezone: 'UTC', force: false, period: P }),   // /budget-variance
+      reports.getPerformance(U, T2, { timezone: 'UTC', period: P, cashFlow: false, customers: false, force: false }),   // /performance
+    ]);
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
+    expect(api.getReportProfitAndLoss).toHaveBeenCalledTimes(1);
+  });
+
+  test('the Insights page first load (figures, commentary and cash flow together) fetches each report once', async () => {
+    const T2 = 't-order-page';
+    await Promise.all([
+      reports.getPerformance(U, T2, { timezone: 'UTC', period: P, cashFlow: false, customers: false, force: false }),
+      reports.getVarianceInsights(U, T2, { timezone: 'UTC', period: P, force: false, reanalyse: false }),
+      reports.getCashFlow(U, T2, { timezone: 'UTC', period: P, force: false }),
+    ]);
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
+    expect(api.getReportProfitAndLoss).toHaveBeenCalledTimes(1);
+    expect(api.getPayments).toHaveBeenCalledTimes(1);
+  });
+
+  test('an option left out and the same option at its default are one request', async () => {
+    const T2 = 't-defaults';
+    await Promise.all([
+      reports.getBudgetVariance(U, T2, { timezone: 'UTC', period: P }),                  // how the export reads it
+      reports.getBudgetVariance(U, T2, { timezone: 'UTC', force: false, period: P }),
+      reports.getBudgetVariance(U, T2, { timezone: 'UTC', force: undefined, period: P }),
+    ]);
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
+  });
+
+  test('different requests are still fetched separately', async () => {
+    const T2 = 't-distinct';
+    await Promise.all([
+      reports.getBudgetVariance(U, T2, { timezone: 'UTC', period: { preset: 'fy' } }),
+      reports.getBudgetVariance(U, T2, { timezone: 'UTC', period: { preset: 'prev-fy' } }),
+    ]);
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(2);
+  });
+
+  test('keys sort properties and drop undefined ones, at every depth', () => {
+    expect(reports._dedupeKey('f', [U, T, { b: 1, a: { d: 2, c: undefined, e: 3 } }]))
+      .toBe(reports._dedupeKey('f', [U, T, { a: { e: 3, d: 2 }, b: 1 }]));
+    expect(reports._dedupeKey('f', [U, T, { period: { from: '2026-01', to: '2026-02' } }]))
+      .not.toBe(reports._dedupeKey('f', [U, T, { period: { from: '2026-02', to: '2026-01' } }]));
+  });
+});
+
+// The cache key held the months but not the period's name, while the payload
+// carries the name: a custom Jan-Dec and 'fy' for a December year end shared an
+// entry, and the second came back titled as the first.
+describe('the cache — a period is its months and its name', () => {
+  const y = new Date().getUTCFullYear();
+  const custom = { from: `${y}-01`, to: `${y}-12` };
+  beforeEach(() => {
+    api.getOrganisations.mockResolvedValue({ body: { organisations: [
+      { name: 'Test Org', baseCurrency: 'SGD', financialYearEndDay: 31, financialYearEndMonth: 12 },
+    ] } });
+  });
+
+  test('budget variance: fy then a custom range over the same months each keep their own name', async () => {
+    const T2 = 't-names-bv';
+    const fy = await reports.getBudgetVariance(U, T2, { timezone: 'UTC', period: { preset: 'fy' } });
+    const cu = await reports.getBudgetVariance(U, T2, { timezone: 'UTC', period: custom });
+    expect(fy.period).toMatchObject({ key: 'fy', label: 'This financial year', fromKey: `${y}-01`, toKey: `${y}-12` });
+    expect(cu.period).toMatchObject({ key: 'custom', fromKey: `${y}-01`, toKey: `${y}-12` });
+    expect(fy.fiscalYear.label).toBe(`For the year ended 31 December ${y}`);
+    expect(cu.fiscalYear.label).not.toMatch(/year ended/);
+
+    // And the other way round, from cold.
+    reports._cache.clear();
+    const cu2 = await reports.getBudgetVariance(U, T2, { timezone: 'UTC', period: custom });
+    const fy2 = await reports.getBudgetVariance(U, T2, { timezone: 'UTC', period: { preset: 'fy' } });
+    expect(cu2.period.key).toBe('custom');
+    expect(fy2.period.key).toBe('fy');
+    expect(fy2.fiscalYear.label).toBe(`For the year ended 31 December ${y}`);
+  });
+
+  test('a repeat of the same named period is still served from the cache', async () => {
+    const T2 = 't-names-hit';
+    await reports.getBudgetVariance(U, T2, { timezone: 'UTC', period: { preset: 'fy' } });
+    const again = await reports.getBudgetVariance(U, T2, { timezone: 'UTC', period: { preset: 'fy' } });
+    expect(again.cached).toBe(true);
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
+  });
+
+  test('cash flow, which copies the period into its payload, keeps them apart too', async () => {
+    const T2 = 't-names-cf';
+    const fy = await reports.getCashFlow(U, T2, { timezone: 'UTC', period: { preset: 'fy' } });
+    const cu = await reports.getCashFlow(U, T2, { timezone: 'UTC', period: custom });
+    expect(fy.period.key).toBe('fy');
+    expect(cu.period.key).toBe('custom');
+    expect(cu.period.label).not.toBe(fy.period.label);
+  });
+});
+
+describe('Xero call budget — an over-long period never reaches the report endpoints', () => {
+  test('a direct caller past the route check is refused with a PeriodError, and no report is fetched', async () => {
+    await expect(reports.getBudgetVariance(U, 't-too-long', { period: { from: '1900-01', to: '2100-12' } }))
+      .rejects.toMatchObject({ name: 'PeriodError', status: 400 });
+    await expect(reports.getCashFlow(U, 't-too-long', { period: { from: '2015-12', to: '2026-12' } }))
+      .rejects.toMatchObject({ name: 'PeriodError' });
+    expect(api.getReportProfitAndLoss).not.toHaveBeenCalled();
+    expect(api.getReportBudgetSummary).not.toHaveBeenCalled();
+    expect(api.getPayments).not.toHaveBeenCalled();
+  });
+});

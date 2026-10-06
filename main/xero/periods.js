@@ -70,7 +70,9 @@ function _monthsFrom(start, n = 12) {
 
 // Pure. Every month from `fromKey` to `toKey` inclusive, any span. Reversed
 // inputs are swapped rather than rejected — a from/to the user dragged backwards
-// is an obvious intent, not an error worth blocking on.
+// is an obvious intent, not an error worth blocking on. The span is not capped
+// here: this is plain arithmetic, and the cap belongs where a span turns into
+// Xero calls, which is _resolvePeriod (see _checkRange).
 function _monthsBetween(fromKey, toKey) {
   const parse = k => { const m = /^(\d{4})-(\d{1,2})$/.exec(String(k || '')); return m ? { year: +m[1], month: +m[2] } : null; };
   let a = parse(fromKey), b = parse(toKey);
@@ -95,6 +97,102 @@ function _fiscalYearMonths(today, fiscalYearEnd) {
   return _monthsFrom(_fiscalYearStart(today, fiscalYearEnd));
 }
 
+// ── Which periods may be asked for ──────────────────────────────────────────
+// Every 12 months of a period costs a pair of Xero calls, and nothing bounded
+// the span: from=1900-01&to=2100-12 was about 400 calls, against a budget of 60
+// a minute per app (shared with real invoice posting) and 5,000 a day per
+// organisation. One request could spend a tenant's day.
+//
+// 132 months is the widest span the period picker can produce (it offers
+// eleven years), so no real reader is refused, and the worst one request can
+// cost is eleven call pairs. The year bounds are generous on purpose, since an
+// organisation can import a long history, but they stop nonsense years —
+// including 0 to 99, which Date.UTC quietly reads as 1900 to 1999.
+const MAX_PERIOD_MONTHS = 132;
+const MIN_PERIOD_YEAR   = 1990;
+const MAX_PERIOD_YEAR   = 2100;
+
+// The named periods _resolvePeriod knows. Anything else used to fall back to
+// year to date without a word, which on a budget report quietly turned a
+// requested twelve months into however many had elapsed.
+const PERIOD_PRESETS = new Set([
+  'this-month', 'last-month', 'this-quarter', 'last-quarter',
+  'fy-ytd', 'cy-ytd', 'fy', 'prev-fy', 'next-fy', 'cy',
+  'rolling', 'last-12', 'last-6', 'last-3',
+]);
+
+// A period that cannot be served. Its own type so a route can answer 400 — the
+// request is wrong, and sending it again will not help — rather than the 500
+// every other failure here becomes.
+class PeriodError extends Error {
+  constructor(message) {
+    super(message);
+    this.name   = 'PeriodError';
+    this.status = 400;
+  }
+}
+// By name rather than instanceof: a test runner's module registry can hand the
+// route and reports.js two different copies of this file.
+function _isPeriodError(err) { return !!err && err.name === 'PeriodError'; }
+
+// Pure. 'YYYY-MM' with a real month and a year inside the bounds, else null.
+// Stricter than _monthsBetween, which takes a one-digit month: this is the gate
+// on what a request may say, not on what the arithmetic can cope with.
+function _parseMonthKey(k) {
+  const m = typeof k === 'string' ? /^(\d{4})-(0[1-9]|1[0-2])$/.exec(k) : null;
+  if (!m) return null;
+  const year = +m[1], month = +m[2];
+  return year >= MIN_PERIOD_YEAR && year <= MAX_PERIOD_YEAR ? { year, month } : null;
+}
+
+// Throws PeriodError unless from/to name a span this app will fetch. A reversed
+// range is fine (_monthsBetween swaps it), so the size is measured either way.
+function _checkRange(from, to) {
+  const a = _parseMonthKey(from), b = _parseMonthKey(to);
+  if (!a || !b) {
+    throw new PeriodError(`from and to must be months written YYYY-MM, between ${MIN_PERIOD_YEAR} and ${MAX_PERIOD_YEAR}`);
+  }
+  const n = Math.abs((b.year * 12 + b.month) - (a.year * 12 + a.month)) + 1;
+  if (n > MAX_PERIOD_MONTHS) {
+    throw new PeriodError(`Period too long — at most ${MAX_PERIOD_MONTHS} months (this one is ${n})`);
+  }
+}
+
+// Throws PeriodError unless `p` is a preset _resolvePeriod knows, or the legacy
+// YYYY-MM window (the twelve months ending there) held to the same years as a
+// range.
+function _checkPreset(p) {
+  if (typeof p === 'string' && (PERIOD_PRESETS.has(p) || _parseMonthKey(p))) return;
+  throw new PeriodError(`Unknown period "${String(p).slice(0, 40)}" — use a preset such as fy or fy-ytd, or from=YYYY-MM&to=YYYY-MM`);
+}
+
+// Pure. The period a request's query string asks for, checked, in the shape
+// _resolvePeriod takes: { from, to } or { preset }. `fallback` when the query
+// names no period. Throws PeriodError for anything that is not a period.
+//
+// One gate for every route that takes a period, so the next route added cannot
+// forget the cap. An explicit range wins over a preset, as in _resolvePeriod,
+// and a preset it overrides goes unchecked because it goes unused. Half a range
+// is refused rather than swapped for the default: whoever sent from= without
+// to= asked for something, and it was not the default. An empty value counts
+// as absent, which is how the routes always read one.
+function _periodFromQueryParams(query, fallback) {
+  const q = query || {};
+  const given = v => v !== undefined && v !== null && v !== '';
+  if (given(q.from) || given(q.to)) {
+    if (!given(q.from) || !given(q.to)) throw new PeriodError('A custom period needs both from and to (YYYY-MM)');
+    _checkRange(q.from, q.to);
+    return { from: q.from, to: q.to };
+  }
+  // `window` is the older name for a preset, still sent by older links.
+  const preset = given(q.preset) ? q.preset : q.window;
+  if (given(preset)) {
+    _checkPreset(preset);
+    return { preset };
+  }
+  return fallback;
+}
+
 // Pure. Resolves what the user asked for into an explicit month list.
 //
 // Presets are computed from the ORG's own fiscal year end, never a hardcoded
@@ -102,8 +200,11 @@ function _fiscalYearMonths(today, fiscalYearEnd) {
 // Jan-to-now for a December one, without either org configuring anything. That
 // matters because different organisations connect to this app.
 //
-// Any span is allowed. Twelve months is the ceiling of a single Xero call pair,
-// not of a period — a longer one is fetched as several pairs (see _chunkMonths).
+// Twelve months is the ceiling of a single Xero call pair, not of a period — a
+// longer one is fetched as several pairs (see _chunkMonths). The ceiling of a
+// period is MAX_PERIOD_MONTHS. The routes check it, and it is checked again
+// here so that nothing reaching Xero through this can ask for more: an explicit
+// range that breaks the rules throws PeriodError.
 function _resolvePeriod(spec, today, fiscalYearEnd) {
   const s = typeof spec === 'string' ? { preset: spec } : (spec || {});
   const fyStart = _fiscalYearStart(today, fiscalYearEnd);
@@ -115,6 +216,7 @@ function _resolvePeriod(spec, today, fiscalYearEnd) {
 
   // An explicit range always wins — it is the most specific thing the user can say.
   if (s.from && s.to) {
+    _checkRange(s.from, s.to);
     const months = _monthsBetween(s.from, s.to);
     if (months) return { key: 'custom', label: `${months[0].label} – ${months[months.length - 1].label}`, months };
   }
@@ -205,4 +307,7 @@ function _monthKeyOfDate(d) {
 // living on injected capital and one collecting from customers look identical
 // on a single "cash in" line, and they are not remotely the same business.
 
-module.exports = { _actualThroughIndex, _addDays, _chunkMonths, _closedCount, _dateFromParts, _fiscalYearMonths, _fiscalYearStart, _fmtISODate, _fmtXeroDate, _monthKeyOfDate, _monthMeta, _monthsBetween, _monthsFrom, _parseISODate, _partsFromDate, _resolvePeriod, _resolveWindow, _todayPartsInTz, _weekdayMon0 };
+module.exports = {
+  _actualThroughIndex, _addDays, _chunkMonths, _closedCount, _dateFromParts, _fiscalYearMonths, _fiscalYearStart, _fmtISODate, _fmtXeroDate, _monthKeyOfDate, _monthMeta, _monthsBetween, _monthsFrom, _parseISODate, _partsFromDate, _resolvePeriod, _resolveWindow, _todayPartsInTz, _weekdayMon0,
+  MAX_PERIOD_MONTHS, MIN_PERIOD_YEAR, MAX_PERIOD_YEAR, PERIOD_PRESETS, PeriodError, _isPeriodError, _checkRange, _checkPreset, _periodFromQueryParams,
+};

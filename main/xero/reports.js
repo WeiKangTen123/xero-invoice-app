@@ -90,10 +90,40 @@ const FORCE_GRACE_MS = 10_000;
 // each cache miss used to become its own chain of Xero GETs (and its own LLM
 // call). Every cached fetcher below is bound through this, so callers inside
 // this file share the same in-flight promise as callers outside it.
+//
+// Sharing only works if the same request always produces the same key, and a
+// plain JSON.stringify did not: it follows property order, and the routes build
+// { timezone, force, period } where the reports that call each other build
+// { timezone, period, force }. Those missed each other and both went to Xero.
+// So keys sort their properties and drop undefined ones (a fetcher reads an
+// undefined option as its default anyway), and a fetcher that takes options can
+// name its defaults: an option left out and the same option passed at its
+// default are then one request, not two. The filled-in options are also what
+// the fetcher receives, so the key can never describe a different request from
+// the one actually run.
 const _inflight = new Map();
-function _dedupe(name, fn) {
-  return function deduped(...args) {
-    const key = `${name}:${JSON.stringify(args)}`;
+function _canonical(v) {
+  if (Array.isArray(v)) return v.map(_canonical);
+  if (v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
+    const out = {};
+    for (const k of Object.keys(v).sort()) if (v[k] !== undefined) out[k] = _canonical(v[k]);
+    return out;
+  }
+  return v;
+}
+// Options are the third argument of every fetcher that names defaults.
+function _withDefaults(args, defaults) {
+  if (!defaults) return args;
+  const [userId, tenantId, opts, ...rest] = args;
+  return [userId, tenantId, { ...defaults, ..._canonical(opts || {}) }, ...rest];
+}
+function _dedupeKey(name, args) {
+  return `${name}:${JSON.stringify(_canonical(args))}`;
+}
+function _dedupe(name, fn, defaults = null) {
+  return function deduped(...given) {
+    const args = _withDefaults(given, defaults);
+    const key = _dedupeKey(name, args);
     let p = _inflight.get(key);
     if (!p) {
       p = Promise.resolve().then(() => fn.apply(this, args)).finally(() => _inflight.delete(key));
@@ -817,7 +847,13 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
 
   // The exact span is part of the key — two periods are two different reports,
   // and serving one for the other would silently show the wrong months.
-  const key    = `budgetvar:${userId}:${tenantId}:${months[0].key}:${months[months.length - 1].key}:${actualThroughIdx}`;
+  //
+  // So is the period's name. The payload carries it (period.key and label, and
+  // the fiscalYear title built from them), so a custom Jan–Dec and the 'fy'
+  // preset of a December year end — the same months — must not share an entry,
+  // or whichever came first titles both, down to the exports' "year to date"
+  // or "period to date" wording.
+  const key    = `budgetvar:${userId}:${tenantId}:${win.key}:${months[0].key}:${months[months.length - 1].key}:${actualThroughIdx}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
@@ -1165,7 +1201,12 @@ function _buildQuotePipeline(quotes = [], baseCurrency = '') {
 async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period, cashFlow = false, customers = false } = {}) {
   // Reuses the budget-variance fetch and its cache — on a warm cache this whole
   // endpoint costs one Xero call (the bank summary) rather than three.
-  const bv = await getBudgetVariance(userId, tenantId, { timezone, force, window, period });
+  //
+  // Asked for exactly as the /budget-variance route asks for it. `window` only
+  // means anything when there is no period, and passing it alongside one made
+  // this a different in-flight request from the route's identical one, so the
+  // two fetched the same report from Xero side by side.
+  const bv = await getBudgetVariance(userId, tenantId, period ? { timezone, force, period } : { timezone, force, window });
 
   const todayParts = _todayPartsInTz(timezone);
   const today = _fmtISODate(todayParts);
@@ -1366,7 +1407,10 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
   const first  = perf.fiscalYear.fromISO, last = perf.fiscalYear.toISO;
   const today  = _todayPartsInTz(timezone);
 
-  const key    = `cashflow:${userId}:${tenantId}:${months[0].key}:${months[months.length - 1].key}`;
+  // The period's name is in the key for the reason given at budgetvar: the
+  // payload copies perf.period, so the same months under another name would
+  // otherwise come back carrying the first one's.
+  const key    = `cashflow:${userId}:${tenantId}:${perf.period?.key}:${months[0].key}:${months[months.length - 1].key}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
@@ -1565,11 +1609,21 @@ const getBankAccounts        = _dedupe('getBankAccounts', _getBankAccountsRaw);
 const getContacts            = _dedupe('getContacts', _getContactsRaw);
 const getBankTransactions    = _dedupe('getBankTransactions', _getBankTransactionsRaw);
 const getBankSummary         = _dedupe('getBankSummary', _getBankSummaryRaw);
-const getBudgetVariance      = _dedupe('getBudgetVariance', _getBudgetVarianceRaw);
-const getPerformance         = _dedupe('getPerformance', _getPerformanceRaw);
-const getVarianceInsights    = _dedupe('getVarianceInsights', _getVarianceInsightsRaw);
-const getCashFlow            = _dedupe('getCashFlow', _getCashFlowRaw);
-const getFinancialNarrative  = _dedupe('getFinancialNarrative', _getFinancialNarrativeRaw);
+// The period reports name their option defaults (see _dedupe), matching the
+// defaults in their own signatures. These are the ones fetched together — the
+// Insights page asks for performance, commentary and narrative at once, and
+// each of those asks for the next one down — so these are where a request
+// spelled two ways cost two fetches.
+const getBudgetVariance      = _dedupe('getBudgetVariance', _getBudgetVarianceRaw,
+  { force: false, timezone: 'UTC', window: 'fy' });
+const getPerformance         = _dedupe('getPerformance', _getPerformanceRaw,
+  { timezone: 'UTC', force: false, window: 'fy', cashFlow: false, customers: false });
+const getVarianceInsights    = _dedupe('getVarianceInsights', _getVarianceInsightsRaw,
+  { timezone: 'UTC', force: false, reanalyse: false });
+const getCashFlow            = _dedupe('getCashFlow', _getCashFlowRaw,
+  { timezone: 'UTC', force: false });
+const getFinancialNarrative  = _dedupe('getFinancialNarrative', _getFinancialNarrativeRaw,
+  { timezone: 'UTC', force: false, reanalyse: false });
 
 function clearCache(userId) {
   for (const key of _cache.keys()) {
@@ -1592,4 +1646,5 @@ module.exports = {
   _isTransfer, _isReceiptPayment, _periodCacheTtl, _pruneCache, _cache, CACHE_MAX_ENTRIES, TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights, _buildCategoryVariances,
   _narrativeFacts, _groundNarrative, _narrativePrompt, _narrateFrom,
+  _canonical, _dedupeKey,
 };

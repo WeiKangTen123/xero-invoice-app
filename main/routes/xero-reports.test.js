@@ -293,4 +293,107 @@ describe('routes/xero-reports', () => {
         expect.objectContaining({ period: { from: '2025-01', to: '2025-12' } }));
     });
   });
+
+  // Every 12 months of a period is a pair of Xero calls, and nothing bounded
+  // the span: from=1900-01&to=2100-12 cost about 400 calls against a budget of
+  // 60 a minute shared with invoice posting. Every route that takes a period
+  // now refuses one it should not fetch, before any report runs.
+  describe('period validation', () => {
+    const auth = req => req.set('Authorization', `Bearer ${tokenFor(testUser)}`);
+    const ROUTES = {
+      '/budget-variance':   () => reports.getBudgetVariance,
+      '/performance':       () => reports.getPerformance,
+      '/cash-flow':         () => reports.getCashFlow,
+      '/variance-insights': () => reports.getVarianceInsights,
+      '/narrative':         () => reports.getFinancialNarrative,
+      '/budget/export-url': null,
+    };
+    const INVALID = {
+      'far too long, the reported case':      'from=1900-01&to=2100-12',
+      'too long, inside the year bounds':     'from=2000-01&to=2026-12',
+      'a year before 1990':                   'from=1989-12&to=1990-06',
+      'a year after 2100':                    'from=2100-12&to=2101-01',
+      'a month that does not exist':          'from=2026-13&to=2026-12',
+      'month zero':                           'from=2026-00&to=2026-12',
+      'a one-digit month':                    'from=2026-1&to=2026-12',
+      'a full date':                          'from=2026-01-01&to=2026-12-31',
+      'not a date at all':                    'from=abc&to=2026-12',
+      'half a range':                         'from=2026-01',
+      'the other half':                       'to=2026-12',
+      'a repeated parameter':                 'from=2026-01&from=2026-02&to=2026-03',
+      'an unknown preset':                    'preset=garbage',
+      'custom, which is not a preset':        'preset=custom',
+      'an unknown legacy window':             'window=nope',
+      'a legacy window with no such month':   'preset=2026-13',
+      'a legacy window out of the years':     'preset=1900-12',
+    };
+
+    beforeEach(() => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1', tenantName: 'Org' }]);
+      for (const fn of ['getBudgetVariance', 'getPerformance', 'getCashFlow', 'getVarianceInsights', 'getFinancialNarrative']) {
+        reports[fn].mockResolvedValue({ months: [], rows: [] });
+      }
+    });
+
+    const urlFor = (route, qs) => `/api/xero-reports${route}?${route === '/budget/export-url' ? 'kind=grid&format=pdf&' : ''}${qs}`;
+
+    for (const [route, fetcher] of Object.entries(ROUTES)) {
+      test(`${route} answers 400 for every kind of invalid period, without running the report`, async () => {
+        for (const [why, qs] of Object.entries(INVALID)) {
+          const res = await auth(request(serverFor(app)).get(urlFor(route, qs)));
+          expect({ why, status: res.status }).toEqual({ why, status: 400 });
+          expect(typeof res.body.error).toBe('string');
+        }
+        if (fetcher) expect(fetcher()).not.toHaveBeenCalled();
+      });
+    }
+
+    test('132 months is accepted and 133 refused, in either direction', async () => {
+      for (const route of ['/budget-variance', '/performance', '/cash-flow', '/budget/export-url']) {
+        await auth(request(serverFor(app)).get(urlFor(route, 'from=2016-01&to=2026-12'))).expect(200);   // 132
+        await auth(request(serverFor(app)).get(urlFor(route, 'from=2026-12&to=2016-01'))).expect(200);   // 132, reversed
+        const long = await auth(request(serverFor(app)).get(urlFor(route, 'from=2015-12&to=2026-12'))).expect(400);   // 133
+        expect(long.body.error).toMatch(/Period too long — at most 132 months/);
+        await auth(request(serverFor(app)).get(urlFor(route, 'from=2026-12&to=2015-12'))).expect(400);
+      }
+      expect(reports.getBudgetVariance).toHaveBeenLastCalledWith(testUser.id, 't1',
+        expect.objectContaining({ period: { from: '2026-12', to: '2016-01' } }));   // swapped later, as before
+    });
+
+    test('every known preset and the legacy YYYY-MM window are still accepted', async () => {
+      const { PERIOD_PRESETS } = require('../xero/periods');
+      for (const p of [...PERIOD_PRESETS, '2025-12']) {
+        await auth(request(serverFor(app)).get(`/api/xero-reports/performance?preset=${p}`)).expect(200);
+        expect(reports.getPerformance).toHaveBeenLastCalledWith(testUser.id, 't1', expect.objectContaining({ period: { preset: p } }));
+        await auth(request(serverFor(app)).get(`/api/xero-reports/budget-variance?window=${p}`)).expect(200);
+        expect(reports.getBudgetVariance).toHaveBeenLastCalledWith(testUser.id, 't1', expect.objectContaining({ period: { preset: p } }));
+      }
+    });
+
+    test('no period at all is still financial year to date for the dashboards and the whole year for the budget', async () => {
+      await auth(request(serverFor(app)).get('/api/xero-reports/performance')).expect(200);
+      expect(reports.getPerformance.mock.calls.at(-1)[2].period).toEqual({ preset: 'fy-ytd' });
+      await auth(request(serverFor(app)).get('/api/xero-reports/budget-variance?from=&to=')).expect(200);
+      expect(reports.getBudgetVariance.mock.calls.at(-1)[2].period).toBeUndefined();
+    });
+
+    test('a refused period never reaches a signed export link', async () => {
+      const res = await auth(request(serverFor(app)).get(urlFor('/budget/export-url', 'from=1900-01&to=2100-12'))).expect(400);
+      expect(res.body.url).toBeUndefined();
+    });
+
+    test('a period the report layer refuses is a 400 too, not a 500', async () => {
+      // The check inside periods.js#_resolvePeriod, for anything that reaches a
+      // report without passing through the route check first.
+      const { PeriodError } = require('../xero/periods');
+      reports.getBudgetVariance.mockRejectedValueOnce(new PeriodError('Period too long — at most 132 months (this one is 400)'));
+      const res = await auth(request(serverFor(app)).get('/api/xero-reports/budget-variance?preset=fy')).expect(400);
+      expect(res.body.error).toMatch(/at most 132 months/);
+
+      const token = jwt.sign({ userId: testUser.id, tenantId: 't1', kind: 'grid', format: 'pdf',
+        period: { from: '1900-01', to: '2100-12' }, purpose: 'budget-export' }, jwtSecret(), { expiresIn: '5m' });
+      reports.getBudgetVariance.mockRejectedValueOnce(new PeriodError('Period too long'));
+      await request(serverFor(app)).get(`/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`).expect(400);
+    });
+  });
 });

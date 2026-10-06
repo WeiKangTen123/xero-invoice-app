@@ -6,6 +6,7 @@ const budgetDoc        = require('../reports/budget-doc');
 const budgetRender     = require('../reports/budget-render');
 const tokenCache        = require('../utils/token-cache');
 const reports           = require('../xero/reports');
+const { _periodFromQueryParams, _isPeriodError } = require('../xero/periods');
 const { xeroErrMsg, isScopeError } = require('../xero/xero-utils');
 const { getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const logger             = require('../utils/logger');
@@ -41,10 +42,18 @@ function report(label, fetch, { needs = [] } = {}) {
       const data = await fetch(req, tenantId);
       res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
     } catch (err) {
+      if (_isPeriodError(err)) return _periodRefused(res, label, req, err);
       logger.error(`${label} failed`, { error: xeroErrMsg(err), userId: req.user.id });
       res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
     }
   };
+}
+
+// A period the request should not have asked for is the caller's mistake, not a
+// failure: 400 with what was wrong, logged quietly, and no Xero call made.
+function _periodRefused(res, label, req, err) {
+  logger.info(`${label}: period refused`, { userId: req.user.id, reason: err.message });
+  return res.status(400).json({ error: err.message });
 }
 
 router.get('/summary',       requireAuth, report('Insights summary',       (req, t) => reports.getSummary(req.user.id, t, { force: force(req) })));
@@ -55,8 +64,9 @@ router.get('/bank-accounts', requireAuth, report('Insights bank accounts', (req,
 router.get('/bank-transactions', requireAuth, report('Insights bank transactions',
   (req, t) => reports.getBankTransactions(req.user.id, t, req.query.accountId, { force: force(req) }), { needs: ['accountId'] }));
 // The monthly actual/budget grid. Needs accounting.reports.budgetsummary.read.
-// Takes the same ?preset= or ?from=&to= as the other reports; it used to take
-// nothing, so the budget tabs were fixed to the current financial year.
+// Takes the same ?preset= or ?from=&to= as the other reports, checked the same
+// way; it used to take nothing, so the budget tabs were fixed to the current
+// financial year.
 router.get('/budget-variance', requireAuth, report('Budget vs Actual',
   (req, t) => reports.getBudgetVariance(req.user.id, t, { timezone: tz(req), force: force(req), period: _budgetPeriodFromQuery(req) })));
 // Powers Dashboard -> Overview and Revenue. Composed from the budget-variance
@@ -87,6 +97,7 @@ router.get('/variance-insights', requireAuth, async (req, res) => {
     });
     res.json({ connected: true, ...data });
   } catch (err) {
+    if (_isPeriodError(err)) return _periodRefused(res, 'Variance insights', req, err);
     logger.error('Variance insights failed', { error: xeroErrMsg(err), userId: req.user.id });
     res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
   }
@@ -108,6 +119,9 @@ router.get('/narrative', requireAuth, async (req, res) => {
     });
     res.json({ connected: true, ...data });
   } catch (err) {
+    // The one failure that is not swallowed: a bad period is the request's
+    // fault, and the same request gets a 400 from every other report.
+    if (_isPeriodError(err)) return _periodRefused(res, 'Financial narrative', req, err);
     logger.error('Financial narrative failed', { error: xeroErrMsg(err), userId: req.user.id });
     res.json({ connected: true, available: false, reason: 'error' });
   }
@@ -162,6 +176,9 @@ router.get('/budget/export-url', requireAuth, async (req, res) => {
     const token  = issueExportToken(req.user.id, { tenantId, kind, format, month, period });
     res.json({ url: `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`, expiresIn: EXPORT_TOKEN_TTL });
   } catch (err) {
+    // Checked before a token is signed, so a link can never carry a period the
+    // report routes would refuse.
+    if (_isPeriodError(err)) return _periodRefused(res, 'Budget export URL', req, err);
     logger.error('Budget export URL failed', { error: xeroErrMsg(err), userId: req.user.id });
     res.status(500).json({ error: xeroErrMsg(err) });
   }
@@ -202,26 +219,38 @@ router.get('/budget/export', async (req, res) => {
     setDownloadName(res, base, 'pdf');
     return budgetRender.streamPdf(definition, res);
   } catch (err) {
+    // A token signed before the period checks existed can still carry a period
+    // they refuse; that is a stale link, not a server fault.
+    if (_isPeriodError(err)) {
+      if (!res.headersSent) res.status(400).type('text/plain').send(`This export link asks for a period that cannot be exported: ${err.message}`);
+      return;
+    }
     logger.error('Budget export failed', { error: xeroErrMsg(err), userId: spec.userId, kind: spec.kind });
     if (!res.headersSent) res.status(500).type('text/plain').send('Could not build the export.');
   }
 });
 
-// Either a named preset, or an explicit from/to span of any length.
+// Both helpers read the query through periods.js#_periodFromQueryParams, the
+// one check every period-taking route shares: a known preset, the legacy
+// YYYY-MM window, or a from/to range of at most MAX_PERIOD_MONTHS. Anything
+// else throws a PeriodError, which the handlers answer with a 400 before any
+// Xero call is made.
+
+// A named preset or an explicit from/to range. Asking for nothing means
+// financial year to date, the default the dashboards open on.
 function _periodFromQuery(req) {
-  return (req.query.from && req.query.to)
-    ? { from: req.query.from, to: req.query.to }
-    : { preset: req.query.preset || req.query.window };
+  return _periodFromQueryParams(req.query, { preset: 'fy-ytd' });
 }
 
-// The budget reports' period. Unlike _periodFromQuery, asking for nothing means
-// the whole financial year, not year to date: a budget report that silently
-// went from twelve months to nine would be a reporting error (see
-// periods.js#_resolveWindow, which this falls through to).
+// The budget reports' period. Unlike _periodFromQuery, asking for nothing is
+// passed on as no period, which getBudgetVariance resolves through
+// periods.js#_resolveWindow to the whole financial year — not year to date,
+// because a budget report that went from twelve months to nine without being
+// asked would be a reporting error. An unrecognised preset used to reach
+// _resolvePeriod and fall back to year to date, which was exactly that error;
+// it is now refused instead.
 function _budgetPeriodFromQuery(req) {
-  if (req.query.from && req.query.to) return { from: String(req.query.from), to: String(req.query.to) };
-  if (req.query.preset) return { preset: String(req.query.preset) };
-  return undefined;
+  return _periodFromQueryParams(req.query, undefined);
 }
 
 // A call outside the token's granted scopes — the situation for anyone who

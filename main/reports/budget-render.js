@@ -103,6 +103,11 @@ function budgetVsActualWorkbook(payload, opts = {}) {
     sheet.getColumn(firstBudgetIdx + 2).border = { left: { style: 'medium', color: { argb: 'FF6366F1' } } };
   }
   sheet.addRow([]);
+  // What has been booked so far in the month still in progress, which the grid
+  // shows as budget. Same sentence as the PDF; text, because it is a note about
+  // the figures rather than one of them.
+  const soFar = doc.soFarNote(payload);
+  if (soFar) sheet.addRow([soFar]).font = { size: 9, italic: true };
   sheet.addRow([doc._currencyNote(currency, payload.currency)]).font = { size: 8, italic: true, color: { argb: 'FF6B7280' } };
   return wb;
 }
@@ -111,9 +116,11 @@ function budgetVarianceWorkbook(payload, opts = {}) {
   const { rows = [], organisation = {}, months = [] } = payload || {};
   const currency  = organisation.currency && organisation.currency !== '—' ? organisation.currency : '';
   const generated = opts.generatedAt || Date.now();
-  const month     = opts.month || 'ytd';
-  const idx       = month === 'ytd' ? -1 : Math.max(0, months.findIndex(m => m.key === month));
-  const label     = doc.varianceLabel(payload, month);
+  // Resolved by the same rule as the PDF and the filename, so all three agree
+  // on which figures these are.
+  const month     = doc.resolveMonth(payload, opts.month);
+  const idx       = month === 'ytd' ? -1 : months.findIndex(m => m.key === month);
+  const label     = doc.varianceSubtitle(payload, month);
   const figuresFor = r => (month === 'ytd'
     ? { actual: r.actualToDate, budget: r.budgetToDate, variance: r.variance, variancePct: r.variancePct }
     : (r.monthly || [])[idx] || { actual: 0, budget: 0, variance: 0, variancePct: null });
