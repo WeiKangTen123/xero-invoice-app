@@ -14,7 +14,11 @@ import { api } from '../../api/client';
 // and panning already work — which is the honest answer for a table that is
 // three and a half screens wide. The workbook is there because a spreadsheet is
 // usually what an accountant actually wanted.
-export function BudgetExport({ kind, month, disabled }) {
+//
+// `query` is the organisation and period on screen. Without it the export
+// was always the first connected organisation's current financial year,
+// whatever the reader was looking at.
+export function BudgetExport({ kind, month, query, disabled }) {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
 
@@ -23,7 +27,7 @@ export function BudgetExport({ kind, month, disabled }) {
     setBusy(format);
     const tab = window.open('', '_blank');
     try {
-      const q = new URLSearchParams({ kind, format });
+      const q = new URLSearchParams({ ...(query || {}), kind, format });
       if (month) q.set('month', month);
       const { url } = await api.get(`/xero-reports/budget/export-url?${q.toString()}`);
       if (tab) tab.location = url;

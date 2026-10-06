@@ -1,23 +1,33 @@
 import { fmtMoney } from '../../utils/format';
 import { BudgetExport } from './BudgetExport';
 import { VarianceTable } from './VarianceTable';
-import { SourceNote } from './bits';
+import { SourceNote, dayLabel, toDateLabel } from './bits';
 
-export default function VarianceTab({ isMobile, monthsRef, monthEdges, budget, varianceMonth, setVarianceMonth, fetchBudget, currency }) {
+// How the selected figures are titled. A month still in progress says "so
+// far" and when it was read; it used to say "For the month ended Oct 2026"
+// six days into October.
+function subtitleFor(d, varianceMonth) {
+  if (varianceMonth === 'ytd') return `${toDateLabel(d?.period)} — ${d?.kpis?.monthsElapsed ?? 0} completed month(s)`;
+  const m  = d?.months?.find(x => x.key === varianceMonth);
+  const cm = d?.kpis?.currentMonth;
+  if (m && cm && cm.key === m.key) return `${m.label} so far — booked in Xero as of ${dayLabel(cm.asOf)}`;
+  return `For the month ended ${m?.label || '—'}`;
+}
+
+export default function VarianceTab({ isMobile, monthsRef, monthEdges, budget, varianceMonth, setVarianceMonth, fetchBudget, currency, exportQuery }) {
+  const ytdLabel = toDateLabel(budget.data?.period);
   return (
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
             <div>
               <div className="card-title" style={{ marginBottom: 2 }}>Budget Variance</div>
               <div className="card-subtitle" style={{ marginBottom: 2 }}>
-                {varianceMonth === 'ytd'
-                  ? `Year to date — ${budget.data?.kpis?.monthsElapsed ?? 0} completed month(s)`
-                  : `For the month ended ${budget.data?.months?.find(m => m.key === varianceMonth)?.label || '—'}`}
+                {subtitleFor(budget.data, varianceMonth)}
               </div>
               <SourceNote>Xero Profit &amp; Loss (actuals) vs Budget Summary — variance computed per Xero&apos;s formula</SourceNote>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <BudgetExport kind="variance" month={varianceMonth} disabled={budget.status !== 'done' || !!budget.error} />
+              <BudgetExport kind="variance" month={varianceMonth} query={exportQuery} disabled={budget.status !== 'done' || !!budget.error} />
               <button className="btn btn-outline btn-sm" disabled={budget.status === 'loading'} onClick={() => fetchBudget({ force: true })}>
                 {budget.status === 'loading' ? <span className="btn-spinner" /> : '↻'} Refresh
               </button>
@@ -38,7 +48,7 @@ export default function VarianceTab({ isMobile, monthsRef, monthEdges, budget, v
             // Either one month's own figures, or the year-to-date rollup the
             // backend already computed over the completed months.
             const periods = varianceMonth === 'ytd'
-              ? [{ label: 'Year to date', of: r => ({ actual: r.actualToDate, budget: r.budgetToDate, variance: r.variance, variancePct: r.variancePct }) }]
+              ? [{ label: ytdLabel, of: r => ({ actual: r.actualToDate, budget: r.budgetToDate, variance: r.variance, variancePct: r.variancePct }) }]
               : [{ label: d.months[idx].label, of: r => r.monthly[idx] }];
 
             const net = d.rows.find(r => r.kind === 'summary' && /^net (profit|loss)/i.test(r.label));
@@ -61,13 +71,14 @@ export default function VarianceTab({ isMobile, monthsRef, monthEdges, budget, v
                   style={{ display: 'flex', gap: 6, flexWrap: isMobile ? 'nowrap' : 'wrap' }}
                 >
                   {d.months.map(m => (
-                    <button key={m.key} type="button" onClick={() => setVarianceMonth(m.key)} style={{
+                    <button key={m.key} type="button" onClick={() => setVarianceMonth(m.key)}
+                      title={m.current ? 'In progress: actuals booked so far' : undefined} style={{
                       padding: '5px 10px', fontSize: 11.5, fontWeight: 600, borderRadius: 7, cursor: 'pointer',
                       flexShrink: 0, whiteSpace: 'nowrap',
-                      border: `1px solid ${varianceMonth === m.key ? 'transparent' : 'var(--border)'}`,
+                      border: `1px solid ${varianceMonth === m.key ? 'transparent' : m.current ? 'var(--warning)' : 'var(--border)'}`,
                       background: varianceMonth === m.key ? 'var(--accent-gradient)' : 'transparent',
-                      color: varianceMonth === m.key ? '#fff' : (m.source === 'actual' ? 'var(--text-secondary)' : 'var(--text-muted)'),
-                    }}>{m.label}</button>
+                      color: varianceMonth === m.key ? '#fff' : m.current ? 'var(--warning)' : (m.source === 'actual' ? 'var(--text-secondary)' : 'var(--text-muted)'),
+                    }}>{m.label}{m.current ? ' · so far' : ''}</button>
                   ))}
                   <button type="button" onClick={() => setVarianceMonth('ytd')} style={{
                     padding: '5px 10px', fontSize: 11.5, fontWeight: 700, borderRadius: 7, cursor: 'pointer',
@@ -75,7 +86,7 @@ export default function VarianceTab({ isMobile, monthsRef, monthEdges, budget, v
                     border: `1px solid ${varianceMonth === 'ytd' ? 'transparent' : 'var(--border)'}`,
                     background: varianceMonth === 'ytd' ? 'var(--accent-gradient)' : 'transparent',
                     color: varianceMonth === 'ytd' ? '#fff' : 'var(--text-muted)',
-                  }}>Year to date</button>
+                  }}>{ytdLabel}</button>
                 </div>
                 </div>
 

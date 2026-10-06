@@ -1,9 +1,9 @@
 import { fmtMoney } from '../../utils/format';
 import { BudgetExport } from './BudgetExport';
 import { BudgetGrid } from './BudgetGrid';
-import { SourceNote } from './bits';
+import { SourceNote, dayLabel } from './bits';
 
-export default function BudgetTab({ budget, fetchBudget, currency }) {
+export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }) {
   return (
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
@@ -15,7 +15,7 @@ export default function BudgetTab({ budget, fetchBudget, currency }) {
               <SourceNote>Xero Profit &amp; Loss (actuals) + Budget Summary — Overall Budget</SourceNote>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <BudgetExport kind="grid" disabled={budget.status !== 'done' || !!budget.error} />
+              <BudgetExport kind="grid" query={exportQuery} disabled={budget.status !== 'done' || !!budget.error} />
               <button className="btn btn-outline btn-sm" disabled={budget.status === 'loading'} onClick={() => fetchBudget({ force: true })}>
                 {budget.status === 'loading' ? <span className="btn-spinner" /> : '↻'} Refresh
               </button>
@@ -32,6 +32,7 @@ export default function BudgetTab({ budget, fetchBudget, currency }) {
             const d   = budget.data;
             const cur = d.organisation?.currency || currency;
             const k   = d.kpis;
+            const cm  = k.currentMonth;
             const tiles = [
               { label: `Actual to date (${k.monthsElapsed}mo)`, value: k.ytdActualNet, hint: 'Net profit, completed months' },
               { label: `Budget remaining (${k.monthsTotal - k.monthsElapsed}mo)`, value: k.restOfYearNet, hint: 'Net profit still budgeted' },
@@ -49,6 +50,20 @@ export default function BudgetTab({ budget, fetchBudget, currency }) {
                       <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>{t.hint}</div>
                     </div>
                   ))}
+                  {/* The month in progress, live: what is booked so far against
+                      its whole-month budget. Matches the amber column in the grid
+                      and, like it, is not part of the forecast. */}
+                  {cm && (
+                    <div className="card figure-tile" style={{ flex: 1, minWidth: 180, background: 'var(--warning-subtle)', borderColor: 'var(--warning)' }}>
+                      <div className="figure-label" style={{ fontSize: 11.5, color: 'var(--warning)', fontWeight: 700, marginBottom: 4 }}>{cm.label} so far</div>
+                      <div className="figure-value" style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: cm.actualNet < 0 ? 'var(--danger)' : 'var(--success)' }}>
+                        {fmtMoney(cm.actualNet, cur)}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>
+                        Net profit booked, of {fmtMoney(cm.budgetNet, cur)} budgeted · as of {dayLabel(cm.asOf)}
+                      </div>
+                    </div>
+                  )}
                   <div className="card figure-tile" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
                     <div className="figure-label" style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>Progress</div>
                     <div className="figure-value" style={{ fontSize: 21, fontWeight: 800 }}>{k.monthsElapsed} <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>of {k.monthsTotal} months</span></div>
@@ -62,7 +77,8 @@ export default function BudgetTab({ budget, fetchBudget, currency }) {
 
                 <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 14, lineHeight: 1.6 }}>
                   A month shows actuals only once it has fully closed — the current month reads as budget, since its
-                  income may be invoiced before its costs are entered. Section names come from Xero&apos;s standard
+                  income may be invoiced before its costs are entered. What has been booked against it so far is in
+                  the amber &ldquo;so far&rdquo; column; it is not added into Total or the forecast. Section names come from Xero&apos;s standard
                   Profit &amp; Loss layout; a custom report layout in Xero may label them differently.
                 </div>
               </>

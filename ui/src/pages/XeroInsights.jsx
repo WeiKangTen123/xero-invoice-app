@@ -15,6 +15,10 @@ import ContactsTab from './xero-insights/ContactsTab';
 import BudgetTab from './xero-insights/BudgetTab';
 import VarianceTab from './xero-insights/VarianceTab';
 
+// Tabs that need the performance report. Cash Flow has its own report, but its
+// period bar is drawn from this one's months.
+const PERF_TABS = ['overview', 'revenue', 'banking', 'profit', 'analysis', 'cashflow'];
+
 const TABS = [
   { key: 'overview', label: 'Overview' },
   // All AI-written commentary in one place, with its own controls. It used to be
@@ -94,6 +98,16 @@ export default function XeroInsights() {
   // until loaded (unlike those, it's an object not a list, so there's nothing
   // meaningful to render half-populated).
   const [budget, setBudget] = useState({ status: 'idle', data: null, error: '' });
+  // The budget tabs' own period, separate from the overview's. It opens on the
+  // whole financial year rather than year to date: a budget is read a year at
+  // a time, and the tabs had no period at all before.
+  const [budgetPreset, setBudgetPreset] = useState('fy');
+  const [budgetRange,  setBudgetRange]  = useState(null); // { from, to } when custom
+
+  // One counter per report. A response is applied only if no newer request for
+  // that report was made since — two quick period changes could otherwise let
+  // the slower, older answer land last and sit under the newer period's label.
+  const seq = useRef({ perf: 0, cashflow: 0, budget: 0, analysis: 0 });
 
   // Performance overview — feeds BOTH the Overview and Revenue tabs from one
   // fetch. monthFrom/monthTo index into data.months, so changing the range
@@ -183,9 +197,15 @@ export default function XeroInsights() {
     // Budget vs Actual is per-organisation, so a tenant switch invalidates it —
     // refetch if it's on screen, otherwise let the lazy loader pick it up.
     if (tab === 'budget' || tab === 'variance') fetchBudget();
-    else setBudget({ status: 'idle', data: null, error: '' });
-    if (['overview', 'revenue', 'banking', 'profit', 'analysis'].includes(tab)) fetchPerf();
-    else setPerf({ status: 'idle', data: null, error: '' });
+    else { seq.current.budget++; setBudget({ status: 'idle', data: null, error: '' }); }
+    // Cash flow is listed too: its period bar is drawn from the performance
+    // months, and the bar vanished on a switch made from the Cash Flow tab.
+    if (PERF_TABS.includes(tab)) fetchPerf();
+    else { seq.current.perf++; setPerf({ status: 'idle', data: null, error: '' }); }
+    // Cash flow was never reset here, so it kept showing the previous
+    // organisation's figures.
+    if (tab === 'cashflow') fetchCashflow();
+    else { seq.current.cashflow++; setCashflow({ status: 'idle', data: null, error: '' }); }
   }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Only to keep the "synced Xs ago" labels honest — no fetching. It still
@@ -210,12 +230,16 @@ export default function XeroInsights() {
     // Both budget tabs share one fetch and one cache entry — the Budget Variance
     // view is a different presentation of the same merged data, not a second call.
     if ((tab === 'budget' || tab === 'variance') && budget.status === 'idle') fetchBudget();
-    if (['overview', 'revenue', 'banking', 'profit', 'analysis'].includes(tab) && perf.status === 'idle') fetchPerf();
+    if (PERF_TABS.includes(tab) && perf.status === 'idle') fetchPerf();
     if (tab === 'cashflow' && cashflow.status === 'idle') fetchCashflow();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A Refresh keeps the figures on screen while it reloads; a new period or
+  // organisation clears them, so last period's cash flow is never shown under
+  // this period's label.
   function fetchCashflow(opts = {}) {
-    setCashflow(s => ({ ...s, status: 'loading', error: '' }));
+    const n = ++seq.current.cashflow;
+    setCashflow(s => ({ status: 'loading', error: '', data: opts.force ? s.data : null }));
     const params = new URLSearchParams();
     if (activeTenantId) params.set('tenantId', activeTenantId);
     const range = opts.range !== undefined ? opts.range : perfRange;
@@ -223,8 +247,17 @@ export default function XeroInsights() {
     else       { params.set('preset', opts.preset || perfPreset); }
     if (opts.force) params.set('force', 'true');
     api.get(`/xero-reports/cash-flow?${params.toString()}`)
-      .then(d => setCashflow({ status: 'done', data: d, error: '' }))
-      .catch(err => setCashflow({ status: 'done', data: null, error: err.message }));
+      .then(d => { if (n === seq.current.cashflow) setCashflow({ status: 'done', data: d, error: '' }); })
+      .catch(err => { if (n === seq.current.cashflow) setCashflow({ status: 'done', data: null, error: err.message }); });
+  }
+
+  // Cash flow is fetched only for its own tab, and opening the tab was the
+  // only thing that fetched it. A period picked ON the Cash Flow tab cleared
+  // it and nothing asked again, which is the blank page this replaces. Off the
+  // tab it is just dropped, for the tab to fetch when next opened.
+  function cashflowForPeriod(opts) {
+    if (tab === 'cashflow') fetchCashflow(opts);
+    else { seq.current.cashflow++; setCashflow({ status: 'idle', data: null, error: '' }); }
   }
 
   // The period the page is currently showing, as query params. Shared so the
@@ -240,6 +273,7 @@ export default function XeroInsights() {
   }
 
   function fetchPerf(opts = {}) {
+    const n = ++seq.current.perf;
     setPerf(s => ({ ...s, status: 'loading', error: '' }));
     const params = periodParams(opts);
     if (opts.force) params.set('force', 'true');
@@ -251,6 +285,7 @@ export default function XeroInsights() {
     if (tab === 'revenue') params.set('customers', 'true');
     api.get(`/xero-reports/performance?${params.toString()}`)
       .then(d => {
+        if (n !== seq.current.perf) return;
         setPerf({ status: 'done', data: d, error: '' });
         // The server already resolved exactly which months this period covers,
         // so the panels span all of them. Narrowing further is done by changing
@@ -258,7 +293,7 @@ export default function XeroInsights() {
         setMonthFrom(0);
         setMonthTo(Math.max(0, (d.months || []).length - 1));
       })
-      .catch(err => setPerf({ status: 'done', data: null, error: err.message }));
+      .catch(err => { if (n === seq.current.perf) setPerf({ status: 'done', data: null, error: err.message }); });
 
     // Commentary arrives after the numbers, never blocking them — but it must
     // describe the SAME period, so it takes the identical params.
@@ -268,13 +303,25 @@ export default function XeroInsights() {
     fetchAnalysis(ip);
   }
 
+  // The organisation and period the budget tabs show, as query values. The
+  // exports take the same ones, so a PDF is the report on screen.
+  function budgetQuery(opts = {}) {
+    const q = {};
+    if (activeTenantId) q.tenantId = activeTenantId;
+    const range = opts.range !== undefined ? opts.range : budgetRange;
+    if (range) { q.from = range.from; q.to = range.to; }
+    else       { q.preset = opts.preset || budgetPreset; }
+    return q;
+  }
+
   function fetchBudget(opts = {}) {
+    const n = ++seq.current.budget;
     setBudget(s => ({ ...s, status: 'loading', error: '' }));
-    const params = new URLSearchParams();
-    if (activeTenantId) params.set('tenantId', activeTenantId);
+    const params = new URLSearchParams(budgetQuery(opts));
     if (opts.force) params.set('force', 'true');
     api.get(`/xero-reports/budget-variance?${params.toString()}`)
       .then(d => {
+        if (n !== seq.current.budget) return;
         setBudget({ status: 'done', data: d, error: '' });
         // Keep an existing selection if it still exists in this org's fiscal year,
         // otherwise land on the current month — the first one still on budget.
@@ -283,7 +330,10 @@ export default function XeroInsights() {
           return (d.months || []).find(m => m.source === 'budget')?.key || d.months?.[0]?.key || '';
         });
       })
-      .catch(err => setBudget({ status: 'done', data: null, error: err.message }));
+      // The last good report is kept, not shown: the tabs show the error, but
+      // the period bar is drawn from it, so the reader can pick another period
+      // instead of being stuck on the one that failed.
+      .catch(err => { if (n === seq.current.budget) setBudget(s => ({ status: 'done', data: s.data, error: err.message })); });
   }
 
   function viewStatement(account) {
@@ -306,6 +356,8 @@ export default function XeroInsights() {
   // has narrowed it, so the commentary describes the span they are looking at —
   // a narrative sitting above numbers it is not describing is worse than none.
   function fetchAnalysis(baseParams, { reanalyse = false } = {}) {
+    const n = ++seq.current.analysis;
+    const fresh = () => n === seq.current.analysis;
     const q = new URLSearchParams(baseParams);
     if (reanalyse) q.set('reanalyse', 'true');
     const months = perf.data?.months;
@@ -316,9 +368,9 @@ export default function XeroInsights() {
       q.delete('window');
     }
     return Promise.allSettled([
-      api.get(`/xero-reports/variance-insights?${q.toString()}`).then(d => setInsights(d)),
-      api.get(`/xero-reports/narrative?${q.toString()}`).then(d => setNarrative(d)),
-    ]).then(() => setLastAnalysedAt(new Date().toISOString()));
+      api.get(`/xero-reports/variance-insights?${q.toString()}`).then(d => { if (fresh()) setInsights(d); }),
+      api.get(`/xero-reports/narrative?${q.toString()}`).then(d => { if (fresh()) setNarrative(d); }),
+    ]).then(() => { if (fresh()) setLastAnalysedAt(new Date().toISOString()); });
   }
 
   async function reanalyse() {
@@ -502,21 +554,50 @@ export default function XeroInsights() {
                         if (p === 'custom') return;      // range pickers drive that
                         setPerfPreset(p); setPerfRange(null);
                         fetchPerf({ preset: p, range: null });
-                        setCashflow({ status: 'idle', data: null, error: '' });
+                        cashflowForPeriod({ preset: p, range: null });
                       }}
                       onRange={(from, to) => {
                         const r = { from, to };
                         setPerfRange(r); fetchPerf({ range: r });
-                        setCashflow({ status: 'idle', data: null, error: '' });
+                        cashflowForPeriod({ range: r });
                       }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
               {perf.data.months.filter(m => m.source === 'actual').length} closed · {perf.data.months.filter(m => m.source === 'budget').length} budgeted
             </span>
-            <button className="btn btn-outline btn-sm" disabled={perf.status === 'loading'} onClick={() => fetchPerf({ force: true })}>
-              {perf.status === 'loading' ? <span className="btn-spinner" /> : '↻'} Refresh
-            </button>
+            {/* On Cash Flow this refreshes cash flow too; it used to reload
+                only the overview figures underneath it. */}
+            {(() => {
+              const busy = perf.status === 'loading' || (tab === 'cashflow' && cashflow.status === 'loading');
+              return (
+                <button className="btn btn-outline btn-sm" disabled={busy}
+                        onClick={() => { fetchPerf({ force: true }); if (tab === 'cashflow') fetchCashflow({ force: true }); }}>
+                  {busy ? <span className="btn-spinner" /> : '↻'} Refresh
+                </button>
+              );
+            })()}
           </div>
+        </div>
+      )}
+
+      {/* The budget tabs' period. Monthly, like the budgets themselves: Xero
+          holds a budget per month, so there is no day to pick. */}
+      {['budget', 'variance'].includes(tab) && budget.data?.months?.length > 0 && (
+        <div className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                       gap: 14, flexWrap: 'wrap', marginBottom: 16, padding: '12px 16px' }}>
+          <MonthRange months={budget.data.months} from={0} to={budget.data.months.length - 1}
+                      label={budget.data.period?.label}
+                      chunks={budget.data.period?.chunks}
+                      preset={budgetRange ? 'custom' : budgetPreset}
+                      onPreset={p => {
+                        if (p === 'custom') return;
+                        setBudgetPreset(p); setBudgetRange(null);
+                        fetchBudget({ preset: p, range: null });
+                      }}
+                      onRange={(from, to) => {
+                        const r = { from, to };
+                        setBudgetRange(r); fetchBudget({ range: r });
+                      }} />
         </div>
       )}
 
@@ -602,9 +683,9 @@ export default function XeroInsights() {
       {tab === 'contacts' && <ContactsTab isMobile={isMobile} contacts={contacts} contactSearch={contactSearch} setContactSearch={setContactSearch} filteredContacts={filteredContacts} />}
 
 
-      {tab === 'budget' && <BudgetTab budget={budget} fetchBudget={fetchBudget} currency={currency} />}
+      {tab === 'budget' && <BudgetTab budget={budget} fetchBudget={fetchBudget} currency={currency} exportQuery={budgetQuery()} />}
 
-      {tab === 'variance' && <VarianceTab isMobile={isMobile} monthsRef={monthsRef} monthEdges={monthEdges} budget={budget} varianceMonth={varianceMonth} setVarianceMonth={setVarianceMonth} fetchBudget={fetchBudget} currency={currency} />}
+      {tab === 'variance' && <VarianceTab isMobile={isMobile} monthsRef={monthsRef} monthEdges={monthEdges} budget={budget} varianceMonth={varianceMonth} setVarianceMonth={setVarianceMonth} fetchBudget={fetchBudget} currency={currency} exportQuery={budgetQuery()} />}
     </div>
   );
 }

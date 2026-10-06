@@ -4,6 +4,22 @@ export function SourceNote({ children }) {
   return <div style={{ fontSize: 10.5, color: 'var(--text-muted)', opacity: 0.75, marginBottom: 10 }}>Source: {children}</div>;
 }
 
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// '2026-10-06' -> '6 Oct 2026', read from the string so no timezone moves it.
+// Same wording as the exports (main/reports/budget-doc.js#dayLabel).
+export function dayLabel(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  return m ? `${Number(m[3])} ${MONTH_ABBR[Number(m[2]) - 1]} ${m[1]}` : '';
+}
+
+// "Year to date" only when the period is a year; a quarter or the last six
+// months is a period to date. Matches budget-doc.js#varianceLabel.
+const YEAR_PERIODS = new Set(['fy', 'fy-ytd', 'prev-fy', 'next-fy', 'cy', 'cy-ytd']);
+export function toDateLabel(period) {
+  return !period?.key || YEAR_PERIODS.has(period.key) ? 'Year to date' : 'Period to date';
+}
+
 // Generic "search this table" box, reused for accounts/contacts.
 export function SearchBox({ value, onChange, placeholder }) {
   return <input type="text" className="form-input" placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)} style={{ maxWidth: 240 }} />;
