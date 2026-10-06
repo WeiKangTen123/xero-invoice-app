@@ -2,6 +2,7 @@ const express   = require('express');
 const rateLimit = require('express-rate-limit');
 const router    = express.Router();
 const { requireAuth } = require('../middleware/auth-middleware');
+const asyncHandler = require('../middleware/async-handler');
 const chatAgent = require('../utils/chat-agent');
 const tokenCache = require('../utils/token-cache');
 const { getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
@@ -26,7 +27,7 @@ const chatLimiter = rateLimit({
 // on the frontend by calling the existing PATCH /api/invoices/:id (or /submit)
 // endpoints once the user clicks Confirm — same validation, same code path as
 // editing through the UI directly. This route cannot write to the database.
-router.post('/', requireAuth, chatLimiter, async (req, res, next) => {
+router.post('/', requireAuth, chatLimiter, asyncHandler(async (req, res, next) => {
   try {
     const { message, history, invoiceId } = req.body;
     if (!message || typeof message !== 'string' || !message.trim()) {
@@ -58,6 +59,6 @@ router.post('/', requireAuth, chatLimiter, async (req, res, next) => {
         : 'Chat assistant is unavailable right now — try again shortly.',
     });
   }
-});
+}));
 
 module.exports = router;

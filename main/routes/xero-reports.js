@@ -2,6 +2,7 @@ const express          = require('express');
 const router           = express.Router();
 const jwt              = require('jsonwebtoken');
 const { requireAuth, jwtSecret }  = require('../middleware/auth-middleware');
+const asyncHandler = require('../middleware/async-handler');
 const budgetDoc        = require('../reports/budget-doc');
 const budgetRender     = require('../reports/budget-render');
 const tokenCache        = require('../utils/token-cache');
@@ -34,7 +35,7 @@ function _resolveTenant(req) {
 const force = req => req.query.force === 'true';
 const tz    = req => getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
 function report(label, fetch, { needs = [] } = {}) {
-  return async (req, res) => {
+  return asyncHandler(async (req, res) => {
     try {
       const { tenants, tenantId } = _resolveTenant(req);
       if (!tenantId) return res.json({ connected: false, tenants: [] });
@@ -46,7 +47,7 @@ function report(label, fetch, { needs = [] } = {}) {
       logger.error(`${label} failed`, { error: xeroErrMsg(err), userId: req.user.id });
       res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
     }
-  };
+  });
 }
 
 // A period the request should not have asked for is the caller's mistake, not a
@@ -86,7 +87,7 @@ router.get('/cash-flow', requireAuth, report('Cash flow',
 // from /performance deliberately: the dashboard paints from real figures first,
 // and this arrives after, so an LLM outage or a missing API key can never delay
 // or blank the numbers. Its own shape: no tenant list.
-router.get('/variance-insights', requireAuth, async (req, res) => {
+router.get('/variance-insights', requireAuth, asyncHandler(async (req, res) => {
   try {
     const { tenantId } = _resolveTenant(req);
     if (!tenantId) return res.json({ connected: false });
@@ -101,12 +102,12 @@ router.get('/variance-insights', requireAuth, async (req, res) => {
     logger.error('Variance insights failed', { error: xeroErrMsg(err), userId: req.user.id });
     res.status(_scopeAwareStatus(err)).json({ error: _scopeAwareMessage(err) });
   }
-});
+}));
 
 // GET /api/xero-reports/narrative?preset=|from=&to=
 // Three sentences joining up the alerts, written by Gemini from figures this
 // server computed. Read-only. Never a hard failure: the card is an extra.
-router.get('/narrative', requireAuth, async (req, res) => {
+router.get('/narrative', requireAuth, asyncHandler(async (req, res) => {
   try {
     const { tenantId } = _resolveTenant(req);
     if (!tenantId) return res.json({ connected: false, available: false });
@@ -125,7 +126,7 @@ router.get('/narrative', requireAuth, async (req, res) => {
     logger.error('Financial narrative failed', { error: xeroErrMsg(err), userId: req.user.id });
     res.json({ connected: true, available: false, reason: 'error' });
   }
-});
+}));
 
 // ── Budget exports ───────────────────────────────────────────────────────────
 // Two steps, the same shape as /api/invoices/:id/pdf-url: the browser cannot put
@@ -159,7 +160,7 @@ function setDownloadName(res, base, ext) {
     `inline; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(raw)}`);
 }
 
-router.get('/budget/export-url', requireAuth, async (req, res) => {
+router.get('/budget/export-url', requireAuth, asyncHandler(async (req, res) => {
   try {
     const { tenantId } = _resolveTenant(req);
     if (!tenantId) return res.status(400).json({ error: 'No Xero organisation connected' });
@@ -182,9 +183,9 @@ router.get('/budget/export-url', requireAuth, async (req, res) => {
     logger.error('Budget export URL failed', { error: xeroErrMsg(err), userId: req.user.id });
     res.status(500).json({ error: xeroErrMsg(err) });
   }
-});
+}));
 
-router.get('/budget/export', async (req, res) => {
+router.get('/budget/export', asyncHandler(async (req, res) => {
   let spec;
   try {
     spec = verifyExportToken(String(req.query.token || ''));
@@ -231,7 +232,7 @@ router.get('/budget/export', async (req, res) => {
     logger.error('Budget export failed', { error: xeroErrMsg(err), userId: spec.userId, kind: spec.kind });
     if (!res.headersSent) res.status(500).type('text/plain').send('Could not build the export.');
   }
-});
+}));
 
 // Both helpers read the query through periods.js#_periodFromQueryParams, the
 // one check every period-taking route shares: a known preset, the legacy

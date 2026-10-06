@@ -1,9 +1,17 @@
 const logger = require('../utils/logger');
+// Every Xero module requires this file, so loading the guard here puts the
+// SDK's network-error fix and request timeout in place before any call.
+require('./sdk-guard');
 
 /**
  * Retry wrapper for Xero API calls.
  * Handles 429 rate-limit responses using Retry-After header when available,
  * falling back to exponential backoff.
+ *
+ * Network failures and timeouts are deliberately not retried. A reset or a
+ * timed-out write may already have landed in Xero, so repeating it risks a
+ * duplicate invoice; and five attempts behind a 60-second timeout would hold
+ * the caller for five minutes. They fail once, with xeroErrMsg's message.
  */
 async function withRetry(fn, retries = 5, delayMs = 2000) {
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -54,7 +62,40 @@ function _parseXeroErr(err) {
   const wwwAuthenticate = parsed?.response?.headers?.['www-authenticate']
     || err?.response?.headers?.['www-authenticate']
     || err?.headers?.['www-authenticate'] || null;
-  return { status, body, retryAfter, wwwAuthenticate };
+  // Only a failure with no HTTP response has these: sdk-guard.js carries the
+  // socket error's code and message inside the SDK's serialised rejection, and
+  // a direct axios call leaves them on the error itself.
+  const code = (typeof parsed?.code === 'string' && parsed.code)
+    || (typeof err?.code === 'string' && err.code) || null;
+  const message = (typeof parsed?.message === 'string' && parsed.message) || null;
+  return { status, body, retryAfter, wwwAuthenticate, code, message };
+}
+
+// Socket- and DNS-level failures: no response came back at all.
+const NETWORK_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'ESOCKETTIMEDOUT',
+  'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ENETDOWN', 'EPIPE',
+  'ERR_NETWORK', 'ERR_SOCKET_CONNECTION_TIMEOUT',
+]);
+
+/**
+ * A plain-language message when the call never got an answer from Xero, or
+ * null when it did. Without this a dropped connection surfaced as the SDK's
+ * serialised error — a JSON dump — or as nothing at all.
+ */
+function _networkErrMsg(err, { status, code, message }) {
+  if (status) return null;
+  const text = message || (typeof err?.message === 'string' ? err.message : '');
+  // axios reports its own timeout as ECONNABORTED "timeout of Nms exceeded";
+  // ECONNABORTED without that wording is an aborted connection, not a timeout.
+  if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT'
+      || (code === 'ECONNABORTED' && /timeout/i.test(text))) {
+    return 'Xero did not respond in time — please try again in a moment';
+  }
+  if (code && NETWORK_CODES.has(code)) {
+    return `Could not reach Xero (${code}) — check the connection and try again`;
+  }
+  return null;
 }
 
 /**
@@ -76,12 +117,15 @@ function isScopeError(err) {
  * Extracts a human-readable error message from a xero-node error.
  */
 function xeroErrMsg(err) {
-  const { status, body } = _parseXeroErr(err);
+  const parsed = _parseXeroErr(err);
+  const { status, body } = parsed;
   if (status === 429) return 'Xero rate limit exceeded — try again in a minute';
   return (
+    _networkErrMsg(err, parsed) ||
     body?.Elements?.[0]?.ValidationErrors?.[0]?.Message ||
     body?.Detail   ||
     body?.Message  ||
+    parsed.message ||
     err?.message   ||
     String(err)
   );

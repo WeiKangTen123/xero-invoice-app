@@ -4,6 +4,7 @@ const jwt     = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { hasUsers, createUser, validatePassword, verifiedPasswordHash, passwordProblem, setPassword, getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
+const asyncHandler = require('../middleware/async-handler');
 const logger  = require('../utils/logger');
 
 // Strict rate limiter for authentication endpoints: max 10 attempts per 15 minutes per IP
@@ -40,7 +41,7 @@ router.get('/status', (_req, res) => {
 // reopens it. It used to be the other way round — open unless the flag said
 // "false" — and the flag was documented nowhere, so the public URL took anyone.
 // Returns a JWT immediately so the user lands on Setup without a second login step.
-router.post('/register', authLimiter, async (req, res) => {
+router.post('/register', authLimiter, asyncHandler(async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -64,10 +65,10 @@ router.post('/register', authLimiter, async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
-});
+}));
 
 // Login
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', authLimiter, asyncHandler(async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -92,7 +93,7 @@ router.post('/login', authLimiter, async (req, res) => {
     logger.error('Login error', { error: err.message });
     res.status(500).json({ error: 'Login failed' });
   }
-});
+}));
 
 // Get current user (validate token)
 // POST /api/auth/logout — stops this user's mailbox watcher.
@@ -135,7 +136,7 @@ router.get('/me', requireAuth, (req, res) => {
 //
 // A wrong current password is a 400, not a 401: the client treats every 401
 // as an expired session and bounces to the login page.
-router.post('/change-password', requireAuth, changePasswordLimiter, async (req, res) => {
+router.post('/change-password', requireAuth, changePasswordLimiter, asyncHandler(async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body || {};
     if (!currentPassword || !newPassword) {
@@ -163,6 +164,6 @@ router.post('/change-password', requireAuth, changePasswordLimiter, async (req, 
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
-});
+}));
 
 module.exports = router;

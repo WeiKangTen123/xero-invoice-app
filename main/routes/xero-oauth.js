@@ -1,6 +1,7 @@
 const express = require('express');
 const router  = express.Router();
 const { requireAuth } = require('../middleware/auth-middleware');
+const asyncHandler = require('../middleware/async-handler');
 const oauthState  = require('../utils/oauth-state');
 const xeroOAuth    = require('../xero/oauth');
 const tokenCache   = require('../utils/token-cache');
@@ -57,7 +58,7 @@ router.get('/oauth/callback', (req, res) => {
 // POST /api/xero/oauth/complete — authenticated SPA call that actually finishes the
 // connection. Rejects unless the caller is the same user `state` was minted for —
 // this is the check that closes the hijack described above.
-router.post('/oauth/complete', requireAuth, async (req, res) => {
+router.post('/oauth/complete', requireAuth, asyncHandler(async (req, res) => {
   const { code, state } = req.body;
   if (!code || !state) return res.status(400).json({ error: 'Missing code or state' });
 
@@ -74,7 +75,7 @@ router.post('/oauth/complete', requireAuth, async (req, res) => {
     logger.error('Xero OAuth completion failed', { error: err.message, userId: req.user.id });
     res.status(400).json({ error: err.message });
   }
-});
+}));
 
 // DELETE /api/xero/oauth/disconnect — clears the OAuth connection for this user
 // (Custom Connection, if also configured, is untouched).

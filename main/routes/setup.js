@@ -3,6 +3,7 @@ const router  = express.Router();
 const fs      = require('fs');
 const path    = require('path');
 const { requireAuth, requireAdmin } = require('../middleware/auth-middleware');
+const asyncHandler = require('../middleware/async-handler');
 const {
   getUserConfig, saveUserConfig, getSetupStatus, getImapSettings,
   getGeminiKeys, addGeminiKey, removeGeminiKey,
@@ -192,7 +193,7 @@ router.delete('/llm-keys/:id', requireAuth, (req, res) => {
 });
 
 // ── POST /api/setup/test/xero — test this user's Xero connection ──────────────
-router.post('/test/xero', requireAuth, async (req, res) => {
+router.post('/test/xero', requireAuth, asyncHandler(async (req, res) => {
   try {
     const { autoConnect } = require('../xero/connect');
     await autoConnect(req.user.id);
@@ -200,10 +201,10 @@ router.post('/test/xero', requireAuth, async (req, res) => {
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }
-});
+}));
 
 // ── POST /api/setup/test/imap — test this user's IMAP connection ──────────────
-router.post('/test/imap', requireAuth, async (req, res) => {
+router.post('/test/imap', requireAuth, asyncHandler(async (req, res) => {
   try {
     // The same settings the watcher will use, so a passing test means a working
     // watcher — including everything filled in from the account.
@@ -235,10 +236,10 @@ router.post('/test/imap', requireAuth, async (req, res) => {
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }
-});
+}));
 
 // ── POST /api/setup/test/llm — test this user's LLM key ─────────────────────
-router.post('/test/llm', requireAuth, async (req, res) => {
+router.post('/test/llm', requireAuth, asyncHandler(async (req, res) => {
   try {
     const { extractWithRetry } = require('../email/llm-parser');
     await extractWithRetry('Invoice #TEST-001\nVendor: Test Co\nTotal: $1.00', 'test.pdf', req.user.id);
@@ -246,6 +247,6 @@ router.post('/test/llm', requireAuth, async (req, res) => {
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }
-});
+}));
 
 module.exports = router;
