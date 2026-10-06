@@ -1,4 +1,4 @@
-# Xero Invoice Automation
+# Financial Automation
 
 Multi-user app that watches each user's email inbox and automatically creates draft invoices in Xero. Supports PDF attachments, structured email templates, and Xero bills (ACCPAY) or sales invoices (ACCREC).
 
@@ -78,13 +78,17 @@ npm run deploy -- --check   # report drift between local, GitHub and the server
 npm run backup:pull         # copy the latest backup set to ~/xero-backups/
 ```
 
-`npm run deploy` refuses uncommitted or unpushed changes, waits for the GitHub
-Actions run for that commit to be green, pulls on the server, installs from the
-lockfile, runs the tests there, builds the UI, takes a verified database backup,
-reloads pm2 through `ecosystem.config.js`, and only reports success once the
-running process says it is on the shipped commit (`/dashboard/health` returns
-`commit`). Every deploy is tagged `deploy/<timestamp>`. Restore and rollback
-steps are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
+`npm run deploy` first checks that `gcloud` and `gh` are logged in (an expired
+login stops it at once rather than hanging on a hidden prompt), refuses
+uncommitted or unpushed changes or a checkout that is not exactly
+`origin/master`, waits for the GitHub Actions run for that commit to be green,
+moves the server to exactly that commit, installs from the lockfile, runs the
+tests there (a failure stops it), builds the UI, takes a verified database
+backup, reloads pm2 through `ecosystem.config.js`, and only reports success once
+the running process says it is on the shipped commit (`/dashboard/health`
+returns `commit`) and pm2 still has it up 15 s later. Every deploy is tagged
+`deploy/<timestamp>`. Restore, rollback, and what to do when a deploy fails
+partway are in [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ### Environment variables (`main/.env`)
 
@@ -370,6 +374,7 @@ xero-invoice-app/
 | POST | `/api/auth/logout` | JWT | Stop this user's watcher and end the session |
 | GET | `/api/auth/me` | JWT | Current user |
 | GET | `/api/auth/status` | — | Whether any account exists yet |
+| POST | `/api/auth/change-password` | JWT | Change your own password (`currentPassword`, `newPassword`); returns a fresh token and signs out your other sessions |
 
 ### Setup
 | Method | Path | Auth | Description |
@@ -455,9 +460,8 @@ xero-invoice-app/
 | GET | `/api/xero-reports/summary` | JWT | Outstanding balances snapshot (what's owed now) |
 | GET | `/api/xero-reports/accounts` | JWT | Chart of accounts |
 | GET | `/api/xero-reports/bank-accounts` | JWT | Bank accounts list |
-| GET | `/api/xero-reports/contacts` | JWT | Contacts with outstanding balances |
 | GET | `/api/xero-reports/bank-transactions` | JWT | Bank transactions |
-| GET | `/api/xero-reports/budget-variance` | JWT | Budget vs actual variance |
+| GET | `/api/xero-reports/budget-variance` | JWT | Budget vs actual variance, by month. `?preset=` (e.g. `fy`, `prev-fy`, `last-12`) or `?from=YYYY-MM&to=YYYY-MM` (at most 132 months; a longer span or an unknown preset is a 400); no period = the whole current financial year |
 | GET | `/api/xero-reports/performance` | JWT | Financial performance metrics |
 | GET | `/api/xero-reports/variance-insights` | JWT | AI-generated variance insights (Gemini) |
 | GET | `/api/xero-reports/narrative` | JWT | AI-generated P&L narrative (Gemini) |
@@ -476,6 +480,12 @@ xero-invoice-app/
 | GET | `/api/admin/users` | Admin | List all users |
 | POST | `/api/admin/users` | Admin | Create user |
 | DELETE | `/api/admin/users/:id` | Admin | Delete user |
+| PATCH | `/api/admin/users/:id/role` | Admin | Promote or demote (`role`: `admin` / `user`); the last admin cannot be demoted |
+| PATCH | `/api/admin/users/:id/password` | Admin | Set a new password for another account; signs out its sessions |
+| POST | `/api/admin/users/:id/sign-out` | Admin | Sign an account out everywhere (its tokens are refused from now on) |
+| PATCH | `/api/admin/users/:id/disabled` | Admin | Disable or re-enable an account (`disabled`: true / false); data is kept and its watcher is stopped |
+| PATCH | `/api/admin/users/:id/auto-process` | Admin | Turn an account's auto-submit off (`autoProcess: false` only — turning it on stays with the user) |
+| POST | `/api/admin/users/:id/watcher/stop` | Admin | Stop an account's mailbox watcher |
 | GET | `/api/admin/reports` | Admin | Flagged invoices across all users |
 | PATCH | `/api/admin/reports/:userId/:invoiceId/resolve` | Admin | Mark a flagged invoice reviewed |
 | GET | `/api/admin/monitoring` | Admin | Per-user activity + backend health |
@@ -521,7 +531,6 @@ The **Xero Insights** page (`XeroInsights.jsx`) provides a live analytics dashbo
 | **Bank summary** | Account balances at a glance |
 | **Budget variance** | Actual vs budget with variance % |
 | **Performance** | KPI metrics derived from your Xero data |
-| **Contacts** | Contacts with outstanding balances |
 | **Bank accounts** | Account list with current balances |
 | **Bank transactions** | Recent transactions |
 | **Chart of accounts** | Account codes and types |
