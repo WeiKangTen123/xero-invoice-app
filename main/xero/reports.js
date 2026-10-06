@@ -213,6 +213,7 @@ const {
   _partsFromDate,
   _resolvePeriod,
   _resolveWindow,
+  _toDateLabel,
   _todayPartsInTz,
 } = require('./periods');
 
@@ -612,6 +613,11 @@ async function _getBankSummaryRaw(userId, tenantId, { from, to, force = false } 
 // so 12 is the ceiling — exactly one fiscal year. Their column headers are also
 // formatted differently ("31 Aug 26" vs "Aug-26"), so columns are matched
 // POSITIONALLY off the known anchor, never by parsing header text.
+//
+// The P&L anchor must be a 31-day month: Xero gives every comparison period the
+// anchor's day count, so a short anchor month truncates the months before it.
+// A span ending in a short month is therefore fetched in two P&L calls — see
+// _pnlCallPlan.
 
 
 // How long a fetched period stays cached. A period that has already closed is
@@ -653,55 +659,202 @@ async function _mapWithConcurrency(items, limit, fn) {
 }
 const REPORT_CHUNK_CONCURRENCY = 2;
 
-// Pure. `n` consecutive months starting at `start`, oldest first.
+// The ProfitAndLoss calls that cover one chunk of months, as a pure plan.
 //
 // Twelve months is a per-CALL limit, not a fiscal-year limit: ProfitAndLoss caps
 // `periods` at 11 (12 columns) and BudgetSummary at 12, but both anchor on an
-// arbitrary date. So any 12 consecutive months cost exactly one pair of calls —
-// which is what lets the window slide off the fiscal year entirely.
-function _rowValuesByLabel(reportRows, { reverse = false } = {}) {
-  const out = new Map();
-  (function walk(rows) {
+// arbitrary date. So any 12 consecutive months cost one BudgetSummary call and
+// one or two ProfitAndLoss calls — which is what lets the window slide off the
+// fiscal year entirely.
+//
+// Why sometimes two: Xero applies the anchor's DATE RANGE to every comparison
+// period, not "the same month, earlier" (documented under ProfitAndLoss
+// `periods`: with a 30-day anchor each prior period includes only its first 30
+// days). Anchored on September, every 31-day month before it silently lost its
+// 31st; anchored on February, the 29th to the 31st. So a chunk ending in a
+// month shorter than 31 days is anchored on the month before it — always 31
+// days, since no two short months are adjacent — and its last month is asked
+// for on its own, with exact dates. A chunk ending in a 31-day month stays one
+// call.
+//
+// Each entry says what to send and which months of the chunk the answer covers
+// (`offset`, `n`), so the pieces line up column for column when merged.
+function _pnlCallPlan(chunk) {
+  const n = chunk.length;
+  // A single month has no comparison periods at all, so `periods` is omitted
+  // rather than passed as 0, which the endpoint rejects.
+  const alone = i => ({ fromISO: chunk[i].startISO, toISO: chunk[i].endISO, periods: undefined, offset: i, n: 1 });
+  if (n === 1) return [alone(0)];
+  const last = chunk[n - 1];
+  if (_parseISODate(last.endISO).day === 31) {
+    return [{ fromISO: last.startISO, toISO: last.endISO, periods: n - 1, offset: 0, n }];
+  }
+  const prev = chunk[n - 2];
+  const head = n === 2 ? alone(0) : { fromISO: prev.startISO, toISO: prev.endISO, periods: n - 2, offset: 0, n: n - 1 };
+  return [head, alone(n - 1)];
+}
+
+// Pure. Every labelled line of a report, in Xero's reading order:
+// { section, label, kind, values }.
+//
+// A line under a titled section is an 'account', or a 'subtotal' where Xero
+// marks it a SummaryRow. A line in an untitled section is a floating 'summary'
+// — Gross Profit, Total Expenses, Net Profit — which is exactly how they sit in
+// Xero's layout. `reverse` flips ProfitAndLoss's newest-first columns into the
+// oldest-first order the month list uses.
+function _reportLines(reportRows, { reverse = false } = {}) {
+  const out = [];
+  (function walk(rows, title) {
     for (const row of rows || []) {
-      if (row.rowType !== 'Header' && row.cells?.length > 1) {
-        const label = (row.cells[0].value || '').trim();
-        if (label && !out.has(label)) {
-          const values = row.cells.slice(1).map(c => _parseReportNumber(c.value));
-          out.set(label, reverse ? values.reverse() : values);
-        }
+      if (row.rowType === 'Header') continue;
+      if (row.rowType === 'Section' || row.rows?.length) {
+        walk(row.rows, (row.title || '').trim() || title);
+        continue;
       }
-      if (row.rows?.length) walk(row.rows);
+      const label = (row.cells?.[0]?.value || '').trim();
+      if (!label) continue;
+      const values = (row.cells || []).slice(1).map(c => _parseReportNumber(c?.value));
+      out.push({
+        section: title,
+        label,
+        kind: !title ? 'summary' : (row.rowType === 'SummaryRow' ? 'subtotal' : 'account'),
+        values: reverse ? values.reverse() : values,
+      });
     }
-  })(reportRows);
+  })(reportRows, '');
   return out;
 }
 
-// Pure. Row order/kind skeleton taken from BudgetSummary, which is the richer of
-// the two: confirmed live that it returns every row the P&L does plus the
-// budget-only accounts (Cost of Goods Sold, Other Income - Grant, the overheads),
-// because the P&L omits any account with no actual transactions entirely.
-//
-// A section with an empty title holds a floating summary line — Gross Profit,
-// Total Expenses, Net Profit — which is exactly how they sit in Xero's layout.
-function _skeletonFromBudget(reportRows) {
-  const out = [];
-  for (const section of reportRows || []) {
-    if (section.rowType === 'Header') continue;
-    const title = (section.title || '').trim();
-    if (title) out.push({ kind: 'section', label: title });
-    for (const row of section.rows || []) {
-      const label = (row.cells?.[0]?.value || '').trim();
-      if (!label) continue;
-      out.push({
-        kind: !title ? 'summary' : (row.rowType === 'SummaryRow' ? 'subtotal' : 'account'),
-        label,
-        // Which section this row sits under, so downstream consumers can tell a
-        // revenue account from an overhead without re-walking the tree.
-        section: title,
-      });
+// A line's identity is its section AND its label. The label alone is not one:
+// a name can sit in two sections (an income "Consulting" and an expense
+// "Consulting"), and matching on it alone dropped one of them or gave it the
+// other's figures. Case and spacing are ignored, and Xero names the bottom lines
+// by their sign — "Net Loss" in one report is "Net Profit" in the other — so
+// each of those pairs reads as one line.
+const _norm = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+function _lineName(label) {
+  const l = _norm(label);
+  if (/^net (profit|loss)$/.test(l))   return 'net profit';
+  if (/^gross (profit|loss)$/.test(l)) return 'gross profit';
+  return l;
+}
+const _lineKey = (section, label) => `${_norm(section)}\u0000${_lineName(label)}`;
+
+const _sectionIndex = (layout, title) => layout.findIndex(r => r.kind === 'section' && _norm(r.label) === _norm(title));
+
+// Index just past the section that row `i` sits in: the next heading or
+// floating summary line, or the end.
+function _sectionEnd(layout, i) {
+  let j = i + 1;
+  while (j < layout.length && layout[j].kind !== 'section' && layout[j].kind !== 'summary') j++;
+  return j;
+}
+
+// Where something that follows `prev` in its own report goes: straight after a
+// floating summary line, or after the whole section an ordinary line sits in.
+function _placeAfter(layout, prev) {
+  if (!prev) return 0;
+  const p = layout.indexOf(prev);
+  return prev.kind === 'summary' ? p + 1 : _sectionEnd(layout, p);
+}
+
+// The layout row a report line belongs to, or null when it has none yet.
+// `claimed` holds rows an earlier line of the same report already took, so two
+// lines of one report never land on one row.
+function _matchLine(layout, line, { claimed, alias, counts }) {
+  const free = r => r.kind !== 'section' && !claimed.has(r);
+  const key = _lineKey(line.section, line.label);
+  const exact = layout.find(r => free(r) && r.key === key);
+  if (exact) return exact;
+  // The two reports should title their sections identically under the standard
+  // layout, but nothing guarantees it, and a small difference must not split
+  // every line in two. So the label alone is enough when it names exactly one
+  // line in each report — but never for a section the budget has too: a
+  // section both reports share is a genuine second section, and a namesake
+  // elsewhere is a different account.
+  const budgetHasSection = layout.some(r => r.kind === 'section' && !r.unbudgeted && _norm(r.label) === _norm(line.section));
+  if (line.kind === 'summary' || budgetHasSection) return null;
+  const name = _lineName(line.label);
+  if (counts.get(name) === 1) {
+    const same = layout.filter(r => r.kind !== 'section' && r.kind !== 'summary' && r.name === name);
+    if (same.length === 1 && !claimed.has(same[0])) return same[0];
+  }
+  // A retitled section usually retitles its total too ("Total Overheads"), so a
+  // subtotal under a section already matched that way is that section's total
+  // when it has exactly one.
+  const target = alias.get(_norm(line.section));
+  if (line.kind === 'subtotal' && target !== undefined) {
+    const h = _sectionIndex(layout, target);
+    if (h >= 0) {
+      const subs = layout.slice(h + 1, _sectionEnd(layout, h)).filter(r => r.kind === 'subtotal' && !claimed.has(r));
+      if (subs.length === 1) return subs[0];
     }
   }
-  return out;
+  return null;
+}
+
+// Adds a line the layout does not have yet, in its own section and in its own
+// report's order, and returns the new row.
+//
+// Appending it at the bottom — the old behaviour — put it below Net Profit with
+// no section, so section sums no longer added up and the dashboard's revenue
+// and expense lines skipped it. An account goes after the line before it in its
+// report when that line is in the same section, otherwise first in the section;
+// either way before the section's subtotal. A section the layout does not have
+// at all goes in whole, after whatever preceded it in its report — which puts
+// it before the next summary line, where Xero shows it.
+function _insertLine(layout, line, prev, { alias, budgeted, totalMonths }) {
+  const row = {
+    kind: line.kind, label: line.label, section: '', unbudgeted: !budgeted,
+    name: _lineName(line.label), key: null,
+    budget: Array(totalMonths).fill(0), actual: Array(totalMonths).fill(0),
+  };
+  if (line.kind === 'summary') {
+    row.key = _lineKey('', line.label);
+    layout.splice(_placeAfter(layout, prev), 0, row);
+    return row;
+  }
+  const title = alias.get(_norm(line.section)) ?? line.section;
+  row.section = title;
+  row.key = _lineKey(title, line.label);
+  const h = _sectionIndex(layout, title);
+  if (h < 0) {
+    layout.splice(_placeAfter(layout, prev), 0, { kind: 'section', label: title, section: title, unbudgeted: !budgeted }, row);
+    return row;
+  }
+  const end = _sectionEnd(layout, h);
+  if (line.kind === 'subtotal') { layout.splice(end, 0, row); return row; }
+  const sub = layout.findIndex((r, i) => i > h && i < end && r.kind === 'subtotal');
+  const limit = sub >= 0 ? sub : end;
+  const p = prev ? layout.indexOf(prev) : -1;
+  layout.splice(p > h && p < limit ? p + 1 : h + 1, 0, row);
+  return row;
+}
+
+// Lays one report's lines into the layout and writes their figures into
+// `field` at the report's month offset.
+//
+// Every line is matched before any is inserted, so whether a line finds its
+// row never depends on what the same report happened to insert ahead of it.
+function _placeLines(layout, { lines, offset, n }, { field, budgeted, totalMonths }) {
+  const claimed = new Set();
+  const alias   = new Map();   // this report's section title -> the layout's, learnt from label matches
+  const counts  = new Map();
+  for (const l of lines) counts.set(_lineName(l.label), (counts.get(_lineName(l.label)) || 0) + 1);
+  const matched = lines.map(line => {
+    const row = _matchLine(layout, line, { claimed, alias, counts });
+    if (row) {
+      claimed.add(row);
+      if (line.kind !== 'summary' && _norm(row.section) !== _norm(line.section)) alias.set(_norm(line.section), row.section);
+    }
+    return row;
+  });
+  let prev = null;
+  lines.forEach((line, k) => {
+    const row = matched[k] || _insertLine(layout, line, prev, { alias, budgeted, totalMonths });
+    for (let i = 0; i < n; i++) row[field][offset + i] = line.values[i] || 0;
+    prev = row;
+  });
 }
 
 // Xero's variance percentage, matched against the org's own Budget Variance
@@ -715,38 +868,54 @@ function _variancePct(variance, budget) {
   return budget !== 0 ? variance / Math.abs(budget) : null;
 }
 
-// Pure. Stitches per-chunk report rows into one series spanning every month.
+// Pure. Stitches every chunk's two reports into one ordered layout of rows,
+// each carrying its budget and actual series across every month.
+//
+// The order is BudgetSummary's, which is the richer of the two: confirmed live
+// that it returns every row the P&L does plus the budget-only accounts (Cost of
+// Goods Sold, Other Income - Grant, the overheads), because the P&L omits any
+// account with no actual transactions entirely. Every chunk's budget is laid
+// down before any actuals, so an account budgeted in any chunk counts as
+// budgeted wherever its actuals first appear; whatever the P&L has beyond that
+// is `unbudgeted`. A row first seen in a later chunk joins its own section, in
+// its report's order, rather than the bottom of the layout.
 //
 // Each chunk is an independent Xero response, so an account can be present in
 // one and absent from another (the P&L omits accounts with no transactions in
 // that span). Missing chunks are zero-filled at the right offset rather than
-// shortening the series, otherwise months would silently slide.
+// shortening the series, otherwise months would silently slide. A part's P&L
+// comes as `pnl` pieces (see _pnlCallPlan), or as one `pnlRows` covering it.
 function _mergeChunks(parts, totalMonths) {
-  const budget = new Map(), actual = new Map(), skeleton = [];
-  const seenRow = new Set(), seenSection = new Set();
-  const put = (map, label, values, offset, n) => {
-    if (!map.has(label)) map.set(label, Array(totalMonths).fill(0));
-    const arr = map.get(label);
-    for (let i = 0; i < n; i++) arr[offset + i] = values[i] || 0;
-  };
-
+  const layout = [];
+  const budgets = [], actuals = [];
   let offset = 0;
   for (const part of parts) {
     const n = part.months.length;
-    for (const [label, vals] of _rowValuesByLabel(part.budgetRows))                  put(budget, label, vals, offset, n);
-    for (const [label, vals] of _rowValuesByLabel(part.pnlRows, { reverse: true }))  put(actual, label, vals, offset, n);
-
-    // Row order comes from the first chunk that contains each line, so the
-    // report reads in Xero's own order rather than the order chunks happened to
-    // introduce accounts.
-    for (const row of _skeletonFromBudget(part.budgetRows)) {
-      if (row.kind === 'section') {
-        if (!seenSection.has(row.label)) { seenSection.add(row.label); skeleton.push(row); }
-      } else if (!seenRow.has(row.label)) { seenRow.add(row.label); skeleton.push(row); }
+    budgets.push({ lines: _reportLines(part.budgetRows), offset, n });
+    for (const piece of part.pnl || [{ rows: part.pnlRows, offset: 0, n }]) {
+      actuals.push({ lines: _reportLines(piece.rows, { reverse: true }), offset: offset + piece.offset, n: piece.n });
     }
     offset += n;
   }
-  return { budget, actual, skeleton };
+  for (const b of budgets) _placeLines(layout, b, { field: 'budget', budgeted: true,  totalMonths });
+  for (const a of actuals) _placeLines(layout, a, { field: 'actual', budgeted: false, totalMonths });
+  return { layout, budgetMissing: budgets.every(b => b.lines.length === 0) };
+}
+
+// Every figure the payload carries is rounded to the cent. Sums of report
+// values carry floating-point dust (-3.55e-15), which a reader sees as a red
+// "(0.00)", or as a variance where there is none. -0 becomes 0 for the same
+// reason.
+function _cents(v) {
+  const r = Math.round(v * 100) / 100;
+  return r === 0 ? 0 : r;
+}
+
+// The bottom line. By name when it carries one of Xero's two names for it;
+// failing that, the last floating summary line, which is where Xero puts it.
+function _netRow(rows) {
+  return rows.find(r => r.kind === 'summary' && /^net (profit|loss)/i.test(r.label))
+      || [...rows].reverse().find(r => r.kind === 'summary' && !r.section);
 }
 
 // Pure. Merges the two reports into one flat, ordered row list.
@@ -761,65 +930,68 @@ function _mergeChunks(parts, totalMonths) {
 // booked against it so far is reported beside the grid as kpis.currentMonth
 // instead, read on `asOfISO`, and is not added into any total.
 function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx, merged, currentIdx = -1, asOfISO = null }) {
-  // `merged` is the multi-chunk path; the single-report path is unchanged so a
-  // period that fits one Xero call pair behaves exactly as it always did.
-  const budget   = merged ? merged.budget   : _rowValuesByLabel(budgetRows);
-  const actual   = merged ? merged.actual   : _rowValuesByLabel(pnlRows, { reverse: true });
-  const skeleton = merged ? merged.skeleton : _skeletonFromBudget(budgetRows);
-
-  // An account with actuals but no budget appears only in the P&L. Rare (this
-  // org has none), but dropping it would silently understate the report, so it
-  // gets appended under its own heading rather than omitted.
-  const known    = new Set(skeleton.map(r => r.label));
-  const pnlOnly  = [...actual.keys()].filter(l => !known.has(l));
-  if (pnlOnly.length) {
-    skeleton.push({ kind: 'section', label: 'Other (actuals only, not budgeted)' });
-    for (const label of pnlOnly) skeleton.push({ kind: 'account', label });
-  }
+  // `merged` is the fetched path; a lone pair of reports is merged as one chunk.
+  const { layout, budgetMissing } = merged || _mergeChunks([{ months, budgetRows, pnlRows }], months.length);
 
   const elapsed = actualThroughIdx + 1;
-  const rows = skeleton.map(row => {
-    if (row.kind === 'section') return { ...row };
-    const a = actual.get(row.label) || [];
-    const b = budget.get(row.label) || [];
-    const cells = months.map((_, i) => (i <= actualThroughIdx ? (a[i] || 0) : (b[i] || 0)));
+  const pair = (actual, budget) => {
+    // From the rounded figures, so a percentage always agrees with what is shown.
+    const variance = _cents(actual - budget);
+    return { actual, budget, variance, variancePct: _variancePct(variance, budget) };
+  };
+  const rows = layout.map(r => {
+    const row = {
+      kind: r.kind, label: r.label, section: r.section,
+      // Costs, where a figure above budget is the bad direction: every line of
+      // the cost-of-sales and overhead sections, their subtotals included.
+      expense:    r.kind !== 'section' && ['cogs', 'opex'].includes(_sectionKind(r.section)),
+      unbudgeted: !!r.unbudgeted,
+    };
+    if (r.kind === 'section') return row;
+    const a = months.map((_, i) => _cents(r.actual[i] || 0));
+    const b = months.map((_, i) => _cents(r.budget[i] || 0));
+    const cells = months.map((_, i) => (i <= actualThroughIdx ? a[i] : b[i]));
 
     // Per-month actual/budget/variance, kept for every month including ones not
     // yet elapsed. Xero's own Budget Variance report compares the CURRENT
     // (part-elapsed) month too — confirmed against the org's report, which shows
     // August actuals of 52,000 against a 17,615 August budget — so the actuals
     // can't be suppressed here the way the monthly grid suppresses them.
-    const monthly = months.map((_, i) => {
-      const av = a[i] || 0, bv = b[i] || 0;
-      return { actual: av, budget: bv, variance: av - bv, variancePct: _variancePct(av - bv, bv) };
-    });
+    const monthly = months.map((_, i) => pair(a[i], b[i]));
+
+    // Running totals from the period's first month over those same figures, so
+    // "to date" at any month is one lookup rather than a re-sum each consumer
+    // could do slightly differently.
+    let runA = 0, runB = 0;
+    const cumulative = months.map((_, i) => { runA += a[i]; runB += b[i]; return pair(_cents(runA), _cents(runB)); });
 
     // Year-to-date rolls up the fully elapsed months only.
-    let actualToDate = 0, budgetToDate = 0;
-    for (let i = 0; i < elapsed; i++) { actualToDate += a[i] || 0; budgetToDate += b[i] || 0; }
-    const variance = actualToDate - budgetToDate;
-
+    const toDate = elapsed > 0 ? cumulative[elapsed - 1] : pair(0, 0);
     return {
       ...row,
       cells,
-      total:        cells.reduce((s, v) => s + v, 0),
+      total:        _cents(cells.reduce((s, v) => s + v, 0)),
       monthly,
-      actualToDate,
-      budgetToDate,
-      variance,
-      variancePct: _variancePct(variance, budgetToDate),
+      cumulative,
+      actualToDate: toDate.actual,
+      budgetToDate: toDate.budget,
+      variance:     toDate.variance,
+      variancePct:  toDate.variancePct,
     };
   });
 
-  const net = rows.find(r => r.kind === 'summary' && /^net (profit|loss)/i.test(r.label));
+  const net = _netRow(rows);
   const cur = currentIdx >= 0 && currentIdx < months.length ? currentIdx : -1;
   return {
     rows,
+    // Said outright, because a missing budget otherwise looks exactly like a
+    // budget of nil on every line.
+    budgetMissing,
     kpis: {
       monthsElapsed:  elapsed,
       monthsTotal:    months.length,
       ytdActualNet:   net ? net.actualToDate : 0,
-      restOfYearNet:  net ? net.cells.slice(elapsed).reduce((s, v) => s + v, 0) : 0,
+      restOfYearNet:  net ? _cents(net.cells.slice(elapsed).reduce((s, v) => s + v, 0)) : 0,
       forecastNet:    net ? net.total : 0,
       // Everything Xero holds dated in this month, which can include
       // transactions dated later in it — "so far" means booked so far.
@@ -853,7 +1025,12 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
   // preset of a December year end — the same months — must not share an entry,
   // or whichever came first titles both, down to the exports' "year to date"
   // or "period to date" wording.
-  const key    = `budgetvar:${userId}:${tenantId}:${win.key}:${months[0].key}:${months[months.length - 1].key}:${actualThroughIdx}`;
+  //
+  // And so is the month in progress. When a period's first month begins, no
+  // month of it has closed on either side of midnight, so actualThroughIdx
+  // alone does not change, and the entry from the day before was served without
+  // that month marked current for up to a cache lifetime.
+  const key    = `budgetvar:${userId}:${tenantId}:${win.key}:${months[0].key}:${months[months.length - 1].key}:${actualThroughIdx}:${currentIdx}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
@@ -876,24 +1053,32 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
   }
 
   const chunks = _chunkMonths(months, 12);
+  let pnlCalls = 0;
   const parts = await _mapWithConcurrency(chunks, REPORT_CHUNK_CONCURRENCY, async (chunk) => {
-    const first = chunk[0], last = chunk[chunk.length - 1];
-    const n = chunk.length;
-    const [pnlRes, budRes] = await Promise.all([
-      // Anchored on the LAST month — periods counts backwards from here. A
-      // single month has no comparison periods at all, so `periods` is omitted
-      // rather than passed as 0, which the endpoint rejects.
-      withRetry(() => (n === 1
-        ? api.getReportProfitAndLoss(tenantId, first.startISO, last.endISO)
-        : api.getReportProfitAndLoss(tenantId, last.startISO, last.endISO, n - 1, 'MONTH'))),
+    const first = chunk[0], n = chunk.length;
+    // A chunk's P&L pieces go one after the other rather than side by side, so
+    // two chunks in flight stay at four calls, inside Xero's limit of five
+    // concurrent calls per organisation.
+    const fetchPnl = async () => {
+      const pieces = [];
+      for (const c of _pnlCallPlan(chunk)) {
+        pnlCalls++;
+        // standardLayout: without it Xero lays the P&L out in the
+        // organisation's own custom layout, whose sections and labels need not
+        // match BudgetSummary's — and the two are matched line by line on them.
+        const res = await withRetry(() => api.getReportProfitAndLoss(
+          tenantId, c.fromISO, c.toISO, c.periods, c.periods ? 'MONTH' : undefined,
+          undefined, undefined, undefined, undefined, true));
+        pieces.push({ rows: res.body.reports?.[0]?.rows || [], offset: c.offset, n: c.n });
+      }
+      return pieces;
+    };
+    const [pnl, budRes] = await Promise.all([
+      fetchPnl(),
       // Anchored on the FIRST month — periods counts forwards from here. timeframe 1 = month.
       withRetry(() => api.getReportBudgetSummary(tenantId, first.endISO, n, 1)),
     ]);
-    return {
-      months: chunk,
-      budgetRows: budRes.body.reports?.[0]?.rows || [],
-      pnlRows:    pnlRes.body.reports?.[0]?.rows || [],
-    };
+    return { months: chunk, budgetRows: budRes.body.reports?.[0]?.rows || [], pnl };
   });
 
   const built = _buildBudgetVariance({
@@ -906,12 +1091,17 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
   const end = _parseISODate(last.endISO);
   const MONTHS_LONG = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   // Only a true fiscal-year window can honestly be called "the year ended X".
+  // A custom range is already named by its months, so they are not said twice.
+  const range = `${first.label} – ${last.label}`;
   const periodLabel = win.key === 'fy'
     ? `For the year ended ${end.day} ${MONTHS_LONG[end.month - 1]} ${end.year}`
-    : `${win.label} · ${months[0].label} – ${last.label}`;
+    : (win.label === range ? range : `${win.label} · ${range}`);
+  // The closed months a to-date figure covers, named once here so the screen
+  // and the exports cannot describe them differently.
+  const closedLast = actualThroughIdx >= 0 ? months[actualThroughIdx] : null;
   logger.info('Budget vs Actual fetched', {
     userId, tenantId, period: win.key, range: `${first.key}..${last.key}`,
-    months: months.length, chunks: chunks.length, actualMonths: actualThroughIdx + 1,
+    months: months.length, chunks: chunks.length, pnlCalls, actualMonths: actualThroughIdx + 1,
   });
 
   return _cacheSet(key, {
@@ -919,7 +1109,11 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
     fiscalYear:   { label: periodLabel, fromISO: first.startISO, toISO: last.endISO },
     budgets,
     period:       { key: win.key, label: win.label, months: months.length, chunks: chunks.length,
-                    fromKey: months[0].key, toKey: months[months.length - 1].key },
+                    fromKey: months[0].key, toKey: months[months.length - 1].key,
+                    toDateLabel:      _toDateLabel(months, fiscalYearEnd),
+                    closedFromLabel:  closedLast ? first.label : null,
+                    closedToLabel:    closedLast ? closedLast.label : null,
+                    closedThroughISO: closedLast ? closedLast.endISO : null },
     months:       months.map((m, i) => ({ key: m.key, label: m.label, source: i <= actualThroughIdx ? 'actual' : 'budget', current: i === currentIdx })),
     ...built,
   }, _periodCacheTtl(months, today));
@@ -971,7 +1165,7 @@ function _buildPerformance({ months, rows, cash }) {
     cogs:        seriesOf(find(/^total cost of sales$/i)),
     grossProfit: seriesOf(find(/^gross profit$/i)),
     opex:        seriesOf(find(/^total operating expenses$/i)),
-    netProfit:   seriesOf(find(/^net (profit|loss)/i)),
+    netProfit:   seriesOf(_netRow(rows)),
   };
 
   // One entry per revenue account — this is what drives "Revenue by service line"
@@ -1639,8 +1833,8 @@ module.exports = {
   _buildBankTransactions, _buildPayments, _buildBankSummary,
   _splitIntoReportWindows, _clampReportFrom,
   _fiscalYearMonths, _monthsFrom, _monthMeta, _monthsBetween, _chunkMonths,
-  _resolveWindow, _resolvePeriod, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
-  _mergeChunks, _buildCustomerRevenue, _buildInvoiceHygiene, _buildQuotePipeline, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
+  _resolveWindow, _resolvePeriod, _actualThroughIndex, _reportLines, _pnlCallPlan, _buildBudgetVariance,
+  _mergeChunks, _cents, _netRow, _toDateLabel, _buildCustomerRevenue, _buildInvoiceHygiene, _buildQuotePipeline, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
   _toBase, _foreignCurrency, _closedCount, _growthPct, _buildGrowth, _buildRunway, _buildCashWaterfall,
   _buildAlerts, ALERT_THRESHOLDS,
   _isTransfer, _isReceiptPayment, _periodCacheTtl, _pruneCache, _cache, CACHE_MAX_ENTRIES, TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,

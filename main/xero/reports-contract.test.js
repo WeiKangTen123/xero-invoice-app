@@ -73,8 +73,10 @@ describe('Xero call contract — report period arguments', () => {
     await reports.getBudgetVariance(U, T, { period: { preset: 'this-month' }, force: true });
 
     const pnlCall = api.getReportProfitAndLoss.mock.calls[0];
-    expect(pnlCall.length).toBeLessThanOrEqual(3);   // tenant, from, to — no periods/timeframe
-    expect(pnlCall[3]).toBeUndefined();
+    expect(api.getReportProfitAndLoss).toHaveBeenCalledTimes(1);
+    expect(pnlCall[3]).toBeUndefined();               // no periods...
+    expect(pnlCall[4]).toBeUndefined();               // ...and so no timeframe
+    expect(pnlCall[9]).toBe(true);                    // standardLayout, as on every P&L call
 
     const [, , budPeriods] = api.getReportBudgetSummary.mock.calls[0];
     expect(budPeriods).toBe(1);                      // Budget accepts 1; never 0
@@ -385,5 +387,134 @@ describe('Xero call budget — an over-long period never reaches the report endp
     expect(api.getReportProfitAndLoss).not.toHaveBeenCalled();
     expect(api.getReportBudgetSummary).not.toHaveBeenCalled();
     expect(api.getPayments).not.toHaveBeenCalled();
+  });
+});
+
+// Xero applies the ProfitAndLoss anchor's date RANGE to every comparison
+// period ("if the specified date range is for a 30 day month, each prior
+// period will only include the first 30 days"), so any period ending in a
+// month of fewer than 31 days lost the 29th to the 31st of the months before
+// it, with no error. These pin the calls that avoid it, and what they cost.
+describe('Xero call contract — every ProfitAndLoss column is a whole month', () => {
+  const STANDARD_LAYOUT = 9;   // xero-node 7: tenant, from, to, periods, timeframe, 4 tracking ids, standardLayout, paymentsOnly
+  const pnlCalls = () => api.getReportProfitAndLoss.mock.calls;
+  const dayCount = iso => new Date(`${iso}T00:00:00Z`).getUTCDate();
+
+  test('every ProfitAndLoss call asks for the standard layout, never the organisation\'s custom one', async () => {
+    for (const period of [{ preset: 'fy' }, { preset: 'this-month' }, { from: '2024-01', to: '2026-08' }, { from: '2026-01', to: '2026-09' }]) {
+      reports._cache.clear();
+      api.getReportProfitAndLoss.mockClear();
+      await reports.getBudgetVariance(U, T, { period, force: true });
+      expect(pnlCalls().length).toBeGreaterThan(0);
+      for (const call of pnlCalls()) {
+        expect(call[STANDARD_LAYOUT]).toBe(true);
+        expect(call.length).toBeLessThanOrEqual(11);
+        for (const i of [5, 6, 7, 8]) expect(call[i]).toBeUndefined();   // no tracking filter
+      }
+    }
+  });
+
+  test('a period ending in a short month anchors on the 31-day month before it and fetches its last month alone', async () => {
+    await reports.getBudgetVariance(U, T, { period: { from: '2026-01', to: '2026-09' }, force: true });
+    expect(pnlCalls().map(c => c.slice(1, 5))).toEqual([
+      ['2026-08-01', '2026-08-31', 7, 'MONTH'],        // Jan–Aug, each a full month
+      ['2026-09-01', '2026-09-30', undefined, undefined],
+    ]);
+    expect(api.getReportBudgetSummary.mock.calls.map(c => c.slice(1))).toEqual([['2026-01-31', 9, 1]]);
+  });
+
+  test('any call with comparison periods is anchored on a whole 31-day month', async () => {
+    for (const period of [{ from: '2026-01', to: '2026-11' }, { from: '2025-01', to: '2026-06' }, { from: '2015-10', to: '2026-09' }, { from: '2027-03', to: '2028-02' }]) {
+      reports._cache.clear();
+      api.getReportProfitAndLoss.mockClear();
+      await reports.getBudgetVariance(U, T, { period, force: true });
+      for (const [, from, to, periods] of pnlCalls()) {
+        expect(from.endsWith('-01')).toBe(true);
+        if (periods !== undefined) expect(dayCount(to)).toBe(31);
+        else expect(from.slice(0, 7)).toBe(to.slice(0, 7));   // a lone month, whole
+      }
+    }
+  });
+
+  test.each([
+    ['Jan–Sep',                        2, 1, { from: '2026-01', to: '2026-09' }],
+    ['Jan–Nov',                        2, 1, { from: '2026-01', to: '2026-11' }],
+    ['Jan–Feb',                        2, 1, { from: '2026-01', to: '2026-02' }],
+    ['Jul–Sep (a quarter)',            2, 1, { from: '2026-07', to: '2026-09' }],
+    ['Apr–Jun',                        2, 1, { from: '2026-04', to: '2026-06' }],
+    ['Apr–Mar (a March year)',         1, 1, { from: '2026-04', to: '2027-03' }],
+    ['18 months ending Dec',           3, 2, { from: '2025-07', to: '2026-12' }],
+    ['18 months ending Jun',           3, 2, { from: '2025-01', to: '2026-06' }],
+    ['132 months, Jan–Dec chunks',     11, 11, { from: '2016-01', to: '2026-12' }],
+    ['132 months, Oct–Sep chunks',     22, 11, { from: '2015-10', to: '2026-09' }],
+  ])('%s costs %i ProfitAndLoss and %i BudgetSummary calls', async (_name, pnl, budget, period) => {
+    await reports.getBudgetVariance(U, T, { period, force: true });
+    expect(api.getReportProfitAndLoss).toHaveBeenCalledTimes(pnl);
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(budget);
+  });
+});
+
+// The payload fields the screen and the exports read. The clock is fixed so the
+// closed months are known; only Date is faked, so nothing waits on a timer.
+describe('budget variance payload — what a period is called and what has closed', () => {
+  const REAL_TIMERS = ['nextTick', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'queueMicrotask', 'hrtime', 'performance'];
+  const at = iso => jest.setSystemTime(new Date(iso));
+  beforeEach(() => jest.useFakeTimers({ now: new Date('2026-10-07T03:00:00Z'), doNotFake: REAL_TIMERS }));
+  afterEach(() => jest.useRealTimers());
+  const get = (period, tenant = 't-payload') => reports.getBudgetVariance(U, tenant, { timezone: 'UTC', period });
+
+  test('a year to date only when the period opens the financial year and stays inside it', async () => {
+    // The org's year runs Apr–Mar.
+    expect((await get({ preset: 'fy' })).period.toDateLabel).toBe('Year to date');
+    expect((await get({ preset: 'fy-ytd' })).period.toDateLabel).toBe('Year to date');
+    expect((await get({ preset: 'prev-fy' })).period.toDateLabel).toBe('Year to date');
+    expect((await get({ from: '2026-04', to: '2026-09' })).period.toDateLabel).toBe('Year to date');
+    expect((await get({ preset: 'last-12' })).period.toDateLabel).toBe('Period to date');
+    expect((await get({ preset: 'this-quarter' })).period.toDateLabel).toBe('Period to date');
+    expect((await get({ from: '2026-04', to: '2027-04' })).period.toDateLabel).toBe('Period to date');   // crosses into the next year
+    expect((await get({ from: '2026-01', to: '2026-12' })).period.toDateLabel).toBe('Period to date');
+  });
+
+  test('the closed months are named, and are null while none has closed', async () => {
+    expect((await get({ preset: 'fy' })).period).toMatchObject({
+      closedFromLabel: 'Apr 2026', closedToLabel: 'Sep 2026', closedThroughISO: '2026-09-30',
+    });
+    expect((await get({ preset: 'prev-fy' })).period).toMatchObject({
+      closedFromLabel: 'Apr 2025', closedToLabel: 'Mar 2026', closedThroughISO: '2026-03-31',
+    });
+    expect((await get({ preset: 'this-quarter' })).period).toMatchObject({
+      closedFromLabel: null, closedToLabel: null, closedThroughISO: null,
+    });
+  });
+
+  test('a custom range is named by its months once, not twice', async () => {
+    expect((await get({ from: '2026-07', to: '2027-06' })).fiscalYear.label).toBe('Jul 2026 – Jun 2027');
+    expect((await get({ preset: 'fy-ytd' })).fiscalYear.label).toBe('Financial year to date · Apr 2026 – Oct 2026');
+    expect((await get({ preset: 'fy' })).fiscalYear.label).toBe('For the year ended 31 March 2027');
+  });
+
+  test('budgetMissing is true when BudgetSummary returns nothing, and false once it returns lines', async () => {
+    expect((await get({ preset: 'fy' }, 't-nobudget')).budgetMissing).toBe(true);
+    api.getReportBudgetSummary.mockResolvedValue({ body: { reports: [{ rows: [
+      { rowType: 'Header', cells: [{ value: '' }] },
+      { rowType: 'Section', title: 'Income', rows: [{ rowType: 'Row', cells: [{ value: 'Sales' }, ...Array(12).fill({ value: '10.00' })] }] },
+    ] }] } });
+    const withBudget = await get({ preset: 'fy' }, 't-budget');
+    expect(withBudget.budgetMissing).toBe(false);
+    expect(withBudget.rows.find(r => r.label === 'Sales')).toMatchObject({ section: 'Income', expense: false, unbudgeted: false });
+    expect(withBudget.rows.find(r => r.label === 'Sales').cumulative.at(-1).budget).toBe(120);
+  });
+
+  test('a period whose first month has just begun is not served from the day before', async () => {
+    // Three minutes either side of midnight: inside the cache lifetime, and no
+    // month of the period closes in between — only the month in progress moves.
+    at('2026-10-31T23:58:00Z');
+    const before = await get({ from: '2026-11', to: '2026-11' }, 't-midnight');
+    expect(before.months[0].current).toBe(false);
+    at('2026-11-01T00:01:00Z');
+    const after = await get({ from: '2026-11', to: '2026-11' }, 't-midnight');
+    expect(after.months[0].current).toBe(true);
+    expect(after.kpis.currentMonth).toMatchObject({ key: '2026-11' });
+    expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(2);
   });
 });

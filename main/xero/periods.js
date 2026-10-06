@@ -35,15 +35,48 @@ function _parseISODate(s) {
 // date" dashboard widget uses it, not the calendar year) — defaults to a
 // calendar year (Dec 31 end) when the caller doesn't have fiscal-year-end
 // info to hand, which reproduces the old hardcoded Jan-1 behavior exactly.
+//
+// The year starts on the 1st of the month AFTER the year-end month, never the
+// day after the year-end date. Every period here is built from whole months,
+// and "the day after" broke on February: a 28 Feb year end in a leap year made
+// 29 Feb the first day, so on that day the year ran Feb 2028 – Jan 2029, a
+// month out of step with every other year.
+//
+// Which year today falls in is decided against the year-end day, capped at the
+// last day of that month in that year — a 29 Feb year end means 28 Feb in a
+// common year, where Date.UTC would otherwise read it as 1 March and keep
+// 1 March in the old year. A February year end on the 28th is read as the end
+// of February in every year: it is the only way to say "end of February" in a
+// common year, and it keeps 29 Feb inside the year whose last month it is —
+// otherwise "financial year to date" on that day would open on the March after
+// it and run backwards.
 function _fiscalYearStart(today, fiscalYearEnd) {
   const feMonth = fiscalYearEnd?.month || 12;
   const feDay   = fiscalYearEnd?.day   || 31;
-  const thisCalendarYearEnd = { year: today.year, month: feMonth, day: feDay };
+  const monthEnd = _lastDayOfMonth(today.year, feMonth);
+  const endDay   = feMonth === 2 && feDay >= 28 ? monthEnd : Math.min(feDay, monthEnd);
   // "Today" is inside the fiscal year that ends on the NEXT occurrence of the
   // fiscal-year-end date — so if that date (this calendar year) hasn't
   // happened yet, the current fiscal year started the year before.
-  const endYear = _dateFromParts(today) <= _dateFromParts(thisCalendarYearEnd) ? today.year - 1 : today.year;
-  return _addDays({ year: endYear, month: feMonth, day: feDay }, 1);
+  const endYear = _dateFromParts(today) <= _dateFromParts({ year: today.year, month: feMonth, day: endDay })
+    ? today.year - 1 : today.year;
+  return feMonth === 12
+    ? { year: endYear + 1, month: 1, day: 1 }
+    : { year: endYear, month: feMonth + 1, day: 1 };
+}
+
+function _lastDayOfMonth(year, month) { return new Date(Date.UTC(year, month, 0)).getUTCDate(); }
+
+// Pure. What a to-date figure over `months` is called. "Year to date" only
+// when it really is one: the period opens on the first month of a financial
+// year and stays inside that year. Anything else — a quarter, a rolling twelve
+// months, a span crossing a year end — is a period to date, and calling it a
+// year would tell the reader the wrong thing about what was added up.
+function _toDateLabel(months, fiscalYearEnd) {
+  const first = /^(\d{4})-(\d{2})$/.exec(months?.[0]?.key || '');
+  if (!first) return 'Period to date';
+  const startMonth = (fiscalYearEnd?.month || 12) % 12 + 1;
+  return +first[2] === startMonth && months.length <= 12 ? 'Year to date' : 'Period to date';
 }
 
 
@@ -308,6 +341,6 @@ function _monthKeyOfDate(d) {
 // on a single "cash in" line, and they are not remotely the same business.
 
 module.exports = {
-  _actualThroughIndex, _addDays, _chunkMonths, _closedCount, _dateFromParts, _fiscalYearMonths, _fiscalYearStart, _fmtISODate, _fmtXeroDate, _monthKeyOfDate, _monthMeta, _monthsBetween, _monthsFrom, _parseISODate, _partsFromDate, _resolvePeriod, _resolveWindow, _todayPartsInTz, _weekdayMon0,
+  _actualThroughIndex, _addDays, _chunkMonths, _closedCount, _dateFromParts, _fiscalYearMonths, _fiscalYearStart, _fmtISODate, _fmtXeroDate, _lastDayOfMonth, _monthKeyOfDate, _monthMeta, _monthsBetween, _monthsFrom, _parseISODate, _partsFromDate, _resolvePeriod, _resolveWindow, _toDateLabel, _todayPartsInTz, _weekdayMon0,
   MAX_PERIOD_MONTHS, MIN_PERIOD_YEAR, MAX_PERIOD_YEAR, PERIOD_PRESETS, PeriodError, _isPeriodError, _checkRange, _checkPreset, _periodFromQueryParams,
 };

@@ -94,3 +94,78 @@ describe('xero/periods — which periods may be asked for', () => {
     expect(_isPeriodError(null)).toBe(false);
   });
 });
+
+// The year starts on the 1st of the month after the year-end month. It used to
+// start the day after the year-end DATE, which on 29 Feb 2028 for a 28 Feb
+// year end made the year Feb 2028 – Jan 2029.
+describe('xero/periods — the financial year around a February year end', () => {
+  const { _fiscalYearStart, _toDateLabel, _monthsBetween } = periods;
+  const span = w => `${w.months[0].label} .. ${w.months[w.months.length - 1].label}`;
+  const d = (year, month, day) => ({ year, month, day });
+  const FEB28 = { month: 2, day: 28 };
+  const FEB29 = { month: 2, day: 29 };
+
+  test('a 28 Feb year end in a leap year: 29 Feb is the last day of the year, not the first of the next', () => {
+    expect(_fiscalYearStart(d(2028, 2, 28), FEB28)).toEqual(d(2027, 3, 1));
+    expect(_fiscalYearStart(d(2028, 2, 29), FEB28)).toEqual(d(2027, 3, 1));
+    expect(_fiscalYearStart(d(2028, 3, 1),  FEB28)).toEqual(d(2028, 3, 1));
+    expect(span(_resolvePeriod('fy',     d(2028, 2, 29), FEB28))).toBe('Mar 2027 .. Feb 2028');
+    expect(span(_resolvePeriod('fy-ytd', d(2028, 2, 29), FEB28))).toBe('Mar 2027 .. Feb 2028');
+    expect(span(_resolvePeriod('fy',     d(2028, 3, 1),  FEB28))).toBe('Mar 2028 .. Feb 2029');
+  });
+
+  test('a 28 Feb year end in a common year', () => {
+    expect(_fiscalYearStart(d(2027, 2, 28), FEB28)).toEqual(d(2026, 3, 1));
+    expect(_fiscalYearStart(d(2027, 3, 1),  FEB28)).toEqual(d(2027, 3, 1));
+    expect(span(_resolvePeriod('fy', d(2027, 2, 28), FEB28))).toBe('Mar 2026 .. Feb 2027');
+  });
+
+  test('a 29 Feb year end in a common year ends on the 28th, so 1 March starts the new year', () => {
+    expect(_fiscalYearStart(d(2027, 2, 28), FEB29)).toEqual(d(2026, 3, 1));
+    expect(_fiscalYearStart(d(2027, 3, 1),  FEB29)).toEqual(d(2027, 3, 1));
+    expect(span(_resolvePeriod('fy', d(2027, 3, 1), FEB29))).toBe('Mar 2027 .. Feb 2028');
+    // ...and in a leap year it is the 29th, as written.
+    expect(_fiscalYearStart(d(2028, 2, 29), FEB29)).toEqual(d(2027, 3, 1));
+    expect(_fiscalYearStart(d(2028, 3, 1),  FEB29)).toEqual(d(2028, 3, 1));
+  });
+
+  test('ordinary month-end year ends are unchanged, the year always starting on a 1st', () => {
+    const cases = [
+      [{ month: 12, day: 31 }, d(2026, 10, 7),  d(2026, 1, 1)],
+      [{ month: 12, day: 31 }, d(2026, 12, 31), d(2026, 1, 1)],
+      [{ month: 12, day: 31 }, d(2027, 1, 1),   d(2027, 1, 1)],
+      [{ month: 3,  day: 31 }, d(2026, 3, 31),  d(2025, 4, 1)],
+      [{ month: 3,  day: 31 }, d(2026, 4, 1),   d(2026, 4, 1)],
+      [{ month: 6,  day: 30 }, d(2026, 6, 30),  d(2025, 7, 1)],
+      [{ month: 6,  day: 30 }, d(2026, 7, 1),   d(2026, 7, 1)],
+      [{ month: 9,  day: 30 }, d(2028, 2, 29),  d(2027, 10, 1)],
+      [undefined,              d(2026, 10, 7),  d(2026, 1, 1)],   // no year end known: calendar year
+    ];
+    for (const [fye, today, start] of cases) expect({ fye, today, start: _fiscalYearStart(today, fye) }).toEqual({ fye, today, start });
+  });
+
+  test('every day of a leap year, for every month-end year end, falls inside its own financial year', () => {
+    for (let m = 1; m <= 12; m++) {
+      const fye = { month: m, day: new Date(Date.UTC(2027, m, 0)).getUTCDate() };   // the month's end in a common year
+      for (let t = Date.UTC(2028, 0, 1); t < Date.UTC(2029, 0, 1); t += 86400000) {
+        const dt = new Date(t);
+        const today = d(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+        const keys = _resolvePeriod('fy', today, fye).months.map(x => x.key);
+        const todayKey = `${today.year}-${String(today.month).padStart(2, '0')}`;
+        if (!keys.includes(todayKey) || keys.length !== 12) throw new Error(`fy for ${todayKey}-${today.day}, year end ${m}/${fye.day}: ${keys[0]}..${keys[11]}`);
+      }
+    }
+  });
+
+  test('"Year to date" only for a span that opens the financial year and stays inside it', () => {
+    const MAR = { month: 3, day: 31 };
+    expect(_toDateLabel(_monthsBetween('2026-04', '2026-09'), MAR)).toBe('Year to date');
+    expect(_toDateLabel(_monthsBetween('2026-04', '2027-03'), MAR)).toBe('Year to date');
+    expect(_toDateLabel(_monthsBetween('2026-04', '2027-04'), MAR)).toBe('Period to date');   // 13 months
+    expect(_toDateLabel(_monthsBetween('2026-05', '2026-09'), MAR)).toBe('Period to date');   // starts mid-year
+    expect(_toDateLabel(_monthsBetween('2026-01', '2026-12'), MAR)).toBe('Period to date');
+    expect(_toDateLabel(_monthsBetween('2026-01', '2026-12'), { month: 12, day: 31 })).toBe('Year to date');
+    expect(_toDateLabel(_monthsBetween('2026-03', '2026-05'), FEB28)).toBe('Year to date');
+    expect(_toDateLabel([], MAR)).toBe('Period to date');
+  });
+});

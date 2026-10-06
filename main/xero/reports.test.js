@@ -2,7 +2,7 @@ const {
   _buildSummary, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildBankSummary,
   _splitIntoReportWindows, _clampReportFrom,
-  _fiscalYearMonths, _actualThroughIndex, _rowValuesByLabel, _skeletonFromBudget, _buildBudgetVariance,
+  _fiscalYearMonths, _actualThroughIndex, _reportLines, _buildBudgetVariance,
 } = require('./reports');
 
 // Helper matching Xero's real report cell shape: { value }.
@@ -647,25 +647,33 @@ describe('xero/reports — Budget vs Actual (pure)', () => {
   });
 
   test('ProfitAndLoss columns are reversed into month order; BudgetSummary are not', () => {
-    const actual = _rowValuesByLabel(pnlRows, { reverse: true });
+    const line = (lines, label) => lines.find(l => l.label === label).values;
+    const actual = _reportLines(pnlRows, { reverse: true });
     // Jul 2026 = index 3. Newest-first the same value sits at index 8.
-    expect(actual.get('Sales - Implementation')[3]).toBe(-17670);
-    expect(actual.get('Sales - Implementation')[4]).toBe(37000); // Aug
-    const budget = _rowValuesByLabel(budgetRows);
-    expect(budget.get('Cost of Goods Sold')[4]).toBe(7330); // Aug, already oldest-first
+    expect(line(actual, 'Sales - Implementation')[3]).toBe(-17670);
+    expect(line(actual, 'Sales - Implementation')[4]).toBe(37000); // Aug
+    const budget = _reportLines(budgetRows);
+    expect(line(budget, 'Cost of Goods Sold')[4]).toBe(7330); // Aug, already oldest-first
   });
 
-  test('the skeleton keeps Xero\'s reading order, with floating summary lines', () => {
-    const skel = _skeletonFromBudget(budgetRows);
-    expect(skel.slice(0, 4)).toEqual([
-      { kind: 'section',  label: 'Income' },
+  test('the layout keeps Xero\'s reading order, with floating summary lines', () => {
+    const { rows } = build();
+    expect(rows.slice(0, 4).map(r => ({ kind: r.kind, label: r.label, section: r.section }))).toEqual([
+      { kind: 'section',  label: 'Income',                          section: 'Income' },
       { kind: 'account',  label: 'Sales - Implementation',          section: 'Income' },
       { kind: 'account',  label: 'Sales - Maintenance (Recurring)', section: 'Income' },
       { kind: 'subtotal', label: 'Total Income',                    section: 'Income' },
     ]);
     // Gross Profit / Net Profit live in untitled sections -> 'summary', not 'subtotal'.
-    expect(find(skel, 'Gross Profit').kind).toBe('summary');
-    expect(find(skel, 'Net Profit').kind).toBe('summary');
+    expect(find(rows, 'Gross Profit')).toMatchObject({ kind: 'summary', section: '' });
+    expect(find(rows, 'Net Profit')).toMatchObject({ kind: 'summary', section: '' });
+    expect(rows.map(r => r.label)).toEqual([
+      'Income', 'Sales - Implementation', 'Sales - Maintenance (Recurring)', 'Total Income',
+      'Less Cost of Sales', 'Cost of Goods Sold', 'Total Cost of Sales', 'Gross Profit',
+      'Other Income', 'Other Income - Grant', 'Total Other Income',
+      'Less Operating Expenses', 'Bank Fees', 'Consulting & Accounting', 'Insurance', 'Legal expenses',
+      'Subscriptions', 'Wages and Salaries', 'Total Operating Expenses', 'Net Profit',
+    ]);
   });
 
   test('every row matches the org\'s own Xero PDF, actual months and budget months', () => {
@@ -740,21 +748,66 @@ describe('xero/reports — Budget vs Actual (pure)', () => {
     expect(out.kpis.currentMonth).toBeNull();
   });
 
-  test('an account with actuals but no budget is appended, never dropped', () => {
+  test('an account with actuals but no budget is kept, in its own section, never dropped', () => {
     const withOrphan = [...pnlRows, section('Less Operating Expenses', [
       row('Surprise Expense', ['Surprise Expense', ...Array(12).fill('0.00').map((v, i) => (i === 8 ? '99.00' : v))]),
     ])];
     const { rows } = _buildBudgetVariance({ budgetRows, pnlRows: withOrphan, months, actualThroughIdx: 3 });
     const orphan = find(rows, 'Surprise Expense');
-    expect(orphan).toBeDefined();
+    expect(orphan).toMatchObject({ kind: 'account', section: 'Less Operating Expenses', unbudgeted: true, expense: true });
     expect(orphan.cells[3]).toBe(99); // Jul, after the newest-first reversal
-    expect(find(rows, 'Other (actuals only, not budgeted)').kind).toBe('section');
+    expect(orphan.monthly.every(m => m.budget === 0)).toBe(true);
+    // Inside its section, above the section's total — not below Net Profit.
+    const at = label => rows.findIndex(r => r.label === label);
+    expect(at('Surprise Expense')).toBeGreaterThan(at('Less Operating Expenses'));
+    expect(at('Surprise Expense')).toBeLessThan(at('Total Operating Expenses'));
+    expect(rows.find(r => /actuals only/i.test(r.label))).toBeUndefined();
+    expect(rows[rows.length - 1].label).toBe('Net Profit');
   });
 
   test('an empty pair of reports yields no rows and zeroed KPIs, not a crash', () => {
     const out = _buildBudgetVariance({ budgetRows: [], pnlRows: [], months, actualThroughIdx: 3 });
     expect(out.rows).toEqual([]);
     expect(out.kpis.forecastNet).toBe(0);
+    expect(out.budgetMissing).toBe(true);
+  });
+
+  // The contract fields, read off the same PDF fixture.
+  test('expense marks every cost-of-sales and overhead line, subtotals included, and nothing else', () => {
+    const { rows } = build();
+    const expense = rows.filter(r => r.expense).map(r => r.label);
+    expect(expense).toEqual([
+      'Cost of Goods Sold', 'Total Cost of Sales',
+      'Bank Fees', 'Consulting & Accounting', 'Insurance', 'Legal expenses', 'Subscriptions', 'Wages and Salaries',
+      'Total Operating Expenses',
+    ]);
+    for (const label of ['Income', 'Sales - Implementation', 'Total Income', 'Gross Profit', 'Other Income - Grant', 'Net Profit', 'Less Cost of Sales']) {
+      expect(find(rows, label).expense).toBe(false);
+    }
+  });
+
+  test('every line of the PDF is budgeted, so none is marked unbudgeted', () => {
+    const { rows, budgetMissing } = build();
+    expect(rows.every(r => r.unbudgeted === false)).toBe(true);
+    expect(budgetMissing).toBe(false);
+  });
+
+  test('cumulative runs from the first month over actual and budget, the month in progress included', () => {
+    const { rows } = build();
+    const net = find(rows, 'Net Profit');
+    expect(net.cumulative).toHaveLength(12);
+    // Through Jul (index 3) it is exactly the year to date.
+    expect(net.cumulative[3]).toEqual({ actual: net.actualToDate, budget: net.budgetToDate, variance: net.variance, variancePct: net.variancePct });
+    expect(net.cumulative[3]).toMatchObject({ actual: 32727, budget: 32727, variance: 0 });
+    // Aug adds what is booked so far against Aug's budget: 32,727 + 52,000 against 32,727 + 17,615.
+    expect(net.cumulative[4]).toMatchObject({ actual: 84727, budget: 50342, variance: 34385 });
+    expect(net.cumulative[4].variancePct).toBeCloseTo(34385 / 50342, 12);
+    // The whole year's budget is the PDF's budget Net Profit summed.
+    expect(net.cumulative[11].budget).toBe(20946);
+    const cogs = find(rows, 'Cost of Goods Sold');
+    expect(cogs.cumulative[4]).toMatchObject({ actual: 0, budget: 7330, variance: -7330, variancePct: -1 });
+    // A nil budget to date has no percentage, as elsewhere.
+    expect(find(rows, 'Bank Fees').cumulative[3].variancePct).toBeNull();
   });
 });
 
@@ -966,6 +1019,319 @@ describe('xero/reports — performance overview (pure)', () => {
     const { totals } = build();
     const list = _buildWatchList({ months, totals, actualThroughIdx: -1 });
     expect(list.some(w => /No month of this financial year has closed/.test(w.text))).toBe(true);
+  });
+});
+
+// ── Budget vs Actual: which rows are which ──────────────────────────────────
+// Rows used to be matched by label text alone, first one wins, and anything the
+// P&L had beyond the budget was dumped below Net Profit with no section. These
+// pin identity (section + label), placement (inside the right section, in
+// Xero's order) and the fields the screen and the exports read.
+describe('xero/reports — budget rows: identity, placement and rounding (pure)', () => {
+  const { _mergeChunks, _cents, _netRow, _buildPerformance, _monthsBetween, _chunkMonths } = require('./reports');
+  const months = _monthsBetween('2026-01', '2026-03');
+  const money  = v => (v < 0 ? `(${Math.abs(v).toFixed(2)})` : v.toFixed(2));
+  const line   = (label, vals, rowType = 'Row') => row(label, [label, ...vals.map(money)], rowType);
+  // ProfitAndLoss answers newest-first. Fixtures are written oldest-first and
+  // flipped here, so both reports read the same way below.
+  const pLine  = (label, vals, rowType = 'Row') => line(label, [...vals].reverse(), rowType);
+  const header = { rowType: 'Header', cells: [cell('')] };
+  const build  = (budget, pnl, actualThroughIdx = 1) =>
+    _buildBudgetVariance({ budgetRows: [header, ...budget], pnlRows: [header, ...pnl], months, actualThroughIdx });
+  const at     = (rows, sec, label) => rows.filter(r => r.section === sec && r.label === label);
+  const one    = (rows, sec, label) => { const m = at(rows, sec, label); expect(m).toHaveLength(1); return m[0]; };
+  const actuals = r => r.monthly.map(m => m.actual);
+  const OPEX = 'Less Operating Expenses';
+
+  test('one name in two sections is two rows, each with its own figures', () => {
+    const { rows } = build([
+      section('Income', [line('Consulting', [100, 100, 100]), line('Total Income', [100, 100, 100], 'SummaryRow')]),
+      section(OPEX,     [line('Consulting', [20, 20, 20]),    line('Total Operating Expenses', [20, 20, 20], 'SummaryRow')]),
+      section('',       [line('Net Profit', [80, 80, 80], 'SummaryRow')]),
+    ], [
+      section('Income', [pLine('Consulting', [90, 110, 5]), pLine('Total Income', [90, 110, 5], 'SummaryRow')]),
+      section(OPEX,     [pLine('Consulting', [25, 15, 0]),  pLine('Total Operating Expenses', [25, 15, 0], 'SummaryRow')]),
+      section('',       [pLine('Net Profit', [65, 95, 5], 'SummaryRow')]),
+    ]);
+    expect(rows.filter(r => r.label === 'Consulting')).toHaveLength(2);
+    expect(actuals(one(rows, 'Income', 'Consulting'))).toEqual([90, 110, 5]);
+    expect(actuals(one(rows, OPEX, 'Consulting'))).toEqual([25, 15, 0]);
+    expect(one(rows, OPEX, 'Consulting').expense).toBe(true);
+    expect(one(rows, 'Income', 'Consulting').expense).toBe(false);
+  });
+
+  test('a namesake with no actuals of its own does not borrow the other one\'s', () => {
+    const { rows } = build([
+      section('Income', [line('Consulting', [100, 100, 100])]),
+      section(OPEX,     [line('Consulting', [20, 20, 20])]),
+    ], [
+      section(OPEX, [pLine('Consulting', [25, 15, 0])]),
+    ]);
+    expect(actuals(one(rows, 'Income', 'Consulting'))).toEqual([0, 0, 0]);
+    expect(actuals(one(rows, OPEX, 'Consulting'))).toEqual([25, 15, 0]);
+  });
+
+  test('"Net Loss" and "Net Profit" are one row across the two reports, and so are the gross lines', () => {
+    const { rows, kpis } = build([
+      section('Income', [line('Sales', [100, 100, 100])]),
+      section('',       [line('Gross Profit', [100, 100, 100], 'SummaryRow')]),
+      section(OPEX,     [line('Rent', [150, 150, 150])]),
+      section('',       [line('Net Profit', [-50, -50, -50], 'SummaryRow')]),
+    ], [
+      section('Income', [pLine('Sales', [-10, 40, 0])]),
+      section('',       [pLine('Gross Loss', [-10, 40, 0], 'SummaryRow')]),
+      section(OPEX,     [pLine('Rent', [150, 150, 0])]),
+      section('',       [pLine('Net Loss', [-160, -110, 0], 'SummaryRow')]),
+    ]);
+    expect(rows.filter(r => r.kind === 'summary').map(r => r.label)).toEqual(['Gross Profit', 'Net Profit']);
+    expect(actuals(one(rows, '', 'Gross Profit'))).toEqual([-10, 40, 0]);
+    expect(actuals(one(rows, '', 'Net Profit'))).toEqual([-160, -110, 0]);
+    expect(kpis.ytdActualNet).toBe(-270);
+  });
+
+  test('a small difference in section title still matches a label unique to both reports', () => {
+    const { rows } = build([
+      section(OPEX, [line('Rent', [50, 50, 50]), line('Total Operating Expenses', [50, 50, 50], 'SummaryRow')]),
+      section('',   [line('Net Profit', [-50, -50, -50], 'SummaryRow')]),
+    ], [
+      section('Less Overheads', [pLine('Rent', [55, 45, 0]), pLine('Total Overheads', [55, 45, 0], 'SummaryRow')]),
+      section('',               [pLine('Net Profit', [-55, -45, 0], 'SummaryRow')]),
+    ]);
+    expect(actuals(one(rows, OPEX, 'Rent'))).toEqual([55, 45, 0]);
+    // The renamed section's total is the section's total, not a second one.
+    expect(actuals(one(rows, OPEX, 'Total Operating Expenses'))).toEqual([55, 45, 0]);
+    expect(rows.map(r => r.label)).toEqual([OPEX, 'Rent', 'Total Operating Expenses', 'Net Profit']);
+    expect(rows.some(r => r.unbudgeted)).toBe(false);
+  });
+
+  test('…whatever order the renamed section lists its lines in', () => {
+    // An unbudgeted line first: it must not open a second, P&L-titled section
+    // that would then stop Rent from matching.
+    const { rows } = build([
+      section(OPEX, [line('Rent', [50, 50, 50]), line('Total Operating Expenses', [50, 50, 50], 'SummaryRow')]),
+    ], [
+      section('Less Overheads', [pLine('Advertising', [5, 5, 0]), pLine('Rent', [55, 45, 0]), pLine('Total Overheads', [60, 50, 0], 'SummaryRow')]),
+    ]);
+    expect(rows.map(r => r.label)).toEqual([OPEX, 'Advertising', 'Rent', 'Total Operating Expenses']);
+    expect(one(rows, OPEX, 'Advertising')).toMatchObject({ unbudgeted: true, expense: true });
+    expect(actuals(one(rows, OPEX, 'Rent'))).toEqual([55, 45, 0]);
+    expect(actuals(one(rows, OPEX, 'Total Operating Expenses'))).toEqual([60, 50, 0]);
+  });
+
+  test('…but never across two sections both reports have: that is a different account', () => {
+    const { rows } = build([
+      section('Income', [line('Consulting', [100, 100, 100])]),
+      section(OPEX,     [line('Rent', [50, 50, 50])]),
+    ], [
+      section(OPEX, [pLine('Rent', [50, 50, 0]), pLine('Consulting', [7, 8, 0])]),
+    ]);
+    expect(actuals(one(rows, 'Income', 'Consulting'))).toEqual([0, 0, 0]);
+    expect(one(rows, OPEX, 'Consulting')).toMatchObject({ unbudgeted: true, expense: true });
+    expect(actuals(one(rows, OPEX, 'Consulting'))).toEqual([7, 8, 0]);
+  });
+
+  test('the bottom line is found by name, else it is the last floating summary line', () => {
+    expect(_netRow([{ kind: 'summary', label: 'Net Loss', section: '' }, { kind: 'summary', label: 'X', section: '' }]).label).toBe('Net Loss');
+    expect(_netRow([{ kind: 'summary', label: 'Gross Profit', section: '' }, { kind: 'summary', label: 'Profit after tax', section: '' }]).label).toBe('Profit after tax');
+    expect(_netRow([{ kind: 'account', label: 'Sales', section: 'Income' }])).toBeUndefined();
+    const { kpis } = build([
+      section('Income', [line('Sales', [10, 10, 10])]),
+      section('',       [line('Profit after tax', [10, 10, 10], 'SummaryRow')]),
+    ], [
+      section('Income', [pLine('Sales', [12, 8, 0])]),
+      section('',       [pLine('Profit after tax', [12, 8, 0], 'SummaryRow')]),
+    ]);
+    expect(kpis).toMatchObject({ ytdActualNet: 20, forecastNet: 30 });
+  });
+
+  test('an account only in the P&L goes in its section, before the subtotal, with a nil budget', () => {
+    const { rows } = build([
+      section('Income', [line('Sales', [100, 100, 100]), line('Total Income', [100, 100, 100], 'SummaryRow')]),
+      section('',       [line('Net Profit', [100, 100, 100], 'SummaryRow')]),
+    ], [
+      section('Income', [pLine('Sales', [90, 90, 0]), pLine('Sundry', [5, 6, 0]), pLine('Total Income', [95, 96, 0], 'SummaryRow')]),
+      section('',       [pLine('Net Profit', [95, 96, 0], 'SummaryRow')]),
+    ]);
+    expect(rows.map(r => r.label)).toEqual(['Income', 'Sales', 'Sundry', 'Total Income', 'Net Profit']);
+    const sundry = one(rows, 'Income', 'Sundry');
+    expect(sundry).toMatchObject({ kind: 'account', unbudgeted: true, expense: false, cells: [5, 6, 0] });
+    expect(sundry.monthly.map(m => m.budget)).toEqual([0, 0, 0]);
+    expect(rows.filter(r => r.label !== 'Sundry').every(r => r.unbudgeted === false)).toBe(true);
+  });
+
+  const withCogs = () => build([
+    section('Income', [line('Sales', [100, 100, 100]), line('Total Income', [100, 100, 100], 'SummaryRow')]),
+    section('',       [line('Gross Profit', [100, 100, 100], 'SummaryRow')]),
+    section(OPEX,     [line('Rent', [10, 10, 10]), line('Total Operating Expenses', [10, 10, 10], 'SummaryRow')]),
+    section('',       [line('Net Profit', [90, 90, 90], 'SummaryRow')]),
+  ], [
+    section('Income', [pLine('Sales', [100, 80, 0]), pLine('Support Retainer', [20, 20, 0]), pLine('Total Income', [120, 100, 0], 'SummaryRow')]),
+    section('Less Cost of Sales', [pLine('Purchases', [30, 25, 0]), pLine('Total Cost of Sales', [30, 25, 0], 'SummaryRow')]),
+    section('',       [pLine('Gross Profit', [90, 75, 0], 'SummaryRow')]),
+    section(OPEX,     [pLine('Rent', [10, 10, 0]), pLine('Total Operating Expenses', [10, 10, 0], 'SummaryRow')]),
+    section('',       [pLine('Net Profit', [80, 65, 0], 'SummaryRow')]),
+  ]);
+
+  test('a P&L section the budget lacks goes in whole, where the P&L has it, before the next summary line', () => {
+    const { rows } = withCogs();
+    expect(rows.map(r => `${r.kind}:${r.label}`)).toEqual([
+      'section:Income', 'account:Sales', 'account:Support Retainer', 'subtotal:Total Income',
+      'section:Less Cost of Sales', 'account:Purchases', 'subtotal:Total Cost of Sales',
+      'summary:Gross Profit',
+      `section:${OPEX}`, 'account:Rent', `subtotal:Total Operating Expenses`,
+      'summary:Net Profit',
+    ]);
+    for (const label of ['Less Cost of Sales', 'Purchases', 'Total Cost of Sales']) {
+      expect(one(rows, 'Less Cost of Sales', label)).toMatchObject({ unbudgeted: true, section: 'Less Cost of Sales' });
+    }
+    expect(one(rows, 'Less Cost of Sales', 'Total Cost of Sales')).toMatchObject({ kind: 'subtotal', expense: true });
+    expect(one(rows, 'Less Cost of Sales', 'Purchases').expense).toBe(true);
+    // Every row says which section it sits in.
+    expect(rows.every(r => typeof r.section === 'string')).toBe(true);
+  });
+
+  test('lines only in the P&L reach the dashboard: service lines, expense lines and the recurring split', () => {
+    const { rows } = withCogs();
+    const perf = _buildPerformance({ months, rows, cash: {} });
+    expect(perf.serviceLines.map(l => l.label)).toEqual(['Sales', 'Support Retainer']);
+    expect(perf.serviceLines[1]).toMatchObject({ section: 'Income', recurring: true, actual: [20, 20, 0], budget: [0, 0, 0] });
+    expect(perf.expenseLines.map(l => [l.label, l.kind])).toEqual([['Purchases', 'cogs'], ['Rent', 'opex']]);
+    expect(perf.split.recurring.actual).toEqual([20, 20, 0]);
+    expect(perf.totals.cogs.actual).toEqual([30, 25, 0]);
+    // The service lines still add up to the income total once the P&L-only one is in.
+    expect(perf.split.recurring.actual.map((v, i) => v + perf.split.project.actual[i])).toEqual(perf.totals.revenue.actual);
+  });
+
+  test('a row first seen in a later chunk joins its own section in Xero\'s order, not the bottom', () => {
+    const m4 = _monthsBetween('2026-01', '2026-04');
+    const [c1, c2] = _chunkMonths(m4, 2);
+    const bud = (...lines) => [header, section(OPEX, lines), section('', [line('Net Profit', [0, 0], 'SummaryRow')])];
+    const { layout } = _mergeChunks([
+      { months: c1, budgetRows: bud(line('Rent', [1, 1]), line('Wages', [2, 2]), line('Total Operating Expenses', [3, 3], 'SummaryRow')),
+        pnlRows: [header, section(OPEX, [pLine('Software', [4, 4])])] },
+      { months: c2, budgetRows: bud(line('Rent', [1, 1]), line('Software', [5, 5]), line('Wages', [2, 2]), line('Total Operating Expenses', [8, 8], 'SummaryRow')),
+        pnlRows: [header, section(OPEX, [pLine('Rent', [1, 1]), pLine('Training', [6, 6])])] },
+    ], 4);
+    // Software follows Rent as the second chunk's budget has it; Training, only
+    // in the second chunk's P&L, follows Rent as that report has it.
+    expect(layout.map(r => r.label)).toEqual([OPEX, 'Rent', 'Training', 'Software', 'Wages', 'Total Operating Expenses', 'Net Profit']);
+    const software = layout.find(r => r.label === 'Software');
+    expect(software.budget).toEqual([0, 0, 5, 5]);
+    expect(software.actual).toEqual([4, 4, 0, 0]);
+    // Budgeted in a later chunk is budgeted, though its actuals came first.
+    expect(software.unbudgeted).toBe(false);
+    expect(layout.find(r => r.label === 'Training')).toMatchObject({ unbudgeted: true, section: OPEX, actual: [0, 0, 6, 6] });
+  });
+
+  test('every figure is rounded to the cent, so floating-point dust never reads as a variance', () => {
+    expect(_cents(0.1 + 0.2)).toBe(0.3);
+    expect(_cents(-3.552713678800501e-15)).toBe(0);
+    expect(Object.is(_cents(-0.001), 0)).toBe(true);   // never -0
+    expect(_cents(1234567.891)).toBe(1234567.89);
+
+    const { rows, kpis } = build([
+      section('Income', [line('Sales', [0.3, 0, 0])]),
+      section('',       [line('Net Profit', [0.3, 0, 0], 'SummaryRow')]),
+    ], [
+      section('Income', [pLine('Sales', [0.1, 0.2, 0])]),
+      section('',       [pLine('Net Profit', [0.1, 0.2, 0], 'SummaryRow')]),
+    ]);
+    const sales = one(rows, 'Income', 'Sales');
+    expect(sales.total).toBe(0.3);
+    expect(sales.monthly[0]).toEqual({ actual: 0.1, budget: 0.3, variance: -0.2, variancePct: -0.2 / 0.3 });
+    // 0.1 + 0.2 against 0.3 is no variance at all, not 5.55e-17 of one.
+    expect(sales.cumulative[1]).toEqual({ actual: 0.3, budget: 0.3, variance: 0, variancePct: 0 });
+    expect(sales).toMatchObject({ actualToDate: 0.3, budgetToDate: 0.3, variance: 0, variancePct: 0 });
+    expect(kpis).toMatchObject({ ytdActualNet: 0.3, forecastNet: 0.3, restOfYearNet: 0 });
+  });
+
+  test('budgetMissing says when BudgetSummary returned nothing for any chunk', () => {
+    expect(build([], [section('Income', [pLine('Sales', [1, 2, 0])])]).budgetMissing).toBe(true);
+    expect(build([section('Income', [line('Sales', [0, 0, 0])])], []).budgetMissing).toBe(false);
+    const m4 = _monthsBetween('2026-01', '2026-04');
+    const [c1, c2] = _chunkMonths(m4, 2);
+    expect(_mergeChunks([
+      { months: c1, budgetRows: [header], pnlRows: [] },
+      { months: c2, budgetRows: [header, section('Income', [line('Sales', [1, 1])])], pnlRows: [] },
+    ], 4).budgetMissing).toBe(false);
+    expect(_mergeChunks([
+      { months: c1, budgetRows: [header], pnlRows: [] },
+      { months: c2, budgetRows: [], pnlRows: [] },
+    ], 4).budgetMissing).toBe(true);
+  });
+});
+
+// ── ProfitAndLoss: a full month in every column ─────────────────────────────
+// Xero applies the anchor's date range to every comparison period, so an
+// anchor of 30 days or fewer cut the months before it short. The plan must
+// only ever anchor a multi-month call on a 31-day month.
+describe('xero/reports — ProfitAndLoss call plan (pure)', () => {
+  const { _pnlCallPlan, _monthsBetween, _chunkMonths, _mergeChunks } = require('./reports');
+  const plan = (from, to) => _pnlCallPlan(_monthsBetween(from, to)).map(c => [c.fromISO, c.toISO, c.periods, c.offset, c.n]);
+
+  test('a chunk ending in a 31-day month is one call anchored on it', () => {
+    expect(plan('2026-04', '2027-03')).toEqual([['2027-03-01', '2027-03-31', 11, 0, 12]]);
+    expect(plan('2026-01', '2026-12')).toEqual([['2026-12-01', '2026-12-31', 11, 0, 12]]);
+    expect(plan('2026-07', '2026-08')).toEqual([['2026-08-01', '2026-08-31', 1, 0, 2]]);
+  });
+
+  test('a chunk ending in a short month anchors on the month before, and fetches the last on its own', () => {
+    expect(plan('2026-01', '2026-09')).toEqual([['2026-08-01', '2026-08-31', 7, 0, 8], ['2026-09-01', '2026-09-30', undefined, 8, 1]]);
+    expect(plan('2026-01', '2026-11')).toEqual([['2026-10-01', '2026-10-31', 9, 0, 10], ['2026-11-01', '2026-11-30', undefined, 10, 1]]);
+    expect(plan('2026-07', '2026-09')).toEqual([['2026-08-01', '2026-08-31', 1, 0, 2], ['2026-09-01', '2026-09-30', undefined, 2, 1]]);
+    expect(plan('2026-04', '2026-06')).toEqual([['2026-05-01', '2026-05-31', 1, 0, 2], ['2026-06-01', '2026-06-30', undefined, 2, 1]]);
+    // Two months: the first is a single month too, so neither sends `periods`.
+    expect(plan('2026-01', '2026-02')).toEqual([['2026-01-01', '2026-01-31', undefined, 0, 1], ['2026-02-01', '2026-02-28', undefined, 1, 1]]);
+    // A leap February ends on the 29th, and is still fetched alone.
+    expect(plan('2027-03', '2028-02')).toEqual([['2028-01-01', '2028-01-31', 10, 0, 11], ['2028-02-01', '2028-02-29', undefined, 11, 1]]);
+  });
+
+  test('a single month is one call with no comparison periods', () => {
+    expect(plan('2026-09', '2026-09')).toEqual([['2026-09-01', '2026-09-30', undefined, 0, 1]]);
+    expect(plan('2026-10', '2026-10')).toEqual([['2026-10-01', '2026-10-31', undefined, 0, 1]]);
+  });
+
+  test('for any span: every anchor with comparison periods is a 31-day month, and the pieces cover each month once', () => {
+    for (let start = 0; start < 24; start++) {
+      for (let len = 1; len <= 12; len++) {
+        const s = new Date(Date.UTC(2026, start, 1)), e = new Date(Date.UTC(2026, start + len - 1, 1));
+        const key = d => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+        const chunk = _monthsBetween(key(s), key(e));
+        const pieces = _pnlCallPlan(chunk);
+        let next = 0;
+        for (const p of pieces) {
+          expect(p.offset).toBe(next);
+          next += p.n;
+          if (p.periods !== undefined) {
+            expect(p.toISO.endsWith('-31')).toBe(true);
+            expect(p.periods).toBe(p.n - 1);
+            expect(p.periods).toBeGreaterThanOrEqual(1);
+            expect(p.periods).toBeLessThanOrEqual(11);
+          }
+          // Each piece's dates are whole months, and its newest month is the anchor.
+          expect(p.fromISO).toBe(chunk[p.offset + p.n - 1].startISO);
+          expect(p.toISO).toBe(chunk[p.offset + p.n - 1].endISO);
+        }
+        expect(next).toBe(len);
+        expect(pieces.length).toBeLessThanOrEqual(2);
+      }
+    }
+  });
+
+  test('the pieces line up column for column when merged', () => {
+    const months = _monthsBetween('2026-07', '2026-09');
+    const rowOf = (label, vals) => ({ rowType: 'Row', cells: [{ value: label }, ...vals.map(v => ({ value: String(v) }))] });
+    const sec = rows => [{ rowType: 'Section', title: 'Income', rows }];
+    const [head, tail] = _pnlCallPlan(months);
+    const { layout } = _mergeChunks([{
+      months,
+      budgetRows: sec([rowOf('Sales', [10, 20, 30])]),
+      // Each piece newest-first, as Xero returns it.
+      pnl: [{ rows: sec([rowOf('Sales', [2, 1])]), offset: head.offset, n: head.n },
+            { rows: sec([rowOf('Sales', [3]), rowOf('Late Fees', [9])]), offset: tail.offset, n: tail.n }],
+    }], 3);
+    expect(layout.find(r => r.label === 'Sales').actual).toEqual([1, 2, 3]);
+    expect(layout.find(r => r.label === 'Late Fees').actual).toEqual([0, 0, 9]);
   });
 });
 
@@ -1208,9 +1574,10 @@ describe('xero/reports — period resolution (pure)', () => {
         pnlRows:    [{ rowType: 'Section', title: 'Income', rows: [rowOf('Sales', [4, 3])] }] },
     ];
     const m = _mergeChunks(parts, months.length);
-    expect(m.budget.get('Sales')).toEqual([10, 20, 30, 40]);
-    expect(m.actual.get('Sales')).toEqual([1, 2, 3, 4]);   // reversed per chunk, then concatenated
-    expect(m.skeleton.filter(r => r.kind === 'section')).toHaveLength(1); // not duplicated per chunk
+    const sales = m.layout.find(r => r.label === 'Sales');
+    expect(sales.budget).toEqual([10, 20, 30, 40]);
+    expect(sales.actual).toEqual([1, 2, 3, 4]);   // reversed per chunk, then concatenated
+    expect(m.layout.filter(r => r.kind === 'section')).toHaveLength(1); // not duplicated per chunk
   });
 
   test('an account missing from one chunk is zero-filled, not shifted', () => {
@@ -1224,8 +1591,8 @@ describe('xero/reports — period resolution (pure)', () => {
       { months: chunks[1], budgetRows: [{ rowType: 'Section', title: 'Income', rows: [rowOf('B', [7, 8])] }], pnlRows: [] },
     ];
     const m = _mergeChunks(parts, months.length);
-    expect(m.budget.get('A')).toEqual([1, 2, 0, 0]);
-    expect(m.budget.get('B')).toEqual([0, 0, 7, 8]);
+    expect(m.layout.find(r => r.label === 'A').budget).toEqual([1, 2, 0, 0]);
+    expect(m.layout.find(r => r.label === 'B').budget).toEqual([0, 0, 7, 8]);
   });
 });
 
