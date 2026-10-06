@@ -233,6 +233,33 @@ function budgetVsActualDoc(payload, opts = {}) {
 // ── Budget Variance ─────────────────────────────────────────────────────────
 // Portrait: five columns fit comfortably, and it is the report someone is more
 // likely to read on a phone.
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// '2026-10-06' -> '6 Oct 2026'. Read from the string, not through Date, so no
+// timezone can move it a day.
+function dayLabel(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  return m ? `${Number(m[3])} ${MONTH_ABBR[Number(m[2]) - 1]} ${m[1]}` : '';
+}
+
+// Periods that are a year, so their rollup is a "year to date". Anything else
+// the reader picked (a quarter, the last six months) is a period to date.
+const YEAR_PERIODS = new Set(['fy', 'fy-ytd', 'prev-fy', 'next-fy', 'cy', 'cy-ytd']);
+
+// What the variance figures cover, in words. Shared by the PDF and the
+// workbook, and matched by the screen. A month still in progress says so and
+// when it was read: titling it "Oct 2026" alone reads as a closed month.
+function varianceLabel(payload, month = 'ytd') {
+  const months = payload?.months || [];
+  const key    = payload?.period?.key;
+  const ytd    = !key || YEAR_PERIODS.has(key) ? 'Year to date' : 'Period to date';
+  if (month === 'ytd') return ytd;
+  const m = months.find(x => x.key === month) || months[0];
+  if (!m) return ytd;
+  const cur = payload?.kpis?.currentMonth;
+  return cur && cur.key === m.key && cur.asOf ? `${m.label} so far, as of ${dayLabel(cur.asOf)}` : m.label;
+}
+
 function budgetVarianceDoc(payload, opts = {}) {
   const { rows = [], organisation = {}, months = [] } = payload || {};
   const currency  = organisation.currency && organisation.currency !== '—' ? organisation.currency : '';
@@ -242,7 +269,7 @@ function budgetVarianceDoc(payload, opts = {}) {
   // 'ytd' rolls up the fully elapsed months; a month key reports that month
   // alone. Same two choices the screen offers, resolved the same way.
   const idx   = month === 'ytd' ? -1 : Math.max(0, months.findIndex(m => m.key === month));
-  const label = month === 'ytd' ? 'Year to date' : (months[idx]?.label || 'Year to date');
+  const label = varianceLabel(payload, month);
   const figuresFor = r => (month === 'ytd'
     ? { actual: r.actualToDate, budget: r.budgetToDate, variance: r.variance, variancePct: r.variancePct }
     : (r.monthly || [])[idx] || { actual: 0, budget: 0, variance: 0, variancePct: null });
@@ -338,6 +365,8 @@ module.exports = {
   budgetVsActualDoc,
   budgetVarianceDoc,
   exportFilename,
+  varianceLabel,
+  dayLabel,
   // exported for tests
   _cell: cell, _money: money, _pct: pct, _currencyNote: currencyNote, _latin1: latin1,
 };

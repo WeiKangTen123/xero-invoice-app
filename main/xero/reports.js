@@ -725,7 +725,12 @@ function _mergeChunks(parts, totalMonths) {
 // elapsed — never both, and never a sum of the two. Subtotals are taken from
 // whichever report supplied that column rather than recomputed, so they stay
 // internally consistent with the figures above them.
-function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx, merged }) {
+//
+// `currentIdx` is the month containing today, when the period includes it. Its
+// cell stays budget, for the reason _actualThroughIndex gives; what has been
+// booked against it so far is reported beside the grid as kpis.currentMonth
+// instead, read on `asOfISO`, and is not added into any total.
+function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx, merged, currentIdx = -1, asOfISO = null }) {
   // `merged` is the multi-chunk path; the single-report path is unchanged so a
   // period that fits one Xero call pair behaves exactly as it always did.
   const budget   = merged ? merged.budget   : _rowValuesByLabel(budgetRows);
@@ -777,6 +782,7 @@ function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx, m
   });
 
   const net = rows.find(r => r.kind === 'summary' && /^net (profit|loss)/i.test(r.label));
+  const cur = currentIdx >= 0 && currentIdx < months.length ? currentIdx : -1;
   return {
     rows,
     kpis: {
@@ -785,6 +791,15 @@ function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx, m
       ytdActualNet:   net ? net.actualToDate : 0,
       restOfYearNet:  net ? net.cells.slice(elapsed).reduce((s, v) => s + v, 0) : 0,
       forecastNet:    net ? net.total : 0,
+      // Everything Xero holds dated in this month, which can include
+      // transactions dated later in it — "so far" means booked so far.
+      currentMonth: cur < 0 ? null : {
+        key:       months[cur].key,
+        label:     months[cur].label,
+        asOf:      asOfISO,
+        actualNet: net ? net.monthly[cur].actual : 0,
+        budgetNet: net ? net.monthly[cur].budget : 0,
+      },
     },
   };
 }
@@ -797,6 +812,8 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
                                : _resolveWindow(window, today, fiscalYearEnd);
   const months        = win.months;
   const actualThroughIdx = _actualThroughIndex(months, today);
+  const todayKey      = `${today.year}-${String(today.month).padStart(2, '0')}`;
+  const currentIdx    = months.findIndex(m => m.key === todayKey);
 
   // The exact span is part of the key — two periods are two different reports,
   // and serving one for the other would silently show the wrong months.
@@ -844,7 +861,7 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
   });
 
   const built = _buildBudgetVariance({
-    months, actualThroughIdx,
+    months, actualThroughIdx, currentIdx, asOfISO: _fmtISODate(today),
     merged: _mergeChunks(parts, months.length),
   });
 
@@ -867,7 +884,7 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
     budgets,
     period:       { key: win.key, label: win.label, months: months.length, chunks: chunks.length,
                     fromKey: months[0].key, toKey: months[months.length - 1].key },
-    months:       months.map((m, i) => ({ key: m.key, label: m.label, source: i <= actualThroughIdx ? 'actual' : 'budget' })),
+    months:       months.map((m, i) => ({ key: m.key, label: m.label, source: i <= actualThroughIdx ? 'actual' : 'budget', current: i === currentIdx })),
     ...built,
   }, _periodCacheTtl(months, today));
 }

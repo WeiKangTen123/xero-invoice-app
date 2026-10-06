@@ -267,4 +267,43 @@ describe('routes/xero-reports', () => {
       }
     });
   });
+
+  // The budget tabs had no period: the route passed none, so they were fixed
+  // to the current financial year, and the exports with them.
+  describe('budget period', () => {
+    const auth = req => req.set('Authorization', `Bearer ${tokenFor(testUser)}`);
+    beforeEach(() => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1', tenantName: 'Org' }]);
+      reports.getBudgetVariance.mockResolvedValue({ months: [], rows: [] });
+    });
+
+    test('GET /budget-variance passes a preset or a from/to range through', async () => {
+      await auth(request(serverFor(app)).get('/api/xero-reports/budget-variance?preset=prev-fy')).expect(200);
+      expect(reports.getBudgetVariance).toHaveBeenLastCalledWith(testUser.id, 't1',
+        expect.objectContaining({ period: { preset: 'prev-fy' } }));
+
+      await auth(request(serverFor(app)).get('/api/xero-reports/budget-variance?from=2025-07&to=2026-12')).expect(200);
+      expect(reports.getBudgetVariance).toHaveBeenLastCalledWith(testUser.id, 't1',
+        expect.objectContaining({ period: { from: '2025-07', to: '2026-12' } }));
+    });
+
+    test('GET /budget-variance with no period asks for none, which is the whole financial year — not year to date', async () => {
+      await auth(request(serverFor(app)).get('/api/xero-reports/budget-variance')).expect(200);
+      const opts = reports.getBudgetVariance.mock.calls.at(-1)[2];
+      expect(opts.period).toBeUndefined();
+    });
+
+    test('the export link carries the period, and the export reads that period', async () => {
+      const res = await auth(request(serverFor(app))
+        .get('/api/xero-reports/budget/export-url?kind=grid&format=pdf&from=2025-01&to=2025-12')).expect(200);
+      const token = decodeURIComponent(res.body.url.split('token=')[1]);
+      expect(jwt.verify(token, jwtSecret()).period).toEqual({ from: '2025-01', to: '2025-12' });
+
+      // Rejected so no file is rendered; only which report was asked for matters here.
+      reports.getBudgetVariance.mockRejectedValueOnce(new Error('stop'));
+      await request(serverFor(app)).get(`/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`).expect(500);
+      expect(reports.getBudgetVariance).toHaveBeenLastCalledWith(testUser.id, 't1',
+        expect.objectContaining({ period: { from: '2025-01', to: '2025-12' } }));
+    });
+  });
 });

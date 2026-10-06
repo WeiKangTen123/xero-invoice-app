@@ -113,7 +113,7 @@ function budgetVarianceWorkbook(payload, opts = {}) {
   const generated = opts.generatedAt || Date.now();
   const month     = opts.month || 'ytd';
   const idx       = month === 'ytd' ? -1 : Math.max(0, months.findIndex(m => m.key === month));
-  const label     = month === 'ytd' ? 'Year to date' : (months[idx]?.label || 'Year to date');
+  const label     = doc.varianceLabel(payload, month);
   const figuresFor = r => (month === 'ytd'
     ? { actual: r.actualToDate, budget: r.budgetToDate, variance: r.variance, variancePct: r.variancePct }
     : (r.monthly || [])[idx] || { actual: 0, budget: 0, variance: 0, variancePct: null });

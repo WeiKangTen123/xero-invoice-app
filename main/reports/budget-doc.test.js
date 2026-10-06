@@ -187,3 +187,38 @@ describe('reports/budget-doc — filenames and character coverage', () => {
     expect(doc._latin1('A–B')).toBe('A-B');
   });
 });
+
+// What the variance export is titled. It said "Oct 2026" for a month six days
+// old, which reads as a closed month, and "Year to date" for any period.
+describe('reports/budget-doc — what the variance figures cover', () => {
+  const months = [{ key: '2026-09', label: 'Sep 2026' }, { key: '2026-10', label: 'Oct 2026' }];
+  const payload = {
+    months,
+    period: { key: 'fy' },
+    kpis: { currentMonth: { key: '2026-10', label: 'Oct 2026', asOf: '2026-10-06' } },
+  };
+
+  test('a month in progress says so, with the day it was read', () => {
+    expect(doc.varianceLabel(payload, '2026-10')).toBe('Oct 2026 so far, as of 6 Oct 2026');
+  });
+
+  test('a closed month is just its name', () => {
+    expect(doc.varianceLabel(payload, '2026-09')).toBe('Sep 2026');
+  });
+
+  test('the rollup is a year to date only when the period is a year', () => {
+    expect(doc.varianceLabel(payload, 'ytd')).toBe('Year to date');
+    expect(doc.varianceLabel({ ...payload, period: { key: 'last-6' } }, 'ytd')).toBe('Period to date');
+    expect(doc.varianceLabel({ months }, 'ytd')).toBe('Year to date'); // no period: the old default
+  });
+
+  test('the PDF header carries the label', () => {
+    const def = doc.budgetVarianceDoc({ ...payload, rows: [], organisation: { name: 'Org' } }, { month: '2026-10', generatedAt: 0 });
+    expect(JSON.stringify(def.header)).toContain('Oct 2026 so far, as of 6 Oct 2026');
+  });
+
+  test('dayLabel reads the date as written, and refuses anything else', () => {
+    expect(doc.dayLabel('2026-01-31')).toBe('31 Jan 2026');
+    expect(doc.dayLabel('nope')).toBe('');
+  });
+});

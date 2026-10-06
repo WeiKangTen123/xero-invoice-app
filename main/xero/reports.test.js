@@ -715,7 +715,29 @@ describe('xero/reports — Budget vs Actual (pure)', () => {
       ytdActualNet:  32727,
       restOfYearNet: 20946 - 32727, // budget Aug–Mar
       forecastNet:   20946,
+      currentMonth:  null,          // no month in progress was named
     });
+  });
+
+  test('the month in progress reports what is booked so far, and leaves the grid and the forecast alone', () => {
+    // 17 Aug: Aug (index 4) is in progress. The P&L already holds 52,000 for it.
+    const out = _buildBudgetVariance({
+      budgetRows, pnlRows, months, actualThroughIdx: _actualThroughIndex(months, TODAY),
+      currentIdx: 4, asOfISO: '2026-08-17',
+    });
+    expect(out.kpis.currentMonth).toEqual({
+      key: '2026-08', label: 'Aug 2026', asOf: '2026-08-17',
+      actualNet: 52000, budgetNet: 17615,
+    });
+    // The Aug cell is still its budget, and the forecast is unchanged by the
+    // part-month actuals: they are reported beside the grid, not in it.
+    expect(find(out.rows, 'Net Profit').cells[4]).toBe(17615);
+    expect(out.kpis.forecastNet).toBe(20946);
+  });
+
+  test('a current month outside the period is ignored rather than read past the end', () => {
+    const out = _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx: 3, currentIdx: 12, asOfISO: '2027-04-02' });
+    expect(out.kpis.currentMonth).toBeNull();
   });
 
   test('an account with actuals but no budget is appended, never dropped', () => {

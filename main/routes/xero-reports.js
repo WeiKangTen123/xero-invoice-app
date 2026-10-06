@@ -56,8 +56,10 @@ router.get('/contacts',      requireAuth, report('Insights contacts',      (req,
 router.get('/bank-transactions', requireAuth, report('Insights bank transactions',
   (req, t) => reports.getBankTransactions(req.user.id, t, req.query.accountId, { force: force(req) }), { needs: ['accountId'] }));
 // The monthly actual/budget grid. Needs accounting.reports.budgetsummary.read.
+// Takes the same ?preset= or ?from=&to= as the other reports; it used to take
+// nothing, so the budget tabs were fixed to the current financial year.
 router.get('/budget-variance', requireAuth, report('Budget vs Actual',
-  (req, t) => reports.getBudgetVariance(req.user.id, t, { timezone: tz(req), force: force(req) })));
+  (req, t) => reports.getBudgetVariance(req.user.id, t, { timezone: tz(req), force: force(req), period: _budgetPeriodFromQuery(req) })));
 // Powers Dashboard -> Overview and Revenue. Composed from the budget-variance
 // fetch plus a bank summary, so it needs no scope those two don't already have.
 router.get('/performance', requireAuth, report('Performance overview',
@@ -154,8 +156,11 @@ router.get('/budget/export-url', requireAuth, async (req, res) => {
     if (!EXPORT_KINDS.has(kind))     return res.status(400).json({ error: 'kind must be grid or variance' });
     if (!EXPORT_FORMATS.has(format)) return res.status(400).json({ error: 'format must be pdf or xlsx' });
 
-    const month = kind === 'variance' ? String(req.query.month || 'ytd') : undefined;
-    const token = issueExportToken(req.user.id, { tenantId, kind, format, month });
+    const month  = kind === 'variance' ? String(req.query.month || 'ytd') : undefined;
+    // The period on screen travels in the token, so the file is the report the
+    // reader was looking at, not the current financial year.
+    const period = _budgetPeriodFromQuery(req);
+    const token  = issueExportToken(req.user.id, { tenantId, kind, format, month, period });
     res.json({ url: `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`, expiresIn: EXPORT_TOKEN_TTL });
   } catch (err) {
     logger.error('Budget export URL failed', { error: xeroErrMsg(err), userId: req.user.id });
@@ -176,7 +181,7 @@ router.get('/budget/export', async (req, res) => {
     // Reads the same cached payload the screen renders, so an exported figure
     // and an on-screen one cannot disagree — and because it is already cached,
     // an export costs no additional Xero call.
-    const data = await reports.getBudgetVariance(spec.userId, spec.tenantId, { timezone });
+    const data = await reports.getBudgetVariance(spec.userId, spec.tenantId, { timezone, period: spec.period });
 
     const opts = { month: spec.month, generatedAt: Date.now() };
     const base = budgetDoc.exportFilename(spec.kind === 'variance' ? 'variance' : 'grid', data, opts);
@@ -208,6 +213,16 @@ function _periodFromQuery(req) {
   return (req.query.from && req.query.to)
     ? { from: req.query.from, to: req.query.to }
     : { preset: req.query.preset || req.query.window };
+}
+
+// The budget reports' period. Unlike _periodFromQuery, asking for nothing means
+// the whole financial year, not year to date: a budget report that silently
+// went from twelve months to nine would be a reporting error (see
+// periods.js#_resolveWindow, which this falls through to).
+function _budgetPeriodFromQuery(req) {
+  if (req.query.from && req.query.to) return { from: String(req.query.from), to: String(req.query.to) };
+  if (req.query.preset) return { preset: String(req.query.preset) };
+  return undefined;
 }
 
 // A call outside the token's granted scopes — the situation for anyone who
