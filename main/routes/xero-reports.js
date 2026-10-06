@@ -50,7 +50,6 @@ function report(label, fetch, { needs = [] } = {}) {
 router.get('/summary',       requireAuth, report('Insights summary',       (req, t) => reports.getSummary(req.user.id, t, { force: force(req) })));
 router.get('/accounts',      requireAuth, report('Insights accounts',      (req, t) => reports.getAccounts(req.user.id, t, { force: force(req) })));
 router.get('/bank-accounts', requireAuth, report('Insights bank accounts', (req, t) => reports.getBankAccounts(req.user.id, t, { force: force(req) })));
-router.get('/contacts',      requireAuth, report('Insights contacts',      (req, t) => reports.getContacts(req.user.id, t, { force: force(req) })));
 // The statement view behind Banking's "View transactions" — needs
 // accounting.banktransactions.read, so a scope error becomes a reconnect prompt.
 router.get('/bank-transactions', requireAuth, report('Insights bank transactions',

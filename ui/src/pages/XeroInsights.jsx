@@ -11,7 +11,6 @@ import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPa
 import { balancesByName } from './xero-insights/balances';
 import { KpiCard } from './xero-insights/bits';
 import BankingTab from './xero-insights/BankingTab';
-import ContactsTab from './xero-insights/ContactsTab';
 import BudgetTab from './xero-insights/BudgetTab';
 import VarianceTab from './xero-insights/VarianceTab';
 
@@ -30,7 +29,6 @@ const TABS = [
   { key: 'banking',  label: 'Banking' },
   // Chart of Accounts moved to Settings: it answers "is my setup right?", not
   // "how is the business doing?". Its route still backs AccountCodeSelect.
-  { key: 'contacts', label: 'Contacts' },
   { key: 'budget',   label: 'Budget vs Actual' },
   { key: 'variance', label: 'Budget Variance' },
 ];
@@ -82,13 +80,12 @@ export default function XeroInsights() {
   const [, forceTick] = useState(0); // re-render every 15s so "synced Xs ago" stays live
 
 
-  // Lazily-loaded directory tabs — fetched once, the first time each is opened.
+  // Lazily-loaded directory tab — fetched once, the first time it is opened.
   // data starts as [] (not null) so the very first render after switching to
-  // one of these tabs — before the fetch effect has even fired, while status
-  // is still 'idle' — never has to null-check .data.length mid-render.
+  // it — before the fetch effect has even fired, while status is still
+  // 'idle' — never has to null-check .data.length mid-render. (A Contacts tab
+  // loaded the same way; it was removed as nothing anyone used.)
   const [banking,  setBanking]  = useState({ status: 'idle', data: [], error: '' });
-  const [contacts, setContacts] = useState({ status: 'idle', data: [], error: '' });
-  const [contactSearch, setContactSearch] = useState('');
 
   // Banking tab's statement drill-down — which account, and its transactions.
   const [selectedBankAccount, setSelectedBankAccount] = useState(null);
@@ -220,12 +217,6 @@ export default function XeroInsights() {
       api.get(`/xero-reports/bank-accounts${activeTenantId ? `?tenantId=${activeTenantId}` : ''}`)
         .then(d => setBanking({ status: 'done', data: d.bankAccounts || [], error: '' }))
         .catch(err => setBanking({ status: 'done', data: [], error: err.message }));
-    }
-    if (tab === 'contacts' && contacts.status === 'idle') {
-      setContacts(s => ({ ...s, status: 'loading' }));
-      api.get(`/xero-reports/contacts${activeTenantId ? `?tenantId=${activeTenantId}` : ''}`)
-        .then(d => setContacts({ status: 'done', data: d.contacts || [], error: '' }))
-        .catch(err => setContacts({ status: 'done', data: [], error: err.message }));
     }
     // Both budget tabs share one fetch and one cache entry — the Budget Variance
     // view is a different presentation of the same merged data, not a second call.
@@ -381,12 +372,6 @@ export default function XeroInsights() {
     finally { setReanalysing(false); }
   }
 
-  const filteredContacts = useMemo(() => {
-    if (!contacts.data) return [];
-    const q = contactSearch.trim().toLowerCase();
-    if (!q) return contacts.data;
-    return contacts.data.filter(c => c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q));
-  }, [contacts.data, contactSearch]);
 
   if (data === null && !error) {
     return (
@@ -680,7 +665,6 @@ export default function XeroInsights() {
       {tab === 'banking' && <BankingTab user={user} isMobile={isMobile} banking={banking} selectedBankAccount={selectedBankAccount} setSelectedBankAccount={setSelectedBankAccount} statement={statement} perf={perf} viewStatement={viewStatement} bankBalances={bankBalances} currency={currency} />}
 
 
-      {tab === 'contacts' && <ContactsTab isMobile={isMobile} contacts={contacts} contactSearch={contactSearch} setContactSearch={setContactSearch} filteredContacts={filteredContacts} />}
 
 
       {tab === 'budget' && <BudgetTab budget={budget} fetchBudget={fetchBudget} currency={currency} exportQuery={budgetQuery()} />}

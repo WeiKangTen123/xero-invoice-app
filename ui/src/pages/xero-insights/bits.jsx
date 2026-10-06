@@ -20,11 +20,6 @@ export function toDateLabel(period) {
   return !period?.key || YEAR_PERIODS.has(period.key) ? 'Year to date' : 'Period to date';
 }
 
-// Generic "search this table" box, reused for accounts/contacts.
-export function SearchBox({ value, onChange, placeholder }) {
-  return <input type="text" className="form-input" placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)} style={{ maxWidth: 240 }} />;
-}
-
 // One headline figure. The three at the top of the page were identical but for
 // their colour, icon and wording, and the phone treatment has to apply to all
 // three the same way — so it lives in one place now.

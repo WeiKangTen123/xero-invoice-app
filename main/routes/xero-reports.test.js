@@ -111,16 +111,15 @@ describe('routes/xero-reports', () => {
     expect(res.body.error).toMatch(/rate limit/i);
   });
 
-  describe('GET /accounts, /bank-accounts, /contacts', () => {
-    test('all three require authentication', async () => {
+  describe('GET /accounts, /bank-accounts', () => {
+    test('both require authentication', async () => {
       await request(serverFor(app)).get('/api/xero-reports/accounts').expect(401);
       await request(serverFor(app)).get('/api/xero-reports/bank-accounts').expect(401);
-      await request(serverFor(app)).get('/api/xero-reports/contacts').expect(401);
     });
 
-    test('all three return connected:false with no tenant', async () => {
+    test('both return connected:false with no tenant', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([]);
-      for (const path of ['accounts', 'bank-accounts', 'contacts']) {
+      for (const path of ['accounts', 'bank-accounts']) {
         const res = await request(serverFor(app))
           .get(`/api/xero-reports/${path}`)
           .set('Authorization', `Bearer ${tokenFor(testUser)}`)
@@ -154,24 +153,12 @@ describe('routes/xero-reports', () => {
       expect(reports.getBankAccounts).toHaveBeenCalledWith(testUser.id, 't1', { force: true });
     });
 
-    test('GET /contacts calls reports.getContacts for the resolved tenant', async () => {
+    test('a failure surfaces as 500, not a crash', async () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      reports.getContacts.mockResolvedValue({ contacts: [] });
-
-      await request(serverFor(app))
-        .get('/api/xero-reports/contacts')
-        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
-        .expect(200);
-
-      expect(reports.getContacts).toHaveBeenCalledWith(testUser.id, 't1', { force: false });
-    });
-
-    test('a failure on any of the three surfaces as 500, not a crash', async () => {
-      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
-      reports.getContacts.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
+      reports.getAccounts.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
 
       const res = await request(serverFor(app))
-        .get('/api/xero-reports/contacts')
+        .get('/api/xero-reports/accounts')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(500);
       expect(res.body.error).toMatch(/rate limit/i);
@@ -247,8 +234,9 @@ describe('routes/xero-reports', () => {
   });
 
   describe('one handler shape', () => {
-    test('the three report routes nothing called are gone', async () => {
-      for (const path of ['/api/xero-reports/period', '/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31', '/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31']) {
+    // /contacts went with the Dashboard's Contacts tab, its only caller.
+    test('the report routes nothing calls are gone', async () => {
+      for (const path of ['/api/xero-reports/period', '/api/xero-reports/profit-loss?from=2026-01-01&to=2026-01-31', '/api/xero-reports/bank-summary?from=2026-01-01&to=2026-01-31', '/api/xero-reports/contacts']) {
         const res = await request(serverFor(app)).get(path).set('Authorization', `Bearer ${tokenFor(testUser)}`);
         if (res.status !== 404) console.log('UNEXPECTED', path, res.status, res.text.slice(0, 300));
         expect({ status: res.status, body: res.body }).toMatchObject({ status: 404 });   // body shown on failure
@@ -259,8 +247,7 @@ describe('routes/xero-reports', () => {
       tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1', tenantName: 'Org' }]);
       reports.getAccounts.mockResolvedValue({ accounts: [] });
       reports.getBankAccounts.mockResolvedValue({ bankAccounts: [] });
-      reports.getContacts.mockResolvedValue({ contacts: [] });
-      for (const path of ['/api/xero-reports/accounts', '/api/xero-reports/bank-accounts', '/api/xero-reports/contacts']) {
+      for (const path of ['/api/xero-reports/accounts', '/api/xero-reports/bank-accounts']) {
         const res = await request(serverFor(app)).get(path).set('Authorization', `Bearer ${tokenFor(testUser)}`).expect(200);
         expect(res.body).toMatchObject({ connected: true, activeTenantId: 't1' });
         expect(res.body.tenants).toHaveLength(1);
