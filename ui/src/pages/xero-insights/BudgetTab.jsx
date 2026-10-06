@@ -1,7 +1,7 @@
 import { fmtMoney } from '../../utils/format';
 import { BudgetExport } from './BudgetExport';
 import { BudgetGrid } from './BudgetGrid';
-import { SourceNote, dayLabel } from './bits';
+import { SourceNote, dayLabel, isFullYear, lastLoaded } from './bits';
 
 export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }) {
   return (
@@ -10,7 +10,7 @@ export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }
             <div>
               <div className="card-title" style={{ marginBottom: 2 }}>Budget vs Actual</div>
               <div className="card-subtitle" style={{ marginBottom: 2 }}>
-                {budget.data?.fiscalYear?.label || 'Current financial year by month'}
+                {lastLoaded(budget.data?.fiscalYear?.label, !!budget.error) || 'Current financial year by month'}
               </div>
               <SourceNote>Xero Profit &amp; Loss (actuals) + Budget Summary — Overall Budget</SourceNote>
             </div>
@@ -33,10 +33,15 @@ export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }
             const cur = d.organisation?.currency || currency;
             const k   = d.kpis;
             const cm  = k.currentMonth;
+            // The forecast is the total over the selected period. Called a
+            // full-year forecast whatever the period, a quarter's total read as
+            // the whole year's.
+            const fullYear = isFullYear(d.period);
             const tiles = [
               { label: `Actual to date (${k.monthsElapsed}mo)`, value: k.ytdActualNet, hint: 'Net profit, completed months' },
               { label: `Budget remaining (${k.monthsTotal - k.monthsElapsed}mo)`, value: k.restOfYearNet, hint: 'Net profit still budgeted' },
-              { label: 'Full-year forecast', value: k.forecastNet, hint: 'Actual to date + budget ahead' },
+              { label: fullYear ? 'Full-year forecast' : 'Period forecast', value: k.forecastNet,
+                hint: fullYear ? 'Actual to date + budget ahead' : 'Actual to date + budget to the end of the period' },
             ];
             return (
               <>

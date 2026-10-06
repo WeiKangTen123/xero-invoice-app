@@ -20,6 +20,23 @@ export function toDateLabel(period) {
   return !period?.key || YEAR_PERIODS.has(period.key) ? 'Year to date' : 'Period to date';
 }
 
+// A forecast runs to the end of the period, so it is a full-year forecast only
+// when the period is a whole year. The year-to-date periods count as a year
+// above but end this month, so they are left out here. No key means a payload
+// from before periods existed, which was always the whole financial year.
+const FULL_YEAR_PERIODS = new Set(['fy', 'prev-fy', 'next-fy', 'cy']);
+export function isFullYear(period) {
+  return !period?.key || FULL_YEAR_PERIODS.has(period.key);
+}
+
+// The text describing a report's period, once a newer request for another
+// period has failed. The report kept on screen is the last one that loaded, and
+// the period picker already shows the period that failed, so the two would
+// otherwise disagree with nothing saying which is which.
+export function lastLoaded(text, failed) {
+  return failed && text ? `Last loaded: ${text}` : text;
+}
+
 // One headline figure. The three at the top of the page were identical but for
 // their colour, icon and wording, and the phone treatment has to apply to all
 // three the same way — so it lives in one place now.

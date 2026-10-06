@@ -1,7 +1,7 @@
 import { fmtMoney } from '../../utils/format';
 import { BudgetExport } from './BudgetExport';
 import { VarianceTable } from './VarianceTable';
-import { SourceNote, dayLabel, toDateLabel } from './bits';
+import { SourceNote, dayLabel, toDateLabel, lastLoaded } from './bits';
 
 // How the selected figures are titled. A month still in progress says "so
 // far" and when it was read; it used to say "For the month ended Oct 2026"
@@ -22,7 +22,7 @@ export default function VarianceTab({ isMobile, monthsRef, monthEdges, budget, v
             <div>
               <div className="card-title" style={{ marginBottom: 2 }}>Budget Variance</div>
               <div className="card-subtitle" style={{ marginBottom: 2 }}>
-                {subtitleFor(budget.data, varianceMonth)}
+                {lastLoaded(subtitleFor(budget.data, varianceMonth), !!budget.error && !!budget.data)}
               </div>
               <SourceNote>Xero Profit &amp; Loss (actuals) vs Budget Summary — variance computed per Xero&apos;s formula</SourceNote>
             </div>
@@ -113,9 +113,9 @@ export default function VarianceTab({ isMobile, monthsRef, monthEdges, budget, v
                 <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 14, lineHeight: 1.6 }}>
                   Variance is actual minus budget; the percentage divides that by the absolute budget, so a negative
                   budget still reads with Xero&apos;s sign. An on-budget line and a line with no budget both show
-                  &ldquo;-&rdquo; rather than 0.00%. Unlike the monthly grid, this view compares the current month using
-                  the actuals booked so far &mdash; so a part-elapsed month can look far ahead of budget simply because
-                  its costs haven&apos;t been entered yet.
+                  &ldquo;-&rdquo; rather than 0.00%. The month in progress is compared using the actuals booked in it so
+                  far, as in Xero&apos;s own report and the amber &ldquo;so far&rdquo; column of the Budget vs Actual grid
+                  &mdash; so it can look far ahead of budget simply because its costs haven&apos;t been entered yet.
                 </div>
               </>
             );
