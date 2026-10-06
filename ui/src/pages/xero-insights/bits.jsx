@@ -13,11 +13,55 @@ export function dayLabel(iso) {
   return m ? `${Number(m[3])} ${MONTH_ABBR[Number(m[2]) - 1]} ${m[1]}` : '';
 }
 
-// "Year to date" only when the period is a year; a quarter or the last six
-// months is a period to date. Matches budget-doc.js#varianceLabel.
-const YEAR_PERIODS = new Set(['fy', 'fy-ytd', 'prev-fy', 'next-fy', 'cy', 'cy-ytd']);
-export function toDateLabel(period) {
-  return !period?.key || YEAR_PERIODS.has(period.key) ? 'Year to date' : 'Period to date';
+// The closed months a to-date figure covers: 'Apr 2026 – Sep 2026', just
+// 'Apr 2026' for one, or '' while none has closed. The server names them; a
+// payload from before it did falls back to the first and last of the elapsed
+// months, which are the same two months.
+export function closedRange(d) {
+  const n = d?.kpis?.monthsElapsed ?? 0;
+  if (n <= 0) return '';
+  const from = d?.period?.closedFromLabel || d?.months?.[0]?.label;
+  const to   = d?.period?.closedToLabel   || d?.months?.[n - 1]?.label;
+  if (!from || !to) return '';
+  return from === to ? from : `${from} – ${to}`;
+}
+
+// A to-date figure's title, naming its months: "Year to date · Apr 2026 –
+// Sep 2026 (6 completed months)". "Year to date" alone reads the same for this
+// year and last, and does not say that the month in progress is left out.
+// Whether it is a year or a period to date is the server's call, so the
+// exports and the screen cannot word it differently; without that word from
+// it the title stays neutral rather than guessing.
+export function toDateText(d, { count = true } = {}) {
+  const label = d?.period?.toDateLabel || 'To date';
+  const range = closedRange(d);
+  if (!range) return `${label} · no completed months yet`;
+  if (!count) return `${label} · ${range}`;
+  const n = d.kpis.monthsElapsed;
+  return `${label} · ${range} (${n} completed month${n === 1 ? '' : 's'})`;
+}
+
+// Said outright when Xero has no Overall Budget for the period. Every budget
+// cell would otherwise read "-", the same as a line budgeted at nil, and every
+// variance would equal its actual with nothing on screen saying why.
+export function BudgetMissingNote() {
+  return (
+    <div className="alert alert-warning" style={{ marginTop: 14 }}>
+      <span className="alert-icon">⚠</span>
+      Xero returned no Overall Budget for this period, so budget figures are blank.
+    </div>
+  );
+}
+
+// An account Xero has actuals for but no budget line at all. Its budget prints
+// "-" exactly like a line budgeted at nil, so the tag says which one it is.
+export function NotBudgeted() {
+  return (
+    <span style={{ marginLeft: 6, padding: '0 5px', fontSize: 10, fontWeight: 600, color: 'var(--text-muted)',
+                   border: '1px solid var(--border)', borderRadius: 4, whiteSpace: 'nowrap' }}>
+      not budgeted
+    </span>
+  );
 }
 
 // A forecast runs to the end of the period, so it is a full-year forecast only

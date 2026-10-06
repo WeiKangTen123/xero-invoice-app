@@ -1,7 +1,7 @@
 import { fmtMoney } from '../../utils/format';
 import { BudgetExport } from './BudgetExport';
 import { BudgetGrid } from './BudgetGrid';
-import { SourceNote, dayLabel, isFullYear, lastLoaded } from './bits';
+import { BudgetMissingNote, SourceNote, closedRange, dayLabel, isFullYear, lastLoaded } from './bits';
 
 export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }) {
   return (
@@ -38,13 +38,15 @@ export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }
             // the whole year's.
             const fullYear = isFullYear(d.period);
             const tiles = [
-              { label: `Actual to date (${k.monthsElapsed}mo)`, value: k.ytdActualNet, hint: 'Net profit, completed months' },
+              { label: `Actual to date (${k.monthsElapsed}mo)`, value: k.ytdActualNet,
+                hint: `Net profit, ${closedRange(d) || 'no completed months yet'}` },
               { label: `Budget remaining (${k.monthsTotal - k.monthsElapsed}mo)`, value: k.restOfYearNet, hint: 'Net profit still budgeted' },
               { label: fullYear ? 'Full-year forecast' : 'Period forecast', value: k.forecastNet,
                 hint: fullYear ? 'Actual to date + budget ahead' : 'Actual to date + budget to the end of the period' },
             ];
             return (
               <>
+                {d.budgetMissing && <BudgetMissingNote />}
                 <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', margin: '18px 0 4px' }}>
                   {tiles.map(t => (
                     <div key={t.label} className="card figure-tile" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
@@ -78,7 +80,7 @@ export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }
                   </div>
                 </div>
 
-                <BudgetGrid months={d.months} rows={d.rows} />
+                <BudgetGrid months={d.months} rows={d.rows} currency={cur} />
 
                 <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 14, lineHeight: 1.6 }}>
                   A month shows actuals only once it has fully closed — the current month reads as budget, since its

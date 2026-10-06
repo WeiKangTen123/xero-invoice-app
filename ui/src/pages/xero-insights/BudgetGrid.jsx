@@ -1,5 +1,6 @@
 import { Fragment } from 'react';
 import { fmtCell } from '../../utils/format';
+import { NotBudgeted } from './bits';
 
 // The monthly actual/budget grid. 14 columns don't fit any normal screen, so the
 // table scrolls horizontally inside its own container while the row-label column
@@ -9,7 +10,10 @@ import { fmtCell } from '../../utils/format';
 // it: what has been booked against it in Xero so far. That column is never
 // added into Total, which stays closed actuals plus budget — a few days of
 // figures counted as a whole month would understate the year.
-export function BudgetGrid({ months, rows }) {
+//
+// The currency is named once, above the account column, rather than in every
+// cell; the cells print as the exports do (see fmtCell).
+export function BudgetGrid({ months, rows, currency }) {
   const firstBudgetIdx = months.findIndex(m => m.source === 'budget');
   const actualCount    = firstBudgetIdx === -1 ? months.length : firstBudgetIdx;
   // The current month is always the first budget month when the period
@@ -35,7 +39,9 @@ export function BudgetGrid({ months, rows }) {
         <thead>
           {/* Band spanning the blocks, so ACTUAL, SO FAR and BUDGET read as separate things */}
           <tr>
-            <th style={labelCell()} />
+            <th style={labelCell({ padding: '2px 12px 2px 0', fontSize: 10, fontWeight: 600, color: 'var(--text-muted)' })}>
+              {currency ? `Figures in ${currency}` : ''}
+            </th>
             {actualCount > 0 && (
               <th colSpan={actualCount} style={{ padding: '2px 8px', fontSize: 10, letterSpacing: '0.08em', color: 'var(--success)', textTransform: 'uppercase' }}>Actual</th>
             )}
@@ -78,7 +84,9 @@ export function BudgetGrid({ months, rows }) {
             const booked  = hasCur ? (r.monthly?.[curIdx]?.actual ?? 0) : 0;
             return (
               <tr key={`r-${idx}`} style={rowLine}>
-                <td style={labelCell({ paddingLeft: r.kind === 'account' ? 14 : 0, fontWeight: strong ? 700 : 400 })}>{r.label}</td>
+                <td style={labelCell({ paddingLeft: r.kind === 'account' ? 14 : 0, fontWeight: strong ? 700 : 400 })}>
+                  {r.label}{r.unbudgeted && <NotBudgeted />}
+                </td>
                 {r.cells.map((v, i) => (
                   <Fragment key={i}>
                     {hasCur && i === curIdx && (
