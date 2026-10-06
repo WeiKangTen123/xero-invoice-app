@@ -294,6 +294,59 @@ describe('routes/xero-reports', () => {
     });
   });
 
+  // "Generated" was stamped in the server's timezone, UTC on the VM, beside
+  // "as of" dates in the organisation's; and nothing in the file said when its
+  // figures had been read from Xero, though an export re-reads them.
+  describe('budget export times', () => {
+    const FETCHED = Date.UTC(2026, 9, 6, 17, 25);
+    const exportUrl = spec => {
+      const token = jwt.sign({ userId: testUser.id, tenantId: 't1', purpose: 'budget-export', ...spec }, jwtSecret(), { expiresIn: '5m' });
+      return `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`;
+    };
+    const binary = (res, cb) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => cb(null, Buffer.concat(chunks)));
+    };
+    beforeEach(() => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1', tenantName: 'Org' }]);
+      reports.getBudgetVariance.mockResolvedValue({
+        organisation: { name: 'Org', currency: 'SGD' }, months: [], rows: [], kpis: { monthsElapsed: 0 }, fetchedAt: FETCHED,
+      });
+    });
+
+    test('the workbook is stamped in the user\'s own timezone, and says when its figures were read', async () => {
+      users.saveUserConfig(testUser.id, { TIMEZONE: 'Asia/Tokyo' });
+      const render = require('../reports/budget-render');
+      const spy = jest.spyOn(render, 'budgetVarianceWorkbook');
+
+      const res = await request(serverFor(app)).get(exportUrl({ kind: 'variance', format: 'xlsx', month: 'ytd' }))
+        .buffer(true).parse(binary).expect(200);
+
+      expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timezone: 'Asia/Tokyo' }));
+      const ExcelJS = require('exceljs');
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(res.body);
+      const ws = wb.getWorksheet('Budget Variance');
+      expect(String(ws.getCell(2, 1).value)).toMatch(/· Generated \d{1,2} \w{3} \d{4}, \d{2}:\d{2} GMT\+9$/);
+      expect(ws.getCell(3, 1).value).toBe('Figures read from Xero at 7 Oct 2026, 02:25 GMT+9');
+    });
+
+    test('a user who never chose a timezone gets the default one, in the PDF too', async () => {
+      const budgetDoc = require('../reports/budget-doc');
+      const spy = jest.spyOn(budgetDoc, 'budgetVsActualDoc');
+
+      const res = await request(serverFor(app)).get(exportUrl({ kind: 'grid', format: 'pdf' }))
+        .buffer(true).parse(binary).expect(200);
+
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timezone: 'Asia/Singapore' }));
+      const header = spy.mock.results[0].value.header.columns[1].stack.map(s => s.text);
+      expect(header).toContain('Figures read from Xero at 7 Oct 2026, 01:25 GMT+8');
+      expect(header.find(t => t.startsWith('Generated '))).toMatch(/GMT\+8$/);
+    });
+  });
+
   // Every 12 months of a period is a pair of Xero calls, and nothing bounded
   // the span: from=1900-01&to=2100-12 cost about 400 calls against a budget of
   // 60 a minute shared with invoice posting. Every route that takes a period

@@ -199,7 +199,10 @@ router.get('/budget/export', async (req, res) => {
     // an export costs no additional Xero call.
     const data = await reports.getBudgetVariance(spec.userId, spec.tenantId, { timezone, period: spec.period });
 
-    const opts = { month: spec.month, generatedAt: Date.now() };
+    // The reader's timezone travels with the request so "Generated" and "Figures
+    // read from Xero" are stamped in it. They were formatted in the server's own
+    // zone, which is UTC on the VM, beside "as of" dates in the organisation's.
+    const opts = { month: spec.month, generatedAt: Date.now(), timezone };
     const base = budgetDoc.exportFilename(spec.kind === 'variance' ? 'variance' : 'grid', data, opts);
 
     if (spec.format === 'xlsx') {

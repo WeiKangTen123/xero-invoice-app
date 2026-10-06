@@ -14,11 +14,11 @@ const doc     = require('./budget-doc');
 // bundle and no .ttf, so embedding Roboto here would have meant committing font
 // binaries for no visible gain on a financial table.
 //
-// The catch is coverage: the standard fonts are Latin-1, so a label written in
-// a non-Latin script cannot be drawn. Rather than let that throw mid-stream,
-// text is folded to Latin-1 on the way in (see _latin1 in budget-doc), and the
-// .xlsx export — which is UTF-8 throughout — is the one to reach for when the
-// chart of accounts is not in a Latin script.
+// The catch is coverage: the standard fonts are drawn through WinAnsiEncoding,
+// so a label written in a non-Latin script cannot be drawn. Rather than let that
+// throw mid-stream, text is folded on the way in (see _latin1 in budget-doc),
+// and the .xlsx export — which is UTF-8 throughout — is the one to reach for
+// when the chart of accounts is not in a Latin script.
 const FONTS = {
   Helvetica: {
     normal:      'Helvetica',
@@ -51,91 +51,122 @@ function streamPdf(definition, res) {
 // Numbers land as numbers with a display format, never as preformatted strings.
 // An export that arrives as text is one an accountant cannot sum, which defeats
 // the point of offering a spreadsheet alongside the PDF.
-const MONEY_FMT = '#,##0.00;(#,##0.00);"–"';
+//
+// The formats print what the PDF and the screen print: brackets for negatives,
+// a plain "-" for nil (it was an en dash here and a hyphen everywhere else), and
+// percentages to two decimals with no plus sign, as Xero shows them. A
+// percentage that prints as a dash is written as the text "-" (see below), so
+// its format needs no zero section of its own.
+const MONEY_FMT = '#,##0.00;(#,##0.00);"-"';
+const PCT_FMT   = '0.00%';
 
-function _sheetHeader(sheet, organisation, title, subtitle, generatedAt, width) {
-  sheet.mergeCells(1, 1, 1, width);
-  sheet.getCell(1, 1).value = `${organisation?.name || 'Organisation'} — ${title}`;
-  sheet.getCell(1, 1).font  = { bold: true, size: 13 };
-  sheet.mergeCells(2, 1, 2, width);
-  sheet.getCell(2, 1).value = `${subtitle} · Generated ${new Date(generatedAt).toLocaleString('en-GB')}`;
-  sheet.getCell(2, 1).font  = { size: 9, color: { argb: 'FF6B7280' } };
+const ARGB = {
+  muted:    'FF6B7280',
+  accent:   'FF6366F1',
+  positive: 'FF0F9D76',
+  negative: 'FFB42318',
+  amber:    'FFB45309',
+};
+// The month in progress, tinted as on screen and in the PDF.
+const AMBER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFDF3DC' } };
+const RIGHT      = { horizontal: 'right' };
+
+// Rounded to cents, as the figures are printed. Sums of cent amounts can carry
+// float noise (9857.100000000002) that shows the moment someone widens the
+// number format, and that neither the PDF nor the screen ever shows.
+const num = v => (Math.round(Number(v || 0) * 100) / 100) || 0;
+
+// The title block above a sheet, one merged line each: what the report is, what
+// it covers and when it was generated, when its figures were read from Xero,
+// and — said before anything else — a missing budget. Returns the first free
+// row, since how many lines there are depends on the payload.
+function _sheetHeader(sheet, payload, title, subtitle, opts, width) {
+  const muted = { size: 9, color: { argb: ARGB.muted } };
+  const lines = [
+    { text: `${payload?.organisation?.name || 'Organisation'} — ${title}`, font: { bold: true, size: 13 } },
+    { text: `${subtitle} · Generated ${doc.stamp(opts.generatedAt, opts.timezone)}`, font: muted },
+  ];
+  const fetched = doc.fetchedNote(payload, opts.timezone);
+  if (fetched) lines.push({ text: fetched, font: muted });
+  if (payload?.budgetMissing) lines.push({ text: doc.BUDGET_MISSING, font: { bold: true, size: 10, color: { argb: ARGB.amber } } });
+  lines.forEach((l, i) => {
+    sheet.mergeCells(i + 1, 1, i + 1, width);
+    sheet.getCell(i + 1, 1).value = l.text;
+    sheet.getCell(i + 1, 1).font  = l.font;
+  });
+  return lines.length + 1;
+}
+
+// A heading spanning a block of columns, as the screen's band does.
+function _band(sheet, row, from, to, text, argb, fill) {
+  if (to > from) sheet.mergeCells(row, from, row, to);
+  const c = sheet.getCell(row, from);
+  c.value     = text;
+  c.font      = { bold: true, size: 9, color: { argb } };
+  c.alignment = { horizontal: 'center' };
+  if (fill) c.fill = fill;
+}
+
+// The account name stays exactly as Xero has it, so a workbook can be matched
+// against the chart of accounts or another export by name. "Not budgeted" goes
+// in the cell's note instead of being appended to the name, where it broke
+// every lookup on that account.
+const labelOf = r => r.label ?? '';
+const NOT_BUDGETED_NOTE = 'Not budgeted: this line has actuals in Xero but no Overall Budget.';
+function markUnbudgeted(row, r) {
+  if (r.unbudgeted) row.getCell(1).note = NOT_BUDGETED_NOTE;
+}
+
+function _workbook(generated) {
+  const wb   = new ExcelJS.Workbook();
+  wb.creator = 'Financial Automation';
+  wb.created = new Date(generated);
+  return wb;
 }
 
 function budgetVsActualWorkbook(payload, opts = {}) {
   const { months = [], rows = [], organisation = {}, fiscalYear = {} } = payload || {};
   const currency  = organisation.currency && organisation.currency !== '—' ? organisation.currency : '';
-  const generated = opts.generatedAt || Date.now();
+  const generated = opts.generatedAt ?? Date.now();
 
-  const wb    = new ExcelJS.Workbook();
-  wb.creator  = 'Financial Automation';
-  wb.created  = new Date(generated);
-  const sheet = wb.addWorksheet('Budget vs Actual', { views: [{ state: 'frozen', xSplit: 1, ySplit: 4 }] });
-
-  const width = months.length + 2;
-  _sheetHeader(sheet, organisation, 'Budget vs Actual',
-    [fiscalYear.label || 'Current financial year', currency].filter(Boolean).join(' · '), generated, width);
+  const wb    = _workbook(generated);
+  const sheet = wb.addWorksheet('Budget vs Actual');
 
   const firstBudgetIdx = months.findIndex(m => m.source === 'budget');
-  sheet.getRow(3).values = ['', ...months.map(m => (m.source === 'budget' ? 'Budget' : 'Actual')), ''];
-  sheet.getRow(3).font   = { size: 8, color: { argb: 'FF6B7280' } };
+  const actualCount    = firstBudgetIdx === -1 ? months.length : firstBudgetIdx;
+  // The month in progress gets a "so far" column before its budget one, as on
+  // screen and in the PDF, and it stays out of Total.
+  const curIdx   = doc.currentColumn(months);
+  const hasCur   = curIdx >= 0;
+  const soFarCol = hasCur ? 2 + curIdx : -1;
+  const colOf    = i => 2 + i + (hasCur && i >= curIdx ? 1 : 0);
+  const width    = months.length + 2 + (hasCur ? 1 : 0);
 
-  const header = sheet.getRow(4);
-  header.values = ['Account', ...months.map(m => m.label), 'Total'];
-  header.font   = { bold: true, size: 10 };
+  const bandRow = _sheetHeader(sheet, payload, 'Budget vs Actual',
+    [fiscalYear.label || 'Current financial year', currency].filter(Boolean).join(' · '),
+    { ...opts, generatedAt: generated }, width);
+  const headRow = bandRow + 1;
 
-  for (const r of rows) {
-    if (r.kind === 'section') {
-      const row = sheet.addRow([r.label]);
-      row.font = { bold: true };
-      continue;
-    }
-    const strong = r.kind === 'subtotal' || r.kind === 'summary';
-    const row = sheet.addRow([r.label, ...(r.cells || []).map(Number), Number(r.total || 0)]);
-    if (strong) row.font = { bold: true };
-    for (let c = 2; c <= width; c++) row.getCell(c).numFmt = MONEY_FMT;
+  // The same band as the screen: Actual, So far, Overall Budget. It used to
+  // label every budget month just "Budget", which is not what Xero calls it.
+  sheet.getCell(bandRow, 1).value = currency ? `Figures in ${currency}` : '';
+  sheet.getCell(bandRow, 1).font  = { size: 8, color: { argb: ARGB.muted } };
+  if (actualCount > 0) _band(sheet, bandRow, 2, 1 + actualCount, 'Actual', ARGB.positive);
+  if (hasCur) _band(sheet, bandRow, soFarCol, soFarCol, 'So far', ARGB.amber, AMBER_FILL);
+  if (actualCount < months.length) _band(sheet, bandRow, colOf(actualCount), width - 1, 'Overall Budget', ARGB.accent);
+
+  const header = sheet.getRow(headRow);
+  header.getCell(1).value = 'Account';
+  months.forEach((m, i) => { header.getCell(colOf(i)).value = m.label; });
+  header.getCell(width).value = 'Total';
+  header.font = { bold: true, size: 10 };
+  for (let c = 2; c <= width; c++) header.getCell(c).alignment = RIGHT;
+  if (hasCur) {
+    const c = header.getCell(soFarCol);
+    c.value = `${String(months[curIdx].label).split(' ')[0]} so far`;
+    c.font  = { bold: true, size: 10, color: { argb: ARGB.amber } };
+    c.fill  = AMBER_FILL;
   }
-
-  sheet.getColumn(1).width = 34;
-  for (let c = 2; c <= width; c++) sheet.getColumn(c).width = 13;
-  if (firstBudgetIdx >= 0) {
-    // Mark where actuals stop, the same seam the PDF rules and the screen draws.
-    sheet.getColumn(firstBudgetIdx + 2).border = { left: { style: 'medium', color: { argb: 'FF6366F1' } } };
-  }
-  sheet.addRow([]);
-  // What has been booked so far in the month still in progress, which the grid
-  // shows as budget. Same sentence as the PDF; text, because it is a note about
-  // the figures rather than one of them.
-  const soFar = doc.soFarNote(payload);
-  if (soFar) sheet.addRow([soFar]).font = { size: 9, italic: true };
-  sheet.addRow([doc._currencyNote(currency, payload.currency)]).font = { size: 8, italic: true, color: { argb: 'FF6B7280' } };
-  return wb;
-}
-
-function budgetVarianceWorkbook(payload, opts = {}) {
-  const { rows = [], organisation = {}, months = [] } = payload || {};
-  const currency  = organisation.currency && organisation.currency !== '—' ? organisation.currency : '';
-  const generated = opts.generatedAt || Date.now();
-  // Resolved by the same rule as the PDF and the filename, so all three agree
-  // on which figures these are.
-  const month     = doc.resolveMonth(payload, opts.month);
-  const idx       = month === 'ytd' ? -1 : months.findIndex(m => m.key === month);
-  const label     = doc.varianceSubtitle(payload, month);
-  const figuresFor = r => (month === 'ytd'
-    ? { actual: r.actualToDate, budget: r.budgetToDate, variance: r.variance, variancePct: r.variancePct }
-    : (r.monthly || [])[idx] || { actual: 0, budget: 0, variance: 0, variancePct: null });
-
-  const wb    = new ExcelJS.Workbook();
-  wb.creator  = 'Financial Automation';
-  wb.created  = new Date(generated);
-  const sheet = wb.addWorksheet('Budget Variance', { views: [{ state: 'frozen', xSplit: 1, ySplit: 3 }] });
-
-  _sheetHeader(sheet, organisation, 'Budget Variance',
-    [label, currency].filter(Boolean).join(' · '), generated, 5);
-
-  const header = sheet.getRow(3);
-  header.values = ['Account', 'Actual', 'Budget', 'Variance', 'Variance %'];
-  header.font   = { bold: true, size: 10 };
 
   for (const r of rows) {
     if (r.kind === 'section') {
@@ -143,21 +174,118 @@ function budgetVarianceWorkbook(payload, opts = {}) {
       continue;
     }
     const strong = r.kind === 'subtotal' || r.kind === 'summary';
-    const v = figuresFor(r);
-    const row = sheet.addRow([
-      r.label, Number(v.actual || 0), Number(v.budget || 0), Number(v.variance || 0),
-      v.variancePct === null || v.variancePct === undefined ? null : Number(v.variancePct),
-    ]);
+    const values = new Array(width).fill(null);
+    values[0] = labelOf(r);
+    months.forEach((_, i) => { values[colOf(i) - 1] = num(r.cells?.[i]); });
+    if (hasCur) values[soFarCol - 1] = num(r.monthly?.[curIdx]?.actual);
+    values[width - 1] = num(r.total);
+    const row = sheet.addRow(values);
+    markUnbudgeted(row, r);
     if (strong) row.font = { bold: true };
-    for (let c = 2; c <= 4; c++) row.getCell(c).numFmt = MONEY_FMT;
-    row.getCell(5).numFmt = '+0.0%;-0.0%;"–"';
+    for (let c = 2; c <= width; c++) row.getCell(c).numFmt = MONEY_FMT;
+    if (hasCur) row.getCell(soFarCol).fill = AMBER_FILL;
   }
+  const lastRow = sheet.rowCount;
 
-  sheet.getColumn(1).width = 38;
-  for (let c = 2; c <= 5; c++) sheet.getColumn(c).width = 14;
+  sheet.getColumn(1).width = 34;
+  for (let c = 2; c <= width; c++) sheet.getColumn(c).width = 13;
+  if (firstBudgetIdx >= 0) {
+    // Mark where the closed actuals stop, the same seam the PDF rules and the
+    // screen draws: before the "so far" column when there is one. Cell by cell
+    // over the table only, so the merged title lines above are left alone.
+    for (let r = bandRow; r <= lastRow; r++) {
+      sheet.getCell(r, firstBudgetIdx + 2).border = { left: { style: 'medium', color: { argb: ARGB.accent } } };
+    }
+  }
+  sheet.views = [{ state: 'frozen', xSplit: 1, ySplit: headRow }];
+
   sheet.addRow([]);
-  sheet.addRow([doc._currencyNote(currency, payload.currency)]).font = { size: 8, italic: true, color: { argb: 'FF6B7280' } };
+  // What has been booked so far in the month still in progress, which the grid
+  // shows as budget. Same sentence as the PDF; text, because it is a note about
+  // the figures rather than one of them.
+  const soFar = doc.soFarNote(payload);
+  if (soFar) sheet.addRow([soFar]).font = { size: 9, italic: true };
+  sheet.addRow([doc._currencyNote(currency, payload?.currency)]).font = { size: 8, italic: true, color: { argb: ARGB.muted } };
   return wb;
 }
 
-module.exports = { streamPdf, budgetVsActualWorkbook, budgetVarianceWorkbook, FONTS };
+function budgetVarianceWorkbook(payload, opts = {}) {
+  const { rows = [], organisation = {} } = payload || {};
+  const currency  = organisation.currency && organisation.currency !== '—' ? organisation.currency : '';
+  const generated = opts.generatedAt ?? Date.now();
+  // Resolved by the same rule as the PDF and the filename, and laid out from
+  // the same column groups, so all three agree on which figures these are.
+  const month   = doc.resolveMonth(payload, opts.month);
+  const periods = doc.variancePeriods(payload, month);
+  const width   = 1 + periods.length * 4;
+
+  const wb    = _workbook(generated);
+  const sheet = wb.addWorksheet('Budget Variance');
+
+  const bandRow = _sheetHeader(sheet, payload, 'Budget Variance',
+    [doc.varianceSubtitle(payload, month), currency].filter(Boolean).join(' · '),
+    { ...opts, generatedAt: generated }, width);
+  const headRow = bandRow + 1;
+
+  sheet.getCell(bandRow, 1).value = currency ? `Figures in ${currency}` : '';
+  sheet.getCell(bandRow, 1).font  = { size: 8, color: { argb: ARGB.muted } };
+  periods.forEach((p, g) => _band(sheet, bandRow, 2 + g * 4, 5 + g * 4, p.label, ARGB.accent));
+
+  const header = sheet.getRow(headRow);
+  header.values = ['Account', ...periods.flatMap(() => ['Actual', 'Budget', 'Variance', 'Variance %'])];
+  header.font   = { bold: true, size: 10 };
+  for (let c = 2; c <= width; c++) header.getCell(c).alignment = RIGHT;
+
+  for (const r of rows) {
+    if (r.kind === 'section') {
+      sheet.addRow([r.label]).font = { bold: true };
+      continue;
+    }
+    const strong = r.kind === 'subtotal' || r.kind === 'summary';
+    const values = [labelOf(r)];
+    const groups = periods.map(p => doc.figures(p, r));
+    for (const v of groups) {
+      // A percentage the PDF prints as "-" — no budget to divide by, or a line
+      // on budget — is written as that same dash rather than left blank in one
+      // place and dashed in another. One the PDF prints as 0.00% is written as
+      // 0, since a hair below zero would otherwise show in Excel as "-0.00%".
+      const text = doc._pctCell(v);
+      const pct  = text === '-' ? '-' : text === '0.00%' ? 0 : Number(v.variancePct);
+      values.push(num(v.actual), num(v.budget), num(v.variance), pct);
+    }
+    const row = sheet.addRow(values);
+    markUnbudgeted(row, r);
+    if (strong) row.font = { bold: true };
+    groups.forEach((v, g) => {
+      const base = 2 + g * 4;
+      for (let c = base; c < base + 3; c++) row.getCell(c).numFmt = MONEY_FMT;
+      const pctCell = row.getCell(base + 3);
+      pctCell.numFmt    = PCT_FMT;
+      pctCell.alignment = RIGHT;
+      // Favourable green, unfavourable red, as the PDF and the screen colour it.
+      const good = doc.favourable(r, v.variance);
+      if (good !== null) {
+        const font = { bold: strong, color: { argb: good ? ARGB.positive : ARGB.negative } };
+        row.getCell(base + 2).font = font;
+        pctCell.font = font;
+      }
+    });
+  }
+  const lastRow = sheet.rowCount;
+
+  sheet.getColumn(1).width = 38;
+  for (let c = 2; c <= width; c++) sheet.getColumn(c).width = 14;
+  // A rule where one group ends and the next begins, as in the PDF.
+  for (let g = 1; g < periods.length; g++) {
+    for (let r = bandRow; r <= lastRow; r++) {
+      sheet.getCell(r, 2 + g * 4).border = { left: { style: 'thin', color: { argb: 'FFD8D8E4' } } };
+    }
+  }
+  sheet.views = [{ state: 'frozen', xSplit: 1, ySplit: headRow }];
+
+  sheet.addRow([]);
+  sheet.addRow([doc._currencyNote(currency, payload?.currency)]).font = { size: 8, italic: true, color: { argb: ARGB.muted } };
+  return wb;
+}
+
+module.exports = { streamPdf, budgetVsActualWorkbook, budgetVarianceWorkbook, FONTS, MONEY_FMT, PCT_FMT };
