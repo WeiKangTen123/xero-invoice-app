@@ -362,6 +362,24 @@ describe('routes/claims', () => {
       expect(receiptStore.forUser(testUser.id).exists(file)).toBe(false);
     });
 
+    test('a claim already sent to Xero is kept, and the response says so', async () => {
+      // Deleting it locally would lose its Xero ID, and a re-import would post it twice.
+      const zip = makeZip([{ name: 'a.jpg', data: jpegBytes(52) }, { name: 'b.jpg', data: jpegBytes(53) }]);
+      const done = await finish((await start({ archives: [{ name: 'c.zip', data: b64(zip) }] })).body.jobId);
+      const store = invoiceStore.forUser(testUser.id);
+      const [sent] = store.getReceiptGroup(done.result.groupId);
+      await store.update(sent.id, { status: 'posted', xeroInvoiceId: 'X-SENT-1' });
+
+      const res = await request(serverFor(app)).delete(`/api/claims/group/${done.result.groupId}`)
+        .set('Authorization', auth()).expect(200);
+      expect(res.body).toMatchObject({ removed: 1, kept: 1 });
+      expect(res.body.message).toMatch(/already sent to Xero/);
+      const left = store.getReceiptGroup(done.result.groupId);
+      expect(left.map(r => r.id)).toEqual([sent.id]);
+      // Its receipt file stays with it.
+      expect(receiptStore.forUser(testUser.id).exists(left[0].receiptFile)).toBe(true);
+    });
+
     test('404s for an import that is not mine', async () => {
       const other = await users.createUser(`c${Date.now()}z@test.com`, 'password123', 'user');
       created.push(other.id);

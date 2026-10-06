@@ -10,7 +10,7 @@ const pdfStore     = require('../utils/pdf-store');
 const receiptStore = require('../utils/receipt-store');
 const emailQueue   = require('../queue/email-queue');
 const emailWorker  = require('../queue/email-worker');
-const { submitInvoiceToXero } = require('../utils/invoice-handler');
+const { submitInvoiceToXero, postedDuplicateOf } = require('../utils/invoice-handler');
 const { xeroErrMsg }  = require('../xero/xero-utils');
 const logger       = require('../utils/logger');
 
@@ -60,7 +60,7 @@ const IMPORT_TYPES  = new Set(['bill-import', 'invoice-import']);
 
 // POST /api/invoices  { name, data (base64 PDF) }
 // One uploaded bill. Stored as review-needed; never sent to Xero on its own.
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, asyncHandler(async (req, res) => {
   const { name, data } = req.body || {};
   const buffer = decodeBase64(data);
   if (!buffer) return res.status(400).json({ error: `${name || 'The file'} came through empty or unreadable. Try attaching it again.` });
@@ -81,7 +81,7 @@ router.post('/', requireAuth, async (req, res) => {
     logger.error('Bill upload failed', { userId: req.user.id, error: err.message });
     res.status(500).json({ error: err.message || 'Upload failed' });
   }
-});
+}));
 
 // POST /api/invoices/compose  { contactName, contactEmail, contactAddress, invoiceNumber,
 //   invoiceDate, dueDate | termsDays, currency, lineItems: [{ description, unitAmount, discountRate, taxPercent }], description }
@@ -182,6 +182,8 @@ router.get('/', requireAuth, (req, res) => {
     processedAt:   inv.processedAt,
     submittedAt:   inv.submittedAt,
     xeroInvoiceId: inv.xeroInvoiceId,
+    // The connected Xero company that xeroInvoiceId is in.
+    xeroTenantId:  inv.xeroTenantId,
     errorMsg:      inv.errorMsg,
     // The Invoices page reads these to tell a claim from a bill, to group a
     // split photo or an import, and to show a suspected duplicate; they were
@@ -284,7 +286,7 @@ router.get('/:id/pdf', (req, res, next) => {
 // ── PATCH /api/invoices/:id ───────────────────────────────────────────────────
 // Correct LLM-extracted fields before or instead of submitting to Xero.
 // Blocked on already-posted and auto-deduplicated invoices.
-router.patch('/:id', requireAuth, async (req, res, next) => {
+router.patch('/:id', requireAuth, asyncHandler(async (req, res, next) => {
   try {
     const inv = invoiceStore.forUser(req.user.id).getById(req.params.id);
     if (!inv) return res.status(404).json({ error: 'Invoice not found' });
@@ -329,13 +331,17 @@ router.patch('/:id', requireAuth, async (req, res, next) => {
     logger.info('Invoice fields corrected', { id: req.params.id, fields: Object.keys(patch), by: req.user.email });
     res.json({ success: true, invoice: updated });
   } catch (err) { next(err); }
-});
+}));
 
 // ── POST /api/invoices/:id/submit ─────────────────────────────────────────────
 // Manually submit (or re-submit) an invoice to Xero.
 // Safe to call multiple times — already-posted invoices return early without
 // creating a duplicate in Xero.
-router.post('/:id/submit', requireAuth, async (req, res) => {
+//
+// Body { force: true } sends it even though it matches another bill already in
+// Xero. Without it that match is a 409, answered now rather than found in the
+// background, so the person who pressed Submit sees why nothing was sent.
+router.post('/:id/submit', requireAuth, asyncHandler(async (req, res) => {
   const { id } = req.params;
   const userId  = req.user.id;
 
@@ -355,21 +361,31 @@ router.post('/:id/submit', requireAuth, async (req, res) => {
     });
   }
 
+  const force = req.body?.force === true;
+  const dup   = force ? null : postedDuplicateOf(invoiceStore.forUser(userId), inv);
+  if (dup) {
+    const label = [dup.vendorName, dup.invoiceNumber].filter(Boolean).join(' ') || 'a bill';
+    return res.status(409).json({
+      error: `This matches ${label}, which is already in Xero. Send it anyway only if it is a different bill.`,
+      duplicateOf: dup.id,
+    });
+  }
+
   // Fire submission in background — return 202 immediately so the UI doesn't hang.
   // claimForSubmit inside submitInvoiceToXero atomically sets status → 'submitting'
   // and prevents double-posting if the same invoice is in flight elsewhere.
-  submitInvoiceToXero(userId, id).then(xeroInvoiceId => {
+  // submitInvoiceToXero records any failure on the row itself; this used to
+  // write 'error' over it as well, which took a posted row off 'posted'.
+  submitInvoiceToXero(userId, id, { allowDuplicate: force }).then(xeroInvoiceId => {
     logger.info('Manual Xero submission completed', { id, xeroInvoiceId: xeroInvoiceId || 'queued', by: req.user.email });
   }).catch(err => {
-    const errMsg = xeroErrMsg(err);
-    logger.error('Manual Xero submission failed', { id, error: errMsg, userId });
-    invoiceStore.forUser(userId).update(id, { status: 'error', errorMsg: errMsg });
+    logger.error('Manual Xero submission failed', { id, error: xeroErrMsg(err), userId });
   });
   res.status(202).json({ success: true, status: 'submitting' });
-});
+}));
 
 // ── POST /api/invoices/:id/report ─────────────────────────────────────────────
-router.post('/:id/report', requireAuth, async (req, res, next) => {
+router.post('/:id/report', requireAuth, asyncHandler(async (req, res, next) => {
   try {
     const { note } = req.body;
     if (!note || !note.trim()) {
@@ -384,13 +400,14 @@ router.post('/:id/report', requireAuth, async (req, res, next) => {
     logger.info('Invoice issue reported', { id: req.params.id, by: req.user.email });
     res.json({ success: true });
   } catch (err) { next(err); }
-});
+}));
 
 // ── PATCH /api/invoices/:id/status ───────────────────────────────────────────
 // Manual status transitions for the review workflow.
 // posted and duplicate are locked — their status is authoritative and must not
-// be downgraded through this endpoint.
-router.patch('/:id/status', requireAuth, async (req, res, next) => {
+// be downgraded through this endpoint. So is any row holding a Xero ID,
+// whatever its status: it is in Xero.
+router.patch('/:id/status', requireAuth, asyncHandler(async (req, res, next) => {
   try {
     const { status } = req.body;
     const allowed = ['pending', 'reviewed', 'reported', 'review-needed'];
@@ -402,7 +419,7 @@ router.patch('/:id/status', requireAuth, async (req, res, next) => {
     if (!inv) return res.status(404).json({ error: 'Invoice not found' });
 
     const LOCKED = new Set(['posted']);
-    if (LOCKED.has(inv.status)) {
+    if (LOCKED.has(inv.status) || inv.xeroInvoiceId) {
       return res.status(409).json({ error: `Cannot change status of a "${inv.status}" invoice` });
     }
     if (inv.status === 'duplicate' && !req.body.force) {
@@ -420,11 +437,11 @@ router.patch('/:id/status', requireAuth, async (req, res, next) => {
     const updated = await invoiceStore.forUser(req.user.id).update(req.params.id, patch);
     res.json({ success: true, invoice: updated });
   } catch (err) { next(err); }
-});
+}));
 
 // ── POST /api/invoices/batch-status ──────────────────────────────────────────
 // Batch update status for a list of invoice IDs (e.g. approving all verified claims in a batch).
-router.post('/batch-status', requireAuth, async (req, res, next) => {
+router.post('/batch-status', requireAuth, asyncHandler(async (req, res, next) => {
   try {
     const { ids, status } = req.body;
     if (!Array.isArray(ids) || !ids.length) {
@@ -440,50 +457,76 @@ router.post('/batch-status', requireAuth, async (req, res, next) => {
     let updatedCount = 0;
     for (const id of ids) {
       const inv = store.getById(id);
-      if (inv && !LOCKED.has(inv.status)) {
+      if (inv && !LOCKED.has(inv.status) && !inv.xeroInvoiceId) {
         await store.update(id, { status });
         updatedCount++;
       }
     }
     res.json({ success: true, count: updatedCount });
   } catch (err) { next(err); }
-});
+}));
 
 // ── POST /api/invoices/submit-all ────────────────────────────────────────────
-// Bulk-submit all pending invoices that were never sent to Xero.
-// Useful after a server restart that killed the in-memory submission chain.
+// Bulk-submit the pending invoices the person is looking at.
+// Body { ids: string[] }, required and non-empty. Only ids that belong to this
+// user and are still 'pending' are sent; the rest are counted as skipped.
+// Responds { submitted, skipped }.
+//
+// This used to send every pending record of every kind (bills, invoices,
+// claims) while the banner that offered it counted only the open tab, so one
+// click posted documents nobody had looked at.
 router.post('/submit-all', requireAuth, asyncHandler(async (req, res) => {
-  const userId  = req.user.id;
-  const store   = invoiceStore.forUser(userId);
-  const pending = store.getAll().filter(i => i.status === 'pending');
+  const userId = req.user.id;
+  const ids    = req.body?.ids;
+  if (!Array.isArray(ids) || !ids.length || !ids.every(id => typeof id === 'string' && id)) {
+    return res.status(400).json({ error: 'ids must be a non-empty list of invoice ids' });
+  }
 
-  if (!pending.length) return res.json({ submitted: 0, message: 'No pending invoices' });
+  const store   = invoiceStore.forUser(userId);
+  const unique  = [...new Set(ids)];
+  const pending = unique.filter(id => store.getById(id)?.status === 'pending');
+  const skipped = unique.length - pending.length;
 
   // Sequential with 1.5s gap — Xero allows 60 calls/minute; parallel floods cause 429.
   const count = pending.length;
-  (async () => {
-    for (const inv of pending) {
-      try {
-        await submitInvoiceToXero(userId, inv.id);
-      } catch (err) {
-        logger.error('Bulk submit failed for invoice', { id: inv.id, error: xeroErrMsg(err), userId });
+  if (count) {
+    (async () => {
+      for (const id of pending) {
+        // Checked again per invoice: the gaps add up, and the row may have
+        // been sent, edited or deleted meanwhile. claimForSubmit would take a
+        // posted row (that is how a correction goes), so only pending goes.
+        if (store.getById(id)?.status !== 'pending') continue;
+        try {
+          await submitInvoiceToXero(userId, id);
+        } catch (err) {
+          logger.error('Bulk submit failed for invoice', { id, error: xeroErrMsg(err), userId });
+        }
+        await new Promise(r => setTimeout(r, 1500));
       }
-      await new Promise(r => setTimeout(r, 1500));
-    }
-    logger.info('Bulk Xero submission complete', { count, userId });
-  })().catch(err => logger.error('Bulk submit IIFE crashed', { error: err.message, userId }));
+      logger.info('Bulk Xero submission complete', { count, userId });
+    })().catch(err => logger.error('Bulk submit IIFE crashed', { error: err.message, userId }));
+  }
 
-  logger.info('Bulk Xero submission started', { count, userId });
-  res.json({ submitted: count, message: `Submitting ${count} invoice(s) to Xero` });
+  logger.info('Bulk Xero submission started', { count, skipped, userId });
+  res.json({ submitted: count, skipped });
 }));
 
 // ── DELETE /api/invoices/:id ──────────────────────────────────────────────────
-router.delete('/:id', requireAuth, async (req, res, next) => {
+// A row with a Xero ID is the only record here that the bill is in Xero.
+// Deleting it left the bill in Xero and nothing to recognise it by, so the
+// next scan of the same email posted it again. It goes from Xero first.
+router.delete('/:id', requireAuth, asyncHandler(async (req, res, next) => {
   try {
     const store = invoiceStore.forUser(req.user.id);
     // Read the record BEFORE removing it — the receipt filename is the only way
     // to find the image, and it goes with the row.
     const record  = store.getById(req.params.id);
+    if (record?.xeroInvoiceId) {
+      return res.status(409).json({ error: 'This was posted to Xero. Void or delete it in Xero first.' });
+    }
+    if (record?.status === 'submitting') {
+      return res.status(409).json({ error: 'This is being sent to Xero right now. Try again in a moment.' });
+    }
     const removed = await store.remove(req.params.id);
     if (!removed) return res.status(404).json({ error: 'Invoice not found' });
 
@@ -499,21 +542,41 @@ router.delete('/:id', requireAuth, async (req, res, next) => {
     logger.info('Invoice deleted', { id: req.params.id, by: req.user.email });
     res.json({ success: true });
   } catch (err) { next(err); }
-});
+}));
 
 // ── DELETE /api/invoices ──────────────────────────────────────────────────────
-router.delete('/', requireAuth, async (req, res, next) => {
+// "Clear all". Removes every record that exists only here; keeps every one
+// with a Xero ID (and any mid-send), for the reason the single delete refuses
+// them. Responds { success, removed, kept, message }.
+router.delete('/', requireAuth, asyncHandler(async (req, res, next) => {
   try {
     const userId = req.user.id;
     emailWorker.stopWorker(userId);
     emailQueue.clearAll(userId);
-    await invoiceStore.forUser(userId).clear();
-    pdfStore.forUser(userId).clearAll();
-    receiptStore.forUser(userId).clearAll();   // receipts were left behind here too
-    logger.info('Invoice cache cleared (invoices + PDFs + receipts + email queue)', { by: req.user.email });
-    res.json({ success: true });
+    const store = invoiceStore.forUser(userId);
+    const { removed, kept } = await store.clear();
+    if (!kept) {
+      // Nothing left: sweep the folders whole, which also takes any file an
+      // earlier failure orphaned.
+      pdfStore.forUser(userId).clearAll();
+      receiptStore.forUser(userId).clearAll();   // receipts were left behind here too
+    } else {
+      // The kept rows' PDFs and receipts must stay with them, so only the
+      // removed rows' files go. Split siblings share one receipt file; it goes
+      // once nothing kept still points at it.
+      const pdfs = pdfStore.forUser(userId);
+      for (const r of removed) pdfs.remove(r.id);
+      for (const file of new Set(removed.map(r => r.receiptFile).filter(Boolean))) {
+        if (store.countByReceiptFile(file) === 0) receiptStore.forUser(userId).remove(file);
+      }
+    }
+    const message = kept
+      ? `Cleared ${removed.length}. Kept ${kept} that ${kept === 1 ? 'is' : 'are'} in Xero or being sent to it.`
+      : `Cleared ${removed.length}.`;
+    logger.info('Invoice cache cleared (invoices + files + email queue)', { removed: removed.length, kept, by: req.user.email });
+    res.json({ success: true, removed: removed.length, kept, message });
   } catch (err) { next(err); }
-});
+}));
 
 // Exposed so the chat assistant validates proposed edits against the exact same
 // whitelist this route enforces — one source of truth, no risk of drift.

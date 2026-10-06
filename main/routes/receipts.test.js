@@ -887,6 +887,18 @@ describe('routes/receipts — one upload, several records', () => {
       expect(receiptStore.forUser(testUser.id).exists(all[0].receiptFile)).toBe(true);
     });
 
+    test('merging is refused when a part was already sent to Xero', async () => {
+      // Merging deletes the other parts; one already in Xero would lose its Xero ID.
+      parser.parseReceiptImage.mockResolvedValue({ split: true, receipts: TWO });
+      await upload().expect(201);
+      await settle();
+      const [keep, sent] = rows();
+      await invoiceStore.forUser(testUser.id).update(sent.id, { status: 'posted', xeroInvoiceId: 'X-PART-1' });
+      const res = await request(server).post(`/api/receipts/${keep.id}/merge`).set('Authorization', auth()).expect(409);
+      expect(res.body.error).toMatch(/already sent to Xero/);
+      expect(rows()).toHaveLength(2);
+    });
+
     test('merging a receipt that was never split is refused', async () => {
       parser.parseReceiptImage.mockResolvedValue({ split: false, receipts: [TWO[0]] });
       const { body } = await upload().expect(201);

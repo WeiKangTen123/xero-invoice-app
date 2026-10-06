@@ -40,7 +40,25 @@ function accountMayPost(userId) {
   try { return isActive(userId); } catch (_) { return true; }
 }
 
-function createHandler(userId) {
+// Another record, already in Xero, that this one would duplicate — or null. A
+// record that is itself in Xero is sent as an update to its own bill, so it
+// has nothing to duplicate.
+function postedDuplicateOf(invStore, record) {
+  if (!record || record.xeroInvoiceId) return null;
+  return invStore.findPosted(
+    record.vendorName || record.contactName,
+    record.invoiceNumber,
+    record.invoiceDate,
+    record.totalAmount,
+    record.id
+  );
+}
+
+// No org to send to is the account's setup, not a fault in this invoice or in
+// Xero; it is shown on the row and does not page anyone.
+const _SETUP_CODES = new Set(['XERO_TENANT_CHOICE', 'XERO_TENANT_GONE']);
+
+function createHandler(userId, { submitDelayMs = XERO_SUBMIT_DELAY_MS } = {}) {
   const invStore      = invoiceStore.forUser(userId);
   const pdfStoreUser  = pdfStore.forUser(userId);
   const settingsUser  = settingsStore.forUser(userId);
@@ -48,9 +66,15 @@ function createHandler(userId) {
 
   let _xeroChain = Promise.resolve();
 
-  function scheduleXeroSubmit(invoiceData, id) {
+  // The automatic path sends through submitInvoiceToXero, like a manual submit
+  // and the boot retry. It used to post on its own: it never claimed the row,
+  // so the boot retry could send the same pending row at the same moment, and
+  // its duplicate branch copied the other row's Xero ID onto this one, which
+  // the unique index refuses — the update threw, the row stayed pending, and
+  // Submit all or the next boot posted it a second time.
+  function scheduleXeroSubmit(id, sourceEmail) {
     _xeroChain = _xeroChain.then(async () => {
-      await new Promise(r => setTimeout(r, XERO_SUBMIT_DELAY_MS));
+      await new Promise(r => setTimeout(r, submitDelayMs));
 
       // Disabled or deleted while it waited: back to pending for a person to
       // review, never posted. A deleted account's row is already gone with it.
@@ -60,46 +84,34 @@ function createHandler(userId) {
         return;
       }
 
-      // Re-check for duplicates just before submitting — a concurrent scan may
-      // have already posted this invoice while it was waiting in the queue.
-      const dup = invStore.findPosted(
-        invoiceData.vendorName || invoiceData.contactName,
-        invoiceData.invoiceNumber,
-        invoiceData.invoiceDate,
-        invoiceData.totalAmount
-      );
-      if (dup) {
-        logger.info('Duplicate detected before Xero submit — skipping', {
-          id, duplicateOf: dup.id, xeroInvoiceId: dup.xeroInvoiceId, userId,
-        });
-        await invStore.update(id, { status: 'duplicate', duplicateOf: dup.id, xeroInvoiceId: dup.xeroInvoiceId });
+      // Sent by hand, edited back to review or deleted while it waited: not
+      // this chain's to send any more. claimForSubmit would take a posted row
+      // (that is how a correction goes), so only a row still pending goes.
+      if (invStore.getById(id)?.status !== 'pending') {
+        logger.info('Invoice no longer pending when its Xero turn came — skipped', { id, userId });
         return;
       }
 
       try {
-        const cache   = tokenCache.forUser(userId);
-        const tenants = await cache.getAllTenants();
-        if (!tenants.length) {
-          logger.info('No cached Xero tenants — reconnecting', { userId });
-          await reconnectXero(userId);
-        }
-        const xeroInvoiceId = await enqueueInvoice(userId, { ...invoiceData, _invoiceStoreId: id });
-        if (xeroInvoiceId) {
-          await invStore.update(id, { status: 'posted', xeroInvoiceId });
-          logger.info('Invoice marked as posted', { id, xeroInvoiceId, userId });
-        }
+        // Checks for a posted duplicate just before claiming the row, so a
+        // concurrent scan that sent this bill while it waited stops it here.
+        await submitInvoiceToXero(userId, id);
       } catch (err) {
         const errMsg = xeroErrMsg(err);
         logger.error('Failed to submit invoice to Xero', { id, error: errMsg, userId });
-        await invStore.update(id, { status: 'error', errorMsg: errMsg });
+        if (_SETUP_CODES.has(err?.code)) return;
         try {
-          await notifyError({ context: 'Xero submit failed', error: errMsg, email: invoiceData.sourceEmail });
+          await notifyError({ context: 'Xero submit failed', error: errMsg, email: sourceEmail });
         } catch (_) {}
       }
     }).catch(err => {
       logger.error('Unexpected error in Xero submission chain', { error: err?.message || String(err), userId });
     });
   }
+
+  // Resolves once every send queued so far has finished. For tests and for
+  // anything that must not cut a send off halfway.
+  function whenIdle() { return _xeroChain; }
 
   async function onInvoiceEmail(invoiceData) {
     // Upfront dedup: skip if any non-error/duplicate record already exists for this invoice.
@@ -200,10 +212,11 @@ function createHandler(userId) {
     // it in front of them and will review it (intake/profiles.js).
     const mayAutoPost = profileFor(record.invoiceType).autoPost(record.source);
     if (settingsUser.get('autoProcess') && mayAutoPost) {
-      // What goes to Xero is the STORED row — the same payload a manual submit
-      // sends. The raw parser object used to go instead, so the two paths
-      // could differ (and the PDF is read back from disk by id anyway).
-      scheduleXeroSubmit({ ...invStore.getById(id), _invoiceStoreId: id }, id);
+      // What goes to Xero is the STORED row, read again when its turn comes —
+      // the same payload a manual submit sends. The raw parser object used to
+      // go instead, so the two paths could differ (and the PDF is read back
+      // from disk by id anyway).
+      scheduleXeroSubmit(id, record.sourceEmail);
       logger.info('Invoice queued for Xero submission', { id, vendor: record.vendorName, userId });
     } else if (!mayAutoPost) {
       logger.info('Stored for review — this source never auto-posts', { id, source: record.source, userId });
@@ -212,15 +225,34 @@ function createHandler(userId) {
     }
     return { id, status: record.status };
   }
-  return { onInvoiceEmail };
+  return { onInvoiceEmail, whenIdle };
 }
 
 // ── Manual / reusable Xero submission ────────────────────────────────────────
 // Standalone function — not tied to the per-user rate-limiting chain inside
 // createHandler. Suitable for UI-triggered one-shot submissions and retries.
 // Can be called any number of times on the same invoice (idempotent guard below).
-async function submitInvoiceToXero(userId, invoiceId) {
+//
+// allowDuplicate is for a person who has seen that this matches a bill already
+// in Xero and wants it sent anyway; every other caller leaves it off, and a
+// match is marked duplicate and not sent.
+async function submitInvoiceToXero(userId, invoiceId, { allowDuplicate = false } = {}) {
   const invStore = invoiceStore.forUser(userId);
+
+  // The duplicate check and the claim run with no await between them, so no
+  // other send can post a matching bill in the gap.
+  if (!allowDuplicate) {
+    const current = invStore.getById(invoiceId);
+    if (!current) throw new Error('Invoice not found');
+    const dup = current.status === 'submitting' ? null : postedDuplicateOf(invStore, current);
+    if (dup) {
+      // Points at the other row; the Xero ID stays only on the row it belongs
+      // to (one Xero invoice, one local record — a unique index enforces it).
+      invStore.update(invoiceId, { status: 'duplicate', duplicateOf: dup.id });
+      logger.info('Duplicate of an invoice already in Xero — not sent', { invoiceId, duplicateOf: dup.id, userId });
+      return null;
+    }
+  }
 
   // Atomically claim the invoice for submission — prevents concurrent callers
   // (boot-time retry, manual submit, submit-all) from posting the same invoice twice.
@@ -230,35 +262,46 @@ async function submitInvoiceToXero(userId, invoiceId) {
     throw new Error('Invoice not found');
   }
 
-  // Reconnect Xero if the token cache was cleared (e.g. server restart)
-  const cache   = tokenCache.forUser(userId);
-  const tenants = await cache.getAllTenants();
-  if (!tenants.length) {
-    logger.info('No cached Xero tenants — reconnecting before manual submit', { userId });
-    await reconnectXero(userId);
-  }
-
   const record = invStore.getById(invoiceId);
+  // Already in Xero: this send is a correction. However it ends, the row stays
+  // posted — it is in Xero, and 'error' hid it from the duplicate checks.
+  const inXero = !!record.xeroInvoiceId;
   // Pass _invoiceStoreId so createDraftInvoice can read the PDF from disk
   const invoiceData = { ...record, _invoiceStoreId: invoiceId };
 
   try {
-    const xeroInvoiceId = await enqueueInvoice(userId, invoiceData);
+    // Reconnect Xero if the token cache was cleared (e.g. server restart).
+    // Inside the try: a failed reconnect used to leave the row claimed, in
+    // 'submitting', with nothing left to finish it.
+    const cache   = tokenCache.forUser(userId);
+    const tenants = await cache.getAllTenants();
+    if (!tenants.length) {
+      logger.info('No cached Xero tenants — reconnecting before submit', { userId });
+      await reconnectXero(userId);
+    }
 
-    // null means no connected org: nothing was sent, so the row waits as
+    const sent = await enqueueInvoice(userId, invoiceData);
+
+    // null means no connected org: nothing was sent, so a new row waits as
     // pending rather than being marked posted.
-    const patch = xeroInvoiceId
-      ? { status: 'posted', xeroInvoiceId, submittedAt: new Date().toISOString(), errorMsg: null }
-      : { status: 'pending', errorMsg: null };
+    let patch;
+    if (sent) {
+      patch = { status: 'posted', xeroInvoiceId: sent.xeroInvoiceId, xeroTenantId: sent.tenantId,
+                submittedAt: new Date().toISOString(), errorMsg: null };
+    } else if (inXero) {
+      patch = { status: 'posted', errorMsg: 'Xero is not connected. The correction was not sent.' };
+    } else {
+      patch = { status: 'pending', errorMsg: null };
+    }
 
     await invStore.update(invoiceId, patch);
-    logger.info('Invoice submitted to Xero', { invoiceId, xeroInvoiceId: xeroInvoiceId || 'queued', userId });
-    return xeroInvoiceId;
+    logger.info('Invoice submitted to Xero', { invoiceId, xeroInvoiceId: sent?.xeroInvoiceId || 'queued', userId });
+    return sent ? sent.xeroInvoiceId : null;
   } catch (err) {
     const errMsg = xeroErrMsg(err);
-    await invStore.update(invoiceId, { status: 'error', errorMsg: errMsg });
+    await invStore.update(invoiceId, { status: inXero ? 'posted' : 'error', errorMsg: errMsg });
     throw err;
   }
 }
 
-module.exports = { createHandler, submitInvoiceToXero, holdReason, accountMayPost };
+module.exports = { createHandler, submitInvoiceToXero, postedDuplicateOf, holdReason, accountMayPost };

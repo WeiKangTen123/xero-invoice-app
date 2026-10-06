@@ -289,7 +289,7 @@ function captureUrl(req, token) {
 }
 
 // POST /api/receipts/pair — desktop asks for a QR
-router.post('/pair', requireAuth, async (req, res) => {
+router.post('/pair', requireAuth, asyncHandler(async (req, res) => {
   try {
     const token = pairing.create(req.user.id);
     const url   = captureUrl(req, token);
@@ -302,7 +302,7 @@ router.post('/pair', requireAuth, async (req, res) => {
     logger.error('Pairing failed', { userId: req.user.id, error: err.message });
     res.status(500).json({ error: 'Could not create a pairing code' });
   }
-});
+}));
 
 // GET /api/receipts/pair/:token — desktop polls its OWN pairing for arrivals.
 // Returns the receipts themselves, each with a viewing token, so the dialog can
@@ -487,7 +487,7 @@ async function _rereadFrom(userId, record, buffer) {
   return parseReceiptText(userId, text);
 }
 
-router.post('/:id/reread', requireAuth, async (req, res) => {
+router.post('/:id/reread', requireAuth, asyncHandler(async (req, res) => {
   const store  = invoiceStore.forUser(req.user.id);
   const record = store.getById(req.params.id);
   if (!record) return res.status(404).json({ error: 'Receipt not found' });
@@ -535,7 +535,7 @@ router.post('/:id/reread', requireAuth, async (req, res) => {
     logger.warn('Receipt re-read failed', { userId: req.user.id, id: req.params.id, error: err.message });
     res.json({ ok: false, reason: 'unavailable', receipt: record });
   }
-});
+}));
 
 // GET /api/receipts/:id/group — the other records that came from the same
 // upload, so the review screen can say "1 of 2" and offer to step between them.
@@ -589,7 +589,17 @@ router.post('/:id/merge', requireAuth, (req, res) => {
   if (!record) return res.status(404).json({ error: 'Receipt not found' });
   if (!record.receiptGroup) return res.status(400).json({ error: 'This receipt was not split' });
 
-  const siblings = store.getReceiptGroup(record.receiptGroup).filter(r => r.id !== record.id);
+  const members  = store.getReceiptGroup(record.receiptGroup);
+  const siblings = members.filter(r => r.id !== record.id);
+  // A folder or zip import is not a split: merging it would delete every other
+  // claim in the import (see the groupType note on GET /:id/group).
+  if (members.every(r => r.source === 'claim')) {
+    return res.status(400).json({ error: 'This is a claim import, not a split receipt. Delete individual claims instead.' });
+  }
+  // A part already in Xero cannot be deleted locally without losing its Xero ID.
+  if (siblings.some(r => r.xeroInvoiceId || r.status === 'submitting')) {
+    return res.status(409).json({ error: 'Part of this receipt was already sent to Xero, so it cannot be merged back.' });
+  }
   for (const sib of siblings) store.remove(sib.id);
 
   const merged = store.update(req.params.id, { receiptBox: null, receiptPage: null, receiptGroup: null });

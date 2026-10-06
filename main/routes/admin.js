@@ -3,6 +3,7 @@ const router       = express.Router();
 const fs           = require('fs');
 const path         = require('path');
 const { requireAdmin } = require('../middleware/auth-middleware');
+const asyncHandler     = require('../middleware/async-handler');
 const {
   getAllUsers, createUser, updateUserRole, deleteUser, readUsers, findById, getSetupStatus, isOnline,
   passwordProblem, setPassword, invalidateSessions, setDisabled,
@@ -33,7 +34,7 @@ router.get('/users', requireAdmin, (_req, res) => {
 });
 
 // POST /api/admin/users — create new user
-router.post('/users', requireAdmin, async (req, res) => {
+router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
   try {
     const { email, password, role } = req.body;
     if (!email || !password) {
@@ -47,7 +48,7 @@ router.post('/users', requireAdmin, async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
-});
+}));
 
 // DELETE /api/admin/users/:id
 router.delete('/users/:id', requireAdmin, (req, res) => {
@@ -156,7 +157,7 @@ router.patch('/users/:id/role', requireAdmin, (req, res) => {
 // Passwords are bcrypt hashes: there is nothing to view, only replace. The
 // account's other sessions are signed out by the same cutoff a self-service
 // change uses (users.js#setPassword).
-router.patch('/users/:id/password', requireAdmin, async (req, res) => {
+router.patch('/users/:id/password', requireAdmin, asyncHandler(async (req, res) => {
   try {
     const target = findTarget(req, res, 'Change your own password from Setup');
     if (!target) return;
@@ -166,7 +167,7 @@ router.patch('/users/:id/password', requireAdmin, async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
-});
+}));
 
 // POST /api/admin/users/:id/sign-out — every token this account holds is
 // refused from now on. For a lost laptop or a shared password: the account is
@@ -226,8 +227,10 @@ router.post('/users/:id/watcher/stop', requireAdmin, (req, res) => {
 });
 
 // GET /api/admin/reports — all invoices needing human attention across all users.
-// Includes user-flagged reports (status: reported) and system-flagged parsing
-// failures that could not be auto-submitted to Xero (status: review-needed).
+// Includes user-flagged reports (status: reported), system-flagged parsing
+// failures that could not be auto-submitted to Xero (status: review-needed),
+// and rows in Xero with a report newer than their last resolution — those keep
+// status 'posted' (see invoice-store getFlagged).
 router.get('/reports', requireAdmin, (_req, res) => {
   const allUsers = readUsers();
   const reports  = allUsers.flatMap(u =>
@@ -241,19 +244,24 @@ router.get('/reports', requireAdmin, (_req, res) => {
 });
 
 // PATCH /api/admin/reports/:userId/:invoiceId/resolve
-router.patch('/reports/:userId/:invoiceId/resolve', requireAdmin, async (req, res, next) => {
+// Records who resolved it and when. A row in Xero is, and stays, 'posted':
+// setting it to 'reviewed' hid it from the duplicate checks and the same bill
+// could be posted again. (A row reported under the old rule, 'reported' with a
+// Xero ID, goes back to 'posted' here.) A row mid-send keeps its status; the
+// send decides it.
+router.patch('/reports/:userId/:invoiceId/resolve', requireAdmin, asyncHandler(async (req, res, next) => {
   try {
     const { userId, invoiceId } = req.params;
-    const updated = await invoiceStore.forUser(userId).update(invoiceId, {
-      status:     'reviewed',
-      resolvedBy: req.user.email,
-      resolvedAt: new Date().toISOString(),
-    });
-    if (!updated) return res.status(404).json({ error: 'Invoice not found' });
-    logger.info('Report resolved', { invoiceId, userId, by: req.user.email });
+    const store = invoiceStore.forUser(userId);
+    const inv   = store.getById(invoiceId);
+    if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+    const patch = { resolvedBy: req.user.email, resolvedAt: new Date().toISOString() };
+    if (inv.status !== 'submitting') patch.status = inv.xeroInvoiceId ? 'posted' : 'reviewed';
+    await store.update(invoiceId, patch);
+    logger.info('Report resolved', { invoiceId, userId, status: patch.status || inv.status, by: req.user.email });
     res.json({ success: true });
   } catch (err) { next(err); }
-});
+}));
 
 // GET /api/admin/monitoring — per-user activity + backend health, for the Admin Monitoring tab.
 router.get('/monitoring', requireAdmin, (_req, res) => {

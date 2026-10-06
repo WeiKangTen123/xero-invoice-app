@@ -31,6 +31,24 @@ describe('settings-store (SQLite)', () => {
 
   test('get() with no key returns the whole settings object', async () => {
     const u = await users.createUser('s3@test.com', 'password123', 'user');
-    expect(settingsStore.forUser(u.id).get()).toEqual({ autoProcess: false });
+    expect(settingsStore.forUser(u.id).get()).toEqual({ autoProcess: false, defaultTenantId: null });
+  });
+
+  // The Xero company new documents go to when more than one is connected.
+  test('defaultTenantId is stored, read back, and cleared by null or an empty value', async () => {
+    const u = await users.createUser('s4@test.com', 'password123', 'user');
+    const s = settingsStore.forUser(u.id);
+    expect(s.get('defaultTenantId')).toBeNull();
+    expect(s.set({ defaultTenantId: 'tenant-a' })).toEqual({ autoProcess: false, defaultTenantId: 'tenant-a' });
+    expect(settingsStore.forUser(u.id).get('defaultTenantId')).toBe('tenant-a');
+    // Changing one setting leaves the other alone.
+    s.set({ autoProcess: true });
+    expect(s.get()).toEqual({ autoProcess: true, defaultTenantId: 'tenant-a' });
+    s.set({ defaultTenantId: '' });
+    expect(s.get('defaultTenantId')).toBeNull();
+    s.set({ defaultTenantId: 'tenant-b' });
+    s.set({ defaultTenantId: null });
+    expect(s.get('defaultTenantId')).toBeNull();
+    expect(s.get('autoProcess')).toBe(true);
   });
 });

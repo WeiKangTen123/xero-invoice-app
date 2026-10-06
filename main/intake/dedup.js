@@ -77,7 +77,9 @@ function findDuplicate({ store, profile = null, hash, contactName, vendorName, n
   const rows = candidates || store.getAll();
   const hit = rows.find(r =>
     r.id !== excludeId &&
-    r.status !== 'duplicate' && r.status !== 'error' &&
+    // An 'error' row is skipped only if it never reached Xero: a failed
+    // correction of a posted bill keeps its Xero ID and is still in Xero.
+    r.status !== 'duplicate' && (r.status !== 'error' || r.xeroInvoiceId) &&
     vendorMatches(r.vendorName, name) &&
     String(r.invoiceDate || '').slice(0, 10) === String(date).slice(0, 10) &&
     sameAmount(r.totalAmount, amount));

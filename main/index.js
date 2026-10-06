@@ -192,8 +192,32 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Retry any invoices stuck in 'pending' or 'submitting' from a previous run.
-// The Xero submission chain lives in-memory, so any restart orphans pending invoices.
+// Sends cut off by the restart that started this process. Every deploy is a
+// restart, so a send in flight at that moment left its row in 'submitting'
+// for good: the boot retry below re-submitted it, but claimForSubmit refuses
+// 'submitting', and the manual submit refuses it too. The send may well have
+// reached Xero, so it is not retried — a person checks Xero first (see
+// invoice-store releaseInterrupted). Every account, disabled or not, since
+// this only frees rows. Runs synchronously before the server listens and
+// before email recovery can start a send of its own, so it never catches a
+// send belonging to this process.
+const INTERRUPTED_MSG = 'Sending was interrupted by a restart. Check Xero for this document before sending it again.';
+function releaseInterruptedSubmissions() {
+  try {
+    for (const user of getAllUsers()) {
+      const userId = String(user.id);
+      const moved  = invoiceStore.forUser(userId).releaseInterrupted(INTERRUPTED_MSG);
+      if (moved) logger.warn(`${moved} Xero send(s) were interrupted by a restart — held for a person to check`, { userId });
+    }
+  } catch (err) {
+    logger.error('Boot-time release of interrupted Xero sends failed', { error: err.message });
+  }
+}
+releaseInterruptedSubmissions();
+
+// Retry invoices left 'pending' by a previous run. The Xero submission chain
+// lives in memory, so any restart orphans the invoices still waiting in it.
+// ('submitting' ones were handled above and are not retried.)
 // Sequential retry with a 1.5s gap to stay inside Xero's 60 calls/minute limit.
 // Firing all at once causes 429 rate-limit errors that then also fail silently.
 async function retryStuckSubmissions({ gapMs = 1500 } = {}) {
@@ -216,14 +240,19 @@ async function retryStuckSubmissions({ gapMs = 1500 } = {}) {
         logger.info('Boot retry skipped — auto-process is off for this user', { userId });
         continue;
       }
-      const stuck = invoiceStore.forUser(userId).getAll()
-        .filter(i => i.status === 'pending' || i.status === 'submitting');
+      const store = invoiceStore.forUser(userId);
+      const stuck = store.getAll().filter(i => i.status === 'pending');
       if (!stuck.length) continue;
       logger.info(`Retrying ${stuck.length} pending Xero submission(s) on boot`, { userId });
       for (const inv of stuck) {
         // Read again per invoice: the gaps add up, and a disable that lands
         // part-way through must stop the rest.
         if (!isActive(userId)) break;
+        // The row may have moved on while this loop waited — sent by the
+        // live pipeline, edited, deleted. claimForSubmit would happily take
+        // a posted row (that is how a correction is re-sent), so only a row
+        // that is still pending goes.
+        if (store.getById(inv.id)?.status !== 'pending') continue;
         try {
           await submitInvoiceToXero(userId, inv.id);
         } catch (err) {
@@ -296,3 +325,4 @@ process.on('SIGINT',  () => shutdown('SIGINT'));
 
 module.exports = app;
 module.exports.retryStuckSubmissions = retryStuckSubmissions;
+module.exports.releaseInterruptedSubmissions = releaseInterruptedSubmissions;

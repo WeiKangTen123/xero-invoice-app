@@ -68,7 +68,12 @@ CREATE TABLE IF NOT EXISTS user_settings (
   user_id      TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   -- Defaults OFF: auto-submit posts invoices to a live accounting system,
   -- so it must be opted into, never inherited.
-  auto_process INTEGER NOT NULL DEFAULT 0
+  auto_process INTEGER NOT NULL DEFAULT 0,
+  -- The Xero company a new document is sent to when more than one is
+  -- connected. Every connected company used to get its own copy of every bill.
+  -- NULL = not chosen; with one company connected that one is used, with
+  -- several nothing is sent until a person picks.
+  default_tenant_id TEXT
 );
 
 -- 1:many — invoice records (was data/users/<id>/invoices.json array)
@@ -103,6 +108,9 @@ CREATE TABLE IF NOT EXISTS invoices (
   sub_total         INTEGER DEFAULT 0, -- cents
   payment_reference TEXT,
   xero_invoice_id   TEXT,
+  -- The Xero company xero_invoice_id belongs to. A correction is sent there
+  -- and nowhere else; an invoice ID means nothing in another company.
+  xero_tenant_id    TEXT,
   error_msg         TEXT,
   duplicate_of      TEXT REFERENCES invoices(id) ON DELETE SET NULL,
   resolved_by       TEXT,

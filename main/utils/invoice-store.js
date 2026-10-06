@@ -1,5 +1,11 @@
 const db  = require('../db');
 
+// A row holding a Xero invoice ID is in Xero whatever its status says. The
+// duplicate checks used to trust the status alone, and a report, an admin
+// resolution or a failed correction could each move a posted row off
+// 'posted', after which nothing stopped the same bill being sent again.
+const IN_XERO = 'xero_invoice_id IS NOT NULL';
+
 // Normalise a vendor name for dedup comparison.
 // Strips honorifics, common legal suffixes, punctuation, and lowercases so that
 // "BLCKLB PTE. LTD." and "blcklb Pte Ltd" are treated as the same vendor.
@@ -38,6 +44,8 @@ const FIELD_TO_COLUMN = {
   description: 'description', accountCode: 'account_code', taxAmount: 'tax_amount',
   subTotal: 'sub_total', paymentReference: 'payment_reference',
   xeroInvoiceId: 'xero_invoice_id', errorMsg: 'error_msg', duplicateOf: 'duplicate_of',
+  // Which connected Xero company xeroInvoiceId lives in. Written with it.
+  xeroTenantId: 'xero_tenant_id',
   resolvedBy: 'resolved_by', resolvedAt: 'resolved_at', submittedAt: 'submitted_at',
   processedAt: 'processed_at', updatedAt: 'updated_at',
   // Expense claims. Kept separate from pdfFilename rather than overloading it:
@@ -94,6 +102,7 @@ function _rowToRecord(row, reports, lineItems) {
     subTotal:          _centsToDollars(row.sub_total),
     paymentReference:  row.payment_reference,
     xeroInvoiceId:     row.xero_invoice_id,
+    xeroTenantId:      row.xero_tenant_id,
     errorMsg:          row.error_msg,
     duplicateOf:       row.duplicate_of,
     resolvedBy:        row.resolved_by,
@@ -240,6 +249,11 @@ function forUser(userId) {
     return getById(id);
   }
 
+  // A report on a row that is already in Xero is recorded but leaves the status
+  // alone. Turning a posted row into 'reported' hid it from every duplicate
+  // check that looked for 'posted', so the same bill re-read from the mailbox
+  // was sent to Xero a second time. getFlagged still lists it while the report
+  // is open.
   function addReport(id, report) {
     const existing = getById(id);
     if (!existing) return null;
@@ -247,13 +261,23 @@ function forUser(userId) {
       INSERT INTO invoice_reports (invoice_id, user_email, note, reported_at)
       VALUES (?, ?, ?, ?)
     `).run(id, report.userEmail, report.note, new Date().toISOString());
-    return update(id, { status: 'reported' });
+    return update(id, existing.xeroInvoiceId ? {} : { status: 'reported' });
   }
 
   // Returns all invoices that need human attention: user-flagged reports and
-  // system-flagged parsing failures that could not be submitted to Xero.
+  // system-flagged parsing failures that could not be submitted to Xero. A row
+  // in Xero keeps its status when reported, so it is listed while any report on
+  // it is newer than its last resolution.
   function getFlagged() {
-    const rows = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status IN ('reported', 'review-needed')").all(userId);
+    const rows = db.prepare(`
+      SELECT * FROM invoices i WHERE i.user_id = ? AND (
+        i.status IN ('reported', 'review-needed')
+        OR (i.xero_invoice_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM invoice_reports r
+          WHERE r.invoice_id = i.id AND (i.resolved_at IS NULL OR r.reported_at > i.resolved_at)
+        ))
+      )
+    `).all(userId);
     return _hydrateMany(rows);
   }
 
@@ -296,18 +320,21 @@ function forUser(userId) {
     return false;
   }
 
-  // Returns a posted record matching this invoice, or null.
-  function findPosted(vendorName, invoiceNumber, invoiceDate, totalAmount) {
+  // Returns a record in Xero matching this invoice, or null. excludeId leaves
+  // out the row being checked, so a row never counts as its own duplicate.
+  function findPosted(vendorName, invoiceNumber, invoiceDate, totalAmount, excludeId = null) {
     const normV = _normalizeVendor(vendorName);
-    const rows = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status = 'posted'").all(userId);
+    const rows = db.prepare(`SELECT * FROM invoices WHERE user_id = ? AND (status = 'posted' OR ${IN_XERO}) AND id IS NOT ?`)
+      .all(userId, excludeId);
     const candidates = _hydrateMany(rows);
     return candidates.find(inv => _matchesInvoice(inv, normV, invoiceNumber, invoiceDate, totalAmount)) || null;
   }
 
-  // Returns any already-stored record matching this invoice (posted, pending, or review-needed).
+  // Returns any already-stored record matching this invoice (posted, pending, or
+  // review-needed). An error row still counts when it is in Xero.
   function findStored(vendorName, invoiceNumber, invoiceDate, totalAmount) {
     const normV = _normalizeVendor(vendorName);
-    const rows = db.prepare("SELECT * FROM invoices WHERE user_id = ? AND status NOT IN ('duplicate', 'error')").all(userId);
+    const rows = db.prepare(`SELECT * FROM invoices WHERE user_id = ? AND (status NOT IN ('duplicate', 'error') OR ${IN_XERO})`).all(userId);
     const candidates = _hydrateMany(rows);
     return candidates.find(inv => _matchesInvoice(inv, normV, invoiceNumber, invoiceDate, totalAmount)) || null;
   }
@@ -329,8 +356,43 @@ function forUser(userId) {
     return claim();
   }
 
+  // Sends cut off by a restart. The send runs in memory and is gone, so the
+  // row would sit in 'submitting' for good, and claimForSubmit refuses that
+  // status, so nobody could send it again either. Whether the first attempt
+  // reached Xero is unknown, so a person checks before it goes again: a row
+  // with no Xero ID waits in review-needed; a correction to a row already in
+  // Xero stays posted. Both carry the message. Only safe at boot, before this
+  // process has started a send of its own. Returns how many rows it moved.
+  function releaseInterrupted(message) {
+    const now = new Date().toISOString();
+    const release = db.transaction(() => {
+      const held = db.prepare(`
+        UPDATE invoices SET status = 'review-needed', error_msg = ?, updated_at = ?
+        WHERE user_id = ? AND status = 'submitting' AND xero_invoice_id IS NULL
+      `).run(message, now, userId).changes;
+      const kept = db.prepare(`
+        UPDATE invoices SET status = 'posted', error_msg = ?, updated_at = ?
+        WHERE user_id = ? AND status = 'submitting' AND ${IN_XERO}
+      `).run(message, now, userId).changes;
+      return held + kept;
+    });
+    return release();
+  }
+
+  // "Clear all" removes what exists only here. A row with a Xero ID is the only
+  // record here that the bill is already in Xero; without it the next scan of
+  // the same email posts it again. A row mid-send is about to get one. Returns the
+  // removed rows (id and receipt file, so the caller can delete their files)
+  // and how many rows were kept.
   function clear() {
-    db.prepare('DELETE FROM invoices WHERE user_id = ?').run(userId);
+    const run = db.transaction(() => {
+      const where = "user_id = ? AND xero_invoice_id IS NULL AND status != 'submitting'";
+      const removed = db.prepare(`SELECT id, receipt_file AS receiptFile FROM invoices WHERE ${where}`).all(userId);
+      db.prepare(`DELETE FROM invoices WHERE ${where}`).run(userId);
+      const kept = db.prepare('SELECT COUNT(*) AS n FROM invoices WHERE user_id = ?').get(userId).n;
+      return { removed, kept };
+    });
+    return run();
   }
 
   // ── Narrow reads ───────────────────────────────────────────────────────────
@@ -360,11 +422,12 @@ function forUser(userId) {
   // Split siblings share one stored file, so it may only be deleted once nothing
   // references it. A count answers that without loading anything.
   // The same image, byte for byte. Duplicates and errors are excluded so a
-  // rejected earlier attempt does not block a genuine re-import.
+  // rejected earlier attempt does not block a genuine re-import, unless the
+  // row is in Xero, which no status takes back.
   function findByReceiptHash(hash) {
     if (!hash) return null;
     const row = db.prepare(
-      "SELECT * FROM invoices WHERE user_id = ? AND receipt_hash = ? AND status NOT IN ('duplicate', 'error') ORDER BY rowid ASC LIMIT 1"
+      `SELECT * FROM invoices WHERE user_id = ? AND receipt_hash = ? AND (status NOT IN ('duplicate', 'error') OR ${IN_XERO}) ORDER BY rowid ASC LIMIT 1`
     ).get(userId, hash);
     return _hydrate(row);
   }
@@ -376,7 +439,7 @@ function forUser(userId) {
   }
 
   return { getAll, getById, add, update, addReport, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
-           count, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash };
+           releaseInterrupted, count, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash };
 }
 
 module.exports = { forUser, FIELD_TO_COLUMN, normalizeInvoiceNumber };

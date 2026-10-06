@@ -264,3 +264,22 @@ describe('normaliseLineItem — every vocabulary the readers have used', () => {
     expect(d.lineItems[0]).toMatchObject({ description: 'Pie — 6 × 1.60', unitAmount: 9.6 });
   });
 });
+
+// A failed correction of a posted bill keeps its Xero ID and is still in Xero,
+// so it must stay a match target; an 'error' row that never reached Xero is not.
+describe('dedup — failed rows that are already in Xero', () => {
+  const dedup = require('./dedup');
+  const base  = { vendorName: 'Isetan', invoiceDate: '2026-08-10', totalAmount: 45.5 };
+  const store = rows => ({ getAll: () => rows });
+
+  test('an error row with a Xero ID is still a match', () => {
+    const r = dedup.findDuplicate({ store: store([{ id: 'p1', status: 'error', xeroInvoiceId: 'X-1', ...base }]),
+      contactName: 'Isetan', date: '2026-08-10', amount: 45.5 });
+    expect(r).toMatchObject({ match: { id: 'p1' }, certain: false });
+  });
+
+  test('an error row that never reached Xero is not', () => {
+    expect(dedup.findDuplicate({ store: store([{ id: 'e1', status: 'error', ...base }]),
+      contactName: 'Isetan', date: '2026-08-10', amount: 45.5 })).toBeNull();
+  });
+});

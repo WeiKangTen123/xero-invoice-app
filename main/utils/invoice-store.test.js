@@ -258,6 +258,122 @@ describe('invoice-store (SQLite)', () => {
     });
   });
 
+  // A row holding a Xero invoice ID is in Xero whatever its status says. A
+  // report, an admin resolution or a failed correction used to move a posted
+  // row off 'posted'; findPosted looked only at 'posted' and findStored skipped
+  // 'error', so the row went invisible and a re-scanned email posted the bill
+  // a second time.
+  describe('a row in Xero stays recognisable', () => {
+    test('reporting a posted row keeps it posted, records the report, and lists it as flagged', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv   = baseInvoice({ status: 'posted', xeroInvoiceId: 'xero-r1' });
+      store.add(inv);
+      store.addReport(inv.id, { userEmail: 'x@test.com', note: 'wrong account' });
+      const row = store.getById(inv.id);
+      expect(row.status).toBe('posted');
+      expect(row.reports.map(r => r.note)).toEqual(['wrong account']);
+      expect(store.getFlagged().map(i => i.id)).toEqual([inv.id]);
+      expect(store.findPosted('Acme Corp', 'INV-001', '2026-01-01', 100).id).toBe(inv.id);
+      expect(store.findStored('Acme Corp', 'INV-001', '2026-01-01', 100).id).toBe(inv.id);
+    });
+
+    test('a resolved report drops off the flagged list; a newer report puts it back', async () => {
+      const store = invoiceStore.forUser(userId);
+      const inv   = baseInvoice({ status: 'posted', xeroInvoiceId: 'xero-r2' });
+      store.add(inv);
+      store.addReport(inv.id, { userEmail: 'x@test.com', note: 'first' });
+      await new Promise(r => setTimeout(r, 5));
+      store.update(inv.id, { resolvedBy: 'admin@test.com', resolvedAt: new Date().toISOString() });
+      expect(store.getFlagged()).toEqual([]);
+      await new Promise(r => setTimeout(r, 5));
+      store.addReport(inv.id, { userEmail: 'x@test.com', note: 'second' });
+      expect(store.getFlagged().map(i => i.id)).toEqual([inv.id]);
+    });
+
+    test.each(['reported', 'reviewed', 'error'])('a row with a Xero ID in status %s is still found by every duplicate check', status => {
+      const store = invoiceStore.forUser(userId);
+      const inv   = baseInvoice({ status, xeroInvoiceId: `xero-${status}`, receiptHash: `hash-${status}` });
+      store.add(inv);
+      expect(store.findPosted('Acme Corp', 'INV-001', '2026-01-01', 100)?.id).toBe(inv.id);
+      expect(store.findStored('Acme Corp', 'INV-001', '2026-01-01', 100)?.id).toBe(inv.id);
+      expect(store.findByReceiptHash(`hash-${status}`)?.id).toBe(inv.id);
+    });
+
+    test('an error row with no Xero ID is still ignored, so a genuine re-import is not blocked', () => {
+      const store = invoiceStore.forUser(userId);
+      store.add(baseInvoice({ status: 'error', receiptHash: 'h-err' }));
+      expect(store.findPosted('Acme Corp', 'INV-001', '2026-01-01', 100)).toBeNull();
+      expect(store.findStored('Acme Corp', 'INV-001', '2026-01-01', 100)).toBeNull();
+      expect(store.findByReceiptHash('h-err')).toBeNull();
+    });
+
+    test('findPosted never returns the row it is asked to leave out', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv   = baseInvoice({ status: 'posted', xeroInvoiceId: 'xero-self' });
+      store.add(inv);
+      expect(store.findPosted('Acme Corp', 'INV-001', '2026-01-01', 100, inv.id)).toBeNull();
+    });
+  });
+
+  // A restart mid-send left the row in 'submitting', which claimForSubmit
+  // refuses, so nothing could ever send it again.
+  describe('releaseInterrupted', () => {
+    const MSG = 'Sending was interrupted by a restart. Check Xero for this document before sending it again.';
+
+    test("a 'submitting' row becomes review-needed with the message, and can be claimed again", () => {
+      const store = invoiceStore.forUser(userId);
+      const inv   = baseInvoice({ status: 'submitting' });
+      store.add(inv);
+      expect(store.claimForSubmit(inv.id)).toEqual({ claimed: false, reason: 'already submitting' });
+      expect(store.releaseInterrupted(MSG)).toBe(1);
+      const row = store.getById(inv.id);
+      expect(row.status).toBe('review-needed');
+      expect(row.errorMsg).toBe(MSG);
+      expect(store.claimForSubmit(inv.id)).toEqual({ claimed: true });
+    });
+
+    test('a correction to a posted row that was cut off stays posted, with the message', () => {
+      const store = invoiceStore.forUser(userId);
+      const inv   = baseInvoice({ status: 'submitting', xeroInvoiceId: 'xero-int' });
+      store.add(inv);
+      store.releaseInterrupted(MSG);
+      expect(store.getById(inv.id)).toMatchObject({ status: 'posted', xeroInvoiceId: 'xero-int', errorMsg: MSG });
+    });
+
+    test('rows in any other status are left alone', () => {
+      const store = invoiceStore.forUser(userId);
+      store.add(baseInvoice({ id: 'p1', status: 'pending' }));
+      store.add(baseInvoice({ id: 'p2', status: 'posted', xeroInvoiceId: 'xero-p2' }));
+      expect(store.releaseInterrupted(MSG)).toBe(0);
+      expect(store.getById('p1')).toMatchObject({ status: 'pending', errorMsg: null });
+      expect(store.getById('p2')).toMatchObject({ status: 'posted', errorMsg: null });
+    });
+  });
+
+  // "Clear all" deleted posted rows too, and with them the only record that
+  // the bill was already in Xero.
+  test('clear removes only rows with no Xero ID that are not mid-send, and reports what it kept', () => {
+    const store = invoiceStore.forUser(userId);
+    store.add(baseInvoice({ id: 'c-pending', status: 'pending', receiptFile: 'a.jpg' }));
+    store.add(baseInvoice({ id: 'c-error', status: 'error' }));
+    store.add(baseInvoice({ id: 'c-posted', status: 'posted', xeroInvoiceId: 'xero-c1' }));
+    store.add(baseInvoice({ id: 'c-reported', status: 'reported', xeroInvoiceId: 'xero-c2' }));
+    store.add(baseInvoice({ id: 'c-sending', status: 'submitting' }));
+    const { removed, kept } = store.clear();
+    expect(removed.map(r => r.id).sort()).toEqual(['c-error', 'c-pending']);
+    expect(removed.find(r => r.id === 'c-pending').receiptFile).toBe('a.jpg');
+    expect(kept).toBe(3);
+    expect(store.getAll().map(r => r.id).sort()).toEqual(['c-posted', 'c-reported', 'c-sending']);
+  });
+
+  test('xeroTenantId is stored and read back', () => {
+    const store = invoiceStore.forUser(userId);
+    const inv   = baseInvoice();
+    store.add(inv);
+    expect(store.update(inv.id, { status: 'posted', xeroInvoiceId: 'xero-t', xeroTenantId: 'tenant-1' }))
+      .toMatchObject({ xeroInvoiceId: 'xero-t', xeroTenantId: 'tenant-1' });
+  });
+
   describe('schema constraints', () => {
     test('rejects an invoice with a status outside the allowed CHECK list', () => {
       const store = invoiceStore.forUser(userId);

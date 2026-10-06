@@ -48,7 +48,7 @@ function run() {
     ['receipt_file', 'receipt_file TEXT'], ['receipt_mime', 'receipt_mime TEXT'], ['receipt_box', 'receipt_box TEXT'],
     ['receipt_page', 'receipt_page INTEGER'], ['receipt_group', 'receipt_group TEXT'], ['received_at', 'received_at TEXT'],
     ['receipt_hash', 'receipt_hash TEXT'], ['vendor_phone', 'vendor_phone TEXT'], ['project_name', 'project_name TEXT'],
-    ['parsed_at', 'parsed_at TEXT'],
+    ['parsed_at', 'parsed_at TEXT'], ['xero_tenant_id', 'xero_tenant_id TEXT'],
   ]) _ensureColumn('invoices', col, ddl);
 
   // 1. SHA-256 of every stored receipt that predates the hash column.
@@ -92,6 +92,11 @@ function run() {
       if (cols.includes(column)) db.exec(`ALTER TABLE user_credentials DROP COLUMN ${column}`);
     }
   });
+
+  // After the steps, not with the columns above: step 2 rebuilds user_settings
+  // with only the columns it knew about, so on a database old enough to run it
+  // a column added beforehand would be dropped again by the rebuild.
+  _ensureColumn('user_settings', 'default_tenant_id', 'default_tenant_id TEXT');
 }
 
 module.exports = { run };

@@ -120,6 +120,45 @@ describe('admin routes', () => {
     expect(row.resolvedBy).toBe('admin@test.com');
   });
 
+  // Resolving set 'reviewed' on a posted row too, and the duplicate checks
+  // looked only for 'posted' — so a re-scanned email posted the bill again.
+  test('a reported posted row is listed, and resolving it keeps it posted and still found as a duplicate', async () => {
+    const invoiceStore = require('../utils/invoice-store');
+    const owner = await users.createUser('owner2@test.com', 'password123', 'user');
+    const store = invoiceStore.forUser(owner.id);
+    store.add({ id: 'p1', status: 'posted', xeroInvoiceId: 'xero-p1', vendorName: 'Acme', invoiceNumber: 'P-1', invoiceDate: '2026-09-01', totalAmount: 5, processedAt: new Date().toISOString() });
+    store.addReport('p1', { userEmail: 'owner2@test.com', note: 'wrong account code' });
+
+    const before = await request(serverFor(app)).get('/api/admin/reports').set('Authorization', `Bearer ${tokenFor(adminUser)}`).expect(200);
+    expect(before.body.reports.map(r => [r.id, r.status])).toEqual([['p1', 'posted']]);
+
+    await new Promise(r => setTimeout(r, 5));
+    await request(serverFor(app))
+      .patch(`/api/admin/reports/${owner.id}/p1/resolve`)
+      .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
+      .expect(200);
+    const row = store.getById('p1');
+    expect(row).toMatchObject({ status: 'posted', xeroInvoiceId: 'xero-p1', resolvedBy: 'admin@test.com' });
+    expect(store.findPosted('Acme', 'P-1', '2026-09-01', 5)?.id).toBe('p1');
+    expect(store.findStored('Acme', 'P-1', '2026-09-01', 5)?.id).toBe('p1');
+
+    const after = await request(serverFor(app)).get('/api/admin/reports').set('Authorization', `Bearer ${tokenFor(adminUser)}`).expect(200);
+    expect(after.body.reports).toEqual([]);
+  });
+
+  test("resolving a row reported under the old rule ('reported' with a Xero ID) puts it back to posted", async () => {
+    const invoiceStore = require('../utils/invoice-store');
+    const owner = await users.createUser('owner3@test.com', 'password123', 'user');
+    invoiceStore.forUser(owner.id).add({ id: 'old', status: 'reported', xeroInvoiceId: 'xero-old', vendorName: 'A', invoiceNumber: '1', invoiceDate: '2026-09-01', totalAmount: 5, processedAt: new Date().toISOString() });
+    await request(serverFor(app)).patch(`/api/admin/reports/${owner.id}/old/resolve`).set('Authorization', `Bearer ${tokenFor(adminUser)}`).expect(200);
+    expect(invoiceStore.forUser(owner.id).getById('old').status).toBe('posted');
+  });
+
+  test('resolving an invoice that does not exist is a 404', async () => {
+    const owner = await users.createUser('owner4@test.com', 'password123', 'user');
+    await request(serverFor(app)).patch(`/api/admin/reports/${owner.id}/nope/resolve`).set('Authorization', `Bearer ${tokenFor(adminUser)}`).expect(404);
+  });
+
   test('GET /monitoring reports the requesting admin as online (their own request just touched last_seen_at)', async () => {
     const res = await request(serverFor(app))
       .get('/api/admin/monitoring')

@@ -2,6 +2,7 @@ const express      = require('express');
 const router       = express.Router();
 const { decodeBase64 } = require('../utils/base64');
 const { requireAuth } = require('../middleware/auth-middleware');
+const asyncHandler = require('../middleware/async-handler');
 const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
 const claimImport  = require('../claims/claim-import');
@@ -42,7 +43,7 @@ const MAX_UPLOAD_BYTES = 7 * 1024 * 1024;
 const { createClaimRecord } = require('../claims/claim-record');
 
 // POST /api/claims/import  { archives: [{name,data}], forms: [{name,data}], label }
-router.post('/import', requireAuth, async (req, res) => {
+router.post('/import', requireAuth, asyncHandler(async (req, res) => {
   try {
     const { archives = [], forms = [], label } = req.body || {};
     if (!Array.isArray(archives) || !Array.isArray(forms) || (!archives.length && !forms.length)) {
@@ -116,7 +117,7 @@ router.post('/import', requireAuth, async (req, res) => {
     logger.error('Claim import could not start', { userId: req.user.id, error: err.message });
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // GET /api/claims/active — returns any currently in-flight or queued claim import
 router.get('/active', requireAuth, (req, res) => {
@@ -183,16 +184,27 @@ router.delete('/group/:groupId', requireAuth, (req, res) => {
   const members = store.getReceiptGroup(req.params.groupId);
   if (!members.length) return res.status(404).json({ error: 'Nothing found for that import' });
 
+  // A claim already in Xero, or on its way there, stays: deleting the local row
+  // would lose its Xero ID and a re-import would post it a second time. The
+  // same rule as deleting a single record (routes/invoices.js).
+  const inXero = r => !!r.xeroInvoiceId || r.status === 'submitting';
+  const keep   = members.filter(inXero);
+  const drop   = members.filter(r => !inXero(r));
+
   let files = 0;
-  for (const rec of members) {
+  for (const rec of drop) {
     store.remove(rec.id);
     // Siblings can share a file; it goes only when nothing references it.
     if (rec.receiptFile && store.countByReceiptFile(rec.receiptFile) === 0) {
       if (receiptStore.forUser(req.user.id).remove(rec.receiptFile)) files++;
     }
   }
-  logger.info('Claim import undone', { userId: req.user.id, groupId: req.params.groupId, removed: members.length, files });
-  res.json({ removed: members.length });
+  logger.info('Claim import undone', { userId: req.user.id, groupId: req.params.groupId, removed: drop.length, kept: keep.length, files });
+  res.json({
+    removed: drop.length,
+    kept:    keep.length,
+    ...(keep.length ? { message: `${keep.length} claim${keep.length === 1 ? ' was' : 's were'} already sent to Xero and kept.` } : {}),
+  });
 });
 
 module.exports = router;

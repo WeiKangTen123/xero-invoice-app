@@ -1,5 +1,6 @@
 const { AccountingApi }              = require('xero-node');
 const fs                             = require('fs');
+const crypto                         = require('crypto');
 const axios                          = require('axios');
 const { getOrCreateContact }         = require('./contacts');
 const { withRetry, xeroErrMsg } = require('./xero-utils');
@@ -228,6 +229,25 @@ async function _submitWithCurrencyRetry(submitFn, accountingApi, tenantId, invoi
   }
 }
 
+// Xero's Idempotency-Key: a create repeated with the same key inside Xero's
+// six-minute window returns the invoice the first one made instead of making a
+// second draft. That is the case of a send whose answer never arrived — a
+// dropped connection, a timeout, a restart mid-request — retried by withRetry,
+// the boot retry or a person.
+//
+// The key is the local invoice and the org it goes to, plus a digest of the
+// exact body. The same row re-sent unchanged builds the same body and so the
+// same key. A row a person corrected after Xero refused it builds a different
+// one, so the correction is not answered with the refusal Xero kept for the
+// old key. Null without a local id: nothing to tie a retry to.
+function createIdempotencyKey(localId, tenantId, invoiceBody) {
+  if (!localId) return null;
+  const digest = crypto.createHash('sha256')
+    .update(JSON.stringify([String(tenantId), invoiceBody]))
+    .digest('hex').slice(0, 16);
+  return `create-${String(localId).slice(0, 64)}-${digest}`;
+}
+
 // Create a fresh AccountingApi instance per call so concurrent users cannot
 // contaminate each other's token state on a shared singleton.
 async function createDraftInvoice(userId, tenantId, invoiceData) {
@@ -238,9 +258,11 @@ async function createDraftInvoice(userId, tenantId, invoiceData) {
   accountingApi.accessToken  = token;
 
   const { invoiceBody, currencyCode } = await _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi);
+  const idempotencyKey = createIdempotencyKey(invoiceData._invoiceStoreId || invoiceData.id, tenantId, invoiceBody);
 
+  // createInvoices(xeroTenantId, invoices, summarizeErrors?, unitdp?, idempotencyKey?)
   const result = await _submitWithCurrencyRetry(
-    body => accountingApi.createInvoices(tenantId, body),
+    body => accountingApi.createInvoices(tenantId, body, undefined, undefined, idempotencyKey || undefined),
     accountingApi, tenantId, invoiceBody, currencyCode, userId, invoiceData
   );
   const created = result.body.invoices[0];
@@ -358,5 +380,5 @@ module.exports = {
   _submitWithCurrencyRetry,
   createDraftInvoice, updateDraftInvoice,
   // Exposed for tests only — internal to the create/update flow above.
-  buildLineItems, resolveTaxType, getOrgTaxRates,
+  buildLineItems, resolveTaxType, getOrgTaxRates, createIdempotencyKey,
 };

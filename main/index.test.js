@@ -109,4 +109,49 @@ describe('index — boot retry of stuck Xero submissions', () => {
     await app.retryStuckSubmissions({ gapMs: 0 });
     expect(submittedFor()).toEqual([u.id]);
   });
+
+  test('a row that stopped being pending while the retry waited is not sent', async () => {
+    const u = await accountWithStuckInvoices(2);
+    // The first send's gap is when the live pipeline posts the other row.
+    let other;
+    handler.submitInvoiceToXero.mockImplementationOnce(async (userId, id) => {
+      other = id.endsWith('-0') ? `stuck-${userId}-1` : `stuck-${userId}-0`;
+      invoiceStore.forUser(userId).update(other, { status: 'posted', xeroInvoiceId: `x-${userId}` });
+    });
+    await app.retryStuckSubmissions({ gapMs: 0 });
+    const sent = handler.submitInvoiceToXero.mock.calls.map(([, id]) => id);
+    expect(sent).toHaveLength(1);
+    expect(sent).not.toContain(other);
+    expect(submittedFor()).toEqual([u.id]);
+  });
+
+  // Every deploy is a restart. A send in flight at that moment left its row in
+  // 'submitting' for good: the retry re-submitted it, claimForSubmit refused
+  // 'submitting', and so did the manual submit. The send may have reached
+  // Xero, so a person checks first.
+  test("a 'submitting' row becomes review-needed at boot and is not re-sent", async () => {
+    const u = await accountWithStuckInvoices(0);
+    const store = invoiceStore.forUser(u.id);
+    store.add({ id: `mid-${u.id}`, status: 'submitting', vendorName: 'A', invoiceNumber: 'M1', invoiceDate: '2026-09-01', totalAmount: 5, processedAt: new Date().toISOString() });
+    store.add({ id: `fix-${u.id}`, status: 'submitting', xeroInvoiceId: `xero-${u.id}`, vendorName: 'A', invoiceNumber: 'M2', invoiceDate: '2026-09-01', totalAmount: 5, processedAt: new Date().toISOString() });
+
+    app.releaseInterruptedSubmissions();
+    await app.retryStuckSubmissions({ gapMs: 0 });
+
+    const msg = 'Sending was interrupted by a restart. Check Xero for this document before sending it again.';
+    expect(store.getById(`mid-${u.id}`)).toMatchObject({ status: 'review-needed', errorMsg: msg });
+    // A correction to a bill already in Xero stays posted.
+    expect(store.getById(`fix-${u.id}`)).toMatchObject({ status: 'posted', errorMsg: msg });
+    expect(submittedFor()).toEqual([]);
+  });
+
+  test('interrupted sends are released for a disabled account too; nothing is sent for it', async () => {
+    const u = await accountWithStuckInvoices(1);
+    users.setDisabled(u.id, true);
+    invoiceStore.forUser(u.id).update(`stuck-${u.id}-0`, { status: 'submitting' });
+    app.releaseInterruptedSubmissions();
+    await app.retryStuckSubmissions({ gapMs: 0 });
+    expect(invoiceStore.forUser(u.id).getById(`stuck-${u.id}-0`).status).toBe('review-needed');
+    expect(submittedFor()).toEqual([]);
+  });
 });

@@ -16,6 +16,41 @@ describe('db/migrate', () => {
     expect(db.pragma('user_version', { simple: true })).toBeGreaterThanOrEqual(1);
   });
 
+  // One invoice goes to one Xero company: the row records which, and the
+  // account records which company new documents default to.
+  test('invoices.xero_tenant_id and user_settings.default_tenant_id exist after a run', () => {
+    run();
+    const cols = table => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+    expect(cols('invoices')).toContain('xero_tenant_id');
+    expect(cols('user_settings')).toContain('default_tenant_id');
+  });
+
+  test('a deployed database without them gains both on the next boot', () => {
+    run();
+    db.exec('ALTER TABLE invoices DROP COLUMN xero_tenant_id');
+    db.exec('ALTER TABLE user_settings DROP COLUMN default_tenant_id');
+    run();
+    const cols = table => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+    expect(cols('invoices')).toContain('xero_tenant_id');
+    expect(cols('user_settings')).toContain('default_tenant_id');
+  });
+
+  // Step 2 rebuilds user_settings with only the columns it knew. On a database
+  // old enough to run it, a column ensured before the step would be dropped.
+  test('the user_settings rebuild of an old database does not lose default_tenant_id', () => {
+    run();
+    db.exec('DROP TABLE user_settings');
+    db.exec(`CREATE TABLE user_settings (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      auto_process INTEGER NOT NULL DEFAULT 1
+    )`);
+    db.pragma('user_version = 1');
+    run();
+    const cols = db.prepare('PRAGMA table_info(user_settings)').all();
+    expect(String(cols.find(c => c.name === 'auto_process').dflt_value)).toBe('0');
+    expect(cols.map(c => c.name)).toContain('default_tenant_id');
+  });
+
   test('one-off steps run once: a second run leaves the version where it is and touches nothing', () => {
     run();
     const v = db.pragma('user_version', { simple: true });

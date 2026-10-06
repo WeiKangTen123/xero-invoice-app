@@ -9,6 +9,7 @@ const { createHandler } = require('../utils/invoice-handler');
 const { getUserConfig, getSetupStatus } = require('../utils/users');
 const invoiceStore     = require('../utils/invoice-store');
 const settingsStore    = require('../utils/settings-store');
+const tokenCache       = require('../utils/token-cache');
 const processState     = require('../utils/process-state');
 const logger           = require('../utils/logger');
 
@@ -100,21 +101,37 @@ router.post('/stop', requireAuth, (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/process/settings
+// GET /api/process/settings → { autoProcess, defaultTenantId }
+// defaultTenantId is the Xero company a new document is sent to when more than
+// one is connected (queue/processor.js); null when none has been chosen.
 router.get('/settings', requireAuth, (req, res) => {
-  res.json(settingsStore.forUser(req.user.id).get());
+  const { autoProcess, defaultTenantId } = settingsStore.forUser(req.user.id).get();
+  res.json({ autoProcess, defaultTenantId });
 });
 
-// PATCH /api/process/settings
+// PATCH /api/process/settings  { autoProcess?, defaultTenantId? }
+// defaultTenantId must be one of this account's connected companies, or null
+// or '' to clear it. Anything else is refused rather than stored: an unknown
+// id would quietly fall through to "choose a company" on every send.
 router.patch('/settings', requireAuth, (req, res) => {
-  const allowed = ['autoProcess'];
-  const patch   = {};
-  for (const k of allowed) {
-    if (k in req.body) patch[k] = Boolean(req.body[k]);
+  const body  = req.body || {};
+  const patch = {};
+  if ('autoProcess' in body) patch.autoProcess = Boolean(body.autoProcess);
+  if ('defaultTenantId' in body) {
+    const value = body.defaultTenantId;
+    if (value === null || value === '') {
+      patch.defaultTenantId = null;
+    } else {
+      const connected = tokenCache.getPersistedTenants(req.user.id);
+      if (typeof value !== 'string' || !connected.some(t => String(t.tenantId) === value)) {
+        return res.status(400).json({ error: 'Choose one of the connected Xero companies' });
+      }
+      patch.defaultTenantId = value;
+    }
   }
-  const updated = settingsStore.forUser(req.user.id).set(patch);
+  const { autoProcess, defaultTenantId } = settingsStore.forUser(req.user.id).set(patch);
   logger.info('Settings updated', { patch, by: req.user.email });
-  res.json(updated);
+  res.json({ autoProcess, defaultTenantId });
 });
 
 // POST /api/process/rescan — trigger immediate IMAP scan for unread emails
