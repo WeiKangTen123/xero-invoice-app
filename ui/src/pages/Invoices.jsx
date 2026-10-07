@@ -20,8 +20,13 @@ import DesktopTable from './invoices/DesktopTable';
 import { FilterPill } from './invoices/FilterPill';
 import MobileList from './invoices/MobileList';
 import MobileSelectionBar from './invoices/MobileSelectionBar';
+import BulkResultsPanel from './invoices/BulkResultsPanel';
 import { DEFAULT_TAB, TABS, countOf, currencyTotals, receivedBucket, receivedCutoff, scannedNote, tabByKey } from './invoices/helpers';
-import { syncSummary } from './invoices/xero-status';
+import { XERO_STATUS_META, repostBlockedReason, syncSummary, xeroStatusKey } from './invoices/xero-status';
+import { SORT_FIELDS, formatSort, nextSort, overdueDays, parseSort, sortLabel, sortRows, todayIn } from './invoices/list-view';
+import { csvFilename, invoiceCsv } from './invoices/csv';
+import { BULK_MAX, bulkConfirm, stillSelected, summarise } from './invoices/bulk';
+import { DEFAULT_TIMEZONE } from '../utils/formatDate';
 
 // What "Clear all" did, in the server's words. The server decides what is kept
 // (anything in Xero or mid-send) and replies { removed, kept, message }, so its
@@ -33,7 +38,7 @@ function clearedMessage(r) {
 // The filters a link or a Back can restore, with the value each takes when the
 // parameter is absent. A value outside the known set falls back too, so a stale
 // or hand-edited link narrows nothing rather than hiding every row.
-const STATUS_KEYS   = ['all', 'posted', 'reviewed', 'pending', 'needs-action', 'duplicate', 'reported'];
+const STATUS_KEYS   = ['all', 'posted', 'reviewed', 'pending', 'needs-action', 'duplicate', 'reported', 'overdue'];
 const RECEIVED_KEYS = ['all', 'today', '7d', '30d', 'month', 'custom'];
 const DATE_RE       = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -67,8 +72,12 @@ export default function Invoices() {
   const [syncingXero,   setSyncingXero]   = useState(false);
   const [submitMsg,     setSubmitMsg]     = useState('');
   const [selected,      setSelected]      = useState(new Set());
-  const [deleteTarget,  setDeleteTarget]  = useState(null); // { type: 'single', invoice } | { type: 'bulk', count, ids } | { type: 'clear' }
+  const [deleteTarget,  setDeleteTarget]  = useState(null); // { type: 'single', invoice }
   const [deleteLoading, setDeleteLoading] = useState(false);
+  // An action on the selection: which one is running ('review' | 'send' |
+  // 'delete'), and what the last one did, row by row, until dismissed.
+  const [bulkBusy,      setBulkBusy]      = useState(null);
+  const [bulkReport,    setBulkReport]    = useState(null);
   // The tab lives in the URL so Back from a review lands where you left, and so
   // a link can point at one. A query param rather than /invoices/claims because
   // /invoices/:id already exists and a path segment invites a collision there
@@ -82,7 +91,10 @@ export default function Invoices() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tab    = tabByKey(searchParams.get('tab')).key;
   const paramIn = (key, allowed) => (allowed.includes(searchParams.get(key)) ? searchParams.get(key) : 'all');
-  const statusFilter   = paramIn('status', STATUS_KEYS);
+  const statusParam    = paramIn('status', STATUS_KEYS);
+  // Expense claims have no due date. Overdue carried over from another tab
+  // would empty the claims list with no pill lit to say why.
+  const statusFilter   = statusParam === 'overdue' && tab === 'claims' ? 'all' : statusParam;
   const receivedFilter = paramIn('received', RECEIVED_KEYS);
   const customFrom     = DATE_RE.test(searchParams.get('from') || '') ? searchParams.get('from') : '';
   const customTo       = DATE_RE.test(searchParams.get('to')   || '') ? searchParams.get('to')   : '';
@@ -99,10 +111,22 @@ export default function Invoices() {
   const setCustomFrom     = v => setParam('from', v);
   const setCustomTo       = v => setParam('to', v);
   const setFilter         = v => setParam('q', v);
+  // The order is remembered per tab ("sort_ap=due-asc"), beside the tab and
+  // the filters: what is due first is the question on Bills, and need not be
+  // the order on Expense Claims. No parameter is the list grouped by arrival.
+  const sortParam = `sort_${tab}`;
+  const rawSort   = searchParams.get(sortParam);
+  const sort = useMemo(() => {
+    const s = parseSort(rawSort);
+    return s && s.key === 'due' && tab === 'claims' ? null : s;
+  }, [rawSort, tab]);
+  const setSort = s => setParam(sortParam, formatSort(s));
+  const sortBy  = key => setSort(nextSort(sort, key));
   const setTab = (key) => {
     // Selection is a set of ids from the tab you were on. Carrying it across
     // would let a bulk delete on AP remove the AR rows you ticked earlier.
     setSelected(new Set());
+    setBulkReport(null);
     const next = new URLSearchParams(searchParams);
     if (key === DEFAULT_TAB) next.delete('tab'); else next.set('tab', key);
     setSearchParams(next, { replace: true });
@@ -294,39 +318,15 @@ export default function Invoices() {
     setDeleteTarget({ type: 'single', invoice: inv });
   }
 
-  function promptDeleteSelected() {
-    if (!selected.size) return;
-    setDeleteTarget({ type: 'bulk', count: selected.size, ids: [...selected] });
-  }
-
   async function handleConfirmDelete() {
     if (!deleteTarget) return;
     setDeleteLoading(true);
     try {
-      if (deleteTarget.type === 'single') {
-        const id = deleteTarget.invoice.id;
-        await api.delete(`/invoices/${id}`);
-        dropFetchInFlight();
-        setInvoices(prev => prev.filter(i => i.id !== id));
-        setSelected(prev => { const n = new Set(prev); n.delete(id); return n; });
-      } else if (deleteTarget.type === 'bulk') {
-        // Settled one by one rather than Promise.all: a selection can include
-        // something already posted to Xero, which the server refuses (409), and
-        // that refusal must not hide that the rest were deleted — nor leave
-        // them on screen as if they were not.
-        const ids     = deleteTarget.ids;
-        const results = await Promise.allSettled(ids.map(id => api.delete(`/invoices/${id}`)));
-        const gone    = new Set(ids.filter((_, k) => results[k].status === 'fulfilled'));
-        const refused = results.filter(r => r.status === 'rejected').map(r => r.reason);
-        dropFetchInFlight();
-        setInvoices(prev => prev.filter(i => !gone.has(i.id)));
-        setSelected(prev => new Set([...prev].filter(id => !gone.has(id))));
-        if (refused.length) {
-          toast.error(refused.length === 1
-            ? refused[0].message
-            : `${refused.length} of ${ids.length} were not deleted — ${refused[0].message}`);
-        }
-      }
+      const id = deleteTarget.invoice.id;
+      await api.delete(`/invoices/${id}`);
+      dropFetchInFlight();
+      setInvoices(prev => prev.filter(i => i.id !== id));
+      setSelected(prev => { const n = new Set(prev); n.delete(id); return n; });
       setDeleteTarget(null);
     } catch (err) {
       // The server's own reason, e.g. that a posted document cannot be deleted
@@ -381,6 +381,20 @@ export default function Invoices() {
   }
 
   const activeTab = tabByKey(tab);
+  // Today where the person is (their account's timezone), which is when a
+  // bill turns overdue.
+  const today = todayIn(user?.timezone || DEFAULT_TIMEZONE);
+  // The phone's sort choices for this tab: arrival order, then each sort both
+  // ways round. Claims have no due date to sort by.
+  const sortOptions = [
+    { value: '', label: 'Arrival (grouped)' },
+    ...Object.entries(SORT_FIELDS)
+      .filter(([key]) => !(key === 'due' && tab === 'claims'))
+      .flatMap(([key, f]) => {
+        const other = f.start === 'asc' ? 'desc' : 'asc';
+        return [f.start, other].map(dir => ({ value: `${key}-${dir}`, label: `${f.label}, ${f[dir]}` }));
+      }),
+  ];
   // Everything belonging to this tab, before status / search / date narrow it.
   // Both the status counts and the visible rows derive from this, which is what
   // stops a tab claiming "8 posted" while showing three.
@@ -392,6 +406,8 @@ export default function Invoices() {
       if (!ATTENTION_STATUSES.includes(inv.status)) return false;
     } else if (statusFilter === 'duplicate') {
       if (inv.status !== 'duplicate' && !inv.duplicateOf && !(inv.errorMsg && /duplicate/i.test(inv.errorMsg))) return false;
+    } else if (statusFilter === 'overdue') {
+      if (!overdueDays(inv, today)) return false;
     } else if (statusFilter !== 'all' && inv.status !== statusFilter) {
       return false;
     }
@@ -432,7 +448,14 @@ export default function Invoices() {
   // Grouped by ARRIVAL, not document date — the question is "what came in and
   // when", and grouping by invoice date would scatter one day's intake across
   // months. Order within a group is untouched, so the existing sort still holds.
+  //
+  // A chosen sort replaces the grouping with one list in that order: sorted
+  // within each arrival group, "due first" would restart in every month.
   const groups = useMemo(() => {
+    if (sort) {
+      const rows = sortRows(filtered, sort);
+      return [{ key: 'sorted', label: sortLabel(sort), rows, totals: currencyTotals(rows), note: null, openByDefault: true }];
+    }
     const now = new Date();
     const byKey = new Map();
     for (const inv of filtered) {
@@ -450,7 +473,72 @@ export default function Invoices() {
         // the same wall of rows this is meant to fix.
         openByDefault: g.rank <= 2,
       }));
-  }, [filtered]);
+  }, [filtered, sort]);
+
+  // "Export CSV": exactly the rows the list holds now (tab, filters, search),
+  // in the order it shows them, including any in a collapsed group. Built
+  // here rather than asked of the server, so the file cannot disagree with
+  // the screen it was taken from.
+  function handleExportCsv() {
+    const rows = groups.flatMap(g => g.rows);
+    if (!rows.length) return;
+    const csv = invoiceCsv(rows, {
+      xeroStatusLabel: i => { const k = xeroStatusKey(i); return k ? XERO_STATUS_META[k].label : ''; },
+    });
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = csvFilename(activeTab.many, today);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoked after the click has had its turn; revoking at once can cancel
+    // the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // Mark reviewed, Send to Xero or Delete on every selected row: one request
+  // with the ids, answered row by row. The question first says how many and
+  // what will happen; the answer is shown in the results panel, and the rows
+  // not done stay selected so they can be fixed and tried again.
+  async function runBulk(action) {
+    const ids = [...selected];
+    if (!ids.length || bulkBusy) return;
+    if (ids.length > BULK_MAX) {
+      toast.error(`At most ${BULK_MAX} rows can be changed at once, and ${ids.length} are selected. Narrow the selection and try again.`);
+      return;
+    }
+    const rows   = invoices.filter(i => selected.has(i.id));
+    const shown  = new Set(filtered.map(i => i.id));
+    const hidden = rows.filter(i => !shown.has(i.id)).length;
+    if (!(await confirm(bulkConfirm(action, rows, { tab: activeTab, hidden, repostBlockedReason })))) return;
+
+    // Named as they are now: a deleted row is gone from the list by the time
+    // the answer is read.
+    const rowsById = Object.fromEntries(rows.map(i => [i.id, i]));
+    setBulkBusy(action);
+    try {
+      const r = await api.post(`/invoices/bulk/${action}`, { ids });
+      const results = r.results || [];
+      if (action === 'delete') {
+        // Gone now, without waiting for the refetch; anything already out
+        // predates the delete and would put the rows back.
+        const gone = new Set(results.filter(x => x.ok).map(x => x.id));
+        dropFetchInFlight();
+        setInvoices(prev => prev.filter(i => !gone.has(i.id)));
+      }
+      setSelected(new Set(stillSelected(results)));
+      setBulkReport(summarise(action, results, rowsById));
+      fetchInvoices();
+      if (action === 'send') refreshPipeline();
+    } catch (err) {
+      // The whole request was refused (a 400, the connection): nothing was
+      // done to any row, so the selection stays as it was.
+      toast.error(err.message);
+    } finally {
+      setBulkBusy(null);
+    }
+  }
 
   // Only the groups the user has actually clicked are remembered; everything
   // else follows openByDefault. Storing the exceptions rather than the state
@@ -476,6 +564,7 @@ export default function Invoices() {
   const reported    = tabRows.filter(i => i.status === 'reported').length;
   const needsAction = tabRows.filter(i => ATTENTION_STATUSES.includes(i.status)).length;
   const duplicates  = tabRows.filter(isDuplicate).length;
+  const overdue     = tabRows.filter(i => overdueDays(i, today) > 0).length;
 
   return (
     <div>
@@ -650,6 +739,8 @@ export default function Invoices() {
           { key: 'needs-action', label: '⚠ Needs Review',   count: needsAction },
           ...(duplicates > 0 ? [{ key: 'duplicate', label: '⚠ Duplicate', count: duplicates }] : []),
           { key: 'reported',     label: 'Reported',         count: reported },
+          // Unpaid bills and invoices past their due date. Claims have none.
+          ...(tab !== 'claims' ? [{ key: 'overdue', label: '⏰ Overdue', count: overdue }] : []),
         ].map(t => (
           <FilterPill key={t.key} active={statusFilter === t.key} onClick={() => setStatusFilter(t.key)} label={t.label} count={t.count} />
         ))}
@@ -733,15 +824,34 @@ export default function Invoices() {
             </button>
           )}
 
-          {selected.size > 0 && (
-            <button
-              className="btn btn-sm"
-              disabled={deleteLoading}
-              onClick={promptDeleteSelected}
-              style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.25)', whiteSpace: 'nowrap', animation: 'scaleIn 0.15s ease' }}
-            >
-              {deleteLoading ? '...' : `🗑 Delete selected (${selected.size})`}
-            </button>
+          <button className="btn btn-outline btn-sm" onClick={handleExportCsv} disabled={!filtered.length}
+                  title="Download the rows shown here, in this order, as a spreadsheet"
+                  style={{ whiteSpace: 'nowrap' }}>
+            ⤓ Export CSV
+          </button>
+
+          {/* On a phone these live in the floating bar at the bottom. */}
+          {!isMobile && selected.size > 0 && (
+            <div role="group" aria-label="Actions on the selected rows"
+                 style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', animation: 'scaleIn 0.15s ease' }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{selected.size} selected:</span>
+              <button className="btn btn-sm" disabled={!!bulkBusy} onClick={() => runBulk('review')}
+                      style={{ background: 'var(--info-subtle)', color: 'var(--info)', border: '1px solid rgba(59,130,246,0.3)', whiteSpace: 'nowrap' }}>
+                {bulkBusy === 'review' ? '…' : '✓ Mark reviewed'}
+              </button>
+              <button className="btn btn-sm" disabled={!!bulkBusy} onClick={() => runBulk('send')}
+                      style={{ background: 'rgba(99,102,241,0.12)', color: 'var(--accent)', border: '1px solid rgba(99,102,241,0.3)', whiteSpace: 'nowrap' }}>
+                {bulkBusy === 'send' ? '…' : '→ Send to Xero'}
+              </button>
+              <button className="btn btn-sm" disabled={!!bulkBusy} onClick={() => runBulk('delete')}
+                      style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.25)', whiteSpace: 'nowrap' }}>
+                {bulkBusy === 'delete' ? '…' : '🗑 Delete'}
+              </button>
+              <button className="btn btn-ghost btn-sm" disabled={!!bulkBusy} onClick={() => setSelected(new Set())}
+                      style={{ color: 'var(--text-muted)' }}>
+                Clear
+              </button>
+            </div>
           )}
 
           {invoices.length > 0 && selected.size === 0 && (
@@ -762,6 +872,8 @@ export default function Invoices() {
           <RetryAlert message={`Could not refresh the list — showing it as last loaded. ${loadError}`}
                       onRetry={fetchInvoices} busy={refreshing} />
         )}
+
+        {bulkReport && <BulkResultsPanel report={bulkReport} onDismiss={() => setBulkReport(null)} openRecord={openRecord} />}
 
         {loading ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)', padding: '28px 0' }}>
@@ -794,19 +906,21 @@ export default function Invoices() {
                     : 'They arrive as the emailed template — or type one in, or import a spreadsheet, above'}
             </div>
           </div>
-        ) : isMobile ? <MobileList openRecord={openRecord} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} filtered={filtered} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} /> : <DesktopTable user={user} openRecord={openRecord} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} />}
+        ) : isMobile ? <MobileList openRecord={openRecord} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} filtered={filtered} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} sortValue={formatSort(sort)} sortOptions={sortOptions} onSortChange={v => setSort(parseSort(v))} today={today} /> : <DesktopTable user={user} openRecord={openRecord} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} sort={sort} onSort={sortBy} today={today} showDue={tab !== 'claims'} />}
       </div>
 
-      {/* Floating Mobile Selection Bar */}
-      {isMobile && selected.size > 0 && <MobileSelectionBar selected={selected} setSelected={setSelected} deleteLoading={deleteLoading} promptDeleteSelected={promptDeleteSelected} />}
+      {/* Floating Mobile Selection Bar, with room left under the list so it
+          never covers the last rows. */}
+      {isMobile && selected.size > 0 && <div aria-hidden="true" style={{ height: 96 }} />}
+      {isMobile && selected.size > 0 && <MobileSelectionBar selected={selected} setSelected={setSelected} busy={bulkBusy} onAction={runBulk} />}
 
       <DeleteConfirmModal
         isOpen={!!deleteTarget}
-        title={deleteTarget?.type === 'bulk' ? 'Delete Selected Items' : (deleteTarget?.invoice?.invoiceType === 'EXPENSE' || deleteTarget?.invoice?.receiptFile ? 'Delete Receipt' : 'Delete Invoice')}
+        title={deleteTarget?.invoice?.invoiceType === 'EXPENSE' || deleteTarget?.invoice?.receiptFile ? 'Delete Receipt' : 'Delete Invoice'}
         itemName={deleteTarget?.invoice ? (deleteTarget.invoice.vendorName || deleteTarget.invoice.invoiceNumber || deleteTarget.invoice.id) : undefined}
         isExpense={deleteTarget?.invoice ? (deleteTarget.invoice.invoiceType === 'EXPENSE' || !!deleteTarget.invoice.receiptFile) : false}
-        count={deleteTarget?.type === 'bulk' ? deleteTarget.count : 1}
-        confirmLabel={deleteTarget?.type === 'bulk' ? `Delete ${deleteTarget.count} Items` : (deleteTarget?.invoice?.invoiceType === 'EXPENSE' || deleteTarget?.invoice?.receiptFile ? 'Delete Receipt' : 'Delete Invoice')}
+        count={1}
+        confirmLabel={deleteTarget?.invoice?.invoiceType === 'EXPENSE' || deleteTarget?.invoice?.receiptFile ? 'Delete Receipt' : 'Delete Invoice'}
         loading={deleteLoading}
         onConfirm={handleConfirmDelete}
         onClose={() => { if (!deleteLoading) setDeleteTarget(null); }}

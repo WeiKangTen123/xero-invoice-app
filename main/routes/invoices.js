@@ -10,8 +10,8 @@ const pdfStore     = require('../utils/pdf-store');
 const receiptStore = require('../utils/receipt-store');
 const emailQueue   = require('../queue/email-queue');
 const emailWorker  = require('../queue/email-worker');
-const { submitInvoiceToXero, postedDuplicateOf } = require('../utils/invoice-handler');
-const { xeroErrMsg }  = require('../xero/xero-utils');
+const { submitInvoiceToXero, postedDuplicateOf, bankDetailsChange } = require('../utils/invoice-handler');
+const { xeroErrMsg, getRateLimitBudget } = require('../xero/xero-utils');
 const statusSync   = require('../xero/status-sync');
 const logger       = require('../utils/logger');
 
@@ -207,6 +207,11 @@ const _listRow = inv => ({
   invoiceDate:   inv.invoiceDate,
   dueDate:       inv.dueDate,
   totalAmount:   inv.totalAmount,
+  // The list's CSV export carries the split and the account code, so a
+  // bookkeeper can reconcile the export without opening every record.
+  subTotal:      inv.subTotal,
+  taxAmount:     inv.taxAmount,
+  accountCode:   inv.accountCode,
   currency:      inv.currency,
   invoiceType:   inv.invoiceType,
   source:        inv.source,
@@ -389,6 +394,58 @@ router.patch('/:id', requireAuth, asyncHandler(async (req, res, next) => {
   } catch (err) { next(err); }
 }));
 
+// ── Whether a record may be sent ─────────────────────────────────────────────
+// The checks a send passes before it reaches submitInvoiceToXero, which then
+// checks for a duplicate again and claims the row (claimForSubmit) so nothing
+// else sends it at the same moment. The Submit button and Send to Xero on a
+// selection both go through here, so one can never be looser than the other.
+// Null when it may go. Otherwise both forms of the answer: what the single
+// route replies ({ code, error, extra }) and what a row in a bulk result says
+// ({ outcome, message }, with skipped when there is nothing left to do).
+function submitRefusal(store, inv, { force = false } = {}) {
+  if (!SUBMITTABLE_STATUSES.has(inv.status)) {
+    const why = inv.status === 'duplicate'
+      ? { outcome: 'Marked as a duplicate', message: 'Open it and confirm it is a different bill before sending it.' }
+      : inv.status === 'reported'
+        ? { outcome: 'Reported as a problem', message: 'Open it and settle the report before sending it.' }
+        : inv.status === 'submitting'
+          ? { outcome: 'Already being sent to Xero', message: '', skipped: true }
+          : { outcome: `Cannot be sent while it is ${inv.status}`, message: '' };
+    return { code: 409, error: `Invoice with status "${inv.status}" cannot be submitted`, extra: { status: inv.status }, ...why };
+  }
+
+  if (!inv.totalAmount || inv.totalAmount === 0) {
+    return {
+      code: 422, error: 'Invoice has no amount — edit the invoice fields before submitting', extra: {},
+      outcome: 'Needs review first', message: 'No amount was read. Open it and fill in the figures.',
+    };
+  }
+
+  // A correction goes to Xero as an update, which Xero refuses once the bill
+  // has left DRAFT there. Refused here, with the reason, rather than sent to
+  // fail and leave Xero's error on the row. Only a status already read back
+  // counts: one not known yet is sent as before.
+  const locked = statusSync.repostRefusal(inv);
+  if (locked) {
+    return {
+      code: 409, error: `${locked}. If that has changed, refresh from Xero first.`, extra: { xeroStatus: inv.xeroStatus },
+      outcome: locked, message: 'Nothing was sent. If that has changed, refresh from Xero first.', skipped: true,
+    };
+  }
+
+  const dup = force ? null : postedDuplicateOf(store, inv);
+  if (dup) {
+    const label = [dup.vendorName, dup.invoiceNumber].filter(Boolean).join(' ') || 'a bill';
+    return {
+      code: 409, error: `This matches ${label}, which is already in Xero. Send it anyway only if it is a different bill.`,
+      extra: { duplicateOf: dup.id },
+      outcome: 'Matches a bill already in Xero',
+      message: `This matches ${label}, which is already in Xero. If it is a different bill, open it and send it from there.`,
+    };
+  }
+  return null;
+}
+
 // ── POST /api/invoices/:id/submit ─────────────────────────────────────────────
 // Manually submit (or re-submit) an invoice to Xero.
 // Safe to call multiple times — already-posted invoices return early without
@@ -404,37 +461,9 @@ router.post('/:id/submit', requireAuth, asyncHandler(async (req, res) => {
   const inv = invoiceStore.forUser(userId).getById(id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
 
-  if (!SUBMITTABLE_STATUSES.has(inv.status)) {
-    return res.status(409).json({
-      error:  `Invoice with status "${inv.status}" cannot be submitted`,
-      status: inv.status,
-    });
-  }
-
-  if (!inv.totalAmount || inv.totalAmount === 0) {
-    return res.status(422).json({
-      error: 'Invoice has no amount — edit the invoice fields before submitting',
-    });
-  }
-
-  // A correction goes to Xero as an update, which Xero refuses once the bill
-  // has left DRAFT there. Refused here, with the reason, rather than sent to
-  // fail and leave Xero's error on the row. Only a status already read back
-  // counts: one not known yet is sent as before.
-  const locked = statusSync.repostRefusal(inv);
-  if (locked) {
-    return res.status(409).json({ error: `${locked}. If that has changed, refresh from Xero first.`, xeroStatus: inv.xeroStatus });
-  }
-
-  const force = req.body?.force === true;
-  const dup   = force ? null : postedDuplicateOf(invoiceStore.forUser(userId), inv);
-  if (dup) {
-    const label = [dup.vendorName, dup.invoiceNumber].filter(Boolean).join(' ') || 'a bill';
-    return res.status(409).json({
-      error: `This matches ${label}, which is already in Xero. Send it anyway only if it is a different bill.`,
-      duplicateOf: dup.id,
-    });
-  }
+  const force   = req.body?.force === true;
+  const refusal = submitRefusal(invoiceStore.forUser(userId), inv, { force });
+  if (refusal) return res.status(refusal.code).json({ error: refusal.error, ...refusal.extra });
 
   // Fire submission in background — return 202 immediately so the UI doesn't hang.
   // claimForSubmit inside submitInvoiceToXero atomically sets status → 'submitting'
@@ -531,6 +560,85 @@ router.post('/batch-status', requireAuth, asyncHandler(async (req, res, next) =>
   } catch (err) { next(err); }
 }));
 
+// ── Sending several, one at a time ───────────────────────────────────────────
+// Xero allows an organisation 60 calls a minute, and one send is several calls
+// (the contact, the invoice, its attachment). Everything sent from the list,
+// Submit all and Send to Xero on a selection, goes through one queue per
+// account, so two hundred rows go one after another rather than as a burst,
+// and two bulk sends never run side by side. Each send is the ordinary one,
+// submitInvoiceToXero: its duplicate check, its claim on the row, its choice
+// of company and its retry of a 429 all apply.
+//
+// The queue is in memory. A restart forgets what was waiting, and those rows
+// stay as they were (pending or reviewed), never half-sent: a row is only
+// claimed when its own turn comes.
+//
+// Spacing: at least gapMs between the end of one send and the start of the
+// next, as the automatic path has always done. On top of that, when Xero's
+// last answer for that company said fewer than minuteHeadroom calls are left
+// this minute, the next send waits until that minute has turned over, rather
+// than walking into a 429 and waiting inside it.
+const sendPacing = { gapMs: 1500, minuteHeadroom: 10 };
+const _sendQueues = new Map(); // userId -> { tail, waiting: Set<id>, nextAt }
+
+function _sendQueue(userId) {
+  const key = String(userId);
+  let q = _sendQueues.get(key);
+  if (!q) {
+    q = { tail: Promise.resolve(), waiting: new Set(), nextAt: 0 };
+    _sendQueues.set(key, q);
+  }
+  return q;
+}
+
+// Disabled while its rows waited: nothing more is posted for the account. A
+// failed lookup lets the send through, as invoice-handler's accountMayPost
+// does: the store writes around it would fail the same way.
+function _accountMayPost(userId) {
+  try { return isActive(userId); } catch (_) { return true; }
+}
+
+// When the next send may start, after one that went to tenantId.
+function _nextSendAt(tenantId, now = Date.now()) {
+  let at = now + sendPacing.gapMs;
+  const budget = tenantId ? getRateLimitBudget(tenantId) : null;
+  if (budget && budget.minuteRemaining !== null && budget.minuteRemaining < sendPacing.minuteHeadroom) {
+    const seen = Date.parse(budget.updatedAt);
+    if (Number.isFinite(seen)) at = Math.max(at, seen + 60_000);
+  }
+  return at;
+}
+
+// Puts one row at the back of the account's queue. stillSendable is asked
+// when its turn comes, and returns why it should no longer go (or null).
+function queueSend(userId, id, stillSendable) {
+  const q = _sendQueue(userId);
+  q.waiting.add(id);
+  q.tail = q.tail.then(async () => {
+    const wait = q.nextAt - Date.now();
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    q.waiting.delete(id);
+    if (!_accountMayPost(userId)) {
+      logger.info('Account disabled while its sends waited — not sent', { id, userId });
+      return;
+    }
+    const why = stillSendable();
+    if (why) {
+      logger.info('No longer sendable when its turn in the send queue came — skipped', { id, why, userId });
+      return;
+    }
+    try {
+      await submitInvoiceToXero(userId, id);
+    } catch (err) {
+      // submitInvoiceToXero has written the failure on the row already.
+      logger.error('Queued Xero submission failed', { id, error: xeroErrMsg(err), userId });
+    } finally {
+      q.nextAt = _nextSendAt(invoiceStore.forUser(userId).getById(id)?.xeroTenantId);
+    }
+  }).catch(err => logger.error('Send queue step crashed', { id, error: err?.message || String(err), userId }));
+  return q.tail;
+}
+
 // ── POST /api/invoices/submit-all ────────────────────────────────────────────
 // Bulk-submit the pending invoices the person is looking at.
 // Body { ids: string[] }, required and non-empty. Only ids that belong to this
@@ -552,61 +660,228 @@ router.post('/submit-all', requireAuth, asyncHandler(async (req, res) => {
   const pending = unique.filter(id => store.getById(id)?.status === 'pending');
   const skipped = unique.length - pending.length;
 
-  // Sequential with 1.5s gap — Xero allows 60 calls/minute; parallel floods cause 429.
+  // One after another through the account's send queue (queueSend, above),
+  // the same one Send to Xero on a selection uses, so the two never post side
+  // by side. Checked again per invoice when its turn comes: the gaps add up,
+  // and the row may have been sent, edited or deleted meanwhile.
+  // claimForSubmit would take a posted row (that is how a correction goes),
+  // so only pending goes.
   const count = pending.length;
-  if (count) {
-    (async () => {
-      for (const id of pending) {
-        // Checked again per invoice: the gaps add up, and the row may have
-        // been sent, edited or deleted meanwhile. claimForSubmit would take a
-        // posted row (that is how a correction goes), so only pending goes.
-        if (store.getById(id)?.status !== 'pending') continue;
-        try {
-          await submitInvoiceToXero(userId, id);
-        } catch (err) {
-          logger.error('Bulk submit failed for invoice', { id, error: xeroErrMsg(err), userId });
-        }
-        await new Promise(r => setTimeout(r, 1500));
-      }
-      logger.info('Bulk Xero submission complete', { count, userId });
-    })().catch(err => logger.error('Bulk submit IIFE crashed', { error: err.message, userId }));
+  for (const id of pending) {
+    queueSend(userId, id, () => (store.getById(id)?.status === 'pending' ? null : 'no longer pending'));
   }
 
   logger.info('Bulk Xero submission started', { count, skipped, userId });
   res.json({ submitted: count, skipped });
 }));
 
-// ── DELETE /api/invoices/:id ──────────────────────────────────────────────────
+// ── Deleting ──────────────────────────────────────────────────────────────────
 // A row with a Xero ID is the only record here that the bill is in Xero.
 // Deleting it left the bill in Xero and nothing to recognise it by, so the
-// next scan of the same email posted it again. It goes from Xero first.
+// next scan of the same email posted it again. It goes from Xero first. A row
+// mid-send is about to get one. Null when the row may go; otherwise the single
+// route's error and a bulk result's outcome.
+function deleteRefusal(record) {
+  if (record.xeroInvoiceId) {
+    return { error: 'This was posted to Xero. Void or delete it in Xero first.', outcome: 'Kept: already in Xero', message: 'Void or delete it in Xero first.' };
+  }
+  if (record.status === 'submitting') {
+    return { error: 'This is being sent to Xero right now. Try again in a moment.', outcome: 'Kept: being sent to Xero right now', message: 'Try again in a moment.' };
+  }
+  return null;
+}
+
+// Removes the row and the files that were only its. Called straight after
+// deleteRefusal with no await between, so the row cannot start a send in the
+// gap. The record is read BEFORE removing it: the receipt filename is the only
+// way to find the image, and it goes with the row.
+async function removeWithFiles(userId, store, record) {
+  const removed = await store.remove(record.id);
+  if (!removed) return false;
+
+  pdfStore.forUser(userId).remove(record.id);
+
+  // Expense claims carry a photograph, and this route knew nothing about it —
+  // so every deleted receipt left its image on disk forever. Split siblings
+  // SHARE one file, so it may only go once the last row using it has gone.
+  if (record.receiptFile && store.countByReceiptFile(record.receiptFile) === 0) {
+    receiptStore.forUser(userId).remove(record.receiptFile);
+  }
+  return true;
+}
+
+// ── DELETE /api/invoices/:id ──────────────────────────────────────────────────
 router.delete('/:id', requireAuth, asyncHandler(async (req, res, next) => {
   try {
-    const store = invoiceStore.forUser(req.user.id);
-    // Read the record BEFORE removing it — the receipt filename is the only way
-    // to find the image, and it goes with the row.
-    const record  = store.getById(req.params.id);
-    if (record?.xeroInvoiceId) {
-      return res.status(409).json({ error: 'This was posted to Xero. Void or delete it in Xero first.' });
-    }
-    if (record?.status === 'submitting') {
-      return res.status(409).json({ error: 'This is being sent to Xero right now. Try again in a moment.' });
-    }
-    const removed = await store.remove(req.params.id);
-    if (!removed) return res.status(404).json({ error: 'Invoice not found' });
-
-    pdfStore.forUser(req.user.id).remove(req.params.id);
-
-    // Expense claims carry a photograph, and this route knew nothing about it —
-    // so every deleted receipt left its image on disk forever. Split siblings
-    // SHARE one file, so it may only go once the last row using it has gone.
-    if (record?.receiptFile && store.countByReceiptFile(record.receiptFile) === 0) {
-      receiptStore.forUser(req.user.id).remove(record.receiptFile);
-    }
+    const store  = invoiceStore.forUser(req.user.id);
+    const record = store.getById(req.params.id);
+    if (!record) return res.status(404).json({ error: 'Invoice not found' });
+    const refusal = deleteRefusal(record);
+    if (refusal) return res.status(409).json({ error: refusal.error });
+    if (!(await removeWithFiles(req.user.id, store, record))) return res.status(404).json({ error: 'Invoice not found' });
 
     logger.info('Invoice deleted', { id: req.params.id, by: req.user.email });
     res.json({ success: true });
   } catch (err) { next(err); }
+}));
+
+// ── Actions on a selection ───────────────────────────────────────────────────
+// POST /api/invoices/bulk/review   { ids }   Mark reviewed
+// POST /api/invoices/bulk/send     { ids }   Send to Xero
+// POST /api/invoices/bulk/delete   { ids }   Delete
+//
+// One request per action, at most BULK_MAX ids (400 above that, or for a list
+// that is not one). Each id is settled on its own and answered in the order
+// asked, once per id:
+//   { action, results: [{ id, ok, skipped, outcome, message }], summary: { done, skipped, failed } }
+// ok      the row is where the action meant it to be: done now, or already so
+//         (skipped: true, nothing changed). The page counts these.
+// !ok     not done, and something needs a person (review it, wait, void it in
+//         Xero). The page lists these by row and keeps them selected.
+// outcome what happened, in a bookkeeper's words; message the detail or what
+//         to do next ('' when there is nothing to add).
+//
+// The single-record routes answered a selection one request per row; a
+// refusal there hid which rows had gone, and two hundred requests at once is
+// its own burst. These apply the same rules as those routes, row by row.
+const BULK_MAX = 200;
+
+function _bulkIds(body) {
+  const ids = body?.ids;
+  if (!Array.isArray(ids) || !ids.length || !ids.every(id => typeof id === 'string' && id)) {
+    return { error: 'ids must be a non-empty list of record ids' };
+  }
+  if (ids.length > BULK_MAX) {
+    return { error: `At most ${BULK_MAX} records at a time; this asked for ${ids.length}. Select fewer and try again.` };
+  }
+  return { ids: [...new Set(ids)] };
+}
+
+const _done    = (id, outcome, message = '') => ({ id, ok: true,  skipped: false, outcome, message });
+const _skipped = (id, outcome, message = '') => ({ id, ok: true,  skipped: true,  outcome, message });
+const _failed  = (id, outcome, message = '') => ({ id, ok: false, skipped: false, outcome, message });
+const _notFound = id => _failed(id, 'Not found', 'It may have been deleted already.');
+
+// Lets other requests run between two rows. The duplicate check reads every
+// record already in Xero, and better-sqlite3 is synchronous: on an account
+// with 3,000 of them, 200 checks back to back held this one process, and
+// every other user's request, for about seven seconds. Awaited at the top of
+// each row, so that row's checks and its write still happen together, with
+// nothing able to change the row in between.
+const _breathe = () => new Promise(resolve => setImmediate(resolve));
+
+function _bulkReply(res, action, results, userId) {
+  const summary = {
+    done:    results.filter(r => r.ok && !r.skipped).length,
+    skipped: results.filter(r => r.ok && r.skipped).length,
+    failed:  results.filter(r => !r.ok).length,
+  };
+  logger.info('Bulk action on a selection', { action, userId, ...summary });
+  res.json({ action, results, summary });
+}
+
+// Mark reviewed: what PATCH /:id/status allows, one row at a time, with two
+// more refusals. A row with no amount cannot be posted, so calling it ready
+// to post would be wrong. And a bill whose bank details differ from the
+// supplier's last one is held so a person reads that warning; ticking it in a
+// list of fifty is not reading it, and reviewed is one click from Xero.
+function _reviewCheck(store, inv, id) {
+  if (!inv) return _notFound(id);
+  if (inv.status === 'reviewed') return _skipped(id, 'Already reviewed');
+  if (inv.xeroInvoiceId || inv.status === 'posted') return _skipped(id, 'Already in Xero');
+  if (inv.status === 'submitting') return _skipped(id, 'Being sent to Xero right now');
+  if (inv.status === 'duplicate') {
+    return _failed(id, 'Marked as a duplicate', 'Open it and confirm it is a different bill, then mark it reviewed.');
+  }
+  if (!inv.totalAmount) return _failed(id, 'Needs review first', 'No amount was read. Open it and fill in the figures.');
+  const bank = bankDetailsChange(store, inv);
+  if (bank) return _failed(id, 'Needs review first', bank);
+  return null;
+}
+
+router.post('/bulk/review', requireAuth, asyncHandler(async (req, res) => {
+  const { ids, error } = _bulkIds(req.body);
+  if (error) return res.status(400).json({ error });
+  const store   = invoiceStore.forUser(req.user.id);
+  const results = [];
+  for (const id of ids) {
+    await _breathe();
+    const refused = _reviewCheck(store, store.getById(id), id);
+    if (refused) { results.push(refused); continue; }
+    // No await between the checks above and this write, so the row cannot
+    // have started a send in between.
+    await store.update(id, { status: 'reviewed' });
+    results.push(_done(id, 'Marked reviewed'));
+  }
+  _bulkReply(res, 'review', results, req.user.id);
+}));
+
+// Send to Xero: the Submit button's checks (submitRefusal), and two that are
+// only for a selection. A row held for review goes to Xero only after a
+// person has opened it: it is held for a reason (no number read, changed bank
+// details, an interrupted send), and the reason is the message. A row already
+// in Xero is not sent again: from a list that would overwrite each Xero draft
+// with whatever is stored here, edits made in Xero included, so a correction
+// is sent from its own page. No force either: sending a likely duplicate is a
+// decision about one bill at a time.
+function _sendCheck(store, inv, id, { queued = false, atTurn = false } = {}) {
+  if (!inv) return _notFound(id);
+  if (queued) return _skipped(id, 'Already queued for Xero');
+  if (inv.status === 'submitting') return _skipped(id, 'Already being sent to Xero');
+  if (inv.xeroInvoiceId || inv.status === 'posted') {
+    const locked = statusSync.repostRefusal(inv);
+    return locked
+      ? _skipped(id, locked, 'Nothing was sent. If that has changed, refresh from Xero first.')
+      : _skipped(id, 'Already in Xero', 'Not sent again. To send a correction, open it and re-post it.');
+  }
+  if (inv.status === 'review-needed') {
+    return _failed(id, 'Needs review first', inv.errorMsg || 'Open it, check the figures and mark it reviewed.');
+  }
+  // At its turn in the queue the duplicate check is left to
+  // submitInvoiceToXero, which marks the row a duplicate where a person will
+  // see it (two copies of one bill in the same selection meet there), rather
+  // than skipping it here without a word on the row.
+  const refusal = submitRefusal(store, inv, { force: atTurn });
+  if (refusal) return refusal.skipped ? _skipped(id, refusal.outcome, refusal.message) : _failed(id, refusal.outcome, refusal.message);
+  return null;
+}
+
+router.post('/bulk/send', requireAuth, asyncHandler(async (req, res) => {
+  const { ids, error } = _bulkIds(req.body);
+  if (error) return res.status(400).json({ error });
+  const userId  = req.user.id;
+  const store   = invoiceStore.forUser(userId);
+  const waiting = _sendQueue(userId).waiting;
+  const results = [];
+  for (const id of ids) {
+    await _breathe();
+    const refused = _sendCheck(store, store.getById(id), id, { queued: waiting.has(id) });
+    if (refused) { results.push(refused); continue; }
+    // Asked again when its turn comes: by then it may have been edited back
+    // to review, sent from its own page, approved in Xero or deleted.
+    queueSend(userId, id, () => _sendCheck(store, store.getById(id), id, { atTurn: true })?.outcome || null);
+    results.push(_done(id, 'Queued for Xero', 'Sent one at a time; the list updates as each one lands.'));
+  }
+  _bulkReply(res, 'send', results, userId);
+}));
+
+// Delete: the single delete's rules, row by row. A row already gone counts as
+// done, since gone is what was asked for.
+router.post('/bulk/delete', requireAuth, asyncHandler(async (req, res) => {
+  const { ids, error } = _bulkIds(req.body);
+  if (error) return res.status(400).json({ error });
+  const userId  = req.user.id;
+  const store   = invoiceStore.forUser(userId);
+  const results = [];
+  for (const id of ids) {
+    const record = store.getById(id);
+    if (!record) { results.push(_skipped(id, 'Already deleted')); continue; }
+    const refusal = deleteRefusal(record);
+    if (refusal) { results.push(_failed(id, refusal.outcome, refusal.message)); continue; }
+    const removed = await removeWithFiles(userId, store, record);
+    results.push(removed ? _done(id, 'Deleted') : _skipped(id, 'Already deleted'));
+  }
+  _bulkReply(res, 'delete', results, userId);
 }));
 
 // ── DELETE /api/invoices ──────────────────────────────────────────────────────
@@ -646,5 +921,11 @@ router.delete('/', requireAuth, asyncHandler(async (req, res, next) => {
 // Exposed so the chat assistant validates proposed edits against the exact same
 // whitelist this route enforces — one source of truth, no risk of drift.
 router.EDITABLE_FIELDS = EDITABLE_FIELDS;
+
+// For tests: the spacing between queued sends (a real gap makes a suite of
+// them take minutes), and a promise that settles once everything queued for
+// an account so far has been sent or skipped.
+router.sendPacing    = sendPacing;
+router.whenSendsIdle = userId => _sendQueue(userId).tail;
 
 module.exports = router;

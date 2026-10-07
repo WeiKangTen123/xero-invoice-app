@@ -2,12 +2,16 @@ import { fmtMoney } from '../../utils/format';
 import { TypeBadge, ConfidenceBadge, XeroStatusBadge } from '../../components/Badges';
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { totalsLabel } from './helpers';
+import { dueInfo } from './list-view';
 
-export default function MobileList({ openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, filtered, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
+// sortValue is the URL form of the sort ('' for the list grouped by arrival)
+// and sortOptions the choices for this tab; on a phone there are no column
+// headings to click, so the order is a select beside Select all.
+export default function MobileList({ openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, filtered, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup, sortValue, sortOptions, onSortChange, today }) {
   return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {/* Mobile Select-all row if items exist */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 4px 6px', borderBottom: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, padding: '0 4px 6px', borderBottom: '1px solid var(--border)' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer', color: 'var(--text-muted)' }}>
                 <input
                   type="checkbox"
@@ -16,6 +20,13 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                   style={{ cursor: 'pointer', accentColor: 'var(--accent)', width: 16, height: 16 }}
                 />
                 <span>Select all visible ({filtered.length})</span>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-muted)' }}>
+                <span>Sort</span>
+                <select className="form-input" value={sortValue} onChange={e => onSortChange(e.target.value)}
+                        style={{ padding: '4px 8px', fontSize: 12, width: 'auto', maxWidth: 190 }}>
+                  {sortOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
               </label>
             </div>
 
@@ -59,6 +70,8 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                   const isSelected = selected.has(inv.id);
                   const needsAttention = ATTENTION_STATUSES.includes(inv.status);
                   const isDup = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
+                  // Null for an expense claim, which has no due date to show.
+                  const due = dueInfo(inv, today);
 
                   return (
                     <div
@@ -117,6 +130,13 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
                             {inv.invoiceDate || '—'}
                           </div>
+                          {due && due.date && (
+                            <div style={{ fontSize: 11, marginTop: 2, whiteSpace: 'nowrap',
+                                          color: due.overdue ? 'var(--danger)' : due.label === 'Due today' ? 'var(--warning)' : 'var(--text-muted)',
+                                          fontWeight: due.overdue ? 700 : 400 }}>
+                              {due.overdue || due.label === 'Due today' ? due.label : `Due ${due.date}`}
+                            </div>
+                          )}
                         </div>
                       </div>
 

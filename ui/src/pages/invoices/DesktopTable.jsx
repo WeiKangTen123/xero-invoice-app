@@ -4,6 +4,7 @@ import { TypeBadge, ConfidenceBadge, XeroStatusBadge } from '../../components/Ba
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { staggerIn } from '../../utils/stagger';
 import { receivedLabel, totalsLabel } from './helpers';
+import { SORT_FIELDS, dueInfo } from './list-view';
 
 // Reset so the group heading's button looks like the row it always was; the
 // button is there for the keyboard and screen readers, not for its looks.
@@ -15,7 +16,33 @@ const GROUP_BUTTON = {
   padding: '14px 10px 8px', cursor: 'pointer', borderRadius: 6,
 };
 
-export default function DesktopTable({ user, openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
+// A column heading that sorts the list. A real button inside the <th>, so it
+// is reached with Tab and pressed with Enter or Space like any other, and
+// aria-sort tells a screen reader which column the list is in order of.
+const SORT_BUTTON = {
+  background: 'none', border: 'none', padding: 0, margin: 0, font: 'inherit', color: 'inherit',
+  textTransform: 'inherit', letterSpacing: 'inherit', cursor: 'pointer',
+  display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap',
+};
+function SortHeader({ field, label, sort, onSort }) {
+  const active = sort?.key === field;
+  const f = SORT_FIELDS[field];
+  return (
+    <th aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" onClick={() => onSort(field)} style={SORT_BUTTON}
+              title={active ? `Sorted ${f[sort.dir]}. Click to change.` : `Sort by ${f.label.toLowerCase()}, ${f[f.start]}`}>
+        {label}
+        <span aria-hidden="true" style={{ fontSize: 9, opacity: active ? 1 : 0.35 }}>
+          {active ? (sort.dir === 'asc' ? '▲' : '▼') : '↕'}
+        </span>
+      </button>
+    </th>
+  );
+}
+
+export default function DesktopTable({ user, openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup, sort, onSort, today, showDue }) {
+  // Expense claims have no due date, so their tab has no Due column.
+  const columns = showDue ? 11 : 10;
   return (
           <div style={{ overflowX: 'auto' }}>
             <table className="data-table">
@@ -30,14 +57,15 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                       title={allFilteredSelected ? 'Deselect all' : 'Select all visible'}
                     />
                   </th>
-                  <th>Vendor</th>
+                  <SortHeader field="contact" label="Vendor" sort={sort} onSort={onSort} />
                   <th>Invoice #</th>
-                  <th>Amount</th>
+                  <SortHeader field="amount" label="Amount" sort={sort} onSort={onSort} />
                   <th>Type</th>
-                  <th>Invoice date</th>
+                  <SortHeader field="date" label="Invoice date" sort={sort} onSort={onSort} />
+                  {showDue && <SortHeader field="due" label="Due" sort={sort} onSort={onSort} />}
                   <th>Received</th>
                   <th>PDF</th>
-                  <th>Status</th>
+                  <SortHeader field="status" label="Status" sort={sort} onSort={onSort} />
                   <th></th>
                 </tr>
               </thead>
@@ -48,7 +76,7 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                   // The heading is a real button, so a keyboard can open and
                   // close a group the way a mouse always could.
                   <tr key={`h-${g.key}`} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td colSpan={10} style={{ padding: 0 }}>
+                    <td colSpan={columns} style={{ padding: 0 }}>
                       <button type="button" onClick={() => toggleGroup(g.key)} aria-expanded={isOpen(g)}
                               style={GROUP_BUTTON}>
                         <span style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
@@ -71,6 +99,7 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                   const isSelected    = selected.has(inv.id);
                   const needsAttention = ATTENTION_STATUSES.includes(inv.status);
                   const isDup         = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
+                  const due           = showDue ? dueInfo(inv, today) : null;
                   return (
                     <tr
                       key={inv.id}
@@ -144,6 +173,23 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                       <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                         {inv.invoiceDate || '—'}
                       </td>
+                      {showDue && (
+                        <td style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                          {/* An expense claim on this tab (there should be none)
+                              shows nothing, as it has no due date. */}
+                          {due && (due.overdue ? (
+                            <span style={{ display: 'flex', flexDirection: 'column' }}>
+                              <span style={{ color: 'var(--danger)', fontWeight: 700 }}>{due.label}</span>
+                              <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{due.date}</span>
+                            </span>
+                          ) : (
+                            <span style={{ color: due.label === 'Due today' ? 'var(--warning)' : 'var(--text-muted)', fontWeight: due.label === 'Due today' ? 600 : 400 }}
+                                  title={due.label === 'Due today' ? due.date : undefined}>
+                              {due.label}
+                            </span>
+                          ))}
+                        </td>
+                      )}
                       <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}
                           title={[
                             inv.receivedAt  ? `Arrived: ${formatDateTime(inv.receivedAt, user?.timezone)}` : null,
