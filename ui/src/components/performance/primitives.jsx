@@ -161,6 +161,38 @@ export function Rows({ items, currency }) {
 }
 
 // ── Shared derivation ────────────────────────────────────────────────────────
+
+// Budget attainment: actual against budget over the CLOSED months of the range
+// only — the rule the Budget tab's year to date follows. Attainment used to be
+// the whole range's actual over the whole range's budget, which set the current
+// month's part-booked actuals and every future month's nothing against a full
+// year of budget, so early in a financial year it read as a small fraction of
+// what had really been achieved against plan.
+//
+// Null when no month of the range has closed, or nothing was budgeted for the
+// ones that have: a percentage of nothing is not 0% or 100%.
+//
+// Self-contained on purpose — no imports, no React — so a test can read it
+// straight out of this file and run it.
+export function closedAttainment(d, actual, budget, from, to) {
+  const idx = Number.isInteger(d?.closedThroughIdx) ? d.closedThroughIdx
+            : Number.isInteger(d?.actualThroughIdx) ? d.actualThroughIdx : -1;
+  const last = Math.min(idx, to);
+  const months = last >= from ? last - from + 1 : 0;
+  let a = 0, b = 0;
+  for (let i = from; i <= last; i++) {
+    a += Number((actual && actual[i]) || 0);
+    b += Number((budget && budget[i]) || 0);
+  }
+  return {
+    months,
+    actual: a,
+    budget: b,
+    ratio: months > 0 && b > 0 ? a / b : null,
+    throughLabel: months > 0 && d?.months?.[last] ? d.months[last].label : null,
+  };
+}
+
 // Every headline number for the selected range, derived in one place so Overview
 // and Revenue can never disagree about what "total revenue" means.
 export function useRangeTotals(d, from, to) {
@@ -176,8 +208,17 @@ export function useRangeTotals(d, from, to) {
     const grossProfit = S(t.grossProfit, 'actual') || (revenue - cogs);
     const recurring   = sliceSum(d.split.recurring.actual, from, to);
     const project     = sliceSum(d.split.project.actual, from, to);
+    const att         = closedAttainment(d, t.revenue.actual, t.revenue.budget, from, to);
     return {
       revenue, otherIncome, cogs, opex, netProfit, grossProfit, recurring, project,
+      // Closed months only, see closedAttainment. The *Budget totals below stay
+      // whole-range: Profitability compares every month and says how many of
+      // them are not yet earned.
+      attainment:        att.ratio,
+      attainmentActual:  att.actual,
+      attainmentBudget:  att.budget,
+      attainmentMonths:  att.months,
+      attainmentThrough: att.throughLabel,
       revenueBudget:     S(t.revenue, 'budget'),
       netProfitBudget:   S(t.netProfit, 'budget'),
       otherIncomeBudget: S(t.otherIncome, 'budget'),

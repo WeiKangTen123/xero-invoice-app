@@ -230,6 +230,19 @@ export default function XeroInsights() {
   // labels are recomputed on return anyway, so it pauses while hidden.
   useVisiblePolling(() => forceTick(t => t + 1), 15000);
 
+  // The chat assistant answers about whichever company and period this page is
+  // showing. It lives outside the page, so the page announces them; without
+  // this the chat answered about the first connected company and the
+  // financial year to date, whatever was on screen.
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('xero-dashboard-context', {
+      detail: {
+        tenantId: activeTenantId || '',
+        period:   perfRange ? { from: perfRange.from, to: perfRange.to } : { preset: perfPreset },
+      },
+    }));
+  }, [activeTenantId, perfPreset, perfRange]);
+
   // Lazy tab loaders — only fire the first time a tab is opened.
   useEffect(() => {
     if (tab === 'banking' && banking.status === 'idle') fetchBanking();
@@ -527,13 +540,29 @@ export default function XeroInsights() {
             ? `${kpis.payablesCount} bill${kpis.payablesCount !== 1 ? 's' : ''}`
             : `${kpis.payablesCount} bill${kpis.payablesCount !== 1 ? 's' : ''} awaiting payment`}
         />
+        {/* Two figures, never one sum. This card used to add bills you are late
+            paying to invoices customers are late paying, which netted two
+            opposite positions into a number that described neither. Each is
+            labelled with which way the money is owed. */}
         <KpiCard
           icon="⏱" tone="warning"
-          label={isMobile ? 'Overdue' : 'Overdue Amount'}
-          value={isMobile ? fmtMoneyShort(kpis.overdueAmount, currency) : fmtMoney(kpis.overdueAmount, currency)}
+          label="Overdue"
+          value={(
+            <span style={{ display: 'grid', gridTemplateColumns: 'auto auto', columnGap: 8, rowGap: 1,
+                           alignItems: 'baseline', justifyContent: 'start', fontSize: isMobile ? 12 : 15 }}>
+              <span style={{ fontSize: isMobile ? 9.5 : 11, fontWeight: 600, color: 'var(--text-muted)' }}>
+                {isMobile ? 'Owed to you' : 'Customers owe you'}
+              </span>
+              <span>{isMobile ? fmtMoneyShort(kpis.overdueReceivables, currency) : fmtMoney(kpis.overdueReceivables, currency)}</span>
+              <span style={{ fontSize: isMobile ? 9.5 : 11, fontWeight: 600, color: 'var(--text-muted)' }}>
+                {isMobile ? 'You owe' : 'You owe suppliers'}
+              </span>
+              <span>{isMobile ? fmtMoneyShort(kpis.overduePayables, currency) : fmtMoney(kpis.overduePayables, currency)}</span>
+            </span>
+          )}
           sub={isMobile
-            ? `${kpis.statusBreakdown.overdue} past due`
-            : `${kpis.statusBreakdown.overdue} invoice${kpis.statusBreakdown.overdue !== 1 ? 's' : ''} past due`}
+            ? `${kpis.overdueReceivablesCount} inv · ${kpis.overduePayablesCount} bill${kpis.overduePayablesCount !== 1 ? 's' : ''}`
+            : `${kpis.overdueReceivablesCount} invoice${kpis.overdueReceivablesCount !== 1 ? 's' : ''} and ${kpis.overduePayablesCount} bill${kpis.overduePayablesCount !== 1 ? 's' : ''} past due`}
         />
       </div>
 

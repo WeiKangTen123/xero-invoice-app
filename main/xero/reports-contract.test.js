@@ -131,6 +131,14 @@ describe('Xero call contract — getInvoices', () => {
     // is a standing cost that grows with the customer's invoice count. It must
     // still reach back BEFORE the period (open invoices are older than it), so
     // this asserts a lower bound exists and that it precedes the period start.
+    //
+    // Debtor and creditor days are read through the summary, whose own invoice
+    // fetch is unbounded by design (it reports everything still owed) and which
+    // the page loads before any tab. Loaded first here as the page does, so
+    // what is checked is the cash-flow fetch itself; the test below pins what
+    // happens when the summary is not yet cached.
+    await reports.getSummary(U, T);
+    api.getInvoices.mockClear();
     await reports.getCashFlow(U, T, { period: { from: '2026-04', to: '2027-03' }, force: true });
 
     const summaryCalls = api.getInvoices.mock.calls.filter(c => c[12] === true);
@@ -144,6 +152,22 @@ describe('Xero call contract — getInvoices', () => {
       const [, y] = where.match(/DateTime\((\d{4})/) || [];
       expect(Number(y)).toBeLessThan(2026);
     }
+  });
+
+  test('with no summary cached, cash flow adds exactly one unbounded fetch — the summary\'s own — and shares it', async () => {
+    // Performance (and through it cash flow) reads debtor and creditor days
+    // from the summary. Cold, that costs the summary's one fetch; the summary
+    // route asked for at the same moment shares it rather than fetching again.
+    const T2 = 't-cold-summary';
+    await Promise.all([
+      reports.getCashFlow(U, T2, { period: { from: '2026-04', to: '2027-03' } }),
+      reports.getSummary(U, T2, { force: false }),
+    ]);
+    const unbounded = api.getInvoices.mock.calls.filter(c => !c[2]);
+    expect(unbounded).toHaveLength(1);
+    const bounded = api.getInvoices.mock.calls.filter(c => c[2]);
+    expect(bounded.length).toBeGreaterThan(0);
+    for (const call of bounded) expect(call[2]).toMatch(/Date\s*>=\s*DateTime\(/);
   });
 
   test('a Xero where-clause never interpolates an undefined into the query', async () => {

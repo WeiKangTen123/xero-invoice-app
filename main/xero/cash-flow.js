@@ -1,5 +1,5 @@
 const { _toBase, _foreignCurrency } = require('./currency');
-const { _monthKeyOfDate, _dateFromParts, _fmtISODate, _addDays, _closedCount } = require('./periods');
+const { _monthKeyOfDate, _dateFromParts, _fmtISODate, _addDays, _closedCount, _lastDayOfMonth } = require('./periods');
 
 // Turning Xero's payment, bank-transaction and invoice records into a cash view.
 //
@@ -17,16 +17,51 @@ const { _monthKeyOfDate, _dateFromParts, _fmtISODate, _addDays, _closedCount } =
 // bank transaction, but counting it would inflate both sides of the statement.
 const _isTransfer = t => /TRANSFER/i.test(t?.type || '');
 
-// Xero's payment types are not uniformly prefixed. The receivable side is
-// ACCRECPAYMENT plus the AR* credit-note/overpayment/prepayment variants; the
-// rest are payable. Same rule as the Banking statement view already uses.
-const _isReceiptPayment = p => /REC/.test(p?.paymentType || '') || (p?.paymentType || '').startsWith('AR');
+// Xero hands back deleted payments and bank transactions (and voided bank
+// transactions) alongside live ones, still carrying the amount they had. A
+// deleted payment moved no money, so counting it put cash in or out of the
+// bank that never went there.
+const _isLive = r => !/^(DELETED|VOIDED)$/i.test(String(r?.status || '').trim());
+
+// Which way a payment moved money. Only the two invoice payments read the way
+// their names suggest: ACCRECPAYMENT is a customer paying you, ACCPAYPAYMENT is
+// you paying a supplier. Every other type is a REFUND against a credit note, an
+// overpayment or a prepayment, and a refund runs against its ledger: an AR*
+// refund is money paid back OUT to a customer, an AP* refund is money a
+// supplier paid back IN. The old rule ("contains REC, or starts with AR")
+// counted a refund to a customer as a receipt, so money that left the bank was
+// added to cash in.
+const _isReceiptPayment = p => {
+  const t = String(p?.paymentType || '').toUpperCase();
+  if (t === 'ACCRECPAYMENT') return true;
+  if (t === 'ACCPAYPAYMENT') return false;
+  return t.startsWith('AP');
+};
+
+// True for the two payments that settle an invoice or a bill. The rest are the
+// refunds above, which are not customer receipts or supplier payments however
+// they are booked, so the cash view files them as "other".
+const _isInvoicePayment = p => /^ACC(REC|PAY)PAYMENT$/i.test(String(p?.paymentType || ''));
+
+// Which bucket a payment belongs in. A refund keeps its real direction but is
+// not counted as trade with a customer or supplier: a refund paid to a customer
+// is not a supplier payment, and one received from a supplier did not come
+// from a customer.
+function _paymentBucket(p) {
+  const receipt = _isReceiptPayment(p);
+  if (_isInvoicePayment(p)) return receipt ? 'customerReceipts' : 'supplierPayments';
+  return receipt ? 'otherReceipts' : 'otherPayments';
+}
 
 function _buildCashMovement({ payments = [], bankTransactions = [], months = [], baseCurrency = '' }) {
   const idx = new Map(months.map((m, i) => [m.key, i]));
   const zero = () => Array(months.length).fill(0);
   const monthly = { customerReceipts: zero(), otherReceipts: zero(), supplierPayments: zero(), otherPayments: zero() };
   const totals  = { customerReceipts: 0, otherReceipts: 0, supplierPayments: 0, otherPayments: 0 };
+  // Kept out of every figure above, but totalled: the Bank Summary's received
+  // and spent columns DO include transfers, so the tie-out against it has to
+  // take them off that side to compare like with like.
+  const transfers = { in: 0, out: 0 };
 
   const add = (bucket, when, amount) => {
     const v = Math.abs(Number(amount || 0));
@@ -38,21 +73,56 @@ function _buildCashMovement({ payments = [], bankTransactions = [], months = [],
 
   // Converted to base currency so these tie to the bank summary and the P&L,
   // both of which Xero reports in base.
-  for (const p of payments) add(_isReceiptPayment(p) ? 'customerReceipts' : 'supplierPayments', p.date, _toBase(p, p.amount, baseCurrency));
+  for (const p of payments) {
+    if (!_isLive(p)) continue;
+    add(_paymentBucket(p), p.date, _toBase(p, p.amount, baseCurrency));
+  }
   for (const t of bankTransactions) {
-    if (_isTransfer(t)) continue;                       // own-account movement, not cash flow
-    add(/^RECEIVE/i.test(t.type || '') ? 'otherReceipts' : 'otherPayments', t.date, _toBase(t, t.total, baseCurrency));
+    if (!_isLive(t)) continue;
+    const receive = /^RECEIVE/i.test(t.type || '');
+    if (_isTransfer(t)) {                               // own-account movement, not cash flow
+      transfers[receive ? 'in' : 'out'] += Math.abs(Number(_toBase(t, t.total, baseCurrency) || 0));
+      continue;
+    }
+    add(receive ? 'otherReceipts' : 'otherPayments', t.date, _toBase(t, t.total, baseCurrency));
   }
 
   const cashIn  = totals.customerReceipts + totals.otherReceipts;
   const cashOut = totals.supplierPayments + totals.otherPayments;
   return {
     ...totals, cashIn, cashOut, net: cashIn - cashOut,
+    transfers,
     monthly: {
       ...monthly,
       in:  months.map((_, i) => monthly.customerReceipts[i] + monthly.otherReceipts[i]),
       out: months.map((_, i) => monthly.supplierPayments[i] + monthly.otherPayments[i]),
     },
+  };
+}
+
+// Pure. Whether the payment records tie to the Bank Summary, compared like with
+// like.
+//
+// The Bank Summary's "Cash Received" and "Cash Spent" count a transfer between
+// two of the org's own accounts on both sides — out of one, into the other —
+// while the movement above leaves transfers out because they are not cash flow.
+// Compared as they were, every transfer showed up as money the bank had and the
+// records did not, and raised the "does not tie" alert on books that tied
+// exactly. So the transfers are taken off the bank's figures before comparing.
+//
+// A positive gap means the records show more than the bank; a negative one
+// means the bank shows more than the records. Which it is decides what to go
+// and look for, so the sign is kept rather than folded into a magnitude.
+function _buildUnreconciled({ movement = {}, bankIn = 0, bankOut = 0 } = {}) {
+  const tIn  = Number(movement.transfers?.in  || 0);
+  const tOut = Number(movement.transfers?.out || 0);
+  const round = v => Math.round(v * 100) / 100;
+  const inGap  = round(Number(movement.cashIn  || 0) - (bankIn  - tIn));
+  const outGap = round(Number(movement.cashOut || 0) - (bankOut - tOut));
+  return {
+    inGap, outGap,
+    transfersIn: round(tIn), transfersOut: round(tOut),
+    material: Math.abs(inGap) > 1 || Math.abs(outGap) > 1,
   };
 }
 
@@ -123,7 +193,95 @@ function _buildSupplierSpend(invoices, { baseCurrency = '', fromISO = null, toIS
   };
 }
 
-function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days = 0, today, baseCurrency = '' }) {
+// The month a document is dated in. An ISO string's own month is taken as
+// written: parsing "2026-04-01T00:00:00", which carries no offset, reads it in
+// the server's local time, and east of UTC that lands it in March. A Date
+// object (some Xero records arrive as one) goes through the usual UTC reading.
+function _monthOfDoc(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}/.test(value)) return value.slice(0, 7);
+  return _monthKeyOfDate(value);
+}
+
+// Pure. What was invoiced to customers and billed by suppliers in each month,
+// as { 'YYYY-MM': { sales, bills } }, in base currency and INCLUDING tax — the
+// same basis as the amounts still owed, which include tax too. A draft has not
+// been sent and a voided or deleted document was never owed, so neither counts.
+function _raisedByMonth(invoices = [], baseCurrency = '') {
+  const out = {};
+  for (const inv of invoices || []) {
+    if (/^(DRAFT|SUBMITTED|DELETED|VOIDED)$/i.test(String(inv?.status || ''))) continue;
+    const side = inv?.type === 'ACCREC' ? 'sales' : inv?.type === 'ACCPAY' ? 'bills' : null;
+    const key = side ? _monthOfDoc(inv.date) : null;
+    if (!key) continue;
+    if (!out[key]) out[key] = { sales: 0, bills: 0 };
+    out[key][side] += Number(_toBase(inv, inv.total, baseCurrency) || 0);
+  }
+  for (const m of Object.values(out)) {
+    m.sales = Math.round(m.sales * 100) / 100;
+    m.bills = Math.round(m.bills * 100) / 100;
+  }
+  return out;
+}
+
+function _daysInMonthKey(key) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(key || ''));
+  return m ? _lastDayOfMonth(+m[1], +m[2]) : 0;
+}
+
+// Pure. Debtor days (DSO) and creditor days (DPO), defined in this one place.
+// getPerformance works them out once for the period and the Overview, the Cash
+// Flow tab, the alerts and the AI commentary all read that one figure; the
+// Overview used to compute a second, different one of its own.
+//
+// Three things were wrong with the old figures, and each moved them a lot:
+//   * they divided by every day of the period, months not yet begun included,
+//     so a financial year viewed in its fifth month spread five months of sales
+//     over a whole year of days;
+//   * what customers owe includes tax, while the P&L revenue it was divided by
+//     does not, so taxed sales inflated debtor days by the tax rate;
+//   * creditor days were measured against every overhead — wages, depreciation,
+//     costs no supplier ever bills for — which pulled them towards nothing.
+// So both are measured over the period's CLOSED months only, and each side of
+// each ratio comes from the same documents with tax treated alike: what
+// customers owe now against what was invoiced to them in those months, and what
+// is owed to suppliers now against what suppliers billed in those months. Bills
+// are where cost of sales and supplier-charged overheads arrive; payroll and
+// depreciation never do.
+//
+// Null rather than a guess when there is no closed month, or nothing was
+// invoiced or billed in them.
+function _buildPaymentDays({ receivable = 0, payable = 0, raisedByMonth = {}, months = [], today } = {}) {
+  const n = _closedCount(months, today);
+  const closed = months.slice(0, n);
+  let invoiced = 0, billed = 0, days = 0;
+  for (const m of closed) {
+    const r = raisedByMonth?.[m.key];
+    invoiced += Number(r?.sales || 0);
+    billed   += Number(r?.bills || 0);
+    days     += _daysInMonthKey(m.key);
+  }
+  const rec = Number(receivable || 0), pay = Number(payable || 0);
+  return {
+    available: n > 0,
+    // Why there is no figure, so the screen can say which: no closed month yet
+    // is a fact about the calendar, not a fault.
+    reason: n > 0 ? null : 'no-closed-month',
+    dso: n > 0 && invoiced > 0 ? (rec / invoiced) * days : null,
+    dpo: n > 0 && billed   > 0 ? (pay / billed)   * days : null,
+    receivable: rec, payable: pay,
+    invoiced: Math.round(invoiced * 100) / 100,
+    billed:   Math.round(billed * 100) / 100,
+    days,
+    closedMonths: n,
+    fromLabel: n ? closed[0].label || closed[0].key : null,
+    toLabel:   n ? closed[n - 1].label || closed[n - 1].key : null,
+  };
+}
+
+// Debtor and creditor days are not worked out here: they come in as
+// `paymentDays` from _buildPaymentDays, so this tab cannot disagree with the
+// Overview about them.
+function _buildWorkingCapital({ invoices = [], today, baseCurrency = '', paymentDays = null }) {
   const ar = { raised: 0, due: 0, count: 0 }, ap = { raised: 0, due: 0, count: 0 };
   const buckets = { current: 0, d1_30: 0, d31_60: 0, d60plus: 0 };
   const now = today ? _dateFromParts(today) : new Date();
@@ -131,8 +289,8 @@ function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days =
   for (const inv of invoices) {
     const g = inv.type === 'ACCREC' ? ar : inv.type === 'ACCPAY' ? ap : null;
     if (!g) continue;
-    // Base currency: revenue and expenses below come from the P&L, which Xero
-    // reports in base, so DSO/DPO would otherwise divide unlike units.
+    // Base currency, so a USD invoice and an SGD one add up to something that
+    // means anything, and the totals sit beside report figures Xero gives in base.
     const dueBase = _toBase(inv, inv.amountDue, baseCurrency);
     g.raised += _toBase(inv, inv.total, baseCurrency);
     g.due    += dueBase;
@@ -156,8 +314,14 @@ function _buildWorkingCapital({ invoices = [], revenue = 0, expenses = 0, days =
     collectionRate: ar.raised > 0 ? collected / ar.raised : null,
     arAgeing: buckets,
     overdue: buckets.d1_30 + buckets.d31_60 + buckets.d60plus,
-    dso: revenue  > 0 && days > 0 ? (ar.due / revenue)  * days : null,
-    dpo: expenses > 0 && days > 0 ? (ap.due / expenses) * days : null,
+    dso: paymentDays?.dso ?? null,
+    dpo: paymentDays?.dpo ?? null,
+    // What the two figures were measured over, so the screen can say so.
+    paymentDays: paymentDays ? {
+      available: !!paymentDays.available, reason: paymentDays.reason || null,
+      closedMonths: paymentDays.closedMonths, fromLabel: paymentDays.fromLabel, toLabel: paymentDays.toLabel,
+      days: paymentDays.days, invoiced: paymentDays.invoiced, billed: paymentDays.billed,
+    } : null,
     counts: { receivable: ar.count, payable: ap.count },
     currency: _foreignCurrency(invoices, baseCurrency),
   };
@@ -328,6 +492,25 @@ const ALERT_THRESHOLDS = {
 
 const _SEVERITY_ORDER = { critical: 0, warn: 1, info: 2 };
 
+// What the "does not tie" alert says, by which way the records and the bank
+// disagree. It used to say payments were recorded but missing from the bank
+// whatever the sign, so a bank showing MORE than the records — every transfer
+// between the org's own accounts did that — was described backwards, and sent
+// the reader looking for the wrong thing.
+function _unreconciledDetail(u = {}) {
+  const gaps  = [Number(u.inGap || 0), Number(u.outGap || 0)];
+  const over  = gaps.some(g => g > 1);    // the records show more than the bank
+  const under = gaps.some(g => g < -1);   // the bank shows more than the records
+  const parts = [];
+  if (over) {
+    parts.push('Some payments recorded in Xero are not in the bank accounts’ totals, usually because they were posted to an account that is not a bank account, or not yet reconciled.');
+  }
+  if (under) {
+    parts.push('The bank accounts show money moving that no payment or bank transaction in Xero accounts for, usually an entry posted straight to a bank account, such as a manual journal.');
+  }
+  return parts.length ? parts.join(' ') : 'Xero’s payment records and the bank accounts’ totals disagree for this period.';
+}
+
 function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unreconciled = {}, cash = {}, supplierSpend = {} } = {}, thresholds = ALERT_THRESHOLDS) {
   const alerts = [];
   // `detail` may carry a single {amount} placeholder. The figure stays a number
@@ -429,8 +612,7 @@ function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unrecon
   // 9. The records disagree with the bank. Not a business problem — a
   //    bookkeeping one — but it undermines every figure above it.
   if (unreconciled.material) {
-    add('info', 'unreconciled', 'Payment records do not tie to the bank',
-      'Some payments recorded in Xero are not reflected in the bank statement, usually posted to a non-bank account or not yet reconciled.');
+    add('info', 'unreconciled', 'Payment records do not tie to the bank', _unreconciledDetail(unreconciled));
   }
 
   alerts.sort((a, b) => _SEVERITY_ORDER[a.severity] - _SEVERITY_ORDER[b.severity]);
@@ -445,4 +627,7 @@ function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unrecon
   };
 }
 
-module.exports = { _buildSupplierSpend, _isoDay, ALERT_THRESHOLDS, _buildAlerts, _buildCashForecast, _buildCashMovement, _buildCashWaterfall, _buildRunway, _buildWorkingCapital, _isReceiptPayment, _isTransfer };
+module.exports = {
+  _buildSupplierSpend, _isoDay, ALERT_THRESHOLDS, _buildAlerts, _buildCashForecast, _buildCashMovement, _buildCashWaterfall, _buildRunway, _buildWorkingCapital, _isReceiptPayment, _isTransfer,
+  _isLive, _isInvoicePayment, _paymentBucket, _buildUnreconciled, _unreconciledDetail, _raisedByMonth, _buildPaymentDays, _monthOfDoc,
+};

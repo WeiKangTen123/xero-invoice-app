@@ -21,8 +21,14 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                 <div><span style={{ color: 'var(--text-muted)' }}>Cash out </span><b style={{ color: 'var(--danger)' }}>{fmtMoney(perf.data.cash.cashOut, currency)}</b></div>
                 <div><span style={{ color: 'var(--text-muted)' }}>Net </span><b style={{ color: perf.data.cash.net >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtMoney(perf.data.cash.net, currency)}</b></div>
               </div>
-              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+              {/* Per account, a transfer really is money in or out of that
+                  account, so the Bank Summary's figures are shown as Xero gives
+                  them. Added across accounts they count each transfer on both
+                  sides, which is why the Cash Flow tab, measuring money into and
+                  out of the business, leaves transfers out and reads lower. */}
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginLeft: 'auto', textAlign: 'right' }}>
                 {perf.data.fiscalYear?.label} · Xero Bank Summary
+                <div>Includes transfers between your own accounts</div>
               </div>
             </div>
           )}

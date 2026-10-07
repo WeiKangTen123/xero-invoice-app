@@ -218,8 +218,14 @@ const {
 } = require('./periods');
 
 function _buildSummary(org, invoices) {
-  let totalReceivables = 0, totalPayables = 0, overdueAmount = 0;
+  let totalReceivables = 0, totalPayables = 0;
   let receivablesCount = 0, payablesCount = 0;
+  // Overdue is kept per direction. It used to be one sum of every overdue
+  // document, so a bill you were late paying was added to an invoice a customer
+  // was late paying: two opposite positions netted into a figure that described
+  // neither, and grew whenever you fell behind with a supplier.
+  let overdueReceivables = 0, overduePayables = 0;
+  let overdueReceivablesCount = 0, overduePayablesCount = 0;
   const statusBreakdown = { paid: 0, awaiting: 0, overdue: 0 };
   const aging = { receivables: _emptyAging(), payables: _emptyAging() };
 
@@ -232,7 +238,10 @@ function _buildSummary(org, invoices) {
     const dueBase       = _toBase(inv, amountDue, base);
     const status         = _statusLabel(inv);
     statusBreakdown[status]++;
-    if (status === 'overdue') overdueAmount += dueBase;
+    if (status === 'overdue') {
+      if (isReceivable) { overdueReceivables += dueBase; overdueReceivablesCount++; }
+      else              { overduePayables    += dueBase; overduePayablesCount++; }
+    }
 
     if (inv.status === 'AUTHORISED' && amountDue > 0) {
       if (isReceivable) { totalReceivables += dueBase; receivablesCount++; }
@@ -265,9 +274,18 @@ function _buildSummary(org, invoices) {
         ? `${String(org.financialYearEndDay).padStart(2, '0')}/${String(org.financialYearEndMonth).padStart(2, '0')}`
         : '—',
     },
-    kpis: { totalReceivables, totalPayables, receivablesCount, payablesCount, overdueAmount, statusBreakdown },
+    kpis: {
+      totalReceivables, totalPayables, receivablesCount, payablesCount,
+      overdueReceivables, overduePayables, overdueReceivablesCount, overduePayablesCount,
+      statusBreakdown,
+    },
     aging,
     invoices: list,
+    // What was invoiced and billed in each month, from every invoice fetched
+    // rather than the fifty listed. getPerformance measures debtor and creditor
+    // days from this and the totals above, so those need no invoice fetch of
+    // their own.
+    raisedByMonth: _raisedByMonth(invoices, base),
     currency: _foreignCurrency(invoices, base),
   };
 }
@@ -395,10 +413,17 @@ async function _getContactsRaw(userId, tenantId, { force = false } = {}) {
 // accounting.reports.banksummary.read) — see xero/oauth.js for why that means
 // a one-time reconnect for anyone already connected under the old scope list.
 
+// Deleted and voided records are left off the statement, as the cash view
+// leaves them out of its figures (see _isLive): they moved no money, and listed
+// with a +/- amount they read as though they had.
+//
+// Every RECEIVE type is money in — RECEIVE-TRANSFER, RECEIVE-PREPAYMENT and
+// RECEIVE-OVERPAYMENT included. Only plain RECEIVE used to be, so a transfer
+// into this account or a customer's prepayment was printed as money out.
 function _buildBankTransactions(transactions) {
-  return transactions.map(t => ({
+  return transactions.filter(_isLive).map(t => ({
     transactionId: t.bankTransactionID,
-    type:          t.type === 'RECEIVE' ? 'Money In' : 'Money Out',
+    type:          /^RECEIVE/i.test(t.type || '') ? 'Money In' : 'Money Out',
     contact:       t.contact?.name || 'Unknown',
     reference:     t.reference || '',
     // xero-node returns a real Date object here (confirmed against a live
@@ -417,16 +442,15 @@ function _buildBankTransactions(transactions) {
 // A bank account's real cash movement isn't fully captured by BankTransactions
 // alone — confirmed against live data: paying a bill or receiving a customer
 // payment against an invoice creates a Payment record instead, which never
-// shows up in getBankTransactions at all. paymentType's 8 real values (per
-// the xero-node SDK) aren't uniformly prefixed — the two common ones are
-// ACCRECPAYMENT/ACCPAYPAYMENT (confirmed live), and only the other 6
-// credit-note/overpayment/prepayment variants actually start with AR/AP, so
-// "contains REC, or starts with AR" is what actually covers every
-// receivable (money in) type; everything else is payable (money out).
+// shows up in getBankTransactions at all. Which way each of paymentType's
+// eight values moves money is decided by _isReceiptPayment, the rule the cash
+// view uses too: the AR*/AP* variants are refunds, which run against their
+// ledger, so a refund to a customer is money OUT even though it sits on the
+// receivable side. Deleted payments are left off, as on the bank transactions.
 function _buildPayments(payments) {
-  return payments.map(p => ({
+  return payments.filter(_isLive).map(p => ({
     transactionId: p.paymentID,
-    type:          /REC/.test(p.paymentType || '') || (p.paymentType || '').startsWith('AR') ? 'Money In' : 'Money Out',
+    type:          _isReceiptPayment(p) ? 'Money In' : 'Money Out',
     contact:       p.invoice?.contact?.name || 'Unknown',
     reference:     p.reference || (p.invoice?.invoiceNumber ? `Payment - ${p.invoice.invoiceNumber}` : 'Payment'),
     date:          p.date ? new Date(p.date).toISOString().slice(0, 10) : null,
@@ -1128,13 +1152,56 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
 
 // Which P&L section a row belongs to. Order matters: "Less Cost of Sales"
 // contains the word "Sales", so it has to be tested before the revenue pattern.
+//
+// Other income may be headed "Plus Other Income". Read as revenue — it contains
+// "income" — its total would now be added into revenue, since totals are found
+// by their section (see _sectionTotal). Revenue against other income makes no
+// difference to the budget grid, which reads this only to tell costs apart.
 function _sectionKind(section) {
   const s = (section || '').trim();
   if (/^less cost of sales/i.test(s))                      return 'cogs';
   if (/^less (operating expenses|overheads)/i.test(s))     return 'opex';
-  if (/^other income/i.test(s))                            return 'otherIncome';
+  if (/^(plus )?other income/i.test(s))                    return 'otherIncome';
   if (/income|revenue|sales/i.test(s))                     return 'revenue';
   return 'other';
+}
+
+// Pure. A P&L total, found the way the lines above it are found: by the section
+// it closes, never by its own label.
+//
+// Totals were looked up by exact label ("Total Income", "Total Operating
+// Expenses") while their sections were matched by pattern, which also accepts
+// "Trading Income" and "Less Overheads". Under those headings Xero names the
+// totals "Total Trading Income" and "Total Overheads", the lookups found
+// nothing, and revenue and overheads came out as zero for the whole period —
+// while the lines beneath them were shown correctly.
+//
+// Each section of the kind contributes its own subtotal, or the sum of its
+// accounts if it has none. Summed across sections rather than taking the first,
+// because a heading one report words differently from the other can leave the
+// budget's figures and the actuals in two sections of the same kind, each with
+// half of the total. Null when no section of the kind exists.
+function _sectionTotal(rows, kind, n) {
+  const groups = new Map();
+  for (const r of rows) {
+    if (r.kind !== 'subtotal' && r.kind !== 'account') continue;
+    if (_sectionKind(r.section) !== kind) continue;
+    const k = _norm(r.section);
+    if (!groups.has(k)) groups.set(k, { subtotals: [], accounts: [] });
+    groups.get(k)[r.kind === 'subtotal' ? 'subtotals' : 'accounts'].push(r);
+  }
+  if (!groups.size) return null;
+  const actual = _zeros(n), budget = _zeros(n);
+  for (const g of groups.values()) {
+    for (const r of (g.subtotals.length ? g.subtotals : g.accounts)) {
+      (r.monthly || []).forEach((m, i) => {
+        if (i >= n) return;
+        actual[i] += Number(m.actual || 0);
+        budget[i] += Number(m.budget || 0);
+      });
+    }
+  }
+  return { actual: actual.map(_cents), budget: budget.map(_cents) };
 }
 
 // Recurring revenue is a business concept Xero doesn't record — there's no flag
@@ -1151,20 +1218,23 @@ const _sum   = a => a.reduce((s, v) => s + v, 0);
 // Pure. Reshapes budget-variance rows into the series the dashboard charts need.
 function _buildPerformance({ months, rows, cash }) {
   const n = months.length;
-  const find = re => rows.find(r => r.kind !== 'section' && re.test(r.label));
-  // A subtotal Xero didn't emit (this org books no cost of sales, so there's no
-  // "Total Cost of Sales" row at all) must read as a flat zero series, not undefined.
+  // A section Xero didn't emit (this org books no cost of sales, so there is no
+  // cost-of-sales section at all) must read as a flat zero series, not undefined.
   const seriesOf = row => ({
     actual: row ? row.monthly.map(m => m.actual) : _zeros(n),
     budget: row ? row.monthly.map(m => m.budget) : _zeros(n),
   });
+  const sectionSeries = kind => _sectionTotal(rows, kind, n) || seriesOf(null);
+  // A floating line, named by its sign like Net Profit: "Gross Loss" in a
+  // month or report where it is negative.
+  const grossRow = rows.find(r => r.kind !== 'section' && /^gross (profit|loss)$/i.test(String(r.label || '').trim()));
 
   const totals = {
-    revenue:     seriesOf(find(/^total income$/i)),
-    otherIncome: seriesOf(find(/^total other income$/i)),
-    cogs:        seriesOf(find(/^total cost of sales$/i)),
-    grossProfit: seriesOf(find(/^gross profit$/i)),
-    opex:        seriesOf(find(/^total operating expenses$/i)),
+    revenue:     sectionSeries('revenue'),
+    otherIncome: sectionSeries('otherIncome'),
+    cogs:        sectionSeries('cogs'),
+    grossProfit: seriesOf(grossRow),
+    opex:        sectionSeries('opex'),
     netProfit:   seriesOf(_netRow(rows)),
   };
 
@@ -1401,6 +1471,14 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
   // this a different in-flight request from the route's identical one, so the
   // two fetched the same report from Xero side by side.
   const bv = await getBudgetVariance(userId, tenantId, period ? { timezone, force, period } : { timezone, force, window });
+  // Started now, read below for debtor and creditor days, so it overlaps the
+  // bank summary instead of queueing behind it. Asked for exactly as the
+  // /summary route asks, so it shares that request and its cache entry. The
+  // catch is attached here so a failure is never an unhandled rejection.
+  const summaryP = getSummary(userId, tenantId, { force }).catch(err => {
+    logger.warn('Performance: summary unavailable for debtor and creditor days', { userId, tenantId, error: err.message });
+    return null;
+  });
 
   const todayParts = _todayPartsInTz(timezone);
   const today = _fmtISODate(todayParts);
@@ -1471,6 +1549,25 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
   // it is rising makes the reader do the differencing in their head.
   const growth = _buildGrowth({ series: built.totals.revenue.actual, months: bv.months, today: todayParts });
 
+  // Debtor and creditor days, worked out here once for the period. The
+  // Overview shows this figure, and getCashFlow passes the same one to its tab,
+  // its alerts and the AI commentary, so no two places can disagree about it.
+  // Read from the summary, which already holds every invoice and which the page
+  // loads first, so on a normal visit this is a cache hit rather than another
+  // invoice fetch. One card out of many: a failure leaves it unavailable.
+  let paymentDays = { available: false, reason: 'unavailable', dso: null, dpo: null, closedMonths: 0 };
+  try {
+    const summary = await summaryP;
+    if (summary?.kpis) {
+      paymentDays = _buildPaymentDays({
+        receivable: summary.kpis.totalReceivables, payable: summary.kpis.totalPayables,
+        raisedByMonth: summary.raisedByMonth || {}, months: bv.months, today: todayParts,
+      });
+    }
+  } catch (err) {
+    logger.warn('Performance: debtor and creditor days unavailable', { userId, tenantId, error: err.message });
+  }
+
   logger.info('Performance overview built', { userId, tenantId, serviceLines: built.serviceLines.length, actualMonths: actualThroughIdx + 1 });
 
   return {
@@ -1485,6 +1582,7 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
     closedThroughIdx: _closedCount(bv.months, todayParts) - 1,
     ...built,
     growth,
+    paymentDays,
     customerRevenue,
     quotePipeline,
     watchList,
@@ -1590,7 +1688,11 @@ const {
   _buildWorkingCapital,
   _isReceiptPayment,
   _isTransfer,
+  _isLive,
   _buildSupplierSpend,
+  _buildUnreconciled,
+  _buildPaymentDays,
+  _raisedByMonth,
 } = require('./cash-flow');
 
 async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
@@ -1654,18 +1756,23 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
 
   const S = a => a.reduce((x, y) => x + y, 0);
   const revenue  = S(perf.totals.revenue.actual);
-  const expenses = S(perf.totals.cogs.actual) + S(perf.totals.opex.actual);
-  const days     = Math.max(1, Math.round((_dateFromParts(_parseISODate(last)) - _dateFromParts(fromP)) / 86400000) + 1);
 
-  const workingCapital = _buildWorkingCapital({ invoices, revenue, expenses, days, today, baseCurrency });
+  // Debtor and creditor days are the period's one figure from getPerformance,
+  // the same one the Overview shows, not a second calculation here.
+  const workingCapital = _buildWorkingCapital({ invoices, today, baseCurrency, paymentDays: perf.paymentDays });
   // Scoped to the period on screen, not the wider window the invoice fetch uses
   // so the forecast can see older unpaid bills.
   const supplierSpend = _buildSupplierSpend(invoices, { baseCurrency, fromISO: first, toISO: last });
   const hygiene = _buildInvoiceHygiene(invoices, baseCurrency);
   const closing  = bank ? bank.accounts.reduce((s, a) => s + a.closingBalance, 0) : 0;
   const opening  = bank ? bank.accounts.reduce((s, a) => s + (a.openingBalance || 0), 0) : 0;
-  const bankIn   = bank ? bank.cashIn  : 0;
-  const bankOut  = bank ? bank.cashOut : 0;
+  // The Bank Summary's received and spent count a transfer between the org's
+  // own accounts twice over — out of one account and into another — although
+  // no money came into or left the business. Taken off here, so "cash in" on
+  // this tab is money that actually arrived, and it is measured on the same
+  // terms as the movement figures it sits beside and is checked against.
+  const bankIn   = bank ? bank.cashIn  - movement.transfers.in  : 0;
+  const bankOut  = bank ? bank.cashOut - movement.transfers.out : 0;
   const forecast = _buildCashForecast({ invoices, openingBalance: closing, today, baseCurrency });
   const runway   = _buildRunway({ months, monthly: movement.monthly, closing, today });
   const waterfall = _buildCashWaterfall({ opening, closing, movement });
@@ -1675,11 +1782,13 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
   // disagree with the bank if something was recorded against a non-bank account
   // or never reconciled. Deriving the opening balance by subtraction hid that;
   // reading Xero's own opening balance exposes it instead.
-  const unreconciled = {
-    inGap:  Math.round((movement.cashIn  - bankIn)  * 100) / 100,
-    outGap: Math.round((movement.cashOut - bankOut) * 100) / 100,
-  };
-  unreconciled.material = Math.abs(unreconciled.inGap) > 1 || Math.abs(unreconciled.outGap) > 1;
+  //
+  // Only when there is a bank figure to compare with. Without one, every
+  // payment recorded used to read as missing from a bank that was simply not
+  // fetched.
+  const unreconciled = bank
+    ? _buildUnreconciled({ movement, bankIn: bank.cashIn, bankOut: bank.cashOut })
+    : { inGap: 0, outGap: 0, transfersIn: 0, transfersOut: 0, material: false };
 
   const alerts = _buildAlerts({
     runway, workingCapital, forecast, unreconciled, supplierSpend,
@@ -1698,8 +1807,10 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
     cash: {
       available: !!bank,
       closing, opening,
-      // From the bank statement, not inferred from the payment records.
+      // From the bank statement, not inferred from the payment records, less
+      // transfers between the org's own accounts (see bankIn above).
       cashIn: bankIn, cashOut: bankOut, net: bankIn - bankOut,
+      transfersIn: movement.transfers.in, transfersOut: movement.transfers.out,
       accounts: bank ? bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance })) : [],
     },
     movement,
@@ -1837,7 +1948,7 @@ module.exports = {
   _mergeChunks, _cents, _netRow, _toDateLabel, _buildCustomerRevenue, _buildInvoiceHygiene, _buildQuotePipeline, _buildCashMovement, _buildWorkingCapital, _buildCashForecast,
   _toBase, _foreignCurrency, _closedCount, _growthPct, _buildGrowth, _buildRunway, _buildCashWaterfall,
   _buildAlerts, ALERT_THRESHOLDS,
-  _isTransfer, _isReceiptPayment, _periodCacheTtl, _pruneCache, _cache, CACHE_MAX_ENTRIES, TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
+  _isTransfer, _isReceiptPayment, _isLive, _buildUnreconciled, _buildPaymentDays, _raisedByMonth, _sectionTotal, _periodCacheTtl, _pruneCache, _cache, CACHE_MAX_ENTRIES, TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights, _buildCategoryVariances,
   _narrativeFacts, _groundNarrative, _narrativePrompt, _narrateFrom,
   _canonical, _dedupeKey,

@@ -20,30 +20,42 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
     .map(l => ({ label: l.label, value: sliceSum(l.actual, from, to), tag: l.recurring ? 'recurring' : null }))
     .sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
 
-  // Days Sales Outstanding: how long invoiced revenue takes to become cash.
-  // Receivables come from the invoice summary, revenue from the P&L — both
-  // already on the page, so this costs no extra call. Undefined without revenue.
-  const days = months.length * 30.44;
+  // Debtor days are the server's figure — the same one the Cash Flow tab and
+  // its alerts show — measured over the period's closed months with tax treated
+  // alike on both sides. This panel used to work out a second one of its own,
+  // dividing receivables that include tax by P&L revenue that does not, over
+  // every month of the range including ones not yet begun.
+  const pd = data.paymentDays || null;
+  const dso = pd && Number.isFinite(pd.dso) ? pd.dso : null;
   const receivables = summary?.kpis?.totalReceivables ?? null;
-  const dso = (receivables !== null && T.revenue > 0) ? (receivables / T.revenue) * days : null;
-  const overdue = summary?.kpis?.overdueAmount ?? null;
+  // Customers only. The summary's overdue figure used to add bills you owe to
+  // invoices you are owed, which is no note for a measure of collections.
+  const overdueIn = summary?.kpis?.overdueReceivables ?? null;
+  const closedNote = pd?.closedMonths ? `${pd.closedMonths} closed month${pd.closedMonths === 1 ? '' : 's'}` : '';
 
   const scorecard = [
     { label: 'Recurring mix', target: 'Higher is steadier',
       value: T.recurringMix === null ? '—' : fmtPct(T.recurringMix, 0),
       note: T.recurringMix === null ? 'No revenue yet' : `${fmtMoney(T.recurring, cur)} recurring` },
+    // Closed months only, as the Budget tab's year to date (see closedAttainment).
     { label: 'Budget attainment', target: 'Target 100%',
-      value: T.revenueBudget > 0 ? fmtPct(T.revenue / T.revenueBudget, 0) : '—',
-      tone: T.revenueBudget > 0 && T.revenue < T.revenueBudget ? 'var(--danger)' : 'var(--success)',
-      note: T.revenueBudget > 0 ? `vs ${fmtMoney(T.revenueBudget, cur)}` : 'Nothing budgeted' },
+      value: T.attainment === null ? '—' : fmtPct(T.attainment, 0),
+      tone: T.attainment === null ? undefined : T.attainment < 1 ? 'var(--danger)' : 'var(--success)',
+      note: T.attainment !== null
+        ? `${fmtMoney(T.attainmentActual, cur)} vs ${fmtMoney(T.attainmentBudget, cur)} to ${T.attainmentThrough}`
+        : T.attainmentMonths === 0 ? 'No closed month yet' : 'Nothing budgeted' },
     { label: 'Expense ratio', target: 'Lower is better',
       value: T.revenue > 0 ? fmtPct((T.cogs + T.opex) / T.revenue, 0) : '—',
       note: T.revenue > 0 ? `${fmtMoney(T.cogs + T.opex, cur)} of costs` : 'No revenue yet' },
     { label: 'Debtor days', target: 'Lower is better',
       value: dso === null ? '—' : `${Math.round(dso)} days`,
       tone: dso !== null && dso > 60 ? 'var(--warning)' : undefined,
-      note: receivables === null ? 'Needs invoice data'
-            : overdue > 0 ? `${fmtMoney(overdue, cur)} overdue` : `${fmtMoney(receivables, cur)} outstanding` },
+      note: !pd ? 'Needs invoice data'
+            : !pd.available ? (pd.reason === 'no-closed-month' ? 'No closed month yet' : 'Not available right now')
+            : dso === null ? 'Nothing invoiced in the closed months'
+            : overdueIn > 0 ? `${closedNote} · ${fmtMoney(overdueIn, cur)} overdue`
+            : receivables !== null ? `${closedNote} · ${fmtMoney(receivables, cur)} outstanding`
+            : closedNote },
     // Level without direction makes the reader do the differencing themselves.
     { label: 'Revenue growth', target: 'Month on month',
       value: g.mom === null ? '—' : `${g.mom >= 0 ? '+' : ''}${fmtPct(g.mom, 1)}`,
@@ -105,9 +117,10 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Metric label="Total revenue" value={fmtMoney(T.revenue, cur)}
-                meter={T.revenueBudget > 0 ? (T.revenue / T.revenueBudget) * 100 : null}
+                meter={T.attainment === null ? null : T.attainment * 100}
                 footLeft={T.recurringMix === null ? 'No revenue yet' : `${fmtPct(T.recurringMix, 0)} recurring`}
-                footRight={T.revenueBudget > 0 ? `${fmtPct(T.revenue / T.revenueBudget, 0)} of budget` : 'No budget set'} />
+                footRight={T.attainment !== null ? `${fmtPct(T.attainment, 0)} of budget to ${T.attainmentThrough}`
+                         : T.revenueBudget > 0 ? 'No closed month yet' : 'No budget set'} />
         <Metric label="Gross margin" value={T.grossMargin === null ? '—' : fmtPct(T.grossMargin)}
                 meter={T.grossMargin === null ? null : T.grossMargin * 100}
                 footLeft={`${fmtMoney(T.grossProfit, cur)} gross profit`}

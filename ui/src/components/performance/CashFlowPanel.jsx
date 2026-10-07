@@ -2,6 +2,30 @@ import { fmtMoney, fmtPct } from '../../utils/format';
 import { BarList, GroupedMonthlyBars, Waterfall } from './charts';
 import {AlertBand, CurrencyNote, Empty, Legend, Metric, Rows, Surface } from './primitives';
 
+// What the "does not tie" note says, side by side and in the right direction.
+// A gap is the payment records minus the bank's figures (transfers between the
+// org's own accounts already taken off the bank side): positive means Xero has
+// records the bank totals do not show, negative means the bank shows money no
+// record accounts for. The note used to say "recorded in Xero but not seen in
+// the bank" whatever the sign, so a bank showing MORE was described backwards
+// and the reader went looking for the wrong thing. Gaps of a dollar or less are
+// rounding, as on the server, and are not mentioned.
+export function unreconciledText(u, cur) {
+  const sides = [['receipts', Number(u?.inGap || 0)], ['payments', Number(u?.outGap || 0)]]
+    .filter(([, gap]) => Math.abs(gap) > 1);
+  const over  = sides.filter(([, gap]) => gap > 0);
+  const under = sides.filter(([, gap]) => gap < 0);
+  const list = xs => xs.map(([what, gap]) => `${fmtMoney(Math.abs(gap), cur)} of ${what}`).join(' and ');
+  const parts = [];
+  if (over.length) {
+    parts.push(`${list(over)} recorded in Xero but not in the bank accounts' totals, which usually means posted to an account that is not a bank account, or not yet reconciled.`);
+  }
+  if (under.length) {
+    parts.push(`${list(under)} in the bank accounts' totals with no payment or bank transaction in Xero behind it, which usually means an entry posted straight to a bank account, such as a manual journal.`);
+  }
+  return `The payment records don't tie to the bank statement${parts.length ? `: ${parts.join(' ')}` : '.'}`;
+}
+
 export function CashFlowPanel({ data }) {
   const cur = data.organisation?.currency || '';
   const m   = data.movement;
@@ -96,12 +120,15 @@ export function CashFlowPanel({ data }) {
                 paid. {fmtMoney(rec.revenueAccrual, cur)} invoiced, {fmtMoney(rec.customerReceipts, cur)} received.
               </div>
             )}
+            {(data.cash.transfersIn > 0 || data.cash.transfersOut > 0) && (
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
+                Transfers between your own accounts ({fmtMoney(Math.max(data.cash.transfersIn || 0, data.cash.transfersOut || 0), cur)})
+                {' '}are left out of cash in and cash out: they move money between accounts without any coming in or going out.
+              </div>
+            )}
             {data.unreconciled?.material && (
               <div style={{ fontSize: 11, color: 'var(--warning)', marginTop: 10, lineHeight: 1.5 }}>
-                ▲ The payment records don&apos;t tie to the bank statement
-                {data.unreconciled.inGap !== 0 && ` — ${fmtMoney(Math.abs(data.unreconciled.inGap), cur)} of receipts`}
-                {data.unreconciled.outGap !== 0 && `${data.unreconciled.inGap !== 0 ? ' and' : ' — '} ${fmtMoney(Math.abs(data.unreconciled.outGap), cur)} of payments`}
-                {' '}recorded in Xero but not seen in the bank. Usually means posted to a non-bank account, or not yet reconciled.
+                ▲ {unreconciledText(data.unreconciled, cur)}
               </div>
             )}
           </div>
@@ -118,10 +145,20 @@ export function CashFlowPanel({ data }) {
               <div key={x.l} style={{ background: 'var(--bg-secondary)', borderRadius: 9, padding: '10px 12px' }}>
                 <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.05em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>{x.l}</div>
                 <div style={{ fontSize: 18, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
-                  {x.v === null ? '—' : `${Math.round(x.v)} days`}
+                  {x.v === null || x.v === undefined ? '—' : `${Math.round(x.v)} days`}
                 </div>
               </div>
             ))}
+          </div>
+          {/* What the two figures are measured over, said once, because both
+              changed meaning: closed months only, and invoices and bills on
+              both sides of each ratio, tax included alike. */}
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 }}>
+            {wc.paymentDays?.closedMonths
+              ? `What is owed now, against what was invoiced and billed in the ${wc.paymentDays.closedMonths} closed month${wc.paymentDays.closedMonths === 1 ? '' : 's'} to ${wc.paymentDays.toLabel}, tax included on both sides.`
+              : wc.paymentDays?.reason === 'no-closed-month'
+                ? 'Measured over closed months only, and no month of this period has closed yet.'
+                : 'Not available right now — the invoice summary could not be read.'}
           </div>
           <CurrencyNote currency={wc.currency} />
         </Surface>

@@ -17,7 +17,8 @@ describe('xero/reports — _buildSummary (pure)', () => {
     const result = _buildSummary(ORG, []);
     expect(result.connected).toBe(true);
     expect(result.kpis).toEqual({
-      totalReceivables: 0, totalPayables: 0, receivablesCount: 0, payablesCount: 0, overdueAmount: 0,
+      totalReceivables: 0, totalPayables: 0, receivablesCount: 0, payablesCount: 0,
+      overdueReceivables: 0, overduePayables: 0, overdueReceivablesCount: 0, overduePayablesCount: 0,
       statusBreakdown: { paid: 0, awaiting: 0, overdue: 0 },
     });
     expect(result.invoices).toEqual([]);
@@ -57,7 +58,11 @@ describe('xero/reports — _buildSummary (pure)', () => {
     const { kpis, invoices: list } = _buildSummary(ORG, invoices);
     expect(kpis.statusBreakdown).toEqual({ paid: 2, awaiting: 2, overdue: 1 });
     expect(list.map(i => i.status)).toEqual(['paid', 'paid', 'overdue', 'awaiting', 'awaiting']);
-    expect(kpis.overdueAmount).toBe(50); // only the one overdue ACCPAY line
+    // The one overdue line is a BILL: it is owed by you, so it is overdue
+    // payables and leaves overdue receivables at nothing.
+    expect(kpis.overduePayables).toBe(50);
+    expect(kpis.overdueReceivables).toBe(0);
+    expect(kpis.overdueAmount).toBeUndefined();
   });
 
   test('maps ACCREC/ACCPAY to Sale/Bill and falls back invoice currency to the org base currency', () => {
@@ -191,11 +196,13 @@ describe('xero/reports — _buildPayments (pure)', () => {
     expect(payments[1]).toMatchObject({ transactionId: 'p1', type: 'Money In', contact: 'Customer Co', total: 500 });
   });
 
-  // All 8 real PaymentTypeEnum values (per the xero-node SDK) — only 6 of
-  // them actually start with AR/AP, the other 2 (the most common ones) don't.
-  test('every real PaymentTypeEnum value classifies to the correct direction, not just the ones that happen to start with AR/AP', () => {
-    const IN  = ['ACCRECPAYMENT', 'ARCREDITPAYMENT', 'AROVERPAYMENTPAYMENT', 'ARPREPAYMENTPAYMENT'];
-    const OUT = ['ACCPAYPAYMENT', 'APCREDITPAYMENT', 'APPREPAYMENTPAYMENT', 'APOVERPAYMENTPAYMENT'];
+  // All 8 real PaymentTypeEnum values (per the xero-node SDK). The AR*/AP*
+  // variants are refunds against a credit note, overpayment or prepayment, and
+  // a refund runs against its ledger: AR* refunds are paid OUT to a customer,
+  // AP* refunds are paid IN by a supplier.
+  test('every real PaymentTypeEnum value classifies to the correct direction, refunds included', () => {
+    const IN  = ['ACCRECPAYMENT', 'APCREDITPAYMENT', 'APPREPAYMENTPAYMENT', 'APOVERPAYMENTPAYMENT'];
+    const OUT = ['ACCPAYPAYMENT', 'ARCREDITPAYMENT', 'AROVERPAYMENTPAYMENT', 'ARPREPAYMENTPAYMENT'];
     for (const paymentType of IN) {
       expect(_buildPayments([{ paymentID: 'p', paymentType, date: '2026-08-05', amount: 1 }])[0].type).toBe('Money In');
     }
@@ -1354,7 +1361,10 @@ describe('xero/reports — variance insight grounding (pure)', () => {
     expect(_insightIsGrounded('Wages of 24,603 have not been posted yet.', allowed)).toBe(true);
     expect(_insightIsGrounded('No figures cited at all.', allowed)).toBe(true);
     expect(_insightIsGrounded('Spend reached 88,412 this quarter.', allowed)).toBe(false); // invented
-    expect(_insightIsGrounded('Down 15% on 7,330 budgeted.', allowed)).toBe(true);
+    // Percentages are checked too (ai-insights.test.js): 15% is grounded only
+    // when it is one of the figures supplied.
+    expect(_insightIsGrounded('Down 15% on 7,330 budgeted.', allowed)).toBe(false);
+    expect(_insightIsGrounded('Down 15% on 7,330 budgeted.', new Set([...allowed, 15]))).toBe(true);
   });
 
   const perf = {
@@ -1788,11 +1798,11 @@ describe('xero/reports — cash movement (pure)', () => {
     expect(m.cashIn).toBe(100500);
   });
 
-  test('Xero payment types are not uniformly prefixed, so both rules apply', () => {
+  test('Xero payment types are not uniformly prefixed, and refunds run against their ledger', () => {
     expect(_isReceiptPayment({ paymentType: 'ACCRECPAYMENT' })).toBe(true);
-    expect(_isReceiptPayment({ paymentType: 'ARCREDITPAYMENT' })).toBe(true);
+    expect(_isReceiptPayment({ paymentType: 'ARCREDITPAYMENT' })).toBe(false);   // refund paid to a customer
     expect(_isReceiptPayment({ paymentType: 'ACCPAYPAYMENT' })).toBe(false);
-    expect(_isReceiptPayment({ paymentType: 'APCREDITPAYMENT' })).toBe(false);
+    expect(_isReceiptPayment({ paymentType: 'APCREDITPAYMENT' })).toBe(true);    // refund from a supplier
   });
 
   test('amounts land in the month they occurred, and outside months are ignored', () => {
@@ -1845,10 +1855,21 @@ describe('xero/reports — working capital (pure)', () => {
     expect(wc.counts.payable).toBe(1);
   });
 
-  test('DSO/DPO are null without a denominator rather than Infinity', () => {
-    const wc = _buildWorkingCapital({ invoices: [], revenue: 0, expenses: 0, days: 0, today: TODAY });
+  test('DSO/DPO are null when no payment-days figure is supplied, never Infinity', () => {
+    const wc = _buildWorkingCapital({ invoices: [], today: TODAY });
     expect(wc.dso).toBeNull();
     expect(wc.dpo).toBeNull();
+  });
+
+  test('DSO/DPO are the figures handed in, not a second calculation of its own', () => {
+    const wc = _buildWorkingCapital({
+      invoices: [{ type: 'ACCREC', total: 500, amountDue: 500, dueDate: '2026-09-30' }],
+      today: TODAY,
+      paymentDays: { dso: 42, dpo: 17, closedMonths: 4, fromLabel: 'Apr 2026', toLabel: 'Jul 2026', days: 122, invoiced: 1000, billed: 300 },
+    });
+    expect(wc.dso).toBe(42);
+    expect(wc.dpo).toBe(17);
+    expect(wc.paymentDays).toMatchObject({ closedMonths: 4, toLabel: 'Jul 2026' });
   });
 });
 

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { fmtMoney, fmtMoneyShort, fmtPct } from '../../utils/format';
 import { BarList, GroupedMonthlyBars, MonthlyBars } from './charts';
-import { CurrencyNote, Empty, Legend, Metric, Rows, Surface, rangeLabel, slice, sliceSum, sum, useRangeTotals } from './primitives';
+import { CurrencyNote, Empty, Legend, Metric, Rows, Surface, closedAttainment, rangeLabel, slice, sliceSum, sum, useRangeTotals } from './primitives';
 
 // ── Revenue ──────────────────────────────────────────────────────────────────
 export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
@@ -17,6 +17,11 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
   const budget = active ? slice(active.budget, from, to) : slice(data.totals.revenue.budget, from, to);
   const total  = sum(actual);
   const totalB = sum(budget);
+  // "Of budget" over the closed months only, as on Overview and the Budget tab:
+  // the whole range set part-booked and future months against a full budget.
+  const att = closedAttainment(data,
+    active ? active.actual : data.totals.revenue.actual,
+    active ? active.budget : data.totals.revenue.budget, from, to);
 
   // A netted "vs budget" is close to useless on a revenue tab: this org's
   // implementation revenue is 75,000 UNDER budget while maintenance is 75,000
@@ -55,9 +60,10 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Metric label={active ? active.label : 'Total revenue'} value={fmtMoney(total, cur)}
-                meter={totalB > 0 ? (total / totalB) * 100 : null}
+                meter={att.ratio === null ? null : att.ratio * 100}
                 footLeft={rangeLabel(data.months, from, to)}
-                footRight={totalB > 0 ? `${fmtPct(total / totalB, 0)} of budget` : 'No budget set'} />
+                footRight={att.ratio !== null ? `${fmtPct(att.ratio, 0)} of budget to ${att.throughLabel}`
+                         : totalB > 0 ? 'No closed month yet' : 'No budget set'} />
         <Metric label="Recurring revenue" value={fmtMoney(T.recurring, cur)}
                 meter={T.recurringMix === null ? null : T.recurringMix * 100}
                 footLeft={T.recurringMix === null ? 'No revenue yet' : `${fmtPct(T.recurringMix, 0)} of revenue`}
