@@ -5,6 +5,7 @@ const asyncHandler = require('../middleware/async-handler');
 const oauthState  = require('../utils/oauth-state');
 const xeroOAuth    = require('../xero/oauth');
 const tokenCache   = require('../utils/token-cache');
+const { getConnectionStatus } = require('../xero/reconnect');
 const { getUserConfig, saveUserConfig } = require('../utils/users');
 const logger = require('../utils/logger');
 
@@ -79,14 +80,44 @@ router.post('/oauth/complete', requireAuth, asyncHandler(async (req, res) => {
 
 // DELETE /api/xero/oauth/disconnect — clears the OAuth connection for this user
 // (Custom Connection, if also configured, is untouched).
-router.delete('/oauth/disconnect', requireAuth, (req, res) => {
+//
+// Revokes the refresh token with Xero first. Clearing it only here left the
+// grant alive on Xero's side: the app stayed listed under the user's
+// connected apps, with access to their books, until the token lapsed by
+// itself. Revocation is best-effort — Xero being unreachable must not stop a
+// person disconnecting — so its outcome is logged, and the local state is
+// cleared either way.
+router.delete('/oauth/disconnect', requireAuth, asyncHandler(async (req, res) => {
+  let revoked = false;
+  try {
+    revoked = await xeroOAuth.revokeRefreshToken(req.user.id);
+  } catch (err) {
+    logger.warn('Xero OAuth revocation threw — disconnecting locally anyway', { error: err.message, userId: req.user.id });
+  }
+
   const cache = tokenCache.forUser(req.user.id);
   for (const tenant of cache.getAllTenants()) cache.removeTenant(tenant.tenant_id);
   saveUserConfig(req.user.id, { XERO_OAUTH_REFRESH_TOKEN: '', XERO_CONNECTION_TYPE: '' });
+  tokenCache.clearHealth(req.user.id);
   require('../xero/reports').clearCache(req.user.id); // don't let Xero Insights serve stale data post-disconnect
-  logger.info('Xero OAuth connection disconnected', { by: req.user.email });
+  logger.info('Xero OAuth connection disconnected', { by: req.user.email, revokedWithXero: !!revoked });
   res.json({ success: true });
-});
+}));
+
+// GET /api/xero/connection — the state of this user's Xero connection for the
+// app-wide banner. Exactly { method, connected, needsReconnect, reason,
+// missingScopes } — see xero/reconnect.js getConnectionStatus. Reads what is
+// on file and never calls Xero, so it is safe to poll.
+router.get('/connection', requireAuth, asyncHandler(async (req, res) => {
+  const s = getConnectionStatus(req.user.id);
+  res.json({
+    method:         s.method,
+    connected:      s.connected,
+    needsReconnect: s.needsReconnect,
+    reason:         s.reason,
+    missingScopes:  s.missingScopes,
+  });
+}));
 
 // GET /api/xero/tenants — which method is active + which orgs are connected.
 // Works for either connection method — getPersistedTenants doesn't care which

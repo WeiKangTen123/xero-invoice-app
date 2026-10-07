@@ -9,6 +9,10 @@ jest.mock('../utils/users', () => ({
 }));
 jest.mock('../utils/token-cache', () => ({
   forUser: jest.fn(() => ({ cacheToken: jest.fn(), pruneTenants: jest.fn() })),
+  // Connection health: nothing recorded against this user (see connection-health.test.js).
+  getHealth:          jest.fn(() => ({ needsReconnect: false })),
+  markNeedsReconnect: jest.fn(),
+  markRefreshed:      jest.fn(),
 }));
 
 const axios = require('axios');

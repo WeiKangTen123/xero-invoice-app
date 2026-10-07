@@ -202,13 +202,19 @@ router.delete('/llm-keys/:id', requireAuth, (req, res) => {
 });
 
 // ── POST /api/setup/test/xero — test this user's Xero connection ──────────────
+// Tests whichever method is active (OAuth or Custom Connection) and leaves it
+// active. It used to test Custom Connection only and switch the account to it
+// on success, so an OAuth user pressing Test was silently moved off OAuth —
+// see xero/reconnect.js testConnection.
 router.post('/test/xero', requireAuth, asyncHandler(async (req, res) => {
+  const { testConnection } = require('../xero/reconnect');
+  const { xeroErrMsg }     = require('../xero/xero-utils');
   try {
-    const { autoConnect } = require('../xero/connect');
-    await autoConnect(req.user.id);
-    res.json({ success: true, message: 'Xero connected successfully' });
+    const { method } = await testConnection(req.user.id);
+    const via = method === 'oauth' ? 'via Xero login (OAuth)' : 'via Custom Connection';
+    res.json({ success: true, message: `Xero connected successfully ${via}` });
   } catch (err) {
-    res.status(400).json({ success: false, message: err.message });
+    res.status(400).json({ success: false, message: xeroErrMsg(err) });
   }
 }));
 

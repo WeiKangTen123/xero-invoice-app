@@ -76,6 +76,10 @@ function forUser(userId) {
       try {
         await inFlight;
       } catch (err) {
+        // A connection Xero has refused already says, in plain words, what to
+        // do about it; wrapping it would bury that and hide needsReconnect
+        // from the caller.
+        if (err && err.needsReconnect) throw err;
         throw new Error(`No Xero token for tenant ${tenantId} — reconnect Xero first (${err.message})`);
       }
       mem = cache.tokens[tenantId];
@@ -138,4 +142,130 @@ function getPersistedTenants(userId) {
     .all(userId);
 }
 
-module.exports = { forUser, getPersistedTenants };
+// ── Connection health ─────────────────────────────────────────────────────────
+//
+// Whether Xero still accepts this user's connection, which scopes it granted,
+// and when its token was last refreshed. One OAuth connection is one refresh
+// token covering every organisation the user authorised, so this is kept per
+// user and applies to all of that user's tenants.
+//
+// Persisted, unlike the tokens: after a restart the banner should still say a
+// connection needs reconnecting rather than "connected" until the first
+// request fails again, and the keep-alive job (jobs/xero-keepalive.js) needs
+// to know how long ago a token was refreshed. A memory copy backs every read
+// and write, so a failed write (no users row, as in some tests) loses nothing
+// within the process.
+//
+// The table is created here rather than in db/schema.sql so this change stays
+// inside the Xero connection files; CREATE TABLE IF NOT EXISTS is safe on
+// every boot, and the foreign key removes the row with the user.
+const _health = new Map(); // userId -> record
+let _healthTableReady = false;
+
+function _ensureHealthTable() {
+  if (_healthTableReady) return;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS xero_connection_health (
+      user_id            TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      method             TEXT,
+      needs_reconnect    INTEGER NOT NULL DEFAULT 0,
+      reason             TEXT,
+      fingerprint        TEXT,
+      granted_scopes     TEXT,
+      last_refreshed_at  TEXT,
+      updated_at         TEXT NOT NULL
+    )
+  `);
+  _healthTableReady = true;
+}
+
+const EMPTY_HEALTH = Object.freeze({
+  method: null, needsReconnect: false, reason: null, fingerprint: null, grantedScopes: null, lastRefreshedAt: null,
+});
+
+function _rowToHealth(row) {
+  return {
+    method:          row.method || null,
+    needsReconnect:  !!row.needs_reconnect,
+    reason:          row.reason || null,
+    fingerprint:     row.fingerprint || null,
+    grantedScopes:   row.granted_scopes ? row.granted_scopes.split(' ').filter(Boolean) : null,
+    lastRefreshedAt: row.last_refreshed_at || null,
+  };
+}
+
+/**
+ * This user's connection health: { method, needsReconnect, reason, fingerprint,
+ * grantedScopes (array or null when unknown), lastRefreshedAt (ISO or null) }.
+ */
+function getHealth(userId) {
+  if (_health.has(userId)) return { ..._health.get(userId) };
+  let record = { ...EMPTY_HEALTH };
+  try {
+    _ensureHealthTable();
+    const row = db.prepare('SELECT * FROM xero_connection_health WHERE user_id = ?').get(userId);
+    if (row) record = _rowToHealth(row);
+  } catch (err) {
+    logger.warn('Failed to read Xero connection health', { error: err.message, userId });
+  }
+  _health.set(userId, record);
+  return { ...record };
+}
+
+function _saveHealth(userId, record) {
+  _health.set(userId, record);
+  try {
+    _ensureHealthTable();
+    db.prepare(`
+      INSERT INTO xero_connection_health
+        (user_id, method, needs_reconnect, reason, fingerprint, granted_scopes, last_refreshed_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        method = excluded.method, needs_reconnect = excluded.needs_reconnect, reason = excluded.reason,
+        fingerprint = excluded.fingerprint, granted_scopes = excluded.granted_scopes,
+        last_refreshed_at = excluded.last_refreshed_at, updated_at = excluded.updated_at
+    `).run(
+      userId, record.method, record.needsReconnect ? 1 : 0, record.reason, record.fingerprint,
+      record.grantedScopes ? record.grantedScopes.join(' ') : null, record.lastRefreshedAt, new Date().toISOString(),
+    );
+  } catch (err) {
+    logger.warn('Failed to persist Xero connection health', { error: err.message, userId });
+  }
+  return { ...record };
+}
+
+// Xero refused these credentials. `fingerprint` (xero-utils
+// credentialFingerprint) is what lets a later attempt with different
+// credentials through without anyone clearing this first.
+function markNeedsReconnect(userId, { method = null, reason, fingerprint = null } = {}) {
+  const prev = getHealth(userId);
+  return _saveHealth(userId, { ...prev, method: method || prev.method, needsReconnect: true, reason: reason || null, fingerprint });
+}
+
+// A token was issued: the connection works, whatever was recorded before.
+// Scopes are replaced only when the token response said which were granted.
+function markRefreshed(userId, { method = null, grantedScopes = null, at = new Date() } = {}) {
+  const prev = getHealth(userId);
+  return _saveHealth(userId, {
+    ...prev,
+    method:          method || prev.method,
+    needsReconnect:  false,
+    reason:          null,
+    fingerprint:     null,
+    grantedScopes:   Array.isArray(grantedScopes) ? grantedScopes : prev.grantedScopes,
+    lastRefreshedAt: new Date(at).toISOString(),
+  });
+}
+
+// Disconnect: nothing about the old connection applies to the next one.
+function clearHealth(userId) {
+  _health.delete(userId);
+  try {
+    _ensureHealthTable();
+    db.prepare('DELETE FROM xero_connection_health WHERE user_id = ?').run(userId);
+  } catch (err) {
+    logger.warn('Failed to clear Xero connection health', { error: err.message, userId });
+  }
+}
+
+module.exports = { forUser, getPersistedTenants, getHealth, markNeedsReconnect, markRefreshed, clearHealth };

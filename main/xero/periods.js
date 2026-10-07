@@ -133,8 +133,9 @@ function _fiscalYearMonths(today, fiscalYearEnd) {
 // ── Which periods may be asked for ──────────────────────────────────────────
 // Every 12 months of a period costs a pair of Xero calls, and nothing bounded
 // the span: from=1900-01&to=2100-12 was about 400 calls, against a budget of 60
-// a minute per app (shared with real invoice posting) and 5,000 a day per
-// organisation. One request could spend a tenant's day.
+// a minute per app (shared with real invoice posting) and a daily allowance
+// per organisation — 5,000, or 1,000 for Xero apps created after 2 March 2026.
+// One request could spend a tenant's day.
 //
 // 132 months is the widest span the period picker can produce (it offers
 // eleven years), so no real reader is refused, and the worst one request can

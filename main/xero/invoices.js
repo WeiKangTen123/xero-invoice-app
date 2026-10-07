@@ -199,13 +199,19 @@ async function buildLineItems(invoiceData, userConfig, accountingApi, tenantId, 
 
   const defaults    = require('../utils/users').defaultsFrom(userConfig);
   const zeroRate    = defaults.zeroTaxRate;
-  const accountCode = invoiceData.accountCode || defaults.accountCode[invoiceData.invoiceType === 'ACCREC' ? 'invoice' : 'bill'];
+  // The account, first that is set: the document's own, then the default the
+  // contact carries in Xero for this kind of document (a supplier set up to
+  // post to Rent should not land in General Expenses), then Setup's default.
+  // The contact's default never overrides an account the document names.
+  const { contactAccountCode, ...taxPrefer } = prefer;
+  const accountCode = invoiceData.accountCode || contactAccountCode
+    || defaults.accountCode[invoiceData.invoiceType === 'ACCREC' ? 'invoice' : 'bill'];
   const inclusive   = invoiceData.lineAmountTypes === 'Inclusive';
   const { total, sub, tax } = _figures(invoiceData);
 
   const { taxType, applied, unmatchedTaxAmount } = await resolveTaxType(
     accountingApi, tenantId, { ...invoiceData, subTotal: sub, taxAmount: tax }, zeroRate,
-    { accountCode, ...prefer });
+    { accountCode, ...taxPrefer });
 
   let items;
   if (rawLineItems) {
@@ -332,7 +338,8 @@ async function _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi) {
     ? await getBrandingThemeID(accountingApi, tenantId, data.brandingThemeName)
     : undefined;
   const lineItems = await buildLineItems(data, userConfig, accountingApi, tenantId, {
-    contactTaxType: isACCREC ? contact.accountsReceivableTaxType : contact.accountsPayableTaxType,
+    contactTaxType:     isACCREC ? contact.accountsReceivableTaxType : contact.accountsPayableTaxType,
+    contactAccountCode: isACCREC ? contact.salesDefaultAccountCode   : contact.purchasesDefaultAccountCode,
   });
   const lineAmountTypes = data.lineAmountTypes === 'Inclusive' ? 'Inclusive' : 'Exclusive';
 

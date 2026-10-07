@@ -1,6 +1,10 @@
 const axios  = require('axios');
 const logger = require('../utils/logger');
 const oauthState = require('../utils/oauth-state');
+const {
+  OAUTH_SCOPES, XeroReconnectError, reconnectReason, tokenErrorCode, credentialFingerprint, grantedScopesFrom,
+  xeroErrMsg,
+} = require('./xero-utils');
 
 // offline_access is what actually grants a refresh token — without it Xero only
 // ever hands back a 30-minute access token with no way to renew it silently.
@@ -20,17 +24,21 @@ const oauthState = require('../utils/oauth-state');
 // it now avoids a SECOND reconnect later for anyone who reconnects today.
 // accounting.attachments (in OAUTH_SCOPES) lets a posted bill carry its PDF and
 // a claim its receipt; a connection made before it was added must reconnect
-// once for attachments to work, and posts without them until then.
-const SCOPES = `offline_access ${require('./xero-utils').OAUTH_SCOPES}`;
-const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
+// once for attachments to work, and posts without them until then. The scopes
+// Xero granted are recorded at connect and on every refresh, so
+// GET /api/xero/connection can name what such a connection is missing.
+const SCOPES = `offline_access ${OAUTH_SCOPES}`;
+const AUTHORIZE_URL  = 'https://login.xero.com/identity/connect/authorize';
 const TOKEN_URL      = 'https://identity.xero.com/connect/token';
+const REVOCATION_URL = 'https://identity.xero.com/connect/revocation';
 
 // Each user brings their own Xero "Web app" (own Client ID/Secret), same per-user
-// model as Custom Connection — Xero's 60-calls/minute rate limit is per-app, so
-// per-user apps give each user an independent budget instead of every user sharing
-// one deployment-wide pool. Only the redirect URI is shared — it's a property of
-// this server's deployment, not of any one user (see routes/setup.js
-// GLOBAL_SECTIONS.xeroOAuth), and every user's Web app registers the same one.
+// model as Custom Connection. Xero counts its rate limits per app (and per
+// organisation within it), so per-user apps give each user their own allowance
+// instead of every user drawing on one deployment-wide app. Only the redirect URI
+// is shared — it's a property of this server's deployment, not of any one user
+// (see routes/setup.js GLOBAL_SECTIONS.xeroOAuth), and every user's Web app
+// registers the same one.
 function _appCreds(userId) {
   const { getUserConfig } = require('../utils/users');
   const config       = getUserConfig(userId);
@@ -44,6 +52,10 @@ function _appCreds(userId) {
     throw new Error('Xero OAuth is not configured — add your Xero Web app\'s Client ID and Secret in Setup.');
   }
   return { clientId, clientSecret, redirectUri };
+}
+
+function _basicAuth(clientId, clientSecret) {
+  return `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`;
 }
 
 function buildAuthorizeUrl(userId) {
@@ -61,51 +73,130 @@ function buildAuthorizeUrl(userId) {
 
 async function exchangeCodeForTokens(userId, code) {
   const { clientId, clientSecret, redirectUri } = _appCreds(userId);
-  const creds = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
 
   const res = await axios.post(
     TOKEN_URL,
     new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: redirectUri }),
     {
-      headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: { Authorization: _basicAuth(clientId, clientSecret), 'Content-Type': 'application/x-www-form-urlencoded' },
       timeout: 10000,
     }
   );
 
   return {
-    access_token:  res.data.access_token,
-    refresh_token: res.data.refresh_token,
-    expires_at:    new Date(Date.now() + res.data.expires_in * 1000),
+    access_token:   res.data.access_token,
+    refresh_token:  res.data.refresh_token,
+    expires_at:     new Date(Date.now() + res.data.expires_in * 1000),
+    granted_scopes: grantedScopesFrom(res.data),
   };
 }
+
+// userId -> in-flight refresh. Xero rotates the refresh token on every use, so
+// two refreshes racing with the same token (the token cache's expiry refresh,
+// its cold-cache reconnect, the keep-alive job, a Setup test) could have the
+// loser refused with invalid_grant — and a refusal now marks the connection as
+// needing a reconnect, so a lost race must not look like one. Everyone in this
+// process who wants a refresh while one is running shares its result.
+const _refreshing = new Map();
 
 // Xero rotates the refresh token on EVERY use — the previous one stops working the
 // instant a new one is issued. The new token must be persisted before this function
 // returns, or the connection silently breaks the next time a refresh is needed.
-async function refreshAuthCodeToken(userId) {
+//
+// A refusal that only a person can fix (invalid_grant: revoked, or 60 days
+// without a refresh) is recorded and thrown as XeroReconnectError. After that,
+// automatic attempts with the same credentials fail at once without asking
+// Xero again; `force` (the Setup test, a person asking) tries regardless.
+function refreshAuthCodeToken(userId, { force = false } = {}) {
+  let inFlight = _refreshing.get(userId);
+  if (!inFlight) {
+    inFlight = _refresh(userId, { force }).finally(() => _refreshing.delete(userId));
+    _refreshing.set(userId, inFlight);
+  }
+  return inFlight;
+}
+
+async function _refresh(userId, { force }) {
   const { getUserConfig, saveUserConfig } = require('../utils/users');
+  const tokenCache = require('../utils/token-cache');
   const { clientId, clientSecret } = _appCreds(userId);
   const refreshToken = getUserConfig(userId).XERO_OAUTH_REFRESH_TOKEN;
   if (!refreshToken) {
     throw new Error('No Xero OAuth connection on file — reconnect via Setup.');
   }
 
-  const creds = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-  const res = await axios.post(
-    TOKEN_URL,
-    new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
-    {
-      headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-      timeout: 10000,
-    }
-  );
+  const fingerprint = credentialFingerprint(clientId, clientSecret, refreshToken);
+  const health = tokenCache.getHealth(userId);
+  if (!force && health.needsReconnect && health.fingerprint === fingerprint) {
+    throw new XeroReconnectError(health.reason);
+  }
+
+  let res;
+  try {
+    res = await axios.post(
+      TOKEN_URL,
+      new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
+      {
+        headers: { Authorization: _basicAuth(clientId, clientSecret), 'Content-Type': 'application/x-www-form-urlencoded' },
+        timeout: 10000,
+      }
+    );
+  } catch (err) {
+    const reason = reconnectReason(err);
+    if (!reason) throw err;
+    tokenCache.markNeedsReconnect(userId, { method: 'oauth', reason, fingerprint });
+    logger.warn('Xero refused the stored OAuth credentials — the connection needs reconnecting', {
+      userId, oauthError: tokenErrorCode(err),
+    });
+    throw new XeroReconnectError(reason, { cause: err, oauthError: tokenErrorCode(err) });
+  }
 
   saveUserConfig(userId, { XERO_OAUTH_REFRESH_TOKEN: res.data.refresh_token });
+  tokenCache.markRefreshed(userId, { method: 'oauth', grantedScopes: grantedScopesFrom(res.data) });
 
   return {
     access_token: res.data.access_token,
     expires_at:   new Date(Date.now() + res.data.expires_in * 1000),
   };
+}
+
+// Disconnect: tells Xero to revoke the refresh token, which also ends the
+// app's access to every organisation it covered. Clearing it only locally left
+// the grant alive on Xero's side — still listed under the user's connected
+// apps, and usable by anyone holding a copy of the token. Best-effort: a
+// failure is logged and answered with false, never thrown, because the local
+// disconnect must go ahead regardless.
+async function revokeRefreshToken(userId) {
+  // A refresh still in flight would otherwise save a fresh token after this
+  // revoked the old one.
+  const inFlight = _refreshing.get(userId);
+  if (inFlight) await inFlight.catch(() => {});
+
+  try {
+    const { getUserConfig } = require('../utils/users');
+    const config       = getUserConfig(userId);
+    const refreshToken = config.XERO_OAUTH_REFRESH_TOKEN;
+    const clientId     = config.XERO_OAUTH_CLIENT_ID;
+    const clientSecret = config.XERO_OAUTH_CLIENT_SECRET;
+    if (!refreshToken) return false;
+    if (!clientId || !clientSecret) {
+      logger.warn('Xero OAuth token not revoked — no Client ID/Secret on file to authenticate the revocation', { userId });
+      return false;
+    }
+    await axios.post(
+      REVOCATION_URL,
+      new URLSearchParams({ token: refreshToken }),
+      {
+        headers: { Authorization: _basicAuth(clientId, clientSecret), 'Content-Type': 'application/x-www-form-urlencoded' },
+        timeout: 10000,
+      }
+    );
+    logger.info('Xero OAuth refresh token revoked', { userId });
+    return true;
+  } catch (err) {
+    logger.warn('Xero OAuth token revocation failed — disconnecting locally anyway', { userId, error: xeroErrMsg(err) });
+    return false;
+  }
 }
 
 async function _listAndCacheTenants(userId, access_token, expires_at) {
@@ -135,13 +226,16 @@ async function completeConnection(userId, code) {
   const { saveUserConfig } = require('../utils/users');
   logger.info('Completing Xero OAuth connection...', { userId });
 
-  const { access_token, refresh_token, expires_at } = await exchangeCodeForTokens(userId, code);
+  const { access_token, refresh_token, expires_at, granted_scopes } = await exchangeCodeForTokens(userId, code);
 
   saveUserConfig(userId, {
     XERO_OAUTH_REFRESH_TOKEN: refresh_token,
     XERO_CONNECTION_TYPE:     'oauth',
     XERO_OAUTH_CONNECTED_AT:  new Date().toISOString(),
   });
+  // A fresh consent replaces whatever was wrong with the old connection, and
+  // says which scopes this one has.
+  require('../utils/token-cache').markRefreshed(userId, { method: 'oauth', grantedScopes: granted_scopes });
 
   return _listAndCacheTenants(userId, access_token, expires_at);
 }
@@ -149,10 +243,14 @@ async function completeConnection(userId, code) {
 // The OAuth analogue of connect.js's autoConnect() — used when the in-memory token
 // cache is empty (e.g. after a server restart) but a refresh token is on file, so
 // the connection can be silently re-established without the user doing anything.
-async function reconnect(userId) {
+// `force` is for a person testing the connection (see refreshAuthCodeToken).
+async function reconnect(userId, { force = false } = {}) {
   logger.info('Reconnecting to Xero via stored refresh token...', { userId });
-  const { access_token, expires_at } = await refreshAuthCodeToken(userId);
+  const { access_token, expires_at } = await refreshAuthCodeToken(userId, { force });
   return _listAndCacheTenants(userId, access_token, expires_at);
 }
 
-module.exports = { buildAuthorizeUrl, exchangeCodeForTokens, refreshAuthCodeToken, completeConnection, reconnect, SCOPES };
+module.exports = {
+  buildAuthorizeUrl, exchangeCodeForTokens, refreshAuthCodeToken, revokeRefreshToken,
+  completeConnection, reconnect, SCOPES, REVOCATION_URL,
+};
