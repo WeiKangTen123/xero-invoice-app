@@ -41,6 +41,13 @@ function claimDescription({ receipt, row, category }) {
   return cat ? `[${cat}] Expense claim` : null;
 }
 
+// The record's contract is 'high' | 'medium' | 'low' | null. Anything else a
+// reader hands over is no reading at all, not a guess at one.
+const CONFIDENCE = new Set(['high', 'medium', 'low']);
+function _confidence(receipt) {
+  return receipt && CONFIDENCE.has(receipt.confidence) ? receipt.confidence : null;
+}
+
 // One row shape. `extras` is what only the caller knows — the stored file,
 // its hash, a split box or page, a duplicate note — spread last.
 function newClaimRow({ userId, id = newId(), source, groupId = null, receipt = null, row = null, category = null, extras = {} }) {
@@ -70,6 +77,10 @@ function newClaimRow({ userId, id = newId(), source, groupId = null, receipt = n
     taxAmount:     receipt && receipt.tax      != null ? receipt.tax      : null,
     lineItems:     receipt && Array.isArray(receipt.lineItems) && receipt.lineItems.length ? receipt.lineItems : [],
     description:   claimDescription({ receipt, row, category }),
+    // How well the receipt was read (receipt-parser.normalise), so the review
+    // list can say which claims to check. It was computed and then dropped
+    // here. Null with no receipt: there was no reading to be sure of.
+    confidence:    _confidence(receipt),
     receiptGroup:  groupId,
     processedAt:   now,
     receivedAt:    now,
@@ -91,6 +102,9 @@ function claimPatch(r, extras = {}) {
     subTotal:    r.subTotal    ?? undefined,
     description: r.description ?? undefined,
     lineItems:   Array.isArray(r.lineItems) && r.lineItems.length ? r.lineItems : undefined,
+    // A re-read replaces the old confidence along with the figures it was
+    // about; a reader that gave none leaves the old one standing.
+    confidence:  _confidence(r) ?? undefined,
     ...extras,
   };
 }

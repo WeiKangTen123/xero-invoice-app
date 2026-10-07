@@ -4,11 +4,15 @@
 // fetches and computes, this decides which already-computed figures the model
 // may see and discards anything it says that is not grounded in them.
 //
-// Every function here is PURE. The two functions that actually call Gemini stay
-// in reports.js, because they need getPerformance and getCashFlow and requiring
-// those back would be circular. That split is the point: the fetching is
-// orchestration, and the safety argument lives here where it can be tested
-// without a Xero token.
+// Every function here is PURE except the two request helpers at the end
+// (requestVarianceInsights, requestNarrative), which make the model call over
+// figures already computed. The fetching stays in reports.js, because it
+// needs getPerformance and getCashFlow and requiring those back would be
+// circular. That split is the point: the fetching is orchestration, and the
+// safety argument lives here where it can be tested without a Xero token. The
+// helpers take callGemini as an argument for the same reason.
+
+const { parseLlmJson, jsonSchemaFormat } = require('../utils/llm-json');
 
 // Left behind by the split: _buildCategoryVariances moved here and _sum stayed
 // in reports.js. Not caught by the suite because the only caller reaches these
@@ -333,22 +337,77 @@ function _insightPrompt(org, fyLabel, closedMonths, categories, candidates) {
   ];
 }
 
+// The reply's shape, held by the endpoint (llm-json.jsonSchemaFormat). The
+// account names are an enum of the candidates the model was shown, so it
+// cannot explain an account it was never given — _parseInsights drops those
+// anyway, but only after the tokens are spent. The figure guard below still
+// runs on every reason: a schema shapes the reply, it does not ground it.
+const INSIGHT_KEYS = ['revenue', 'delivery', 'opex', 'cash'];
+function _insightResponseFormat(candidates = []) {
+  const names = [...new Set(candidates.map(c => c.account).filter(Boolean))];
+  return jsonSchemaFormat('variance_insights', {
+    type: 'object',
+    properties: {
+      categories: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { key: { type: 'string', enum: INSIGHT_KEYS }, reason: { type: 'string' } },
+          required: ['key', 'reason'],
+        },
+      },
+      reasons: {
+        type: 'array',
+        ...(names.length ? {} : { maxItems: 0 }),
+        items: {
+          type: 'object',
+          properties: { account: names.length ? { type: 'string', enum: names } : { type: 'string' }, reason: { type: 'string' } },
+          required: ['account', 'reason'],
+        },
+      },
+    },
+    required: ['categories', 'reasons'],
+  });
+}
+
+// How long a fallback may be cached. A reply that did not parse, or a call
+// that failed, used to be cached as though the model had answered — labelled
+// 'gemini' and kept for the full 30 minutes, so one bad reply hid the
+// commentary for half an hour and nothing said why. Long enough not to ask
+// again on every page load; short enough that the next visit tries again.
+const INSIGHT_FAILURE_TTL_MS = 2 * 60 * 1000;
+
+// The fallback when the model gave nothing usable: the computed default
+// reasons and the bare candidates, marked so the caller can tell it from an
+// answer — `source: 'figures'`, why in `failed`, and the short TTL.
+function _insightFallback(categories, candidates, failed) {
+  return {
+    categories: categories.map(c => ({ ...c, reason: c.defaultReason })),
+    lines: candidates,
+    source: 'figures',
+    failed,
+    cacheTtlMs: INSIGHT_FAILURE_TTL_MS,
+  };
+}
+
 // Pure. Parses the model reply and merges with grounded category and line-item data.
+//
+// The three-argument form returns { categories, lines, source } and, when the
+// reply could not be read at all, the fallback above with failed: 'unparsed'.
+// The two-argument form (accounts only) is the older contract and returns the
+// grounded lines, or [] when nothing could be read.
 function _parseInsights(raw, arg2, arg3) {
   const isTwoArg = arg3 === undefined;
   const categories = isTwoArg ? [] : (arg2 || []);
   const candidates = isTwoArg ? (arg2 || []) : (arg3 || []);
 
-  let payload;
-  try {
-    const cleaned = require('../utils/llm-json').stripWrapping(raw);
-    const start = cleaned.indexOf('{');
-    const end = cleaned.lastIndexOf('}');
-    if (start === -1 || end === -1 || start >= end) throw new Error('No JSON');
-    payload = JSON.parse(cleaned.slice(start, end + 1));
-  } catch {
+  // The one lenient reader every model reply goes through (llm-json), rather
+  // than a fifth copy of it: a reply in plain JSON mode — after a refused
+  // schema — may still arrive fenced or with a sentence around it.
+  const payload = parseLlmJson(raw);
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     if (isTwoArg) return [];
-    return { categories: categories.map(c => ({ ...c, reason: c.defaultReason })), lines: candidates };
+    return _insightFallback(categories, candidates, 'unparsed');
   }
 
   // Everything the prompt showed the model: the candidates, the categories and
@@ -362,7 +421,8 @@ function _parseInsights(raw, arg2, arg3) {
   }
 
   const byName = new Map(candidates.map(c => [c.account, c]));
-  const parsedLines = (payload.reasons || [])
+  const parsedLines = (Array.isArray(payload.reasons) ? payload.reasons : [])
+    .filter(r => r && typeof r === 'object')
     .map(r => ({ account: String(r.account || '').trim(), reason: String(r.reason || '').trim() }))
     .filter(r => byName.has(r.account) && r.reason)
     .filter(r => _insightIsGrounded(r.reason, allowed))
@@ -372,14 +432,16 @@ function _parseInsights(raw, arg2, arg3) {
     return parsedLines;
   }
 
-  const catMap = new Map((payload.categories || []).map(c => [c.key, String(c.reason || '').trim()]));
+  const catMap = new Map((Array.isArray(payload.categories) ? payload.categories : [])
+    .filter(c => c && typeof c === 'object')
+    .map(c => [c.key, String(c.reason || '').trim()]));
   const parsedCategories = categories.map(cat => {
     const aiReason = catMap.get(cat.key);
     const reason = (aiReason && _insightIsGrounded(aiReason, allowed)) ? aiReason : cat.defaultReason;
     return { ...cat, reason };
   });
 
-  return { categories: parsedCategories, lines: parsedLines.length ? parsedLines : candidates };
+  return { categories: parsedCategories, lines: parsedLines.length ? parsedLines : candidates, source: 'gemini' };
 }
 
 // `force` re-pulls from Xero, which costs API calls and billed egress.
@@ -539,8 +601,83 @@ function _allowedFromText(text, allowed = new Set()) {
 // whole Xero token. "callGemini is not defined" shipped green for exactly that
 // reason.
 
+const _isTruncation = err => !!err && err.code === 'GEMINI_TRUNCATED';
+const _logger = () => require('../utils/logger');
+const _gemini = deps => deps.callGemini || require('../utils/gemini-client').callGemini;
+
+// The variance commentary: prompt, call (with the reply held to the schema
+// above), parse and ground. Never throws. Returns what the caller caches —
+// { categories, lines, source } — plus cacheTtlMs, which is null for an answer
+// (the caller's own TTL applies) and INSIGHT_FAILURE_TTL_MS for a fallback.
+// `failed` says which fallback: 'unparsed', 'truncated' or 'unavailable'.
+//
+// No retry. The call has already been rotated across every model and key by
+// gemini-client, and a cut-off reply already had its one larger retry there;
+// the short TTL is what gives the next visit another try.
+async function requestVarianceInsights(userId, { org, fyLabel, closed, categories = [], candidates = [] }, deps = {}) {
+  const callGemini = _gemini(deps);
+  let raw;
+  try {
+    raw = await callGemini(userId, _insightPrompt(org, fyLabel, closed, categories, candidates), {
+      temperature: 0.2, maxTokens: 800, responseFormat: _insightResponseFormat(candidates),
+    });
+  } catch (err) {
+    const failed = _isTruncation(err) ? 'truncated' : 'unavailable';
+    _logger().warn('Variance insights model unavailable, using computed defaults', { userId, failed, error: err.message });
+    return _insightFallback(categories, candidates, failed);
+  }
+  const out = _parseInsights(raw?.message?.content ?? raw?.content ?? raw, categories, candidates);
+  if (out.failed) {
+    _logger().warn('Variance insights reply could not be read, using computed defaults', { userId, failed: out.failed });
+    return out;
+  }
+  return { ...out, cacheTtlMs: null };
+}
+
+// The dashboard narrative's request. Plain sentences, not JSON, so no schema.
+function _narrativeMessages(facts) {
+  return [
+    { role: 'system', content: 'You are a careful financial analyst. Return plain sentences only.' },
+    { role: 'user',   content: _narrativePrompt(facts) },
+  ];
+}
+
+// Long enough for a rate limit to ease. Nothing waits on this — the card is
+// fetched separately from the figures — so a pause costs the reader nothing.
+const NARRATIVE_RETRY_DELAY_MS = 2500;
+
+// Asks for the narrative: two attempts, with a pause between them, because
+// callGemini has already rotated through every model and key before it throws
+// and an immediate retry re-sends a request that just failed on all of them.
+//
+// Except after a cut-off reply. gemini-client has already asked again with a
+// larger limit, so the identical request stops at the identical place — the
+// second attempt was a wasted call on the user's quota, two and a half
+// seconds later. It now gives up at once.
+//
+// Never throws. Returns { raw, reason }: raw is the model's text, or null
+// with reason 'truncated' or 'unavailable'.
+async function requestNarrative(userId, facts, deps = {}) {
+  const callGemini = _gemini(deps);
+  const attempts = deps.attempts ?? 2;
+  const delayMs  = deps.delayMs ?? NARRATIVE_RETRY_DELAY_MS;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (attempt > 1) await new Promise(r => setTimeout(r, delayMs));
+    try {
+      const raw = await callGemini(userId, _narrativeMessages(facts), { temperature: 0.2, maxTokens: 350 });
+      return { raw, reason: null };
+    } catch (err) {
+      _logger().warn('Financial narrative attempt failed', { userId, attempt, error: err.message });
+      if (_isTruncation(err)) return { raw: null, reason: 'truncated' };
+    }
+  }
+  return { raw: null, reason: 'unavailable' };
+}
+
 module.exports = {
   _buildCategoryVariances, _groundNarrative, _groundMarkdown, _insightIsGrounded, _insightPrompt,
   _largeNumbersIn, _percentsIn, _figuresIn, _ungroundedFigures, _allowedFromText, _closedMonthCount,
   _narrativeFacts, _narrativePrompt, _parseInsights, _varianceCandidates,
+  _insightResponseFormat, _narrativeMessages, INSIGHT_FAILURE_TTL_MS, NARRATIVE_RETRY_DELAY_MS,
+  requestVarianceInsights, requestNarrative,
 };

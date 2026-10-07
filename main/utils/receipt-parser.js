@@ -1,6 +1,6 @@
 const logger = require('./logger');
 const { callGemini } = require('./gemini-client');
-const { parseLlmJson } = require('./llm-json');
+const { parseLlmJson, jsonSchemaFormat, nullable } = require('./llm-json');
 
 // Reads a photographed receipt.
 //
@@ -66,6 +66,87 @@ Rules:
 - A card slip or payment terminal stub belonging to a receipt beside it is NOT a separate receipt.
 - If you are unsure whether something is a second receipt, return one entry rather than two.`;
 
+// The reply's shape, held by the endpoint rather than asked for in prose (see
+// llm-json.jsonSchemaFormat). Required-and-nullable for what the prompt says
+// to return as null, so "unreadable" is an explicit null and not a dropped
+// key. box_2d alone is optional: the prompt says to omit it when unsure, and
+// a text PDF has no image to place one on. The category is held to the listed
+// names, which canonicalCategory below would otherwise have to map back.
+const _str  = () => nullable({ type: 'string' });
+const _numb = () => nullable({ type: 'number' });
+const RECEIPT_FIELDS = {
+  merchant:    _str(),
+  date:        _str(),
+  time:        _str(),
+  currency:    _str(),
+  total:       _numb(),
+  tax:         _numb(),
+  subTotal:    _numb(),
+  category:    { type: 'string', enum: CATEGORIES.map(c => c.name) },
+  description: _str(),
+  lineItems: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        description:  { type: 'string' },
+        unitAmount:   _numb(),
+        quantity:     _numb(),
+        lineTotal:    _numb(),
+        discountRate: _numb(),
+      },
+      required: ['description', 'unitAmount', 'quantity', 'lineTotal', 'discountRate'],
+    },
+  },
+  confidence:  { type: 'string', enum: ['high', 'low'] },
+  box_2d:      { type: 'array', items: { type: 'number', minimum: 0, maximum: 1000 }, minItems: 4, maxItems: 4 },
+};
+const RECEIPT_REQUIRED = ['merchant', 'date', 'time', 'currency', 'total', 'tax', 'subTotal', 'category', 'description', 'lineItems', 'confidence'];
+
+// One photo or one text PDF: { receipts: [...] }, at least one entry.
+const RECEIPTS_SCHEMA = {
+  type: 'object',
+  properties: {
+    receipts: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'object', properties: RECEIPT_FIELDS, required: RECEIPT_REQUIRED },
+    },
+  },
+  required: ['receipts'],
+};
+const RESPONSE_FORMAT = jsonSchemaFormat('receipts', RECEIPTS_SCHEMA);
+
+// A batch of `count` photos: the same entry plus the image it belongs to and
+// how many further receipts that image shows. minItems is the batch size, so
+// a reply that skips an image is refused by the endpoint rather than by
+// _readBatch after the quota is spent. No maxItems: a photo of two receipts
+// may list both, and _readBatch decides whether that can be trusted.
+function batchSchema(count) {
+  return {
+    type: 'object',
+    properties: {
+      receipts: {
+        type: 'array',
+        minItems: count,
+        items: {
+          type: 'object',
+          properties: {
+            index:         { type: 'integer', minimum: 1, maximum: count },
+            ...RECEIPT_FIELDS,
+            otherReceipts: { type: 'integer', minimum: 0 },
+          },
+          required: ['index', ...RECEIPT_REQUIRED, 'otherReceipts'],
+        },
+      },
+    },
+    required: ['receipts'],
+  };
+}
+// One name for every size: the sizes differ only in their numbers, so a
+// refusal gemini-client remembers for one (by name) holds for all of them.
+const batchResponseFormat = count => jsonSchemaFormat('receipt_batch', batchSchema(count));
+
 // Number, date and currency cleaning are shared with every other intake path;
 // see intake/document.js for why a value is dropped rather than coerced.
 const _intake = require('../intake/document');
@@ -119,8 +200,15 @@ function normalise(parsed) {
     desc = `[${category}] ${desc}`.slice(0, 250);
   }
 
+  const merchant = typeof parsed.merchant === 'string' && parsed.merchant.trim() ? parsed.merchant.trim().slice(0, 120) : null;
+  // Stored on the claim (claim-record.js) so the review list can say which
+  // reads to check. The prompt defines "high" as the total and merchant being
+  // clearly legible, so a "high" whose total or merchant did not survive the
+  // cleaning above is not high — the model's word is not the only evidence.
+  const confidence = parsed.confidence === 'high' && usableTotal !== null && merchant ? 'high' : 'low';
+
   return {
-    merchant:    typeof parsed.merchant === 'string' && parsed.merchant.trim() ? parsed.merchant.trim().slice(0, 120) : null,
+    merchant,
     date:        _isoDate(parsed.date),
     time:        _time(parsed.time),
     category,
@@ -132,7 +220,7 @@ function normalise(parsed) {
     subTotal:    sub !== null && sub >= 0 && (usableTotal === null || sub <= usableTotal) ? sub : null,
     description: desc,
     lineItems,
-    confidence:  parsed.confidence === 'high' ? 'high' : 'low',
+    confidence,
     box:         _box(parsed.box_2d),
   };
 }
@@ -241,7 +329,7 @@ async function _readWith(userId, userContent, maxAttempts) {
   ];
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const content = await callGemini(userId, messages, { temperature: 0, maxTokens: 1200 });
+      const content = await callGemini(userId, messages, { temperature: 0, maxTokens: 1200, responseFormat: RESPONSE_FORMAT });
       const result  = normaliseMany(parseLlmJson(content));
       if (result) return result;
       logger.warn('Receipt parse returned an unusable shape', { userId, attempt });
@@ -293,8 +381,8 @@ const BATCH_SIZE = 5;
 function _batchPrompt(count) {
   return `You are reading ${count} SEPARATE receipts. They are unrelated to each other.
 
-Return ONLY a JSON array with exactly ${count} entries, one per image, in the order given:
-[{"index": 1, "merchant": ..., "date": ..., "time": ..., "category": ..., "currency": ..., "total": ..., "tax": ..., "subTotal": ..., "description": ..., "lineItems": [...], "confidence": ...}]
+Return ONLY a JSON object whose "receipts" array has exactly ${count} entries, one per image, in the order given:
+{"receipts": [{"index": 1, "merchant": ..., "date": ..., "time": ..., "category": ..., "currency": ..., "total": ..., "tax": ..., "subTotal": ..., "description": ..., "lineItems": [...], "confidence": ..., "otherReceipts": 0}]}
 
 "index" is the image's position, starting at 1. Every image must appear exactly once.
 If one image shows more than one separate receipt, read the most prominent one for that image and set "otherReceipts" to how many further separate receipts it shows (0 when there are none). A card slip belonging to the receipt beside it is not a separate receipt.
@@ -313,8 +401,10 @@ async function _readBatch(userId, images) {
   const raw = await callGemini(userId, [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content },
-  ], { temperature: 0, maxTokens: Math.max(4000, 800 * images.length) });
+  ], { temperature: 0, maxTokens: Math.max(4000, 800 * images.length), responseFormat: batchResponseFormat(images.length) });
 
+  // Both shapes are still accepted: a refused schema falls back to plain JSON
+  // mode, and a model asked for an object will sometimes send the bare array.
   const parsed = parseLlmJson(raw);
   const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.receipts) ? parsed.receipts : null);
   // A reply that does not account for every image cannot be attributed safely.
@@ -385,4 +475,4 @@ async function parseReceiptBatch(userId, images, { batchSize = BATCH_SIZE, onPro
   return results;
 }
 
-module.exports = { parseReceiptImage, parseReceiptText, parseReceiptBatch, _readBatch, BATCH_SIZE, normalise, normaliseMany, splittable, SYSTEM_PROMPT, _num, _isoDate, _time, _currency, _box, _overlapFraction };
+module.exports = { parseReceiptImage, parseReceiptText, parseReceiptBatch, _readBatch, BATCH_SIZE, normalise, normaliseMany, splittable, SYSTEM_PROMPT, RECEIPTS_SCHEMA, RESPONSE_FORMAT, batchSchema, batchResponseFormat, _num, _isoDate, _time, _currency, _box, _overlapFraction };

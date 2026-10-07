@@ -18,7 +18,48 @@ const PROPOSAL_TYPES = new Set([
   'bulk_field_update', 'bulk_submit_to_xero',
 ]);
 
-const RECENT_INVOICES_LIMIT = 60; // cap prompt size for users with a long history
+// ── What the model is shown ─────────────────────────────────────────────────
+//
+// Every turn used to send the 60 most recent invoices and the pinned invoice
+// in full — its paymentReference included, which is the vendor's bank name,
+// account number and SWIFT code — whatever the question was. "Change the
+// invoice number to INV-999" shipped someone's bank account to a third party
+// for no reason. Now a turn carries what its question can use:
+//
+//   * the invoices the question names — by number, vendor, date, amount or
+//     status — or, when it names none, the 20 most recent;
+//   * counts by status, so "how many are pending?" is not answered from a
+//     sample;
+//   * payment details only when the question asks about them.
+
+// Sent when the question names no invoice in particular.
+const RECENT_INVOICES_LIMIT = 20;
+// Sent at most when it does: "mark all pending as reviewed" needs every
+// pending invoice, not the newest 20 of everything.
+const MATCHED_INVOICES_LIMIT = 40;
+// Searched for the invoices a question names. Read from the local database;
+// only the matches are sent.
+const SEARCH_POOL = 500;
+
+// Bank and payment details. Never sent unless asked for: a question about a
+// total, a date or a status has no use for an account number.
+const PAYMENT_FIELDS = new Set(['paymentReference']);
+
+// A question about how or where to pay, or about the bank details themselves.
+// Deliberately not bare "account": "change the account code to 400" is about
+// the Xero ledger account, not a bank.
+const PAYMENT_QUESTION = new RegExp([
+  String.raw`\bpay\s?now\b`, String.raw`\bbank(?:ing)?\b`, String.raw`\bswift\b`, String.raw`\bbic\b`, String.raw`\biban\b`,
+  String.raw`\bacct\b`, String.raw`\bbeneficiar(?:y|ies)\b`, String.raw`\brouting\b`, String.raw`\bsort\s?code\b`,
+  String.raw`\bremit(?:tance)?\b`, String.raw`\bwire\b`, String.raw`\btransfer\s+(?:details?|to)\b`,
+  String.raw`\bpayment\s*(?:ref(?:erence)?|details?|info(?:rmation)?|instructions?|method|terms)\b`,
+  String.raw`\baccount\s*(?:no|num(?:ber)?|#|details?)\b`,
+  String.raw`\bhow\s+(?:do|can|should|to|would)\s+(?:i|we)?\s*pay\b`, String.raw`\bwhere\s+(?:do|can|should|to)\s+(?:i|we)?\s*pay\b`,
+].join('|'), 'i');
+
+function _asksAboutPayment(text) {
+  return PAYMENT_QUESTION.test(String(text || ''));
+}
 
 function _summarize(inv) {
   return {
@@ -28,10 +69,97 @@ function _summarize(inv) {
   };
 }
 
-function _fullDetail(inv) {
+function _fullDetail(inv, { payment = false } = {}) {
   const out = { id: inv.id, status: inv.status };
-  for (const field of EDITABLE_FIELDS) out[field] = inv[field];
+  for (const field of EDITABLE_FIELDS) {
+    if (!payment && PAYMENT_FIELDS.has(field)) continue;
+    out[field] = inv[field];
+  }
   return out;
+}
+
+// ── Which invoices a question is about ──────────────────────────────────────
+
+const _fold = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+// Words in a company name that say nothing about which company it is.
+const NAME_NOISE = new Set(['the', 'and', 'pte', 'ltd', 'llp', 'llc', 'inc', 'corp', 'corporation', 'company',
+  'limited', 'group', 'holdings', 'services', 'service', 'solutions', 'trading', 'enterprise', 'enterprises',
+  'international', 'sdn', 'bhd', 'singapore', 'asia', 'invoice', 'bill']);
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+// "review" alone is usually the verb ("review the details of this invoice"),
+// so only phrasings that name the status count.
+const STATUS_WORDS = [
+  [/\bpending\b/i, 'pending'],
+  [/\bneeds?\s+(?:a\s+)?review\b|\breview[-\s]needed\b|\b(?:for|in|under|awaiting)\s+review\b|\bon\s+hold\b|\bheld\b/i, 'review-needed'],
+  [/\breviewed\b/i, 'reviewed'],
+  [/\bposted\b|\bin\s+xero\b|\bsent\s+to\s+xero\b/i, 'posted'],
+  [/\berror|\bfail(?:ed|ure)?\b/i, 'error'],
+  [/\bduplicates?\b/i, 'duplicate'],
+];
+
+// What a question names, read once: invoice-number-like tokens, words,
+// dates and months, amounts, statuses.
+function _questionTerms(text) {
+  const s = String(text || '');
+  const lower = s.toLowerCase();
+  const tokens = new Set(lower.split(/[\s,;:()"'?!]+/).map(_fold).filter(t => t.length >= 3));
+  const words = new Set(lower.match(/[a-z][a-z&'-]{2,}/g) || []);
+  const dates = new Set(s.match(/\b\d{4}-\d{2}-\d{2}\b/g) || []);
+  const months = new Set(s.match(/\b\d{4}-\d{2}(?!-\d)\b/g) || []);
+  const monthOnly = new Set();
+  const monthRe = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b\.?(?:\s+(\d{4}))?/gi;
+  let m;
+  while ((m = monthRe.exec(s)) !== null) {
+    const word = m[1].toLowerCase();
+    const idx = MONTHS.findIndex(name => name.startsWith(word.slice(0, 3)));
+    if (idx === -1) continue;
+    const mm = String(idx + 1).padStart(2, '0');
+    if (m[2]) months.add(`${m[2]}-${mm}`);
+    // "may" alone is far more often the verb than the month.
+    else if (word !== 'may') monthOnly.add(mm);
+  }
+  const amounts = (s.match(/\d[\d,]*(?:\.\d+)?/g) || [])
+    .map(n => Number(n.replace(/,/g, '')))
+    .filter(n => Number.isFinite(n) && n > 0);
+  const statuses = new Set(STATUS_WORDS.filter(([re]) => re.test(s)).map(([, st]) => st));
+  return { folded: _fold(s), tokens, words, dates, months, monthOnly, amounts, statuses };
+}
+
+// Named specifically: by number, vendor, date or amount.
+function _named(inv, q) {
+  const num = _fold(inv.invoiceNumber);
+  if (num.length >= 3 && (q.tokens.has(num) || (num.length >= 4 && q.folded.includes(num)))) return true;
+
+  const name = String(inv.vendorName || inv.contactName || '').toLowerCase();
+  if (name) {
+    const whole = _fold(name);
+    if (whole.length >= 4 && q.folded.includes(whole)) return true;
+    const distinctive = (name.match(/[a-z][a-z&'-]{2,}/g) || []).filter(w => w.length >= 4 && !NAME_NOISE.has(w));
+    if (distinctive.some(w => q.words.has(w))) return true;
+  }
+
+  const date = String(inv.invoiceDate || '');
+  const due  = String(inv.dueDate || '');
+  if (q.dates.has(date) || q.dates.has(due)) return true;
+  if (date && (q.months.has(date.slice(0, 7)) || q.monthOnly.has(date.slice(5, 7)))) return true;
+
+  const total = Number(inv.totalAmount);
+  return Number.isFinite(total) && total > 0 && q.amounts.some(a => Math.abs(a - total) < 0.005);
+}
+
+// Pure; exported for testing. `pool` is newest first. The invoices a question
+// names come first; a status ("all pending") is the next-best reading, and
+// only when nothing is named — "has the Acme invoice been posted?" is about
+// Acme, not about every posted invoice. Neither: the most recent 20.
+//
+// The caller reads the question together with the user's last two turns, so
+// "the payroll one" after "show me the Branworks invoice" still finds Branworks.
+function _relevantInvoices(pool, text) {
+  const q = _questionTerms(text);
+  let picked = pool.filter(inv => _named(inv, q));
+  if (!picked.length && q.statuses.size) picked = pool.filter(inv => q.statuses.has(inv.status));
+  if (picked.length) return { invoices: picked.slice(0, MATCHED_INVOICES_LIMIT), matched: true };
+  return { invoices: pool.slice(0, RECENT_INVOICES_LIMIT), matched: false };
 }
 
 function _systemPrompt() {
@@ -42,6 +170,10 @@ TWO DIFFERENT DATA SETS — DO NOT CONFUSE THEM:
 - "xeroFinancials" is the BOOKS, read live from Xero. It includes figures entered directly by an accountant that never passed through this app. Use it for anything about performance, cash, revenue, profit, what is owed, or what is overdue.
 - Answering "how much have we invoiced?" from the pipeline would report only what happened to arrive by email. Use xeroFinancials for that.
 - If xeroFinancials is null, you have no live financial data for this question. Say so plainly and suggest opening the Dashboard, rather than answering from the pipeline as though it were the books.
+
+WHAT THE INVOICE DATA HOLDS:
+- "recentInvoices" is NOT the whole pipeline: it holds only the invoices this question appears to be about, or the ${RECENT_INVOICES_LIMIT} most recent when it names none. "invoiceCounts" gives the true number of invoices in each status — use it for any count. If the invoice the user means is not in the data, ask for its invoice number or vendor rather than guessing.
+- Payment details (paymentReference — bank, account number, PayNow, SWIFT, beneficiary) are left out unless the user's message asks about payment details. If they are absent, never guess them; tell the user to ask about the payment details if they need them.
 
 FINANCIAL ANSWERS:
 - Use ONLY the figures given in xeroFinancials.figures. Never calculate, estimate, derive or extrapolate a number that is not there — not a ratio, not a total, not a projection.
@@ -202,7 +334,13 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
   const store = invoiceStore.forUser(userId);
 
   const pinned = invoiceId ? store.getById(invoiceId) : null;
-  const recent = store.getRecent(RECENT_INVOICES_LIMIT).map(_summarize);
+  // Bank details only when THIS message asks for them — not because an
+  // earlier turn did.
+  const payment = _asksAboutPayment(message);
+  const lastAsked = history.filter(m => m && m.role !== 'assistant').slice(-2).map(m => String(m.content || ''));
+  const { invoices, matched } = _relevantInvoices(store.getRecent(SEARCH_POOL), [...lastAsked, message].join('\n'));
+  const recent = invoices.map(_summarize);
+  logger.info('Chat context', { userId, invoices: recent.length, matched, pinned: !!pinned, payment });
 
   // Only fetched when the question sounds financial. A cold cash-flow read costs
   // several Xero calls and billed egress, and "change the invoice number to
@@ -214,8 +352,10 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
   const { allowed: allowedFigures = [], ...financials } = fetched || {};
 
   const contextBlock = JSON.stringify({
-    pinnedInvoice: pinned ? _fullDetail(pinned) : null,
+    pinnedInvoice: pinned ? _fullDetail(pinned, { payment }) : null,
     recentInvoices: recent,
+    // Totals, so a count is never read off the sample above.
+    invoiceCounts: store.countByStatus(),
     // The BOOKS, from Xero — distinct from recentInvoices, which is this app's
     // unposted pipeline. Conflating them would answer "how much did we bill?"
     // with "how much happened to arrive by email".
@@ -280,4 +420,7 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
   return { reply, proposals };
 }
 
-module.exports = { respond, PROPOSAL_TYPES, _replyFromUnparsed };
+module.exports = {
+  respond, PROPOSAL_TYPES, _replyFromUnparsed, _relevantInvoices, _asksAboutPayment, _fullDetail,
+  RECENT_INVOICES_LIMIT, MATCHED_INVOICES_LIMIT,
+};

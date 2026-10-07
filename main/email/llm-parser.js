@@ -1,8 +1,11 @@
 const logger = require('../utils/logger');
 const { callGemini } = require('../utils/gemini-client');
-const { parseLlmJson } = require('../utils/llm-json');
+const { parseLlmJson, jsonSchemaFormat, nullable } = require('../utils/llm-json');
+const intake = require('../intake/document');
 
 // ── Prompt ────────────────────────────────────────────────────────────────────
+
+const DOCUMENT_TYPES = ['invoice', 'receipt', 'statement', 'credit_note', 'quote', 'other'];
 
 const SYSTEM_PROMPT = `You are an invoice data extractor. Return ONLY valid JSON, no explanation, no markdown.
 
@@ -30,7 +33,126 @@ Extract these fields:
     "credit_note" — a credit note or credit memo reducing what is owed
     "quote"       — a quotation, estimate or pro-forma, not yet a bill
     "other"       — anything else (a contract, a delivery order, a letter, a remittance advice)
-  Judge from the document's own heading and wording, not from the filename.`;
+  Judge from the document's own heading and wording, not from the filename.
+- confidence: how sure you are of what you read, exactly one of:
+    "high"   — the vendor, the total, the date and every line are plainly printed and you read them without guessing
+    "medium" — everything is there but something needed interpretation (an ambiguous label, a line split across pages)
+    "low"    — the text is garbled, partial or out of order, or you guessed any of vendorName, totalAmount or invoiceDate`;
+
+// The reply's shape, held by the endpoint rather than asked for in prose.
+// Every field is required and nullable: "not on the document" is answered as
+// null, never by leaving the key out, so a missing key always means a fault.
+const str  = () => nullable({ type: 'string' });
+const numb = () => nullable({ type: 'number' });
+const BILL_SCHEMA = {
+  type: 'object',
+  properties: {
+    vendorName:       str(),
+    vendorAddress:    str(),
+    bankAddress:      str(),
+    vendorEmail:      str(),
+    vendorPhone:      str(),
+    invoiceNumber:    str(),
+    invoiceDate:      str(),
+    dueDate:          str(),
+    currency:         str(),
+    lineItems: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { description: str(), quantity: numb(), unitPrice: numb(), amount: numb() },
+        required: ['description', 'quantity', 'unitPrice', 'amount'],
+      },
+    },
+    totalAmount:      numb(),
+    subTotal:         numb(),
+    taxAmount:        numb(),
+    paymentReference: str(),
+    projectName:      str(),
+    description:      str(),
+    documentType:     { type: 'string', enum: DOCUMENT_TYPES },
+    confidence:       { type: 'string', enum: ['high', 'medium', 'low'] },
+  },
+  required: [
+    'vendorName', 'vendorAddress', 'bankAddress', 'vendorEmail', 'vendorPhone', 'invoiceNumber',
+    'invoiceDate', 'dueDate', 'currency', 'lineItems', 'totalAmount', 'subTotal', 'taxAmount',
+    'paymentReference', 'projectName', 'description', 'documentType', 'confidence',
+  ],
+};
+const RESPONSE_FORMAT = jsonSchemaFormat('bill', BILL_SCHEMA);
+
+// ── Confidence ────────────────────────────────────────────────────────────────
+//
+// The record says how far its figures can be trusted, so the review list can
+// mark the ones a person should look at ("Check this") instead of every bill
+// looking equally certain. The model's own answer is one input, never the
+// only one: a model will say "high" about a total it read from the wrong row.
+// So the reading is also checked against itself — do the figures add up, is
+// there a date, a currency — and the worst of the two wins.
+//
+//   low    — no usable total; the figures do not add up; no invoice date; no
+//            currency anywhere; part of the document was never read; or the
+//            model itself says it guessed
+//   medium — nothing is wrong, but something is unconfirmed: not an invoice,
+//            no line or subtotal to check the total against, or the model
+//            says it had to interpret
+//   high   — everything above checks out
+//
+// The same arithmetic, and the same two-cent tolerance, as parser.js's
+// _moneyMismatch — which holds the bill with the reason — so a bill held for
+// a mismatch is never also marked high. Not imported: parser.js requires
+// this file.
+const MONEY_TOLERANCE = 0.02;
+const _money2 = n => Math.round(n * 100) / 100;
+
+function _figuresReconcile({ lineItems, subTotal, taxAmount, totalAmount }) {
+  const problems = [];
+  if (subTotal !== null && taxAmount !== null && Math.abs(_money2(subTotal + taxAmount) - totalAmount) > MONEY_TOLERANCE) {
+    problems.push('subtotal plus tax does not equal the total');
+  }
+  if (lineItems.length) {
+    const lines = _money2(lineItems.reduce((s, li) => s + (Number(li.unitAmount) || 0) * (1 - (Number(li.discountRate) || 0) / 100), 0));
+    const expected = subTotal !== null ? subTotal : _money2(totalAmount - (taxAmount || 0));
+    if (Math.abs(lines - expected) > MONEY_TOLERANCE) problems.push('the line items do not add up to the total');
+  }
+  return problems;
+}
+
+// Same reading of the answer as parser.js's _documentType, for "invoice" only.
+const _isInvoice = t => /^(tax_)?invoice$|^bill$|^supplier_invoice$/.test(String(t || '').trim().toLowerCase().replace(/[\s-]+/g, '_'));
+
+// Pure; exported for testing. `reply` is the model's JSON, `text` what it
+// was given. Returns { confidence, reasons }.
+function billConfidence(reply, text = '', { textTruncated = false } = {}) {
+  const low = [];
+  const medium = [];
+
+  const total = intake.money(reply.totalAmount);
+  // One normaliser for every reader, as parser.js uses: the stored amount is
+  // the line total.
+  const lineItems = (Array.isArray(reply.lineItems) ? reply.lineItems : []).map(li => intake.normaliseLineItem(li)).filter(Boolean);
+  if (!(total > 0)) {
+    low.push('no total was read');
+  } else {
+    const sub = intake.money(reply.subTotal);
+    const tax = intake.money(reply.taxAmount);
+    low.push(..._figuresReconcile({ lineItems, subTotal: sub, taxAmount: tax, totalAmount: total }));
+    if (!lineItems.length && !(sub !== null && tax !== null)) medium.push('nothing to check the total against');
+  }
+  if (!(intake.isoDate(reply.invoiceDate) || intake.parseDate(reply.invoiceDate))) low.push('no invoice date');
+  // parser.js falls back to the text's own currency when the model leaves it
+  // null, so a currency the text states is a currency present.
+  if (!intake.currencyCode(reply.currency) && !intake.detectCurrency(String(text || ''))) low.push('no currency');
+  if (textTruncated) low.push('part of the document was not read');
+  if (!_isInvoice(reply.documentType)) medium.push('not an invoice');
+
+  const own = String(reply.confidence || '').trim().toLowerCase();
+  if (own === 'low') low.push('the model was unsure of its reading');
+  else if (own === 'medium') medium.push('the model had to interpret part of it');
+
+  const confidence = low.length ? 'low' : medium.length ? 'medium' : 'high';
+  return { confidence, reasons: low.length ? low : medium };
+}
 
 // ── Core LLM call ─────────────────────────────────────────────────────────────
 
@@ -49,16 +171,23 @@ async function _callLLM(pdfText, filename, userId) {
   const content = await callGemini(userId, [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user',   content: `Invoice filename: ${filename}\n\nInvoice text:\n${sent}` },
-  ], { temperature: 0, maxTokens: MAX_REPLY_TOKENS });
+  ], { temperature: 0, maxTokens: MAX_REPLY_TOKENS, responseFormat: RESPONSE_FORMAT });
 
+  // Still parsed leniently: a refused schema falls back to plain JSON mode,
+  // whose reply is only as clean as the model makes it.
   const parsed = parseLlmJson(content);
   // extractWithRetry treats a throw as a retryable attempt, so keep that contract.
-  if (!parsed || typeof parsed !== 'object') throw new Error('Model reply was not valid JSON');
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Model reply was not valid JSON');
   // Carried on the result rather than only logged: the person reviewing the
   // bill needs to know a later page was never read.
-  if (text.length > sent.length) {
+  const cut = text.length > sent.length;
+  if (cut) {
     parsed.textTruncated = { sentChars: sent.length, totalChars: text.length };
   }
+  // Replaces the model's own answer: what the record stores is the checked one.
+  const { confidence, reasons } = billConfidence(parsed, sent, { textTruncated: cut });
+  if (confidence !== 'high') logger.info('Bill read with reduced confidence', { userId, filename, confidence, reasons });
+  parsed.confidence = confidence;
   return parsed;
 }
 
@@ -88,4 +217,4 @@ async function extractWithRetry(pdfText, filename, userId, maxAttempts = 3) {
 
 logger.info('LLM parser initialised (Gemini, model and key rotation)');
 
-module.exports = { extractWithRetry, MAX_TEXT_CHARS, SYSTEM_PROMPT };
+module.exports = { extractWithRetry, billConfidence, MAX_TEXT_CHARS, SYSTEM_PROMPT, BILL_SCHEMA, RESPONSE_FORMAT };

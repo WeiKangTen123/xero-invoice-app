@@ -153,9 +153,69 @@ function _truncatedError(model, maxTokens, partial) {
   return err;
 }
 
+// ── Structured output ───────────────────────────────────────────────────────
+//
+// A caller that wants JSON passes opts.responseFormat, built with
+// llm-json.jsonSchemaFormat, and it is sent as OpenAI's response_format. The
+// schema is the part that can go wrong: Google supports a subset of JSON
+// Schema, and a keyword outside it is a 400 for every model and every key —
+// so without a fallback, one unsupported keyword would stop the bill reader
+// outright where it used to work with no schema at all.
+//
+// So a 400 on a request carrying a schema is asked once more in plain JSON
+// mode ({ type: 'json_object' }) on the same model and key. If THAT succeeds,
+// the schema was the problem, and that model is not sent that schema again
+// for a while — each call would otherwise pay for the refused request first.
+// If it fails too, the 400 was about something else (an oversized image, a
+// malformed message) and is thrown like any other malformed request. The
+// caller still parses with parseLlmJson either way, so a plain-JSON reply is
+// read exactly as every reply was before.
+const PLAIN_JSON = Object.freeze({ type: 'json_object' });
+// Long enough not to pay for a refusal on every call; short enough that a
+// schema Google starts accepting is picked up again without a restart.
+const SCHEMA_REFUSAL_TTL_MS = 6 * 60 * 60 * 1000;
+const _refusedSchemas = new Map();   // `${model}|${schema name}` -> when it was refused
+
+function _schemaKey(model, format) {
+  return format && format.type === 'json_schema' ? `${model}|${format.json_schema?.name || ''}` : null;
+}
+
+// What this model should actually be sent: the caller's format, unless the
+// endpoint has recently refused that schema on this model.
+function _formatFor(model, format) {
+  const key = _schemaKey(model, format);
+  if (!key) return format || null;
+  const at = _refusedSchemas.get(key);
+  if (at && Date.now() - at < SCHEMA_REFUSAL_TTL_MS) return PLAIN_JSON;
+  if (at) _refusedSchemas.delete(key);
+  return format;
+}
+
+// A 400 that is not a retired model name. _classify calls it fatal, which is
+// right for the rotation — every model would refuse it the same way.
+const _isBadRequest = err => err?.response?.status === 400 && _classify(err) === 'fatal';
+
+async function _callStructured(model, key, messages, opts, maxTokens, userId) {
+  const format = _formatFor(model, opts.responseFormat);
+  try {
+    return await _callOnce(model, key, messages, opts, maxTokens, userId, format);
+  } catch (err) {
+    if (format?.type !== 'json_schema' || !_isBadRequest(err)) throw err;
+    const name = format.json_schema?.name || 'unnamed';
+    // Google's error text names the offending schema keyword. It is the
+    // request's shape, not the prompt or any invoice data.
+    logger.warn(`Gemini refused the "${name}" response schema on ${model} (400) — asking once more in plain JSON mode`, {
+      userId, model, schema: name, error: _bodyText(err).slice(0, 300) || err.message,
+    });
+    const r = await _callOnce(model, key, messages, opts, maxTokens, userId, PLAIN_JSON);
+    _refusedSchemas.set(_schemaKey(model, format), Date.now());
+    return r;
+  }
+}
+
 // Logs what the call cost and how it ended — never the prompt or the reply,
 // which carry invoice and financial data.
-async function _callOnce(model, key, messages, opts, maxTokens, userId) {
+async function _callOnce(model, key, messages, opts, maxTokens, userId, format = null) {
   const started = Date.now();
   const response = await axios.post(
     GEMINI_URL,
@@ -164,6 +224,7 @@ async function _callOnce(model, key, messages, opts, maxTokens, userId) {
       messages,
       temperature: opts.temperature ?? 0,
       max_tokens:  maxTokens,
+      ...(format ? { response_format: format } : {}),
     },
     {
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -175,6 +236,7 @@ async function _callOnce(model, key, messages, opts, maxTokens, userId) {
   const usage = response?.data?.usage || {};
   logger.info('Gemini call', {
     userId, model, finishReason, maxTokens, ms: Date.now() - started,
+    format: format ? format.type : null,
     promptTokens:     usage.prompt_tokens ?? null,
     completionTokens: usage.completion_tokens ?? null,
     totalTokens:      usage.total_tokens ?? null,
@@ -205,6 +267,9 @@ async function _callOnce(model, key, messages, opts, maxTokens, userId) {
 // at the identical place. If the larger reply is cut off too, the call fails
 // with code GEMINI_TRUNCATED (see isTruncation), and callers must not repeat
 // it unchanged.
+//
+// opts: { temperature, maxTokens, retryMaxTokens, responseFormat } — see
+// _callStructured for what happens when responseFormat's schema is refused.
 async function callGemini(userId, messages, opts = {}) {
   const keys = _resolveKeys(userId);
   const limiter = _getLimiter(userId);
@@ -223,14 +288,14 @@ async function callGemini(userId, messages, opts = {}) {
       for (const model of models) {
         if (retired.has(model)) continue;
         try {
-          let r = await _callOnce(model, key, messages, opts, maxTokens, userId);
+          let r = await _callStructured(model, key, messages, opts, maxTokens, userId);
           if (r.truncated) {
             const larger = _largerLimit(maxTokens, opts);
             if (enlarged || larger <= maxTokens) throw _truncatedError(model, maxTokens, r.content);
             logger.warn(`Gemini reply cut off at ${maxTokens} tokens on ${model} — retrying once with ${larger}`, { userId });
             maxTokens = larger;
             enlarged  = true;
-            r = await _callOnce(model, key, messages, opts, maxTokens, userId);
+            r = await _callStructured(model, key, messages, opts, maxTokens, userId);
             if (r.truncated) throw _truncatedError(model, maxTokens, r.content);
           }
           return r.content;
@@ -273,4 +338,4 @@ async function callGemini(userId, messages, opts = {}) {
 // larger retry. Callers check this to avoid sending the identical request again.
 function isTruncation(err) { return !!err && err.code === 'GEMINI_TRUNCATED'; }
 
-module.exports = { callGemini, GEMINI_MODELS, geminiModels, isTruncation, _classify };
+module.exports = { callGemini, GEMINI_MODELS, geminiModels, isTruncation, _classify, PLAIN_JSON, _refusedSchemas };

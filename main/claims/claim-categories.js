@@ -1,5 +1,5 @@
 const logger = require('../utils/logger');
-const { parseLlmJson } = require('../utils/llm-json');
+const { parseLlmJson, jsonSchemaFormat, nullable } = require('../utils/llm-json');
 
 // Suggests which category column a claim line belongs to.
 //
@@ -22,14 +22,48 @@ ${categories.map(c => `- ${c}`).join('\n')}
 CLAIM LINES:
 ${lines.map(l => `${l.rowNo}. ${l.description || '(no description)'}${l.merchant ? ` — receipt from ${l.merchant}` : ''}`).join('\n')}
 
-Return ONLY a JSON array, one entry per line above:
-[{"rowNo": "1", "category": "<one of the categories above, exactly>", "confidence": "high"|"low"}]
+Return ONLY a JSON object with one entry per line above:
+{"suggestions": [{"rowNo": "1", "category": "<one of the categories above, exactly>", "confidence": "high"|"low"}]}
 
 Rules:
 - Use ONLY a category from the list. Never invent one, never reword one.
 - If a line does not clearly belong to any of them, return null for category.
 - Judge from the description and the merchant, nothing else. Do not guess at intent.
 - "high" only when the description plainly names the kind of expense.`;
+}
+
+// The reply's shape for one chunk, held by the endpoint. The rule the prompt
+// states — a category from the list or nothing — is now also the schema: the
+// category is an enum of the form's own headings and the row an enum of the
+// rows asked about, so an invented or reworded category cannot come back at
+// all. normaliseSuggestions still filters: a refused schema falls back to
+// plain JSON mode, where the prompt is the only thing asking.
+//
+// Headings are sent with their whitespace folded ("LOCAL TRAVEL COST\n(SGD)"
+// wraps on the real form), which is also how normaliseSuggestions matches
+// them back to the original text.
+const _fold = c => String(c).replace(/\s+/g, ' ').trim();
+function responseFormat(lines, categories) {
+  const names = [...new Set(categories.map(_fold).filter(Boolean))];
+  const rows  = [...new Set(lines.map(l => String(l.rowNo)))];
+  return jsonSchemaFormat('claim_categories', {
+    type: 'object',
+    properties: {
+      suggestions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            rowNo:      { type: 'string', enum: rows },
+            category:   nullable({ type: 'string', enum: names }),
+            confidence: { type: 'string', enum: ['high', 'low'] },
+          },
+          required: ['rowNo', 'category', 'confidence'],
+        },
+      },
+    },
+    required: ['suggestions'],
+  });
 }
 
 // Keeps only suggestions naming a real category for a real line.
@@ -79,7 +113,7 @@ async function suggestCategories(userId, matches, categories, deps = {}) {
       const raw = await callGemini(userId, [
         { role: 'system', content: 'You categorise expense claims. Return only JSON.' },
         { role: 'user',   content: _prompt(chunk, categories) },
-      ], { temperature: 0, maxTokens: 800 });
+      ], { temperature: 0, maxTokens: 800, responseFormat: responseFormat(chunk, categories) });
       suggestions.push(...normaliseSuggestions(parseLlmJson(raw), chunk, categories));
     } catch (err) {
       // A missing category is a blank field for a person to fill, not a
@@ -91,4 +125,4 @@ async function suggestCategories(userId, matches, categories, deps = {}) {
   return suggestions;
 }
 
-module.exports = { suggestCategories, normaliseSuggestions, linesNeedingCategory, _prompt, CHUNK_SIZE };
+module.exports = { suggestCategories, normaliseSuggestions, linesNeedingCategory, responseFormat, _prompt, CHUNK_SIZE };

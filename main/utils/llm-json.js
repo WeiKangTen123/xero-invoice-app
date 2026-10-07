@@ -48,4 +48,34 @@ function parseLlmJson(raw) {
   }
 }
 
-module.exports = { parseLlmJson, stripWrapping };
+// ── Structured output ───────────────────────────────────────────────────────
+//
+// Every caller here used to ask for JSON in the prompt and then clean up what
+// came back — fences stripped, the widest {...} span tried, the whole request
+// retried blind when that failed. Google's OpenAI-compatible endpoint can hold
+// the reply to a JSON Schema instead, so the model cannot answer in prose or
+// drop a field. The request shape is OpenAI's:
+//
+//   response_format: { type: 'json_schema', json_schema: { name, schema } }
+//
+// (accepted in real-time requests, not in batch; see
+// https://ai.google.dev/gemini-api/docs/openai and
+// https://ai.google.dev/gemini-api/docs/structured-output for the schema
+// subset — anyOf, 'null', enum, minItems/maxItems are in it). parseLlmJson
+// above stays the reader: a schema the endpoint refuses falls back to plain
+// JSON mode (gemini-client), and that reply is only as tidy as the model makes it.
+//
+// OpenAI's `strict` flag is left out on purpose: it is not documented for
+// Gemini, and an unknown field is one more reason for a 400.
+function jsonSchemaFormat(name, schema) {
+  return { type: 'json_schema', json_schema: { name, schema } };
+}
+
+// A value the model may leave empty. anyOf with a 'null' branch is the form
+// Google lists as supported (it is what Pydantic's Optional produces), where a
+// type array is not documented.
+function nullable(schema) {
+  return { anyOf: [schema, { type: 'null' }] };
+}
+
+module.exports = { parseLlmJson, stripWrapping, jsonSchemaFormat, nullable };

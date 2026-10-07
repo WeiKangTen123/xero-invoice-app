@@ -195,7 +195,11 @@ async function verifyTemplateExtraction(text, parsed, userId) {
       reply = await _ask(text, parsed, userId);
       break;
     } catch (err) {
-      if (attempt < ATTEMPTS) {
+      // A reply cut off at its token limit has already been asked for once
+      // more, larger, by gemini-client. Sending the identical request again
+      // stops at the identical place, two seconds later, on the user's quota.
+      const truncated = !!err && err.code === 'GEMINI_TRUNCATED';
+      if (attempt < ATTEMPTS && !truncated) {
         logger.warn(`Template verification failed — retrying (attempt ${attempt}/${ATTEMPTS})`, { userId, error: err.message });
         await new Promise(r => setTimeout(r, 2000));
       } else {
