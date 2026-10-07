@@ -187,26 +187,24 @@ function createHandler(userId, { submitDelayMs = XERO_SUBMIT_DELAY_MS } = {}) {
     await invStore.add(record);
     procState.addInvoice();
 
-    // Stored so the user can see it, but never sent as a blank draft.
-    const hold = holdReason(record);
-    if (hold) {
-      logger.warn('Invoice held for review — skipping Xero submit', { id, vendor: record.vendorName, userId, reason: hold });
-      await invStore.update(id, { status: 'review-needed', errorMsg: hold });
+    // Two kinds of reason stop a bill here, and the row shows both. holdReason
+    // is about the stored row (no amount, no number), so it is never sent as a
+    // blank draft. reviewReason is what the reader found in the document: the
+    // template verifier disagreeing about money, the bill reader's figures not
+    // adding up, a document that is not a bill at all, or a PDF only partly
+    // read. The figures are kept as read; a person decides before anything
+    // reaches Xero. A hold used to return before the review reason was looked
+    // at, so a row held for its number never said its lines did not add up.
+    const hold   = holdReason(record);
+    const review = invoiceData.reviewReason || null;
+    if (hold || review) {
+      const errorMsg = [hold, review && `Please check: ${review}`].filter(Boolean).join('. ');
+      logger.warn('Invoice held for review — skipping Xero submit', { id, vendor: record.vendorName, userId, hold, review });
+      await invStore.update(id, { status: 'review-needed', errorMsg });
       return { id, status: 'review-needed' };
     }
 
-    // The template verifier read the document differently from the parser on
-    // something that affects money. The parser's figures were kept; a person
-    // decides which reading is right before anything reaches Xero.
-    if (invoiceData.reviewReason) {
-      logger.warn('Invoice flagged by template verification — skipping Xero submit', {
-        id, vendor: record.vendorName, userId, reason: invoiceData.reviewReason,
-      });
-            await invStore.update(id, { status: 'review-needed', errorMsg: `Please check: ${invoiceData.reviewReason}` });
-      return { id, status: 'review-needed' };
-    }
-
-        // Whether this document may go to Xero without a person looking at it is
+    // Whether this document may go to Xero without a person looking at it is
     // decided by the intake profile, not only by the auto-process switch: an
     // emailed bill may, a bill someone uploaded by hand never does — they have
     // it in front of them and will review it (intake/profiles.js).

@@ -441,3 +441,80 @@ describe('receipt-parser — categories come from one list, and the reader descr
     expect(r.description).toBe('Snacks');
   });
 });
+
+// ── A second receipt in one photo ───────────────────────────────────────────
+// In a claim batch each photo stands for one claim line, so only one receipt
+// read from it becomes that line's record. The others used to be dropped
+// without a word; now the record carries a review reason naming them.
+describe('receipt-parser — a photo holding two receipts in a claim batch', () => {
+  const img = n => ({ buffer: Buffer.from([0xff, 0xd8, n]), mime: 'image/jpeg' });
+  const read = (index, merchant, total, extra = {}) =>
+    ({ index, merchant, date: '2026-02-23', currency: 'SGD', total, tax: null, subTotal: null, description: null, confidence: 'high', ...extra });
+
+  beforeEach(() => callGemini.mockReset());
+
+  test('two entries for one image: the first is the claim, the second is flagged on it', async () => {
+    callGemini.mockResolvedValue(JSON.stringify([read(1, 'Grab', 15.8), read(1, 'Gojek', 25), read(2, 'CDG', 30.6)]));
+    const out = await parser.parseReceiptBatch('u1', [img(1), img(2)]);
+    expect(callGemini).toHaveBeenCalledTimes(1);
+    expect(out.map(r => r.merchant)).toEqual(['Grab', 'CDG']);
+    expect(out[0].reviewReason).toMatch(/2 receipts; only the first was read/);
+    expect(out[0].reviewReason).toMatch(/Gojek, SGD 25\.00/);
+    expect(out[0].otherReceipts).toEqual([{ merchant: 'Gojek', date: '2026-02-23', currency: 'SGD', total: 25 }]);
+    expect(out[1].reviewReason).toBeUndefined();
+  });
+
+  test('a model that counts the extra receipt instead of reading it is flagged too', async () => {
+    callGemini.mockResolvedValue(JSON.stringify([read(1, 'Grab', 15.8, { otherReceipts: 1 }), read(2, 'CDG', 30.6, { otherReceipts: 0 })]));
+    const out = await parser.parseReceiptBatch('u1', [img(1), img(2)]);
+    expect(out[0].reviewReason).toMatch(/2 receipts/);
+    expect(out[1].reviewReason).toBeUndefined();
+  });
+
+  test('extra entries that do not all name their image are not trusted — the batch is re-read singly', async () => {
+    callGemini
+      .mockResolvedValueOnce(JSON.stringify([read(1, 'Grab', 15.8), read(null, 'Gojek', 25), read(2, 'CDG', 30.6)]))
+      .mockResolvedValue(JSON.stringify({ receipts: [read(1, 'Single', 9.9)] }));
+    const out = await parser.parseReceiptBatch('u1', [img(1), img(2)]);
+    expect(callGemini).toHaveBeenCalledTimes(3);
+    expect(out.map(r => r.merchant)).toEqual(['Single', 'Single']);
+  });
+
+  test('two reads for one image and none for another is a misnumbered reply, re-read singly', async () => {
+    callGemini
+      .mockResolvedValueOnce(JSON.stringify([read(1, 'Grab', 15.8), read(1, 'Gojek', 25)]))
+      .mockResolvedValue(JSON.stringify({ receipts: [read(1, 'Single', 9.9)] }));
+    await parser.parseReceiptBatch('u1', [img(1), img(2)]);
+    expect(callGemini).toHaveBeenCalledTimes(3);
+  });
+
+  test('read singly, a photo with two receipts keeps the first and flags the second', async () => {
+    callGemini.mockResolvedValue(JSON.stringify({ receipts: [read(1, 'Grab', 15.8), read(2, 'FairPrice', 62.1)] }));
+    const out = await parser.parseReceiptBatch('u1', [img(1)]);
+    expect(out[0].merchant).toBe('Grab');
+    expect(out[0].reviewReason).toMatch(/FairPrice, SGD 62\.10/);
+  });
+
+  test('one receipt in one photo carries no flag', async () => {
+    callGemini.mockResolvedValue(JSON.stringify({ receipts: [read(1, 'Only', 12)] }));
+    const out = await parser.parseReceiptBatch('u1', [img(1)]);
+    expect(out[0].reviewReason).toBeUndefined();
+    expect(out[0].otherReceipts).toBeUndefined();
+  });
+
+  test('the batch prompt asks for the count of further receipts in an image', async () => {
+    callGemini.mockResolvedValue(JSON.stringify([read(1, 'A', 1), read(2, 'B', 2)]));
+    await parser.parseReceiptBatch('u1', [img(1), img(2)]);
+    expect(JSON.stringify(callGemini.mock.calls[0][1])).toContain('otherReceipts');
+  });
+});
+
+describe('receipt-parser — a reply cut off at its token limit', () => {
+  beforeEach(() => callGemini.mockReset());
+
+  test('is not asked for again identically — the client already tried a larger limit', async () => {
+    callGemini.mockRejectedValue(Object.assign(new Error('cut off'), { code: 'GEMINI_TRUNCATED' }));
+    expect(await parser.parseReceiptImage('u1', JPEG, 'image/jpeg')).toBeNull();
+    expect(callGemini).toHaveBeenCalledTimes(1);
+  });
+});

@@ -60,25 +60,35 @@ function linesNeedingCategory(matches) {
     .map(m => ({ rowNo: String(m.row.no), description: m.row.description, merchant: m.receipt && m.receipt.merchant }));
 }
 
+// Lines per model call. Every line went into one call capped at 800 tokens, so
+// a long claim form's reply was cut off and every suggestion was lost; 25
+// lines' worth of {row, category} fits that cap with room to spare.
+const CHUNK_SIZE = 25;
+
 async function suggestCategories(userId, matches, categories, deps = {}) {
   const callGemini = deps.callGemini || require('../utils/gemini-client').callGemini;
   const lines = linesNeedingCategory(matches);
   if (!lines.length || !categories.length) return [];
 
-  try {
-    const raw = await callGemini(userId, [
-      { role: 'system', content: 'You categorise expense claims. Return only JSON.' },
-      { role: 'user',   content: _prompt(lines, categories) },
-    ], { temperature: 0, maxTokens: 800 });
-
-    const suggestions = normaliseSuggestions(parseLlmJson(raw), lines, categories);
-    logger.info('Claim categories suggested', { userId, asked: lines.length, returned: suggestions.length });
-    return suggestions;
-  } catch (err) {
-    // A missing category is a blank field for a person to fill, not a failure.
-    logger.warn('Category suggestion failed', { userId, error: err.message });
-    return [];
+  const suggestions = [];
+  // One call after another: the user's Gemini quota is shared with receipt
+  // reading running in the same import.
+  for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
+    const chunk = lines.slice(i, i + CHUNK_SIZE);
+    try {
+      const raw = await callGemini(userId, [
+        { role: 'system', content: 'You categorise expense claims. Return only JSON.' },
+        { role: 'user',   content: _prompt(chunk, categories) },
+      ], { temperature: 0, maxTokens: 800 });
+      suggestions.push(...normaliseSuggestions(parseLlmJson(raw), chunk, categories));
+    } catch (err) {
+      // A missing category is a blank field for a person to fill, not a
+      // failure — and one chunk failing does not cost the others theirs.
+      logger.warn('Category suggestion failed', { userId, lines: chunk.length, error: err.message });
+    }
   }
+  logger.info('Claim categories suggested', { userId, asked: lines.length, returned: suggestions.length });
+  return suggestions;
 }
 
-module.exports = { suggestCategories, normaliseSuggestions, linesNeedingCategory, _prompt };
+module.exports = { suggestCategories, normaliseSuggestions, linesNeedingCategory, _prompt, CHUNK_SIZE };

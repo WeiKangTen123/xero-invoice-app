@@ -11,13 +11,37 @@ const { profileFor } = require('./profiles');
 // path can override a default but the shape is always the same.
 
 const { newId } = require('../utils/ids');
+const { CURRENCY_CODES, currencyCode, detectCurrency } = require('./document');
+
+// A currency as Xero will take it — a three-letter code — from whatever a
+// reader handed over: "sgd", "SGD 1,200", "S$", "RM". Null when nothing in it
+// names a currency (a bare "$" does not), so the caller falls back to a
+// default instead of storing junk. A symbol on its own is looked up here; text
+// around an amount goes to the intake helper. "US$" is matched before that
+// helper sees it, because its symbol scan finds the "S$" inside and says SGD.
+const SYMBOLS = [
+  [/^US\s?\$$/i, 'USD'], [/^S\s?\$$/i, 'SGD'], [/^A\s?\$$/i, 'AUD'], [/^NZ\s?\$$/i, 'NZD'],
+  [/^HK\s?\$$/i, 'HKD'], [/^CA?\s?\$$/i, 'CAD'], [/^RM$/i, 'MYR'], [/^£$/, 'GBP'], [/^€$/, 'EUR'], [/^₹$/, 'INR'],
+];
+function cleanCurrency(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const v = value.trim();
+  const code = currencyCode(v);
+  if (code) return code;
+  const lead = v.match(/^([A-Za-z]{3})\b/);
+  if (lead && CURRENCY_CODES.includes(lead[1].toUpperCase())) return lead[1].toUpperCase();
+  const symbol = SYMBOLS.find(([re]) => re.test(v));
+  if (symbol) return symbol[1];
+  if (/^US\s?\$/i.test(v)) return 'USD';
+  return detectCurrency(v);
+}
 
 function buildRecord({ id = newId(), document: doc, invoiceType, source, defaults = {}, extras = {} }) {
   const profile = profileFor(invoiceType);
   const contact = doc.contact || {};
   const name = contact.name || 'Unknown';
 
-  return {
+  const row = {
     id,
     status:           profile.initialStatus(source),
     hasPdf:           false,
@@ -32,7 +56,7 @@ function buildRecord({ id = newId(), document: doc, invoiceType, source, default
     invoiceDate:      doc.date || null,
     dueDate:          doc.dueDate || null,
     totalAmount:      doc.total || 0,
-    currency:         doc.currency || defaults.currency || require('../utils/users').getUserDefaults(null).currency,
+    currency:         null, // decided below, after the extras
     invoiceType:      profile.xeroType === 'ACCREC' ? 'ACCREC' : invoiceType,
     source,
     sourceEmail:      '',
@@ -51,6 +75,14 @@ function buildRecord({ id = newId(), document: doc, invoiceType, source, default
     reports:          [],
     ...extras,
   };
+  // Extras are spread last, so a path that passed its raw parser value ("S$")
+  // used to override the cleaned code above, and Xero refused the bill. The
+  // currency is cleaned once more here, whichever side supplied it.
+  row.currency = cleanCurrency(extras.currency)
+    || doc.currency
+    || cleanCurrency(defaults.currency)
+    || require('../utils/users').getUserDefaults(null).currency;
+  return row;
 }
 
-module.exports = { buildRecord, newId };
+module.exports = { buildRecord, newId, cleanCurrency };

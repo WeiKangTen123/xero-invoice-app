@@ -231,7 +231,9 @@ async function parseReceiptText(userId, text, { maxAttempts = 2 } = {}) {
 }
 
 // One attempt loop for both readers: a transient model error or an unusable
-// shape earns a second try, then the receipt is left for the user.
+// shape earns a second try, then the receipt is left for the user. A reply cut
+// off at its token limit does not: gemini-client has already asked again with
+// a larger limit, and the identical request would stop at the identical place.
 async function _readWith(userId, userContent, maxAttempts) {
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -245,9 +247,33 @@ async function _readWith(userId, userContent, maxAttempts) {
       logger.warn('Receipt parse returned an unusable shape', { userId, attempt });
     } catch (err) {
       logger.warn('Receipt parse attempt failed', { userId, attempt, error: err.message });
+      if (err && err.code === 'GEMINI_TRUNCATED') break;
     }
   }
   return null;
+}
+
+// A photo in a claim batch stands for ONE claim line, so only one receipt read
+// from it can become that line's record. A second receipt in the same photo
+// used to be dropped without a word — the claimant was never told to claim it.
+// It is now kept on the record as a review reason, with what was read of it,
+// so the person approving the claim sees it and can split it out.
+function _flagOthers(primary, others, extraCount = 0) {
+  if (!primary) return primary;
+  const seen = (others || []).filter(Boolean);
+  const count = Math.max(seen.length, Math.floor(Number(extraCount) || 0));
+  if (!count) return primary;
+  const described = seen
+    .map(r => [r.merchant || 'an unread merchant', r.total != null ? `${r.currency ? r.currency + ' ' : ''}${r.total.toFixed(2)}` : null, r.date].filter(Boolean).join(', '))
+    .join('; ');
+  const reason = `This photo appears to hold ${count + 1} receipts; only the first was read into this claim`
+    + (described ? ` (also seen: ${described})` : '')
+    + (count > 1 ? '. Upload the other receipts on their own so they are claimed.' : '. Upload the other receipt on its own so it is claimed.');
+  return {
+    ...primary,
+    reviewReason: primary.reviewReason ? `${primary.reviewReason}; ${reason}` : reason,
+    otherReceipts: seen.map(({ merchant, date, currency, total }) => ({ merchant, date, currency, total })),
+  };
 }
 
 
@@ -271,6 +297,7 @@ Return ONLY a JSON array with exactly ${count} entries, one per image, in the or
 [{"index": 1, "merchant": ..., "date": ..., "time": ..., "category": ..., "currency": ..., "total": ..., "tax": ..., "subTotal": ..., "description": ..., "lineItems": [...], "confidence": ...}]
 
 "index" is the image's position, starting at 1. Every image must appear exactly once.
+If one image shows more than one separate receipt, read the most prominent one for that image and set "otherReceipts" to how many further separate receipts it shows (0 when there are none). A card slip belonging to the receipt beside it is not a separate receipt.
 Apply the field rules and corporate description formatting from the system prompt to each receipt independently — never carry a figure from one receipt to another.`;
 }
 
@@ -291,16 +318,34 @@ async function _readBatch(userId, images) {
   const parsed = parseLlmJson(raw);
   const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.receipts) ? parsed.receipts : null);
   // A reply that does not account for every image cannot be attributed safely.
-  if (!list || list.length !== images.length) return null;
+  if (!list || list.length < images.length) return null;
+  // More entries than images is a model that found two receipts in one photo
+  // and listed both. That is only trusted when every entry names its image;
+  // otherwise the whole batch is re-read one at a time.
+  const extraEntries = list.length > images.length;
 
-  const out = new Array(images.length).fill(null);
-  for (const item of list) {
+  const out    = new Array(images.length).fill(null);
+  const others = images.map(() => []);
+  const counts = new Array(images.length).fill(0);
+  for (let pos = 0; pos < list.length; pos++) {
+    const item = list[pos];
     const idx = Number(item && item.index);
+    const named = Number.isInteger(idx) && idx >= 1 && idx <= images.length;
+    if (extraEntries && !named) return null;
     // Fall back to position when the model omits the index, but never overwrite.
-    const at = Number.isInteger(idx) && idx >= 1 && idx <= images.length ? idx - 1 : list.indexOf(item);
-    if (at < 0 || at >= images.length || out[at]) continue;
-    out[at] = normalise(item);
+    const at = named ? idx - 1 : pos;
+    if (at < 0 || at >= images.length) continue;
+    const read = normalise(item);
+    if (!read) continue;
+    if (out[at]) { others[at].push(read); continue; }
+    out[at] = read;
+    counts[at] = _num(item.otherReceipts) || 0;
   }
+  // Two reads for one image and none for another is a misnumbered reply, not
+  // a photo of two receipts: nothing in it can be attributed with confidence.
+  const doubled = others.some(o => o.length);
+  if ((extraEntries || doubled) && out.some(x => !x)) return null;
+  for (let i = 0; i < out.length; i++) out[i] = _flagOthers(out[i], others[i], counts[i]);
   return out.some(x => x) ? out : null;
 }
 
@@ -329,7 +374,9 @@ async function parseReceiptBatch(userId, images, { batchSize = BATCH_SIZE, onPro
     // Either a single image, or a batch whose reply could not be trusted.
     for (let i = 0; i < slice.length; i++) {
       const single = await parseReceiptImage(userId, slice[i].buffer, slice[i].mime);
-      results[start + i] = single && single.receipts ? single.receipts[0] : null;
+      results[start + i] = single && single.receipts
+        ? _flagOthers(single.receipts[0], single.receipts.slice(1))
+        : null;
       done++;
       onProgress && onProgress(done);
     }

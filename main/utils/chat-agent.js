@@ -3,7 +3,8 @@ const { callGemini } = require('./gemini-client');
 const invoiceStore  = require('./invoice-store');
 const { EDITABLE_FIELDS } = require('../routes/invoices');
 const { financialContext, looksFinancial } = require('./chat-financials');
-const { parseLlmJson } = require('./llm-json');
+const { parseLlmJson, stripWrapping } = require('./llm-json');
+const { _groundMarkdown, _allowedFromText } = require('../xero/ai-insights');
 
 // Same set the PATCH /api/invoices/:id route accepts — the chat assistant can only
 // ever propose changes to these fields. Nothing else (status, user data, settings,
@@ -161,8 +162,43 @@ function _sanitizeProposals(raw, userId) {
   return out;
 }
 
+// Room for a table and a few proposals. A reply cut off here is asked for once
+// more at a larger limit by gemini-client before anything below sees it.
+const MAX_REPLY_TOKENS = 1500;
+
+const CUT_SHORT  = 'This answer was cut short. Ask again, or ask for less at once.';
+const CUT_ACTIONS = 'Any changes I was about to suggest were cut off. Ask again to see them.';
+const INCOMPLETE = "Sorry, that answer came back incomplete — could you ask again, perhaps in smaller parts?";
+const UNVERIFIED = '_Some figures in this answer could not be matched to your Xero figures or invoices, so they were left out. The Dashboard shows the exact numbers._';
+
+// A reply that did not parse as the JSON asked for. Plain prose is shown as it
+// came, as before. A JSON fragment — what a reply cut off at its token limit
+// looks like — used to be shown raw, braces and all; the "reply" text is taken
+// out of it when it can be, and otherwise the user is told plainly.
+function _replyFromUnparsed(raw, truncated) {
+  const text = stripWrapping(raw);
+  const jsonish = /^[{[]/.test(text) || /"reply"\s*:/.test(text);
+  if (!jsonish) {
+    if (!text) return truncated ? INCOMPLETE : "Sorry, I couldn't process that — could you rephrase?";
+    return truncated ? `${text}…\n\n_${CUT_SHORT}_` : text;
+  }
+  const unescape = s => { try { return JSON.parse(`"${s}"`).trim(); } catch { return ''; } };
+  const whole = text.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (whole) {
+    const reply = unescape(whole[1]);
+    if (reply) return truncated && /"proposals"\s*:\s*\[\s*\{/.test(text) ? `${reply}\n\n_${CUT_ACTIONS}_` : reply;
+  }
+  const partial = text.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  if (partial) {
+    // An escape cut in half ("\" or "\u00") would make the rest unreadable.
+    const reply = unescape(partial[1].replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, ''));
+    if (reply) return `${reply}…\n\n_${CUT_SHORT}_`;
+  }
+  return INCOMPLETE;
+}
+
 // history: [{ role: 'user'|'assistant', content: string }]
-async function respond(userId, { message, history = [], invoiceId = null, tenantId = null, timezone = 'UTC' }) {
+async function respond(userId, { message, history = [], invoiceId = null, tenantId = null, period = null, timezone = 'UTC' }) {
   const store = invoiceStore.forUser(userId);
 
   const pinned = invoiceId ? store.getById(invoiceId) : null;
@@ -171,9 +207,11 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
   // Only fetched when the question sounds financial. A cold cash-flow read costs
   // several Xero calls and billed egress, and "change the invoice number to
   // 2026099" has no business paying for it.
-  const financials = looksFinancial(message)
-    ? await financialContext(userId, tenantId, { timezone })
+  const fetched = looksFinancial(message)
+    ? await financialContext(userId, tenantId, { timezone, period })
     : null;
+  // `allowed` is for checking the reply, not for the model to read.
+  const { allowed: allowedFigures = [], ...financials } = fetched || {};
 
   const contextBlock = JSON.stringify({
     pinnedInvoice: pinned ? _fullDetail(pinned) : null,
@@ -181,29 +219,65 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
     // The BOOKS, from Xero — distinct from recentInvoices, which is this app's
     // unposted pipeline. Conflating them would answer "how much did we bill?"
     // with "how much happened to arrive by email".
-    xeroFinancials: financials,
+    xeroFinancials: fetched ? financials : null,
   });
 
   // Context first, detailed format instructions + examples last (closest to where
   // generation starts) — this model follows the response schema far more reliably
   // when the instructions are the most recent thing it read, rather than being
   // pushed out of focus by a long context block that comes after them.
+  const turns = history.slice(-12).map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '') }));
   const messages = [
     { role: 'system', content: `Invoice data (JSON):\n${contextBlock}\n\n${_systemPrompt()}` },
-    ...history.slice(-12).map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '') })),
+    ...turns,
     { role: 'user', content: message },
   ];
 
-  const raw = await callGemini(userId, messages, { temperature: 0, maxTokens: 1000 });
-
-  const parsed = parseLlmJson(raw);
-  if (!parsed || typeof parsed !== 'object') {
-    logger.warn('Chat agent returned non-JSON response', { userId });
-    return { reply: String(raw || '').trim() || "Sorry, I couldn't process that — could you rephrase?", proposals: [] };
+  // A reply still cut off after gemini-client's larger retry arrives as an
+  // error carrying what was written; it is shown for what it is, not retried.
+  let raw;
+  let truncated = false;
+  try {
+    raw = await callGemini(userId, messages, { temperature: 0, maxTokens: MAX_REPLY_TOKENS });
+  } catch (err) {
+    if (!(err && err.code === 'GEMINI_TRUNCATED')) throw err;
+    logger.warn('Chat reply cut off at its token limit', { userId });
+    truncated = true;
+    raw = err.partial || '';
   }
 
-  const proposals = _sanitizeProposals(parsed.proposals, userId);
-  return { reply: String(parsed.reply || ''), proposals };
+  // A cut-off reply's proposals are never trusted: a half-written lineItems
+  // array would replace an invoice's lines with the half that arrived.
+  const parsed = truncated ? null : parseLlmJson(raw);
+  let reply;
+  let proposals = [];
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    reply = String(parsed.reply || '');
+    proposals = _sanitizeProposals(parsed.proposals, userId);
+  } else {
+    logger.warn('Chat agent returned non-JSON response', { userId, truncated });
+    reply = _replyFromUnparsed(raw, truncated);
+  }
+
+  // The prompt tells the model to use only the figures it was given; this
+  // checks that it did, with the same guard the dashboard narrative uses
+  // (xero/ai-insights.js). A figure is grounded when it is one of the facts or
+  // appears anywhere the model was shown — the invoice data, the conversation,
+  // the question. A sentence or table row quoting anything else is removed and
+  // the user is told. Only when the books were in the context: a pipeline
+  // answer may state a difference the user asked for ("the extra USD 50.00"),
+  // and there is no Xero figure there for it to be confused with.
+  if (fetched) {
+    const allowed = new Set(allowedFigures);
+    _allowedFromText([contextBlock, ...turns.map(t => t.content), message].join('\n'), allowed);
+    const grounded = _groundMarkdown(reply, allowed);
+    if (grounded.dropped) {
+      logger.warn('Chat reply quoted figures not in its context — removed', { userId, dropped: grounded.dropped, figures: grounded.unmatched.length });
+      reply = grounded.text ? `${grounded.text}\n\n${UNVERIFIED}` : UNVERIFIED;
+    }
+  }
+
+  return { reply, proposals };
 }
 
-module.exports = { respond, PROPOSAL_TYPES };
+module.exports = { respond, PROPOSAL_TYPES, _replyFromUnparsed };

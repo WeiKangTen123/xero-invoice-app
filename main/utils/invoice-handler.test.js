@@ -187,3 +187,79 @@ describe('sending to Xero', () => {
     expect(store.getById(result.id)).toMatchObject({ status: 'posted', xeroInvoiceId: 'xero-new-1', xeroTenantId: 't-1' });
   });
 });
+
+// ── What the reader found holds the bill, alongside the row's own holds ─────
+// A reviewReason from the parser (figures that do not add up, a document that
+// is not a bill, a PDF only partly read) keeps a bill from auto-posting. A
+// hold for the row's own number used to return before that reason was looked
+// at, so the row never said its lines did not add up.
+describe('review reasons from the reader', () => {
+  let handlerMod, settings, xero, store, userId, n = 0;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    xero       = require('../xero/invoices');
+    handlerMod = require('./invoice-handler');
+    settings   = require('./settings-store');
+    require('./token-cache')._state.tenants = [{ tenant_id: 't-1', tenant_name: 'One' }];
+    const u = await require('./users').createUser(`review${Date.now()}-${n++}@test.com`, 'password123', 'user');
+    userId = u.id;
+    store  = require('./invoice-store').forUser(userId);
+    xero.createDraftInvoice.mockReset().mockImplementation(async () => ({ invoiceID: 'xero-x' }));
+    settings.forUser(userId).set({ autoProcess: true });
+  });
+
+  const bill = extra => ({
+    vendorName: 'Acme Corp', invoiceNumber: 'R-1', invoiceDate: '2026-09-04', totalAmount: 1090, subTotal: 1000, taxAmount: 90,
+    currency: 'SGD', source: 'email', lineItems: [{ description: 'Design', unitAmount: 600, discountRate: 0 }], ...extra,
+  });
+
+  test('a bill whose figures do not add up is held, never posted, even with auto-process on', async () => {
+    const handler = handlerMod.createHandler(userId, { submitDelayMs: 10 });
+    const reason = 'the line items add up to SGD 600.00, but the subtotal is SGD 1,000.00';
+    const result = await handler.onInvoiceEmail(bill({ reviewReason: reason }));
+    await handler.whenIdle();
+    expect(result.status).toBe('review-needed');
+    expect(store.getById(result.id)).toMatchObject({ status: 'review-needed', errorMsg: `Please check: ${reason}` });
+    expect(xero.createDraftInvoice).not.toHaveBeenCalled();
+  });
+
+  test('a row hold and a reader reason are both shown', async () => {
+    const handler = handlerMod.createHandler(userId, { submitDelayMs: 10 });
+    const result = await handler.onInvoiceEmail(bill({ invoiceNumber: null, reviewReason: 'this PDF looks like a statement of account, not a bill' }));
+    const msg = store.getById(result.id).errorMsg;
+    expect(msg).toMatch(/Could not read an invoice number/);
+    expect(msg).toMatch(/Please check: this PDF looks like a statement of account/);
+  });
+
+  test('a raw currency from the reader is stored as a code', async () => {
+    const handler = handlerMod.createHandler(userId, { submitDelayMs: 10 });
+    const result = await handler.onInvoiceEmail(bill({ currency: 'S$', invoiceNumber: 'R-2', reviewReason: 'hold it' }));
+    expect(store.getById(result.id).currency).toBe('SGD');
+  });
+});
+
+describe('a tax-inclusive template row', () => {
+  let handlerMod, store, userId;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    handlerMod = require('./invoice-handler');
+    const u = await require('./users').createUser(`incl${Date.now()}@test.com`, 'password123', 'user');
+    userId = u.id;
+    store  = require('./invoice-store').forUser(userId);
+  });
+
+  test('is stored Inclusive, with the total as sent and the tax inside it', async () => {
+    const { parseTemplateFormat } = require('../email/parser');
+    const text = [
+      'Client / Customer : PereOcean Demo', 'Currency : SGD, Standard', 'Tax inclusive / exclusive : Inclusive', 'Invoice Number : AR-77', '',
+      '1. Description / Details :', 'Water cartons', '', 'Amount : SGD1090', 'Discount :', 'Tax (If applicable) : 9%',
+    ].join('\n');
+    const parsed = parseTemplateFormat(text, { date: '2026-08-17T03:00:00.000Z', from: { text: 'x@y.com' } }, { currency: 'SGD', accountCode: '200' });
+    const result = await handlerMod.createHandler(userId).onInvoiceEmail({ ...parsed, invoiceType: 'ACCREC', source: 'email' });
+    expect(store.getById(result.id)).toMatchObject({ lineAmountTypes: 'Inclusive', totalAmount: 1090, taxAmount: 90, subTotal: 1000 });
+  });
+});

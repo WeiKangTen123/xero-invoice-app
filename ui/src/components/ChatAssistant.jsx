@@ -193,6 +193,41 @@ export default function ChatAssistant() {
   const panelRef  = useRef(null);
   const buttonRef = useRef(null);
 
+  // Which Xero company, and which period, a financial answer is about. The
+  // server used to take the first connected company whatever the dashboard was
+  // showing, so with two connected the assistant could answer about the other
+  // one. Every message now names the company: the one picked below, or the one
+  // the dashboard announces with a 'xero-dashboard-context' event
+  // ({ tenantId, period }). '' leaves it to the server — the default company
+  // for sending, else the first connected. The server checks the company is
+  // this account's own, and the period, before using either.
+  const [companies, setCompanies] = useState(null); // null until loaded
+  const [tenantId,  setTenantId]  = useState('');
+  const [period,    setPeriod]    = useState(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    api.get('/xero/tenants')
+      .then(d => { if (live) setCompanies(Array.isArray(d.tenants) ? d.tenants : []); })
+      .catch(() => { if (live) setCompanies([]); });
+    return () => { live = false; };
+  }, [open]);
+
+  useEffect(() => {
+    function onDashboardContext(e) {
+      const d = (e && e.detail) || {};
+      if (typeof d.tenantId === 'string') setTenantId(d.tenantId);
+      if (d.period && typeof d.period === 'object') setPeriod(d.period);
+    }
+    window.addEventListener('xero-dashboard-context', onDashboardContext);
+    return () => window.removeEventListener('xero-dashboard-context', onDashboardContext);
+  }, []);
+
+  // A company chosen earlier and since disconnected falls back to the server's
+  // choice rather than failing every message.
+  const activeTenantId = companies && tenantId && !companies.some(c => c.tenantId === tenantId) ? '' : tenantId;
+
   // Close when pressing 'Escape' or clicking outside the chat panel
   useEffect(() => {
     if (!open) return;
@@ -241,7 +276,12 @@ export default function ChatAssistant() {
     setSending(true);
 
     try {
-      const d = await api.post('/chat', { message: text, history, invoiceId: pinnedId || undefined });
+      const d = await api.post('/chat', {
+        message: text, history,
+        invoiceId: pinnedId || undefined,
+        tenantId:  activeTenantId || undefined,
+        period:    period || undefined,
+      });
       setMessages(prev => [...prev, { role: 'assistant', content: d.reply, proposals: d.proposals || [] }]);
     } catch (err) {
       setError(err.message || 'Something went wrong');
@@ -317,6 +357,18 @@ export default function ChatAssistant() {
             </h2>
             <button onClick={() => setOpen(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 15 }}>✕</button>
           </div>
+          {companies && companies.length > 1 && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-muted)' }}>
+              Company
+              <select
+                className="form-input" style={{ flex: 1, minWidth: 0, fontSize: 12, padding: '5px 8px' }}
+                value={activeTenantId} onChange={e => setTenantId(e.target.value)}
+              >
+                <option value="">Default company</option>
+                {companies.map(c => <option key={c.tenantId} value={c.tenantId}>{c.tenantName}</option>)}
+              </select>
+            </label>
+          )}
           {pinnedId && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--accent-subtle)', color: 'var(--accent)', borderRadius: 8, padding: '7px 10px', fontSize: 12, fontWeight: 600 }}>
               📄 {pinInfo ? `${pinInfo.vendorName || 'Invoice'} · #${pinInfo.invoiceNumber || pinnedId}` : 'Loading…'}

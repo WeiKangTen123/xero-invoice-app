@@ -18,37 +18,152 @@ const _sum = a => a.reduce((s, v) => s + v, 0);
 
 const MIN_VARIANCE_TO_EXPLAIN = 1;           // ignore rounding dust
 
-function _largeNumbersIn(text) {
-  return (String(text).match(/-?[\d][\d,]*(?:\.\d+)?/g) || [])
-    .map(t => Math.abs(Number(t.replace(/,/g, ''))))
-    .filter(n => Number.isFinite(n) && n >= 1000);
+// ── The figure guard ────────────────────────────────────────────────────────
+//
+// Every figure a model writes is checked against the set of figures we gave
+// it. The first version only looked at plain numbers of 1,000 or more, while
+// the prompt itself hands the model "SGD 45.2k vs plan" — so "SGD 45.2k",
+// "$2.4M" and "12%" were never checked at all, and an invented one passed.
+// Now an amount written with k/M/bn is read at its full size, any amount
+// carrying a currency is checked whatever its size, and percentages are
+// checked too. Plain numbers below 1,000 with no currency or % stay free:
+// they are counts of days, months and alerts.
+
+// Listed rather than "any three capitals", so "GST 9%" or "FY 2026" never
+// reads as a currency.
+const ISO_CODES = ['SGD', 'USD', 'AUD', 'GBP', 'EUR', 'MYR', 'NZD', 'CAD', 'JPY', 'CNY', 'HKD', 'INR', 'IDR', 'THB', 'PHP', 'VND', 'KRW', 'CHF', 'TWD'];
+const CURRENCY_MARK = `(?:(?:${ISO_CODES.join('|')})\\s?\\$?|US\\$|S\\$|A\\$|NZ\\$|HK\\$|C\\$|RM|[$£€¥₹])`;
+const SCALES = { k: 1e3, K: 1e3, thousand: 1e3, m: 1e6, M: 1e6, mn: 1e6, million: 1e6, B: 1e9, bn: 1e9, billion: 1e9 };
+const FIGURE = new RegExp(
+  `(${CURRENCY_MARK}\\s?)?([-+−]\\s?)?(\\d[\\d,]*(?:\\.\\d+)?)` +
+  '(?:\\s?(thousand|million|billion|mn|bn|[kKmMB])(?![A-Za-z]))?' +
+  '(\\s?(?:%|per\\s?cent\\b|percent\\b))?',
+  'g'
+);
+// Dates and times are not figures: "2026-04-21", "21/04/2026", "12:01".
+const DATE_OR_TIME = /\b\d{4}-\d{1,2}(?:-\d{1,2})?\b|\b\d{1,2}[/.]\d{1,2}[/.]\d{2,4}\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g;
+
+// Pure. Every figure in `text` the guard has an opinion about, as
+// { kind: 'amount' | 'percent', value, tol, policed }. `tol` is how far a
+// figure may sit from one of ours and still be the same figure written
+// shorter: "45.2k" stands for anything from 45,150 to 45,250.
+function _figuresIn(text) {
+  const s = String(text ?? '').replace(DATE_OR_TIME, ' ');
+  const out = [];
+  FIGURE.lastIndex = 0;
+  let m;
+  while ((m = FIGURE.exec(s)) !== null) {
+    const [whole, cur, sign, digits, scale, pct] = m;
+    const prev = s[m.index - 1] || '';
+    const next = s[m.index + whole.length] || '';
+    // Glued to a word, it is part of a name or reference, not a figure:
+    // INV-2026099, FY2026, Q3, #1042, 202016196Z, 3rd.
+    if (!cur && /[A-Za-z_]/.test(prev)) continue;
+    if (!cur && !sign && /[0-9]/.test(prev)) continue;
+    if (!cur && /[#/]/.test(prev)) continue;
+    if (!scale && !pct && /[A-Za-z0-9_]/.test(next)) continue;
+
+    const value = Math.abs(Number(digits.replace(/,/g, '')));
+    if (!Number.isFinite(value)) continue;
+    const decimals = (digits.split('.')[1] || '').length;
+
+    if (pct) { out.push({ kind: 'percent', value, tol: 0.5, policed: true }); continue; }
+    // A lone "m" is as likely months as millions; it counts as millions only
+    // beside a currency.
+    const mult = scale && !(scale === 'm' && !cur) ? SCALES[scale] : 1;
+    if (mult > 1) {
+      out.push({ kind: 'amount', value: value * mult, tol: 0.5 * Math.pow(10, -decimals) * mult, policed: true });
+      continue;
+    }
+    if (cur) { out.push({ kind: 'amount', value, tol: 0.5, policed: true }); continue; }
+    // A bare four-digit year is a date, not an amount.
+    if (!/[,.]/.test(digits) && value >= 1900 && value <= 2100) continue;
+    out.push({ kind: 'amount', value, tol: 0.5, policed: value >= 1000 });
+  }
+  return out;
 }
 
-// Pure. True if every large number in `text` was one we supplied.
-function _insightIsGrounded(text, allowed) {
-  return _largeNumbersIn(text).every(n => allowed.has(Math.round(n)));
+// Pure. The money figures the guard checks, at full size. The name predates
+// the k/M and currency rules; it now also returns a small amount written with
+// a currency ("SGD 450"), because that is a claim about money too.
+function _largeNumbersIn(text) {
+  return _figuresIn(text).filter(f => f.kind === 'amount' && f.policed).map(f => f.value);
 }
+
+// Pure. The percentages in `text`.
+function _percentsIn(text) {
+  return _figuresIn(text).filter(f => f.kind === 'percent').map(f => f.value);
+}
+
+function _figureAllowed(f, allowed) {
+  const v = f.value;
+  if (f.kind === 'percent') return allowed.has(Math.round(v)) || allowed.has(Math.floor(v)) || allowed.has(Math.ceil(v));
+  if (allowed.has(Math.round(v))) return true;
+  if (f.tol <= 0.5) return false;
+  for (const a of allowed) if (Math.abs(a - v) <= f.tol + 0.5) return true;
+  return false;
+}
+
+// Pure. The figures in `text` that match nothing we supplied.
+function _ungroundedFigures(text, allowed) {
+  return _figuresIn(text).filter(f => f.policed && !_figureAllowed(f, allowed));
+}
+
+// Pure. True if every figure the guard polices in `text` was one we supplied.
+function _insightIsGrounded(text, allowed) {
+  return _ungroundedFigures(text, allowed).length === 0;
+}
+
+// Adds a line's figures to an allowed set, with the percentages a reader may
+// fairly say about them: the variance as a share of budget, and actual as a
+// share of budget. Both are arithmetic on figures we gave, not invention.
+function _allowLine(allowed, { actual, budget, variance }) {
+  for (const v of [actual, budget, variance]) if (Number.isFinite(v)) allowed.add(Math.round(Math.abs(v)));
+  if (Number.isFinite(budget) && budget !== 0) {
+    if (Number.isFinite(variance)) allowed.add(Math.round(Math.abs(variance / budget) * 100));
+    if (Number.isFinite(actual))   allowed.add(Math.round(Math.abs(actual / budget) * 100));
+  }
+}
+
+// ── Closed months ───────────────────────────────────────────────────────────
+//
+// How many leading months of perf's series are closed. The series run the
+// whole period — the month in progress has a few days of actuals, the months
+// after it have none, and every one of them carries a full budget — so summing
+// all of it under a full-year period compared part of the year's actuals with
+// all of the year's budget and called the gap a variance. The budget tab
+// compares closed months only (reports.js#_buildBudgetVariance); so does this.
+// Null when perf does not say, which keeps the old whole-series behaviour.
+function _closedMonthCount(perf) {
+  const counts = [perf?.actualThroughIdx, perf?.closedThroughIdx]
+    .filter(Number.isInteger)
+    .map(i => Math.max(0, i + 1));
+  return counts.length ? Math.min(...counts) : null;
+}
+const _sumClosed = (arr, n) => _sum(n === null ? (arr || []) : (arr || []).slice(0, n));
 
 // Pure. Builds the 4 universal executive variance categories from computed Xero actuals vs budget.
+// Closed months only — see _closedMonthCount.
 function _buildCategoryVariances(perf, cf) {
   const cur = perf.organisation?.currency || '';
-  const revA = _sum(perf.totals.revenue.actual);
-  const revB = _sum(perf.totals.revenue.budget);
+  const n = _closedMonthCount(perf);
+  const revA = _sumClosed(perf.totals.revenue.actual, n);
+  const revB = _sumClosed(perf.totals.revenue.budget, n);
   const revV = revA - revB;
 
-  const cogsA = _sum(perf.totals.cogs.actual);
-  const cogsB = _sum(perf.totals.cogs.budget);
+  const cogsA = _sumClosed(perf.totals.cogs.actual, n);
+  const cogsB = _sumClosed(perf.totals.cogs.budget, n);
   const cogsV = cogsA - cogsB;
 
-  const opexA = _sum(perf.totals.opex.actual);
-  const opexB = _sum(perf.totals.opex.budget);
+  const opexA = _sumClosed(perf.totals.opex.actual, n);
+  const opexB = _sumClosed(perf.totals.opex.budget, n);
   const opexV = opexA - opexB;
 
   // Top revenue line movers
   const revDrivers = (perf.serviceLines || [])
     .filter(l => !l.otherIncome)
     .map(l => {
-      const a = _sum(l.actual), b = _sum(l.budget);
+      const a = _sumClosed(l.actual, n), b = _sumClosed(l.budget, n);
       return { name: l.label, actual: a, budget: b, variance: a - b };
     })
     .sort((x, y) => Math.abs(y.variance) - Math.abs(x.variance))
@@ -58,7 +173,7 @@ function _buildCategoryVariances(perf, cf) {
   const cogsDrivers = (perf.expenseLines || [])
     .filter(l => l.kind === 'cogs')
     .map(l => {
-      const a = _sum(l.actual), b = _sum(l.budget);
+      const a = _sumClosed(l.actual, n), b = _sumClosed(l.budget, n);
       return { name: l.label, actual: a, budget: b, variance: a - b };
     })
     .sort((x, y) => Math.abs(y.variance) - Math.abs(x.variance))
@@ -68,7 +183,7 @@ function _buildCategoryVariances(perf, cf) {
   const opexDrivers = (perf.expenseLines || [])
     .filter(l => l.kind === 'opex')
     .map(l => {
-      const a = _sum(l.actual), b = _sum(l.budget);
+      const a = _sumClosed(l.actual, n), b = _sumClosed(l.budget, n);
       return { name: l.label, actual: a, budget: b, variance: a - b };
     })
     .sort((x, y) => Math.abs(y.variance) - Math.abs(x.variance))
@@ -90,7 +205,7 @@ function _buildCategoryVariances(perf, cf) {
     return `${s}${cur ? cur + ' ' : '$'}${num} vs plan`;
   };
 
-  return [
+  const categories = [
     {
       key: 'revenue',
       title: 'Revenue mix',
@@ -150,13 +265,23 @@ function _buildCategoryVariances(perf, cf) {
         : `Debtor collection timing${dso ? ` (averaging ${Math.round(dso)} days)` : ''}${overdue ? ` with overdue customer receivables` : ''} explains the gap between accrual revenue and bank cash.`,
     },
   ];
+  // Nothing has closed, so nothing is compared — said plainly rather than
+  // "tracking on plan", which a row of zeros would otherwise read as.
+  if (n === 0) {
+    for (const c of categories) {
+      if (c.key !== 'cash') c.defaultReason = 'No month of this period has closed yet, so there is nothing to compare with budget.';
+    }
+  }
+  return categories;
 }
 
 // Pure. The variance lines worth explaining, biggest absolute gap first.
+// Closed months only — see _closedMonthCount.
 function _varianceCandidates(perf, limit = 6) {
+  const n = _closedMonthCount(perf);
   const all = [...perf.serviceLines, ...perf.expenseLines].map(l => {
-    const actual = l.actual.reduce((s, v) => s + v, 0);
-    const budget = l.budget.reduce((s, v) => s + v, 0);
+    const actual = _sumClosed(l.actual, n);
+    const budget = _sumClosed(l.budget, n);
     return { account: l.label, actual, budget, variance: actual - budget };
   });
   return all
@@ -226,12 +351,14 @@ function _parseInsights(raw, arg2, arg3) {
     return { categories: categories.map(c => ({ ...c, reason: c.defaultReason })), lines: candidates };
   }
 
+  // Everything the prompt showed the model: the candidates, the categories and
+  // their top drivers (sent as "Name (+1234)", and dropped as invented when
+  // quoted back until they were listed here too).
   const allowed = new Set();
-  for (const c of candidates) {
-    for (const v of [c.actual, c.budget, c.variance]) allowed.add(Math.round(Math.abs(v)));
-  }
+  for (const c of candidates) _allowLine(allowed, c);
   for (const cat of categories) {
-    for (const v of [cat.actual, cat.budget, cat.variance]) allowed.add(Math.round(Math.abs(v)));
+    _allowLine(allowed, cat);
+    for (const d of cat.topDrivers || []) _allowLine(allowed, d);
   }
 
   const byName = new Map(candidates.map(c => [c.account, c]));
@@ -333,6 +460,9 @@ function _narrativeFacts(cf) {
   const alerts = cf.alerts?.alerts || [];
   for (const a of alerts) {
     for (const n of _largeNumbersIn(`${a.title} ${a.detail}`)) allowed.add(Math.round(n));
+    // Percentages are checked now as well, and an alert's "52% is past due"
+    // is ours to quote back.
+    for (const p of _percentsIn(`${a.title} ${a.detail}`)) allowed.add(Math.round(p));
     if (Number.isFinite(a.amount)) allowed.add(Math.round(Math.abs(a.amount)));
   }
 
@@ -367,10 +497,50 @@ function _groundNarrative(text, allowed) {
   return { text: kept.join(' '), dropped: sentences.length - kept.length };
 }
 
+// Pure. The same test as _groundNarrative, for text rendered as markdown (the
+// chat assistant's replies). _groundNarrative folds every newline into a
+// space, which would flatten a table into one line; this keeps the layout.
+// A table row is one claim and stays or goes whole; any other line is
+// checked sentence by sentence, keeping its list or heading marker.
+function _groundMarkdown(text, allowed) {
+  const kept = [];
+  const unmatched = [];
+  let dropped = 0;
+  for (const line of String(text || '').split('\n')) {
+    if (!line.trim()) { kept.push(line); continue; }
+    if (/^\s*\|/.test(line)) {
+      const bad = _ungroundedFigures(line, allowed);
+      if (bad.length) { dropped++; unmatched.push(...bad.map(f => f.value)); } else kept.push(line);
+      continue;
+    }
+    const [, marker = '', body = ''] = line.match(/^(\s*(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+|>\s?)?)(.*)$/) || [];
+    const sentences = body.split(/(?<=[.!?])\s+/).filter(Boolean);
+    const good = [];
+    for (const s of sentences) {
+      const bad = _ungroundedFigures(s, allowed);
+      if (bad.length) { dropped++; unmatched.push(...bad.map(f => f.value)); } else good.push(s);
+    }
+    if (good.length) kept.push(marker + good.join(' '));
+  }
+  return { text: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(), dropped, unmatched };
+}
+
+// Pure. Every figure in `text`, as numbers an allowed set can hold: amounts at
+// full size and rounded, percentages rounded. For building an allowed set from
+// text the model was shown, so a figure it quotes back from that text matches.
+function _allowedFromText(text, allowed = new Set()) {
+  for (const f of _figuresIn(text)) allowed.add(Math.round(f.value));
+  return allowed;
+}
+
 // Everything after the Xero read: prompt, call, ground, cache. Split out so it
 // can be tested directly — the fetch is one line of delegation, and keeping them
 // together meant the only way to reach this logic in a test was to stand up a
 // whole Xero token. "callGemini is not defined" shipped green for exactly that
 // reason.
 
-module.exports = { _buildCategoryVariances, _groundNarrative, _insightIsGrounded, _insightPrompt, _largeNumbersIn, _narrativeFacts, _narrativePrompt, _parseInsights, _varianceCandidates };
+module.exports = {
+  _buildCategoryVariances, _groundNarrative, _groundMarkdown, _insightIsGrounded, _insightPrompt,
+  _largeNumbersIn, _percentsIn, _figuresIn, _ungroundedFigures, _allowedFromText, _closedMonthCount,
+  _narrativeFacts, _narrativePrompt, _parseInsights, _varianceCandidates,
+};

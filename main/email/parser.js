@@ -58,6 +58,7 @@ function getMatch(text, pattern) {
   return m ? m[1].trim() : null;
 }
 const _detectCurrency    = intake.detectCurrency;
+const { cleanCurrency }  = require('../intake/record');
 const _parseTaxPercent   = intake.parseTaxPercent;
 const _ensureSubtotalTax = intake.ensureSubtotalTax;
 // Resolve per-user defaults, falling back to .env globals
@@ -173,6 +174,12 @@ function parseTemplateFormat(rawText, email, defaults) {
 
   const taxSetting      = getMatch(text, /Tax\s+inclusive\s*\/\s*exclusive\s*:\s*([^\n]+)/i) || '';
   const lineAmountTypes = /inclusive/i.test(taxSetting) ? 'Inclusive' : 'Exclusive';
+  // "Inclusive" means each Amount already contains its tax. The tax was added
+  // on top regardless, so a 1,090 line at 9% became a 1,188.10 invoice, and
+  // the row disagreed with the total Xero computed once posted. Inclusive
+  // amounts carry their tax inside: the total is the lines, and the tax is the
+  // part of each line that is tax.
+  const inclusive       = lineAmountTypes === 'Inclusive';
 
   const lineItems = [];
   let taxAmount = 0;
@@ -214,7 +221,8 @@ function parseTemplateFormat(rawText, email, defaults) {
     // resolveTaxType in xero/invoices.js needs a dollar figure, not a label.
     const taxPercent = _parseTaxPercent(match[4]);
     if (taxPercent != null) {
-      taxAmount += unitAmount * (1 - discountRate / 100) * (taxPercent / 100);
+      const net = unitAmount * (1 - discountRate / 100);
+      taxAmount += inclusive ? net * taxPercent / (100 + taxPercent) : net * (taxPercent / 100);
     }
     lineItems.push({ description: desc, unitAmount, discountRate });
   }
@@ -238,9 +246,13 @@ function parseTemplateFormat(rawText, email, defaults) {
     lineItems.push({ description: desc, unitAmount: amt, discountRate: 0 });
   }
 
-  const subTotal    = lineItems.reduce((sum, item) =>
+  const lineTotal   = lineItems.reduce((sum, item) =>
     sum + item.unitAmount * (1 - (item.discountRate || 0) / 100), 0);
-  const totalAmount = subTotal + taxAmount;
+  // Rounded once, here, and the subtotal taken as the difference, so subtotal
+  // plus tax is the total to the cent whichever way the lines are stated.
+  taxAmount         = Math.round(taxAmount * 100) / 100;
+  const totalAmount = Math.round((inclusive ? lineTotal : lineTotal + taxAmount) * 100) / 100;
+  const subTotal    = Math.round((totalAmount - taxAmount) * 100) / 100;
 
   // "Invoice Number :" is optional on the template and wins when present. The
   // loose pattern beneath it predates the field and can match prose ("invoice
@@ -410,6 +422,63 @@ function _vendorAddress(llm) {
   return addr;
 }
 
+// What the model says the document is. Every PDF that reached this path used to
+// become a bill, so a receipt for something already paid, a statement listing
+// bills already in Xero, a credit note or a quote could be posted as a new bill
+// to pay. Anything but an invoice is held, with what it appears to be.
+const DOCUMENT_TYPES = {
+  invoice:     null,
+  receipt:     'this PDF looks like a receipt for a payment already made, not a bill to pay',
+  statement:   'this PDF looks like a statement of account, not a bill; the invoices on it may already be in Xero',
+  credit_note: 'this PDF looks like a credit note, not a bill; it would go to Xero as a credit note, not a bill',
+  quote:       'this PDF looks like a quote or estimate, not a bill',
+  other:       'this PDF does not look like an invoice or bill',
+};
+function _documentType(value) {
+  const t = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!t) return null;   // not answered: treated as before, as a bill
+  if (/^(tax_)?invoice$|^bill$|^supplier_invoice$/.test(t)) return 'invoice';
+  if (/receipt|payment_confirmation/.test(t)) return 'receipt';
+  if (/statement/.test(t)) return 'statement';
+  if (/credit/.test(t)) return 'credit_note';
+  if (/quot|estimate|pro_?forma/.test(t)) return 'quote';
+  return Object.prototype.hasOwnProperty.call(DOCUMENT_TYPES, t) ? t : 'other';
+}
+
+// Within two cents is rounding, not a disagreement.
+const MONEY_TOLERANCE = 0.02;
+const _money2 = n => Math.round(n * 100) / 100;
+const _fmt = (n, cur) => `${cur ? cur + ' ' : ''}${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+// Whether the figures the model read add up. They were posted as read, so a
+// misread line or a total from the wrong row went to Xero with nothing to say
+// so. Same rule as the template verifier (template-verifier.js): a
+// disagreement about money is a flag, never an overwrite — the figures are
+// kept as read and a person decides. Null when they agree.
+//
+// `itemsRead` is false when the model returned no lines and the one line was
+// built from the total, which agrees with it by construction.
+function _moneyMismatch({ lineItems, subTotal, taxAmount, totalAmount, currency }, { itemsRead = true } = {}) {
+  const total = Number(totalAmount);
+  if (!(total > 0)) return null;   // a zero total is held on its own (invoice-handler.holdReason)
+  const sub = subTotal ?? null;
+  const tax = taxAmount ?? null;
+  const problems = [];
+
+  if (sub !== null && tax !== null && Math.abs(_money2(sub + tax) - total) > MONEY_TOLERANCE) {
+    problems.push(`the subtotal ${_fmt(sub, currency)} plus tax ${_fmt(tax, currency)} comes to ${_fmt(sub + tax, currency)}, but the total is ${_fmt(total, currency)}`);
+  }
+  if (itemsRead && Array.isArray(lineItems) && lineItems.length) {
+    const lines = _money2(lineItems.reduce((s, li) => s + (Number(li.unitAmount) || 0) * (1 - (Number(li.discountRate) || 0) / 100), 0));
+    const expected = sub !== null ? sub : _money2(total - (tax || 0));
+    const against  = sub !== null ? 'subtotal' : tax !== null ? 'total before tax' : 'total';
+    if (Math.abs(lines - expected) > MONEY_TOLERANCE) {
+      problems.push(`the line items add up to ${_fmt(lines, currency)}, but the ${against} is ${_fmt(expected, currency)}`);
+    }
+  }
+  return problems.length ? problems.join('; ') : null;
+}
+
 async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   let llm;
   try {
@@ -418,7 +487,9 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     logger.warn('LLM parse failed, falling back to regex', { error: err.message, userId });
     const guess = parseGenericFormat(text, email, defaults);
     // A regex guess at a PDF is never sent on unreviewed.
-    guess.reviewReason = 'the PDF could not be read by the model; the figures below are a rough guess from the text';
+    guess.reviewReason = err && err.code === 'GEMINI_TRUNCATED'
+      ? "the model's reading of the PDF was cut off before it finished; the figures below are a rough guess from the text"
+      : 'the PDF could not be read by the model; the figures below are a rough guess from the text';
     return guess;
   }
 
@@ -432,8 +503,9 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
 
   // One normaliser for every reader: "2 × 75.00" rides in the description and
   // unitAmount is the line total — the figure Xero must receive.
-  const lineItems = (llm.lineItems || []).map(li => intake.normaliseLineItem(li)).filter(Boolean)
+  const lineItems = (Array.isArray(llm.lineItems) ? llm.lineItems : []).map(li => intake.normaliseLineItem(li)).filter(Boolean)
     .map(({ description, unitAmount, discountRate }) => ({ description, unitAmount, discountRate }));
+  const itemsRead = lineItems.length > 0;
 
   if (!lineItems.length) {
     lineItems.push({
@@ -442,6 +514,25 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
       discountRate: 0,
     });
   }
+
+  // A model that answers "S$" or "sgd" is cleaned to the code Xero takes, the
+  // same way the row builder cleans it (intake/record.js).
+  const currency    = cleanCurrency(llm.currency) || _detectCurrency(text) || defaults.currency;
+  const totalAmount = intake.money(llm.totalAmount) ?? 0;
+  const subTotal    = intake.money(llm.subTotal);
+  const taxAmount   = intake.money(llm.taxAmount);
+  const documentType = _documentType(llm.documentType);
+
+  // Everything here holds the bill for a person rather than posting it; the
+  // handler turns reviewReason into review-needed. Several can apply at once.
+  const reasons = [];
+  if (documentType && DOCUMENT_TYPES[documentType]) reasons.push(DOCUMENT_TYPES[documentType]);
+  const mismatch = _moneyMismatch({ lineItems, subTotal, taxAmount, totalAmount, currency }, { itemsRead });
+  if (mismatch) reasons.push(mismatch);
+  if (llm.textTruncated) {
+    reasons.push(`the PDF is long, and only its first ${llm.textTruncated.sentChars.toLocaleString('en-US')} of ${llm.textTruncated.totalChars.toLocaleString('en-US')} characters were read; a total or line on a later page may be missing`);
+  }
+  if (reasons.length) logger.warn('LLM bill held for review', { userId, file: pdfFilename, documentType, reasons });
 
   // No number is left auto-shaped ("INV-<timestamp>") so the handler holds
   // the bill; the filename's first token used to stand in and looked real.
@@ -458,16 +549,18 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     dueDate,
     // Regex fallback covers the rare case the LLM leaves currency null on text that
     // actually does state it — belt-and-braces, not the primary detection path.
-    currency:         llm.currency || _detectCurrency(text) || defaults.currency,
+    currency,
     brandingThemeName:'Standard',
     lineAmountTypes:  'Exclusive',
     lineItems,
-    totalAmount:      intake.money(llm.totalAmount) ?? 0,
+    totalAmount,
     // Both nullable — _ensureSubtotalTax (called by the shared caller) fills in
     // whichever the LLM didn't find from whichever it did, so xero/invoices.js
     // always has a real dollar figure to look up the org's actual tax rate with.
-    subTotal:         intake.money(llm.subTotal),
-    taxAmount:        intake.money(llm.taxAmount),
+    subTotal,
+    taxAmount,
+    documentType: documentType || 'invoice',
+    reviewReason: reasons.length ? reasons.join('; ') : null,
     // What the bill is for, read from its items — not the subject line the
     // sender typed to forward it ("create AP invoice").
     description:      (_oneLine(llm.description) || _describeItems(lineItems) || cleanSubject(email.subject) || `Invoice from ${llm.vendorName}`).slice(0, 500),
@@ -573,4 +666,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, parseTemplateFormat, parsePDFWithLLM, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _isPaymentSchedule, _describeItems, _vendorAddress }; // helpers exposed for tests
+module.exports = { parseInvoice, parseTemplateFormat, parsePDFWithLLM, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _isPaymentSchedule, _describeItems, _vendorAddress, _moneyMismatch, _documentType }; // helpers exposed for tests

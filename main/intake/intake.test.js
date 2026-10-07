@@ -234,6 +234,24 @@ describe('intake/record — one row builder', () => {
     expect(r.pdfFilename).toBe('a.pdf');
     expect(r.receivedAt).toBe('2026-08-01T00:00:00Z');
   });
+
+  // Extras are spread last, and the email handler passes the parser's raw
+  // currency as one — so "S$" overrode the cleaned code and Xero refused it.
+  test('a raw currency passed as an extra is still stored as a code', () => {
+    const raw = doc.normaliseDocument({ vendorName: 'Isetan', totalAmount: 109, currency: 'S$' });
+    expect(raw.currency).toBeNull();   // the document cleaner drops what it cannot read...
+    const r = buildRecord({ document: raw, invoiceType: 'ACCPAY', source: 'email', defaults: { currency: 'S$' }, extras: { currency: 'S$' } });
+    expect(r.currency).toBe('SGD');    // ...and the row no longer lets the raw value back in
+  });
+  test.each([['US$', 'USD'], ['sgd', 'SGD'], ['SGD 1,200.00', 'SGD'], ['RM', 'MYR'], ['€', 'EUR']])('"%s" is stored as %s', (given, code) => {
+    expect(buildRecord({ document: d, invoiceType: 'ACCPAY', source: 'email', extras: { currency: given } }).currency).toBe(code);
+  });
+  test('an unreadable currency falls back to the document, then the default — never stored raw', () => {
+    expect(buildRecord({ document: d, invoiceType: 'ACCPAY', source: 'email', extras: { currency: '$' } }).currency).toBe('SGD');
+    const none = doc.normaliseDocument({ vendorName: 'X', totalAmount: 1 });
+    expect(buildRecord({ document: none, invoiceType: 'ACCPAY', source: 'email', defaults: { currency: 'dollars' }, extras: { currency: '$' } }).currency)
+      .toBe(require('../utils/users').getUserDefaults(null).currency);
+  });
 });
 
 describe('normaliseLineItem — every vocabulary the readers have used', () => {

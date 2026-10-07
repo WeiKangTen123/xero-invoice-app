@@ -27,17 +27,30 @@ function looksFinancial(message) {
   return FINANCIAL_HINTS.test(String(message || ''));
 }
 
+// The period when the request names none: financial year to date, which is
+// what the dashboard opens on.
+const DEFAULT_PERIOD = { preset: 'fy-ytd' };
+
 // Returns a compact block for the prompt, or null when there is nothing to add.
 // Never throws: the assistant must keep working on pipeline questions even if
 // Xero is unreachable.
-async function financialContext(userId, tenantId, { timezone = 'UTC' } = {}) {
+//
+// `tenantId` is the company the user is looking at (routes/chat.js checks it
+// is one of theirs), and `period` the period on screen, so the answer is about
+// the same books and months as the dashboard beside it.
+//
+// `allowed` is not for the prompt: it is the set of figures the reply may
+// quote, from the same facts the dashboard narrative is grounded on
+// (xero/ai-insights.js). chat-agent takes it off before sending the block.
+async function financialContext(userId, tenantId, { timezone = 'UTC', period } = {}) {
   if (!tenantId) return null;
   try {
     const reports = require('../xero/reports');
+    const { _narrativeFacts } = require('../xero/ai-insights');
     // No force: this rides whatever the dashboard already fetched. A warm cache
     // costs nothing, which is the normal case for someone with the app open.
-    const cf = await reports.getCashFlow(userId, tenantId, { timezone, period: { preset: 'fy-ytd' } });
-    const facts = reports._narrativeFacts(cf);
+    const cf = await reports.getCashFlow(userId, tenantId, { timezone, period: period || DEFAULT_PERIOD });
+    const facts = _narrativeFacts(cf);
 
     return {
       organisation: cf.organisation?.name || null,
@@ -45,6 +58,7 @@ async function financialContext(userId, tenantId, { timezone = 'UTC' } = {}) {
       period: cf.period?.label || null,
       figures: facts.lines,
       alerts: (cf.alerts?.alerts || []).map(a => ({ severity: a.severity, title: a.title })),
+      allowed: [...facts.allowed],
     };
   } catch (err) {
     logger.warn('Chat financial context unavailable', { userId, error: err.message });
@@ -52,4 +66,4 @@ async function financialContext(userId, tenantId, { timezone = 'UTC' } = {}) {
   }
 }
 
-module.exports = { financialContext, looksFinancial, FINANCIAL_HINTS };
+module.exports = { financialContext, looksFinancial, FINANCIAL_HINTS, DEFAULT_PERIOD };

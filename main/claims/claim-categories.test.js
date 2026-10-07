@@ -101,6 +101,24 @@ describe('claims/claim-categories', () => {
       expect(callGemini).not.toHaveBeenCalled();
     });
 
+    test('a long form is asked about in chunks, and one failed chunk keeps the others', async () => {
+      // All lines in one 800-token call came back cut off on a long form, and
+      // every suggestion was lost with it.
+      const { CHUNK_SIZE } = require('./claim-categories');
+      const many = Array.from({ length: CHUNK_SIZE * 2 + 3 }, (_, i) => line(i + 1, `Trip ${i + 1}`));
+      const callGemini = jest.fn()
+        .mockImplementationOnce(async () => JSON.stringify([{ rowNo: '1', category: CATEGORIES[2] }]))
+        .mockImplementationOnce(async () => { throw new Error('quota'); })
+        .mockImplementationOnce(async () => JSON.stringify([{ rowNo: String(CHUNK_SIZE * 2 + 1), category: CATEGORIES[1] }]));
+      const out = await suggestCategories('u1', many, CATEGORIES, { callGemini });
+      expect(callGemini).toHaveBeenCalledTimes(3);
+      const asked = callGemini.mock.calls.map(c => c[1].find(m => m.role === 'user').content);
+      expect(asked[0]).toContain('Trip 1');
+      expect(asked[0]).not.toContain(`Trip ${CHUNK_SIZE + 1}.`);
+      expect(asked[2]).toContain(`Trip ${CHUNK_SIZE * 2 + 3}`);
+      expect(out.map(s => String(s.rowNo))).toEqual(['1', String(CHUNK_SIZE * 2 + 1)]);
+    });
+
     test('the prompt forbids inventing a category', () => {
       const p = _prompt([{ rowNo: '1', description: 'x' }], CATEGORIES);
       expect(p).toMatch(/Never invent one/i);

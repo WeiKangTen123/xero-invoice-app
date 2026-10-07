@@ -286,3 +286,51 @@ describe('parseTemplateFormat — the AR template, as actually sent', () => {
     expect(p.lineItems[0].unitAmount).toBe(expected);
   });
 });
+
+// "Tax inclusive / exclusive : Inclusive" means each Amount already contains
+// its tax. The parser added the tax on top anyway, so a 1,090 line at 9%
+// became a 1,188.10 invoice — the row then disagreed with the total Xero
+// computed from the Inclusive lines once it was posted.
+describe('parseTemplateFormat — tax-inclusive and tax-exclusive amounts', () => {
+  const { parseTemplateFormat } = require('./parser');
+  const email = { subject: 'AR invoice', date: '2026-08-17T03:00:00.000Z', from: { text: 'x@y.com', value: [{ address: 'x@y.com' }] } };
+  const defaults = { currency: 'SGD', accountCode: '200' };
+  const template = (setting, items) => [
+    'Client / Customer : PereOcean Demo',
+    'Currency : SGD, Standard',
+    'Payment Terms / Payment Date : 30 days',
+    `Tax inclusive / exclusive : ${setting}`,
+    '',
+    ...items.flatMap(([desc, amount, discount, tax], i) => [
+      `${i + 1}. Description / Details :`, desc, '',
+      `Amount : SGD${amount}`, `Discount : ${discount}`, `Tax (If applicable) : ${tax}`, '',
+    ]),
+  ].join('\n');
+
+  test('inclusive: the total is the lines, and the tax is the part of them that is tax', () => {
+    const p = parseTemplateFormat(template('Inclusive', [['Water cartons', '1090', '', 'GST 9%']]), email, defaults);
+    expect(p.lineAmountTypes).toBe('Inclusive');
+    expect(p).toMatchObject({ totalAmount: 1090, taxAmount: 90, subTotal: 1000 });
+    expect(p.lineItems[0].unitAmount).toBe(1090);   // the line is stated as sent; Xero is told it is Inclusive
+  });
+
+  test('inclusive with a discount and two lines: subtotal plus tax is the total to the cent', () => {
+    const p = parseTemplateFormat(template('Inclusive', [['Cartons', '1,090', '10', '9%'], ['Delivery', '218', '', '9%']]), email, defaults);
+    // 981 + 218 = 1,199 inclusive; tax = 1,199 × 9/109 = 99.00
+    expect(p.totalAmount).toBe(1199);
+    expect(p.taxAmount).toBe(99);
+    expect(p.subTotal).toBe(1100);
+    expect(Math.round((p.subTotal + p.taxAmount) * 100) / 100).toBe(p.totalAmount);
+  });
+
+  test('exclusive is unchanged: the tax is added on top of the lines', () => {
+    const p = parseTemplateFormat(template('Exclusive', [['Water cartons', '1000', '', 'GST 9%']]), email, defaults);
+    expect(p.lineAmountTypes).toBe('Exclusive');
+    expect(p).toMatchObject({ totalAmount: 1090, taxAmount: 90, subTotal: 1000 });
+  });
+
+  test('inclusive with no tax percentage: the lines are the total and there is no tax', () => {
+    const p = parseTemplateFormat(template('Inclusive', [['Water cartons', '500', '', '']]), email, defaults);
+    expect(p).toMatchObject({ lineAmountTypes: 'Inclusive', totalAmount: 500, taxAmount: 0, subTotal: 500 });
+  });
+});

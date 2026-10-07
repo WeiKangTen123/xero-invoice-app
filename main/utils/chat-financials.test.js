@@ -47,3 +47,44 @@ describe('utils/chat-financials — when to pay for Xero context', () => {
     });
   });
 });
+
+describe('utils/chat-financials — financialContext', () => {
+  let financialContext, getCashFlow;
+  const cf = {
+    organisation: { name: 'Acme', currency: 'SGD' },
+    period: { label: 'Last quarter' },
+    reconciliation: { revenueAccrual: 109330, customerReceipts: 26000 },
+    workingCapital: { receivable: 109330, overdue: 57330, collectionRate: 0.24 },
+    alerts: { alerts: [{ severity: 'warn', title: 'Most receivables are overdue', detail: '52% is past due' }] },
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    getCashFlow = jest.fn().mockResolvedValue(cf);
+    jest.doMock('../xero/reports', () => ({ getCashFlow }));
+    ({ financialContext } = require('./chat-financials'));
+  });
+
+  test('reads the company and period it is given', async () => {
+    await financialContext('u1', 'tenant-b', { timezone: 'Asia/Singapore', period: { preset: 'last-quarter' } });
+    expect(getCashFlow).toHaveBeenCalledWith('u1', 'tenant-b', { timezone: 'Asia/Singapore', period: { preset: 'last-quarter' } });
+  });
+
+  test('defaults to financial year to date when no period is named', async () => {
+    await financialContext('u1', 'tenant-a');
+    expect(getCashFlow.mock.calls[0][2].period).toEqual({ preset: 'fy-ytd' });
+  });
+
+  test('returns the figures the reply may quote alongside the block', async () => {
+    const out = await financialContext('u1', 'tenant-a');
+    expect(out.period).toBe('Last quarter');
+    expect(out.figures.join('\n')).toMatch(/109,330/);
+    expect(out.allowed).toEqual(expect.arrayContaining([109330, 26000, 57330, 24, 52]));
+  });
+
+  test('no company means no context, and a Xero failure is not a chat failure', async () => {
+    expect(await financialContext('u1', null)).toBeNull();
+    getCashFlow.mockRejectedValue(new Error('xero down'));
+    expect(await financialContext('u1', 'tenant-a')).toBeNull();
+  });
+});
