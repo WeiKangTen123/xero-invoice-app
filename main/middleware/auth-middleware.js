@@ -43,6 +43,33 @@ function jwtSecretProblem(secret) {
   return {};
 }
 
+// ── Session tokens ───────────────────────────────────────────────────────────
+// A sign-in lasts as long as it is in use, and ends after 24 hours away. Each
+// token is good for 24 hours, and once the one a request carries is an hour
+// old, requireAuth hands a fresh one back with the response (renewSession
+// below), which the browser stores in its place (ui/src/api/client.js). They
+// used to be fixed seven-day tokens: someone working all week was thrown out
+// mid-task on day seven, and a laptop left signed in stayed signed in for a
+// week. The hour means one new token per session per hour rather than one per
+// request; the cost is that "24 hours away" can end up to an hour sooner.
+const SESSION_TTL_SECONDS         = 24 * 60 * 60;
+const SESSION_RENEW_AFTER_SECONDS = 60 * 60;
+const SESSION_TOKEN_HEADER        = 'X-Session-Token';
+
+// What a 401 says when the only thing wrong with a token is its age, which is
+// what someone coming back the next day meets.
+const SESSION_EXPIRED_MESSAGE = 'Your session ended after 24 hours away. Sign in again.';
+
+// Every session token is signed here: sign-in, registration, a password
+// change, a renewal. Only the id is relied on; email and role ride along for
+// the client, and sessionUser reads both from the database on every request.
+// A renewal is marked as one, for the cutoff check in sessionUser.
+function signSession(user, { renewed = false } = {}) {
+  const claims = { id: user.id, email: user.email, role: user.role };
+  if (renewed) claims.renewed = true;
+  return jwt.sign(claims, jwtSecret(), { expiresIn: SESSION_TTL_SECONDS });
+}
+
 // Every check a session token must pass, in one place: signature and expiry,
 // the account still existing, not disabled, and not issued before the
 // account's sign-out cutoff. requireAuth uses it, and so must any route that
@@ -57,13 +84,18 @@ function sessionUser(token) {
   let claims;
   try {
     claims = jwt.verify(token, jwtSecret());
-  } catch {
+  } catch (err) {
+    // A token that has simply run out is the everyday case (back after a day
+    // away) and is said plainly; anything else (a bad signature, a mangled
+    // token) keeps the generic wording.
+    if (err instanceof jwt.TokenExpiredError) return { error: SESSION_EXPIRED_MESSAGE };
     return { error: 'Invalid or expired token' };
   }
   // The token says who; the database says whether they still exist and what
-  // they may do. Tokens live seven days, and role/existence used to be read
-  // from the token alone, so a deleted or demoted user kept their access for
-  // up to a week. One indexed primary-key read per request is cheap.
+  // they may do. Role and existence used to be read from the token alone, so a
+  // deleted or demoted user kept their access until it ran out, which was up to
+  // a week when tokens lived seven days, and with renewal would be for as long
+  // as they kept using it. One indexed primary-key read per request is cheap.
   //
   // users.js is required lazily to avoid a require-cycle at module load
   // (users.js doesn't need this module, but plenty of routes require both).
@@ -75,11 +107,43 @@ function sessionUser(token) {
   // Compared at whole seconds, the precision of a JWT's iat: a token issued in
   // the same second as the cutoff (signing straight back in after a reset)
   // must still be accepted.
-  if (live.sessions_valid_from && claims.iat !== undefined
-      && claims.iat < Math.floor(Date.parse(live.sessions_valid_from) / 1000)) {
-    return { error: 'You have been signed out. Sign in again.' };
+  //
+  // Except a renewed one. A renewal is only made from a token at least an hour
+  // old that passed this same check, so none can be made after a cutoff within
+  // the cutoff's own second: one stamped with that second was made just BEFORE
+  // the cutoff, for a session the cutoff was meant to end. Accepted, it would
+  // carry that session past a password reset or "sign out everywhere", and,
+  // since renewal slides, keep it going indefinitely.
+  if (live.sessions_valid_from && claims.iat !== undefined) {
+    const cutoff = Math.floor(Date.parse(live.sessions_valid_from) / 1000);
+    if (claims.iat < cutoff || (claims.renewed && claims.iat === cutoff)) {
+      return { error: 'You have been signed out. Sign in again.' };
+    }
   }
   return { user: live, claims };
+}
+
+// Hands a fresh token back in the X-Session-Token header once the one this
+// request carried is an hour old. Only called once sessionUser has accepted
+// the token, so an expired one, a disabled account or a token from before the
+// cutoff is never renewed: those got their 401 first. The cutoff is not
+// touched, and the old token stays good until it runs out, so requests already
+// in flight with it still succeed. Revocation still reaches renewed tokens: a
+// password change or "sign out everywhere" moves the cutoff past them too.
+//
+// Skipped when the new token would run out no later than the one presented.
+// That is only true of the seven-day tokens issued before this change; they
+// keep their own end rather than be offered a shorter token the browser would
+// discard anyway (client.js keeps whichever runs out last), and are renewed in
+// their final day like any other.
+//
+// Never fails the request: the token presented is good, renewal is a courtesy.
+function renewSession(res, live, claims) {
+  if (claims.iat === undefined || claims.exp === undefined) return;
+  const now = Math.floor(Date.now() / 1000);
+  if (now - claims.iat < SESSION_RENEW_AFTER_SECONDS) return;
+  if (now + SESSION_TTL_SECONDS <= claims.exp) return;
+  try { res.set(SESSION_TOKEN_HEADER, signSession(live, { renewed: true })); } catch {}
 }
 
 function requireAuth(req, res, next) {
@@ -87,6 +151,7 @@ function requireAuth(req, res, next) {
   const { user: live, claims, error } = sessionUser(token);
   if (error) return res.status(401).json({ error });
   req.user = { ...claims, id: live.id, email: live.email, role: live.role };
+  renewSession(res, live, claims);
   // Throttled to at most one DB write per user per minute — see
   // users.js#touchLastSeen. Failure here must never turn into a 401 — it's
   // presence tracking, not auth.
@@ -103,4 +168,7 @@ function requireAdmin(req, res, next) {
   });
 }
 
-module.exports = { requireAuth, requireAdmin, sessionUser, jwtSecret, jwtSecretProblem, MIN_JWT_SECRET_LENGTH };
+module.exports = {
+  requireAuth, requireAdmin, sessionUser, signSession, jwtSecret, jwtSecretProblem, MIN_JWT_SECRET_LENGTH,
+  SESSION_TTL_SECONDS, SESSION_RENEW_AFTER_SECONDS, SESSION_TOKEN_HEADER, SESSION_EXPIRED_MESSAGE,
+};

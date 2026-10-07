@@ -1,9 +1,10 @@
 const express = require('express');
 const router  = express.Router();
-const jwt     = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { hasUsers, createUser, validatePassword, verifiedPasswordHash, passwordProblem, setPassword, getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
-const { requireAuth, jwtSecret } = require('../middleware/auth-middleware');
+// Session tokens are signed in one place, auth-middleware.js#signSession,
+// which sets how long they last (24 hours, renewed while in use).
+const { requireAuth, signSession, SESSION_TOKEN_HEADER } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
 const logger  = require('../utils/logger');
 
@@ -55,11 +56,7 @@ router.post('/register', authLimiter, asyncHandler(async (req, res) => {
     }
 
     const user  = await createUser(email, password, 'auto');
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      jwtSecret(),
-      { expiresIn: '7d' }
-    );
+    const token = signSession(user);
     logger.info('User registered', { email, role: user.role });
     res.status(201).json({ success: true, user, token });
   } catch (err) {
@@ -82,11 +79,7 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
       return res.status(403).json({ error: 'This account has been disabled. Contact your administrator.' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      jwtSecret(),
-      { expiresIn: '7d' }
-    );
+    const token = signSession(user);
     logger.info('User logged in', { email: user.email, role: user.role });
     res.json({ token, user });
   } catch (err) {
@@ -164,11 +157,11 @@ router.post('/change-password', requireAuth, changePasswordLimiter, asyncHandler
     if (!(await setPassword(req.user.id, newPassword, { ifCurrentHash: verifiedHash }))) {
       return res.status(409).json({ error: 'Your password was changed elsewhere (for example, reset by an administrator) while this was being saved, so this change was not applied. Sign in with the current password and try again.' });
     }
-    const token = jwt.sign(
-      { id: req.user.id, email: req.user.email, role: req.user.role },
-      jwtSecret(),
-      { expiresIn: '7d' }
-    );
+    const token = signSession(req.user);
+    // requireAuth may have renewed the token this request arrived with. That
+    // renewal predates the cutoff setPassword has just moved, so it is already
+    // dead; the token in the body is this session's, and the only one sent.
+    res.removeHeader(SESSION_TOKEN_HEADER);
     logger.info('Password changed', { email: req.user.email });
     res.json({ success: true, token });
   } catch (err) {

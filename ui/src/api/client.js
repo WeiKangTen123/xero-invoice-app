@@ -1,7 +1,51 @@
 const BASE = '/api';
 
+// Where the server hands back a fresh session token, once the one a request
+// carried is an hour old (main/middleware/auth-middleware.js#renewSession).
+// Tokens last 24 hours, so storing these is what keeps someone who is using
+// the app signed in. The API is on this page's own origin, so the header is
+// readable here without any CORS exposure.
+const SESSION_TOKEN_HEADER = 'X-Session-Token';
+
 function getToken() {
   return localStorage.getItem('token');
+}
+
+// A JWT's claims, read without checking the signature. Only ever used to put
+// two tokens in order before storing one; the server verifies every token it
+// is sent, so a forged one here gains nothing. null for anything unreadable.
+export function tokenClaims(token) {
+  try {
+    const payload = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(payload));
+  } catch {
+    return null;
+  }
+}
+
+// Which session token to keep: the one stored, or one a response just handed
+// back. Two requests sent together can both come back renewed, in either
+// order, so the token that runs out last wins and an older one never replaces
+// it. Nothing is taken when nothing is stored (signed out while the request was
+// out) or when the stored token is another account's (signed in as someone
+// else in another tab): the renewal belongs to a session this browser has left.
+export function newerSessionToken(stored, offered) {
+  if (!stored || !offered) return stored;
+  const kept = tokenClaims(stored);
+  const fresh = tokenClaims(offered);
+  if (!kept || !fresh || kept.id !== fresh.id) return stored;
+  return fresh.exp > kept.exp ? offered : stored;
+}
+
+// Stores a renewal the response carried, if it is the newer token. Only called
+// for a response that worked, after the 401 handling has had its say, so a
+// renewal never decides whether a session has ended.
+function storeRenewal(res) {
+  const offered = res.headers?.get(SESSION_TOKEN_HEADER);
+  if (!offered) return;
+  const stored = getToken();
+  const keep   = newerSessionToken(stored, offered);
+  if (keep !== stored) localStorage.setItem('token', keep);
 }
 
 function clearSession() {
@@ -54,6 +98,7 @@ async function request(path, options = {}, retried = false) {
     err.status   = res.status;
     throw err;
   }
+  storeRenewal(res);
   return data;
 }
 

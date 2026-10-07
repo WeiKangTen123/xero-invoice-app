@@ -215,9 +215,10 @@ async function verifiedPasswordHash(id, password) {
   return (await bcrypt.compare(password, user.password)) ? user.password : null;
 }
 
-// Sets a new password and signs the user out everywhere. Tokens are stateless
-// and live seven days, so without the cutoff a reset would leave the old
-// session valid for up to a week — the opposite of what a reset is for.
+// Sets a new password and signs the user out everywhere. Tokens are stateless,
+// live 24 hours and renew while in use (auth-middleware.js), so without the
+// cutoff a reset would leave an active old session valid indefinitely — the
+// opposite of what a reset is for.
 //
 // `ifCurrentHash` makes the write conditional on the password still being the
 // one just verified. Changing your own password checks the current one and
