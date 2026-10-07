@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { fmtMoney, fmtPct } from '../../utils/format';
 import { BarList, ChartModeToggle, TrendChart } from './charts';
-import { GrowthPill, Legend, Metric, Rows, ScoreCard, Surface, WatchBand, closedInRange, rangeGrowth, rangeLabel, slice, sliceSum, useRangeTotals } from './primitives';
+import { GrowthPill, Legend, Metric, PriorYearLine, Rows, ScoreCard, Surface, WatchBand, changeText, closedInRange, comparedText, priorYearRange, priorYearReason, rangeGrowth, rangeLabel, slice, sliceSum, useRangeTotals } from './primitives';
 
 export function OverviewPanel({ data, from, to, insights, summary, narrative, onOpenAnalysis }) {
   const [trendMode, setTrendMode] = useState('bar');
@@ -14,6 +14,13 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
   const healthy = T.netProfit > 0 && (T.grossMargin === null || T.grossMargin > 0);
   const cash = data.cash?.available ? data.cash.total : null;
   const g = rangeGrowth(data, from, to);
+  // The same months last year, when the report carries them (this tab asks
+  // for them). Closed months only, so it sits under the tiles as its own line
+  // rather than claiming to compare the whole figure above it.
+  const py = priorYearRange(data, from, to);
+  const pyLine = (what, key) => (py?.available
+    ? <PriorYearLine what={what} c={py[key]} range={py} currency={cur} />
+    : null);
 
   const serviceItems = data.serviceLines
     .filter(l => !l.otherIncome)
@@ -115,26 +122,39 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
 
       <WatchBand items={data.watchList} />
 
-      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
+      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: py ? 8 : 16 }}>
         <Metric label="Total revenue" value={fmtMoney(T.revenue, cur)}
                 meter={T.attainment === null ? null : T.attainment * 100}
                 footLeft={T.recurringMix === null ? 'No revenue yet' : `${fmtPct(T.recurringMix, 0)} recurring`}
                 footRight={T.attainment !== null ? `${fmtPct(T.attainment, 0)} of budget to ${T.attainmentThrough}`
-                         : T.revenueBudget > 0 ? 'No closed month yet' : 'No budget set'} />
+                         : T.revenueBudget > 0 ? 'No closed month yet' : 'No budget set'}
+                compare={pyLine('', 'revenue')} />
         <Metric label="Gross margin" value={T.grossMargin === null ? '—' : fmtPct(T.grossMargin)}
                 meter={T.grossMargin === null ? null : T.grossMargin * 100}
                 footLeft={`${fmtMoney(T.grossProfit, cur)} gross profit`}
-                footRight={T.cogs === 0 ? 'No cost of sales booked' : `${fmtMoney(T.cogs, cur)} cost of sales`} />
+                footRight={T.cogs === 0 ? 'No cost of sales booked' : `${fmtMoney(T.cogs, cur)} cost of sales`}
+                compare={pyLine('Gross profit', 'grossProfit')} />
         <Metric label="Net margin" value={T.netMargin === null ? '—' : fmtPct(T.netMargin)}
                 meter={T.netMargin === null ? null : T.netMargin * 100}
                 tone={T.netProfit < 0 ? 'var(--danger)' : undefined}
                 footLeft={`${fmtMoney(T.netProfit, cur)} net`}
-                footRight={`${fmtMoney(T.opex, cur)} operating costs`} />
+                footRight={`${fmtMoney(T.opex, cur)} operating costs`}
+                compare={pyLine('Net profit', 'netProfit')} />
         <Metric label="Cash at bank" value={cash === null ? '—' : fmtMoney(cash, cur)}
                 meter={null}
                 footLeft={cash === null ? 'Bank summary unavailable' : `${data.cash.accounts.length} account${data.cash.accounts.length === 1 ? '' : 's'}`}
                 footRight={cash === null ? '' : 'Closing balance'} />
       </div>
+      {/* Which months the tiles' comparison covers. The tiles' own figures
+          include the month in progress; the comparison never does. */}
+      {py && (
+        <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 16 }}>
+          {py.available
+            ? <>Compared with the same months last year: {comparedText(py)}, closed months only
+                {py.recordsFromLabel && ` — nothing was recorded in Xero before ${py.recordsFromLabel}`}.</>
+            : <>No comparison with last year: {priorYearReason(py.reason)}.</>}
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Surface title="Revenue by service line" right={T.recurringMix === null ? null : `${fmtPct(T.recurringMix, 0)} recurring`} flex={7} minWidth={380}>
@@ -200,10 +220,25 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
                 <GrowthPill value={g.mom} title={g.momLabel ? `${g.latestLabel} vs ${g.momLabel}` : 'Needs two closed months'} />
                 {g.momLabel && <span> · {g.latestLabel} vs {g.momLabel}</span>}
               </div>
+              {/* Month against the same month a year before when the range
+                  holds thirteen closed months; otherwise the closed months
+                  against the same months last year, when the report has them. */}
               <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
                 Year on year{' '}
-                <GrowthPill value={g.yoy} title={g.yoyLabel ? `${g.latestLabel} vs ${g.yoyLabel}` : 'Needs 13 months of history'} />
-                {g.yoyLabel ? <span> · {g.latestLabel} vs {g.yoyLabel}</span> : <span> · needs a full prior year</span>}
+                {g.yoyLabel || !py ? (
+                  <>
+                    <GrowthPill value={g.yoy} title={g.yoyLabel ? `${g.latestLabel} vs ${g.yoyLabel}` : 'Needs 13 months of history'} />
+                    {g.yoyLabel ? <span> · {g.latestLabel} vs {g.yoyLabel}</span> : <span> · needs a full prior year</span>}
+                  </>
+                ) : py.available ? (
+                  <>
+                    <strong style={{ fontVariantNumeric: 'tabular-nums',
+                                     color: py.revenue.change > 0 ? 'var(--success)' : py.revenue.change < 0 ? 'var(--danger)' : undefined }}>
+                      {changeText(py.revenue, cur)}
+                    </strong>
+                    <span> · {comparedText(py)}</span>
+                  </>
+                ) : <span>— · {priorYearReason(py.reason)}</span>}
               </div>
             </div>
           )}

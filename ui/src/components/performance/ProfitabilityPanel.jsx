@@ -1,6 +1,6 @@
 import { fmtMoney, fmtPct } from '../../utils/format';
-import { GroupedMonthlyBars, Waterfall } from './charts';
-import {Empty, Legend, Metric, Surface, rangeLabel, sliceSum, useRangeTotals } from './primitives';
+import { GroupedMonthlyBars, PriorYearBars, Waterfall } from './charts';
+import {Empty, Legend, Metric, Surface, priorYearReason, rangeLabel, slice, sliceSum, useRangeTotals } from './primitives';
 
 // ── Profitability ────────────────────────────────────────────────────────────────
 // Xero has no cash-flow-statement endpoint, so every figure here is constructed
@@ -206,6 +206,13 @@ export function ProfitabilityPanel({ data, from, to }) {
   });
   const hasMargins = marginSeries.some(m => m.gross !== null || m.net !== null);
 
+  // Net profit month by month against the same month last year, when the
+  // report carries last year (this tab asks for it). The margin chart beside
+  // the bridge stays as it was: a margin line from last year over this year's
+  // margin bars would put two different questions on one scale.
+  const py = data.priorYear || null;
+  const closedInView = Math.max(0, Math.min(data.closedThroughIdx + 1, to + 1) - from);
+
   return (
     <>
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
@@ -264,6 +271,30 @@ export function ProfitabilityPanel({ data, from, to }) {
           ) : <Empty>No revenue in this range, so there is no margin to plot.</Empty>}
         </Surface>
       </div>
+
+      {py && (
+        <div style={{ marginBottom: 16 }}>
+          <Surface title="Net profit by month" right={py.available ? 'against the same month last year' : rangeLabel(data.months, from, to)}>
+            <PriorYearBars months={months} currency={cur} label="Net profit"
+                           current={slice(data.totals.netProfit.actual, from, to)}
+                           prior={py.available ? slice(py.totals.netProfit.monthly, from, to) : months.map(() => null)}
+                           priorMonths={slice(py.months || [], from, to)}
+                           closed={closedInView} />
+            {py.available && (
+              <Legend items={[
+                { label: 'This year', color: 'var(--accent)' },
+                { label: 'Same month last year', color: 'var(--text-secondary)', dashed: true },
+              ]} />
+            )}
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
+              {py.available
+                ? <>Faded columns are months not yet closed, which no comparison counts.
+                    {py.compared?.firstActivityLabel && ` Nothing was recorded in Xero before ${py.compared.firstActivityLabel}, so last year's line starts there.`}</>
+                : <>No line for last year: {priorYearReason(py.reason)}.</>}
+            </div>
+          </Surface>
+        </div>
+      )}
 
       <Surface title="Income statement" right={rangeLabel(data.months, from, to)}>
         <StatementTable rows={rows} currency={cur} revenue={T.revenue} showBudget />

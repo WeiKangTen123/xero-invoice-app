@@ -18,6 +18,9 @@ import VarianceTab from './xero-insights/VarianceTab';
 // Tabs that need the performance report. Cash Flow has its own report, but its
 // period bar is drawn from this one's months.
 const PERF_TABS = ['overview', 'revenue', 'banking', 'profit', 'analysis', 'cashflow'];
+// Tabs that show the comparison with the same months last year. It costs a
+// second report from Xero (last year's months), so only these ask for it.
+const COMPARE_TABS = ['overview', 'profit'];
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
@@ -263,6 +266,21 @@ export default function XeroInsights() {
     if (tab === 'cashflow' && cashflow.status === 'idle') fetchCashflow();
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A report loaded for another tab carries no comparison with last year, and
+  // Overview and Profitability show one. So it is asked for again, with it, on
+  // arriving at either — or when a report asked for elsewhere lands while one
+  // of them is open. This year's figures come back from the server's cache;
+  // only last year's months are new. A reply to a request that already asked
+  // for the comparison is never asked again, so one that somehow comes back
+  // without it cannot set off a loop of requests.
+  const compareReply = useRef(null);
+  useEffect(() => {
+    const d = perf.data;
+    if (!COMPARE_TABS.includes(tab) || perf.status !== 'done' || perf.error || !d || d.priorYear) return;
+    if (d === compareReply.current) return;
+    fetchPerf({ figuresOnly: true });
+  }, [tab, perf.status, perf.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
   function fetchBanking() {
     const n = ++seq.current.banking;
     setBanking({ status: 'loading', data: [], error: '' });
@@ -320,9 +338,13 @@ export default function XeroInsights() {
     if (tab === 'banking') params.set('cashFlow', 'true');
     // Top customers needs an invoice fetch, so only the Revenue tab asks for it.
     if (tab === 'revenue') params.set('customers', 'true');
+    // Last year's same months are a second report, so only the tabs that show
+    // them ask for them.
+    if (COMPARE_TABS.includes(tab)) params.set('compare', 'prior-year');
     api.get(`/xero-reports/performance?${params.toString()}`)
       .then(d => {
         if (n !== seq.current.perf) return;
+        if (params.has('compare')) compareReply.current = d;
         setPerf({ status: 'done', data: d, error: '' });
         // The server already resolved exactly which months this period covers,
         // so the panels span all of them. Narrowing further is done by changing
@@ -335,6 +357,10 @@ export default function XeroInsights() {
       // a period other than the one that failed. The panels still require no
       // error, so its figures are never shown as the new period's.
       .catch(err => { if (n === seq.current.perf) setPerf(s => ({ status: 'done', data: s.data, error: err.message })); });
+
+    // Re-asked only to add last year's months: the period is unchanged, so the
+    // commentary on screen still describes it, and is left alone.
+    if (opts.figuresOnly) return;
 
     // Commentary arrives after the numbers, never blocking them — but it must
     // describe the SAME period, so it takes the identical params.

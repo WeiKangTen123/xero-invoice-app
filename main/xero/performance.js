@@ -12,6 +12,8 @@ const {
   _closedCount,
   _fmtISODate,
   _fmtXeroDate,
+  _isPeriodError,
+  _monthMeta,
   _parseISODate,
   _todayPartsInTz,
 } = require('./periods');
@@ -356,6 +358,167 @@ function _buildQuotePipeline(quotes = [], baseCurrency = '', { todayISO = new Da
   };
 }
 
+// ── Same months last year (Overview + Profitability) ────────────────────────
+// Year on year in _buildGrowth needs thirteen closed months inside the period,
+// and every preset is twelve or fewer, so it never had a figure to show. This
+// compares the period with the same calendar months a year earlier instead,
+// read through getBudgetVariance like this year's: a past period there is
+// cached for hours (see _periodCacheTtl) and shared in flight like any other.
+//
+// Like with like, three ways. Only months that have CLOSED this year are
+// compared, each against the same month last year: a part-booked current month
+// set against a whole one reads as a collapse that is only the calendar. Months
+// last year before anything at all was recorded in Xero are left out as well,
+// so an organisation that began trading in May is not shown growth from
+// nothing for January to April. And last year's totals are found by
+// _buildPerformance, the way this year's are, so a heading worded differently
+// cannot count in one year and not the other.
+
+const PRIOR_YEAR = 'prior-year';
+const PRIOR_MEASURES = ['revenue', 'grossProfit', 'opex', 'netProfit'];
+
+// A 'YYYY-MM' month twelve months earlier, as { key, label }.
+function _yearEarlier(key) {
+  const [y, m] = String(key).split('-').map(Number);
+  const { key: k, label } = _monthMeta(y - 1, m);
+  return { key: k, label };
+}
+
+// Pure. The months to fetch for last year: this period's, a year earlier,
+// less any that this period already holds. A period longer than twelve months
+// overlaps itself shifted back a year, and the overlapping months' figures are
+// already in hand — so whatever its length, the comparison costs one call pair
+// at most, rather than repeating the ten more a 132-month period would.
+function _priorYearSpan(months) {
+  const n = Math.min(months.length, 12);
+  return { from: _yearEarlier(months[0].key).key, to: _yearEarlier(months[n - 1].key).key };
+}
+
+// One month's figure from a set of totals. Gross profit falls back to revenue
+// less cost of sales where the report carries no gross line, which is how the
+// Overview reads it too (useRangeTotals), so the two cannot disagree.
+function _measureAt(totals, measure, i) {
+  if (measure !== 'grossProfit') return Number(totals[measure].actual[i] || 0);
+  return Number(totals.grossProfit.actual[i] || 0)
+      || Number(totals.revenue.actual[i] || 0) - Number(totals.cogs.actual[i] || 0);
+}
+
+// Whether anything at all was recorded in a month: income, a cost, or a
+// bottom line. A month with none of them is a month with no books, not a
+// month of zero trading.
+function _activityAt(totals, i) {
+  return ['revenue', 'otherIncome', 'cogs', 'opex', 'netProfit'].some(k => Number(totals[k].actual[i] || 0) !== 0);
+}
+
+// Pure. The comparison, index for index with this period's months.
+//
+// `current` is this period's totals and `prior` the totals of the months
+// fetched for last year, which start twelve months before `months` and may be
+// fewer of them (see _priorYearSpan): a month past them is read from this
+// period's own figures, twelve months back. `closed` is how many of this
+// period's months have closed, and `priorClosed` how many of last year's, as
+// _closedCount counts them. A month last year still open (only possible when
+// the period runs a year ahead) has no figure yet, and nor has one before
+// anything was recorded: both are null, not a zero nobody booked.
+//
+// Sums and differences are over the compared months only, and the percentage
+// follows _growthPct: null, never invented, when last year's figure is zero or
+// negative. The amount difference is still given, so there is always
+// something true to show.
+function _buildPriorYear({ months, current, prior, closed, priorClosed }) {
+  const n = months.length;
+  const shifted = months.map(m => _yearEarlier(m.key));
+  const fetched = prior.revenue.actual.length;
+  const source = i => (i >= priorClosed ? null
+    : i < fetched ? { totals: prior, j: i }
+    : { totals: current, j: i - 12 });
+
+  let firstActive = -1;
+  for (let i = 0; i < n && firstActive < 0; i++) {
+    const s = source(i);
+    if (s && _activityAt(s.totals, s.j)) firstActive = i;
+  }
+  const compared = months.map((_, i) => firstActive >= 0 && i >= firstActive && i < closed);
+  const idx = compared.flatMap((c, i) => (c ? [i] : []));
+  const monthsOut = shifted.map((m, i) => ({ ...m, compared: compared[i] }));
+  if (!idx.length) return { available: false, reason: 'no-data', months: monthsOut, compared: null, totals: null };
+
+  const totals = {};
+  for (const measure of PRIOR_MEASURES) {
+    const monthly = months.map((_, i) => {
+      const s = source(i);
+      return s && i >= firstActive ? _cents(_measureAt(s.totals, measure, s.j)) : null;
+    });
+    const thisYearMonthly = months.map((_, i) => _cents(_measureAt(current, measure, i)));
+    const total         = _cents(_sum(idx.map(i => monthly[i])));
+    const thisYearTotal = _cents(_sum(idx.map(i => thisYearMonthly[i])));
+    totals[measure] = {
+      monthly, thisYearMonthly, total, thisYearTotal,
+      change: _cents(thisYearTotal - total),
+      pct:    _growthPct(thisYearTotal, total),
+    };
+  }
+
+  const first = idx[0], last = idx[idx.length - 1];
+  return {
+    available: true,
+    reason:    null,
+    months:    monthsOut,
+    // Which months were compared, named once here so no screen has to work it
+    // out: this year's, last year's, and where last year's records begin when
+    // that cut the comparison short.
+    compared: {
+      count:          idx.length,
+      keys:           idx.map(i => months[i].key),
+      fromLabel:      months[first].label,
+      toLabel:        months[last].label,
+      priorFromLabel: shifted[first].label,
+      priorToLabel:   shifted[last].label,
+      firstActivityLabel: firstActive > 0 ? shifted[firstActive].label : null,
+    },
+    totals,
+  };
+}
+
+// Last year's figures for the period `perf` covers. Never fails the report it
+// is added to: a failed fetch, a period whose year-earlier months fall outside
+// the years periods.js allows, and nothing recorded then each come back as
+// available:false with the reason, and the figures above it stand.
+async function _priorYear(userId, tenantId, perf, { timezone, force }) {
+  const closed = perf.closedThroughIdx + 1;
+  const unavailable = reason => ({
+    available: false, reason,
+    months: perf.months.map(m => ({ ..._yearEarlier(m.key), compared: false })),
+    compared: null, totals: null,
+  });
+  // No month has closed, so there is nothing to compare and nothing is fetched.
+  if (closed < 1) return unavailable('no-closed-month');
+
+  let pbv;
+  try {
+    // Asked for exactly as the /budget-variance route asks for a custom range,
+    // so the two share a request and a cache entry. The range goes through
+    // the same period checks as any other (see _resolvePeriod).
+    pbv = await getBudgetVariance(userId, tenantId, { timezone, force, period: _priorYearSpan(perf.months) });
+  } catch (err) {
+    if (_isPeriodError(err)) return unavailable('out-of-range');
+    logger.warn('Performance: last year\'s figures unavailable for the comparison', { userId, tenantId, error: err.message });
+    return unavailable('unavailable');
+  }
+  const shifted = perf.months.map(m => _yearEarlier(m.key));
+  const built = _buildPriorYear({
+    months: perf.months,
+    current: perf.totals,
+    prior: _buildPerformance({ months: pbv.months, rows: pbv.rows, cash: null }).totals,
+    closed,
+    priorClosed: _closedCount(shifted, _todayPartsInTz(timezone)),
+  });
+  logger.info('Performance: same months last year compared', {
+    userId, tenantId, available: built.available, compared: built.compared?.count || 0, cached: pbv.cached,
+  });
+  return { ...built, cached: pbv.cached, fetchedAt: pbv.fetchedAt };
+}
+
 async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = false, window = 'fy', period, cashFlow = false, customers = false } = {}) {
   // Reuses the budget-variance fetch and its cache — on a warm cache this whole
   // endpoint costs one Xero call (the bank summary) rather than three.
@@ -514,11 +677,28 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
 // the declaration, through the one in-flight map in ./report-cache, so the Cash
 // Flow tab and the commentary, which ask for it in turn, go through the same
 // in-flight map as the /performance route.
-const getPerformance         = _dedupe('getPerformance', _getPerformanceRaw,
+const _getPerformanceShared  = _dedupe('getPerformance', _getPerformanceRaw,
   { timezone: 'UTC', force: false, window: 'fy', cashFlow: false, customers: false });
 
+// The dashboard figures, with the same months last year added when `compare`
+// is 'prior-year' (see _priorYear). Anything else, or nothing, is the report
+// exactly as it was.
+//
+// Added outside the shared fetch rather than inside it, so asking for the
+// comparison still shares the figures in flight with the Cash Flow tab and
+// the commentary, which never ask for it. The only extra work is last year's
+// report, and that is shared and cached in its own right.
+async function getPerformance(userId, tenantId, opts = {}) {
+  const { compare, ...rest } = opts || {};
+  const perf = await _getPerformanceShared(userId, tenantId, rest);
+  if (compare !== PRIOR_YEAR) return perf;
+  const { timezone = 'UTC', force = false } = rest;
+  return { ...perf, priorYear: await _priorYear(userId, tenantId, perf, { timezone, force }) };
+}
+
 module.exports = {
-  getPerformance,
+  getPerformance, PRIOR_YEAR,
   _sectionTotal, _isRecurringName, _recurringFor, _buildPerformance, _growthPct, _buildGrowth,
   _buildWatchList, _buildCustomerRevenue, _xeroDay, _buildQuotePipeline,
+  _buildPriorYear, _priorYearSpan, _yearEarlier,
 };

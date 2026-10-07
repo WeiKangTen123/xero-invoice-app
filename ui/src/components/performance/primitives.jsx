@@ -22,7 +22,10 @@ export function sliceSum(series, from, to) { return sum(slice(series, from, to))
 // figure is worth more in an accounting tool than "128.4K". The three-across
 // KPI row at the top of the page does abbreviate, because ~118px leaves no
 // choice.
-export function Metric({ label, value, meter, footLeft, footRight, tone }) {
+//
+// `compare` is an optional last line, the comparison with the same months last
+// year (see PriorYearLine). Only the tiles that have one pass it.
+export function Metric({ label, value, meter, footLeft, footRight, tone, compare }) {
   const width = meter === null || meter === undefined ? null : Math.max(0, Math.min(100, meter));
   return (
     <div className="card figure-tile" style={{ flex: 1, minWidth: 190, background: 'var(--bg-secondary)', display: 'flex', flexDirection: 'column', gap: 9 }}>
@@ -38,6 +41,11 @@ export function Metric({ label, value, meter, footLeft, footRight, tone }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10.5, color: 'var(--text-muted)' }}>
         <span>{footLeft}</span><span>{footRight}</span>
       </div>
+      {compare && (
+        <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.4, borderTop: '1px solid var(--border)', paddingTop: 7 }}>
+          {compare}
+        </div>
+      )}
     </div>
   );
 }
@@ -128,12 +136,17 @@ export function WatchBand({ items }) {
   );
 }
 
+// An item marked `dashed` is drawn as a short dashed line rather than a
+// swatch, matching a series the chart draws as one — so the key says which
+// mark is which by its form as well as its colour.
 export function Legend({ items }) {
   return (
     <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 10.5, color: 'var(--text-muted)', marginTop: 8 }}>
       {items.map(i => (
         <span key={i.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ width: 9, height: 9, borderRadius: 2, background: i.color, opacity: i.opacity ?? 1, display: 'inline-block' }} />
+          {i.dashed
+            ? <span style={{ width: 16, height: 0, borderTop: `2px dashed ${i.color}`, display: 'inline-block' }} />
+            : <span style={{ width: 9, height: 9, borderRadius: 2, background: i.color, opacity: i.opacity ?? 1, display: 'inline-block' }} />}
           {i.label}
         </span>
       ))}
@@ -272,6 +285,99 @@ export function rangeGrowth(d, from, to) {
     yoy: yoyIdx >= 0 ? pct(series[lastClosed], series[yoyIdx]) : null,
     yoyLabel: yoyIdx >= 0 ? label(yoyIdx) : null,
   };
+}
+
+// The same months last year, for the SELECTED range: the server's comparison
+// re-summed over its compared months that fall inside [from, to], as
+// rangeGrowth does for growth — every figure on these panels follows the
+// range, and one beside them covering a different span would describe
+// neither. The server decides which months may be compared at all (closed
+// this year, and recorded last year); this only narrows them to the range.
+//
+// Null when the report carries no comparison: it was not asked for, or the
+// report that has it is still loading. { available: false, reason } when there
+// is none to give. The percentage follows the server's rule: null, never
+// invented, when last year's figure is zero or negative.
+//
+// Self-contained on purpose — no imports, no React — so a test can read it
+// straight out of this file and run it.
+export function priorYearRange(d, from, to) {
+  const py = d?.priorYear;
+  if (!py) return null;
+  if (!py.available) return { available: false, reason: py.reason };
+  const idx = [];
+  for (let i = from; i <= to; i++) if (py.months?.[i]?.compared) idx.push(i);
+  if (!idx.length) return { available: false, reason: 'none-in-range' };
+
+  const cents = v => { const r = Math.round(v * 100) / 100; return r === 0 ? 0 : r; };
+  const pct = (c, p) => (Number.isFinite(c) && Number.isFinite(p) && p > 0 ? (c - p) / p : null);
+  const measure = key => {
+    const t = py.totals?.[key];
+    if (!t) return null;
+    const prior   = cents(idx.reduce((s, i) => s + Number(t.monthly[i] || 0), 0));
+    const current = cents(idx.reduce((s, i) => s + Number(t.thisYearMonthly[i] || 0), 0));
+    return { prior, current, change: cents(current - prior), pct: pct(current, prior) };
+  };
+  const first = idx[0], last = idx[idx.length - 1];
+  return {
+    available: true,
+    count: idx.length,
+    fromLabel: d.months[first].label,
+    toLabel: d.months[last].label,
+    priorFromLabel: py.months[first].label,
+    priorToLabel: py.months[last].label,
+    // Where last year's records begin, when that is what cut the comparison
+    // short of the start of the range.
+    recordsFromLabel: first > from && py.compared?.firstActivityLabel ? py.compared.firstActivityLabel : null,
+    revenue:     measure('revenue'),
+    grossProfit: measure('grossProfit'),
+    opex:        measure('opex'),
+    netProfit:   measure('netProfit'),
+  };
+}
+
+// A change on last year as text: "+12.3%", or the amount ("+SGD 1,200.00")
+// when there is no percentage to give because last year's figure was zero or
+// negative. Never a percentage the server would not give.
+export function changeText(c, currency) {
+  const sign = c.change > 0 ? '+' : c.change < 0 ? '-' : '';
+  return c.pct !== null && c.pct !== undefined
+    ? `${sign}${fmtPct(Math.abs(c.pct), 1)}`
+    : `${sign}${fmtMoney(Math.abs(c.change), currency)}`;
+}
+
+// Why there is no comparison, said as the end of a sentence.
+export function priorYearReason(reason) {
+  switch (reason) {
+    case 'no-closed-month': return 'no month of this period has closed yet';
+    case 'none-in-range':   return 'no closed month in the selected range';
+    case 'no-data':         return 'nothing was recorded in Xero for the same months last year';
+    case 'out-of-range':    return 'last year falls before the years this dashboard reads';
+    default:                return 'last year\'s figures could not be read from Xero just now';
+  }
+}
+
+// The months compared, as "Jan – Sep 2026 against Jan – Sep 2025".
+export function comparedText(c) {
+  const span = (a, b) => (a === b ? a : `${a} – ${b}`);
+  return `${span(c.fromLabel, c.toLabel)} against ${span(c.priorFromLabel, c.priorToLabel)}`;
+}
+
+// One tile's comparison line: "vs same months last year: +12.3%", coloured by
+// direction. `what` names the figure when the tile's headline is a different
+// one (a margin tile comparing profit). The hover says which months and the
+// two amounts, so the percentage can always be checked.
+export function PriorYearLine({ what, c, range, currency }) {
+  if (!c) return null;
+  const tone = c.change > 0 ? 'var(--success)' : c.change < 0 ? 'var(--danger)' : 'var(--text-muted)';
+  const title = `${comparedText(range)}: ${fmtMoney(c.current, currency)} against ${fmtMoney(c.prior, currency)}`
+    + (c.pct === null ? ' (no percentage: last year was nil or a loss)' : '');
+  return (
+    <span title={title}>
+      {what ? `${what} ` : ''}vs same months last year:{' '}
+      <strong style={{ color: tone, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{changeText(c, currency)}</strong>
+    </span>
+  );
 }
 
 export function AlertBand({ alerts, counts, currency }) {

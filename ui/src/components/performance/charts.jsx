@@ -275,3 +275,78 @@ export function GroupedMonthlyBars({ months, series, currency, height = 200, per
     </div>
   );
 }
+
+// This year's figure per month as columns, and the same month last year as a
+// dashed line over them, on one scale. The two are told apart by form, a
+// column against a dashed line, so the legend does not rest on colour alone.
+//
+// A month that has not closed is drawn faded: part-booked against a whole
+// month, it reads as a fall that is only the calendar, and the line is there
+// to compare against, not to be beaten by a month still in progress. A null in
+// `prior` is a month last year has no figure for yet, and the line breaks
+// there rather than dropping to a zero nobody recorded.
+export function PriorYearBars({ months, priorMonths, current, prior, closed, currency, label, height = 200 }) {
+  const n = months.length;
+  if (!n) return <Empty>Pick a wider period.</Empty>;
+  const has = v => v !== null && v !== undefined;
+  const all = [...current, ...prior.filter(has)];
+  if (!all.some(v => v !== 0)) return <Empty>Nothing recorded in this period or the same months last year.</Empty>;
+
+  const W = 720, H = height, padB = 26, padT = 12;
+  const plot = H - padB - padT;
+  const minV = Math.min(0, ...all);
+  const range = Math.max(...all, 0) - minV || 1;
+  const y = v => padT + plot * (1 - (v - minV) / range);
+  const slot = W / n;
+  const bw = Math.min(26, slot * 0.5);
+  const cx = i => slot * i + slot / 2;
+
+  // The line as runs of consecutive months that have a figure.
+  const runs = [];
+  prior.forEach((v, i) => {
+    if (!has(v)) return;
+    if (i > 0 && has(prior[i - 1])) runs[runs.length - 1].push(i);
+    else runs.push([i]);
+  });
+  const path = run => run.map((i, k) => `${k ? 'L' : 'M'}${cx(i).toFixed(1)},${y(prior[i]).toFixed(1)}`).join(' ');
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', minWidth: n > 6 ? 520 : 0, display: 'block' }}
+           role="img" aria-label={`${label} by month, with the same month last year`}>
+        <line x1="0" x2={W} y1={y(0)} y2={y(0)} stroke="var(--border)" strokeWidth="1" />
+        {months.map((m, i) => {
+          const v = current[i] || 0;
+          const open = i >= closed;
+          return (
+            <g key={m.key}>
+              {v !== 0 && (
+                <rect x={cx(i) - bw / 2} width={bw} y={Math.min(y(v), y(0))} height={Math.abs(y(v) - y(0))}
+                      fill={v < 0 ? 'var(--danger)' : 'var(--accent)'} opacity={open ? 0.35 : 1} rx="2">
+                  <title>{`${m.label} ${label.toLowerCase()}: ${fmtMoney(v, currency)}${open ? ' (month not closed)' : ''}`}</title>
+                </rect>
+              )}
+              <text x={cx(i)} y={H - 8} textAnchor="middle" fontSize="10" fill="var(--text-muted)">
+                {m.label.replace(' 20', " '")}
+              </text>
+            </g>
+          );
+        })}
+        {runs.map(run => (
+          <path key={run[0]} d={path(run)} fill="none" stroke="var(--text-secondary)" strokeWidth="2"
+                strokeDasharray="5 4" strokeLinejoin="round" strokeLinecap="round" />
+        ))}
+        {prior.map((v, i) => (has(v) ? (
+          <g key={`py-${months[i].key}`}>
+            <circle cx={cx(i)} cy={y(v)} r="4" fill="var(--bg-card)" stroke="var(--text-secondary)" strokeWidth="2" />
+            {/* A wider, invisible target than the marker, so the figure can be
+                hovered without hunting for a 4px dot. */}
+            <circle cx={cx(i)} cy={y(v)} r="11" fill="transparent">
+              <title>{`${priorMonths?.[i]?.label || 'Same month last year'} ${label.toLowerCase()}: ${fmtMoney(v, currency)}`}</title>
+            </circle>
+          </g>
+        ) : null))}
+      </svg>
+    </div>
+  );
+}

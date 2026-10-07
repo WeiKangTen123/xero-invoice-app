@@ -7,7 +7,7 @@ const budgetDoc        = require('../reports/budget-doc');
 const budgetRender     = require('../reports/budget-render');
 const tokenCache        = require('../utils/token-cache');
 const reports           = require('../xero/reports');
-const { _periodFromQueryParams, _isPeriodError } = require('../xero/periods');
+const { _periodFromQueryParams, _isPeriodError, PeriodError } = require('../xero/periods');
 const { xeroErrMsg, isScopeError } = require('../xero/xero-utils');
 const { getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const logger             = require('../utils/logger');
@@ -72,10 +72,14 @@ router.get('/budget-variance', requireAuth, report('Budget vs Actual',
   (req, t) => reports.getBudgetVariance(req.user.id, t, { timezone: tz(req), force: force(req), period: _budgetPeriodFromQuery(req) })));
 // Powers Dashboard -> Overview and Revenue. Composed from the budget-variance
 // fetch plus a bank summary, so it needs no scope those two don't already have.
+// ?compare=prior-year adds the same months last year (one more budget-variance
+// report, which only the tabs that show it ask for); without it the payload is
+// exactly what it was.
 router.get('/performance', requireAuth, report('Performance overview',
   (req, t) => reports.getPerformance(req.user.id, t, {
     timezone: tz(req), period: _periodFromQuery(req),
     cashFlow: req.query.cashFlow === 'true', customers: req.query.customers === 'true', force: force(req),
+    ..._compareFromQuery(req),
   })));
 // Xero has no cash-flow-statement endpoint, so this is built from Bank Summary,
 // Payments, Bank Transactions and Invoices. Every one of those is a read.
@@ -255,6 +259,23 @@ function _periodFromQuery(req) {
 // it is now refused instead.
 function _budgetPeriodFromQuery(req) {
   return _periodFromQueryParams(req.query, undefined);
+}
+
+// The comparison /performance was asked for, as options to spread into the
+// report's: { compare: 'prior-year' }, or nothing at all when none was asked
+// for. Checked like a period, because it is one — last year's months, fetched
+// from Xero — and refused the same way: an unknown value, or the parameter
+// repeated, is a 400 before any Xero call, rather than quietly read as no
+// comparison, which would leave the reader wondering where it went. An empty
+// value counts as absent, as it does for a period.
+const COMPARISONS = new Set(['prior-year']);
+function _compareFromQuery(req) {
+  const c = req.query.compare;
+  if (c === undefined || c === '') return {};
+  if (typeof c !== 'string' || !COMPARISONS.has(c)) {
+    throw new PeriodError(`Unknown comparison "${String(c).slice(0, 40)}" — the one available is compare=prior-year`);
+  }
+  return { compare: c };
 }
 
 // A call outside the token's granted scopes — the situation for anyone who
