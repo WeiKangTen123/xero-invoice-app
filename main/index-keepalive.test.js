@@ -15,10 +15,14 @@ jest.mock('./utils/invoice-handler', () => ({
 }));
 let mockLoadError = null;
 const mockKeepalive = { start: jest.fn() };
+// Not { virtual: true }: the module exists now, and a virtual mock is keyed by
+// the path as written (no extension) while index.js resolves the real file
+// (.js). Windows happened to match the two; on Linux CI the real module loaded
+// and the mock was never called.
 jest.mock('./jobs/xero-keepalive', () => {
   if (mockLoadError) throw mockLoadError;
   return mockKeepalive;
-}, { virtual: true });
+});
 
 const PROCESS_EVENTS = ['uncaughtException', 'unhandledRejection', 'SIGTERM', 'SIGINT'];
 let app, onListen, logger, registry, emailWorker, claimWorker, receipts, listenersBefore, originalResume;
