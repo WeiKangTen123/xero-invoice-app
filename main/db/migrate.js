@@ -154,6 +154,10 @@ function run() {
     ['claim_kind', 'claim_kind TEXT'], ['claim_quantity', 'claim_quantity REAL'],
     ['claim_rate', 'claim_rate REAL'], ['claim_unit', 'claim_unit TEXT'], ['claim_details', 'claim_details TEXT'],
   ]) _ensureColumn('invoices', col, ddl);
+  // Which fields supplier memory filled in on a new bill or invoice, and from
+  // which earlier record (JSON). NULL on every existing row: nothing on them
+  // was remembered, they were read or typed.
+  _ensureColumn('invoices', 'prefilled_from', 'prefilled_from TEXT');
   // Here rather than in schema.sql: the schema runs first, and on a database
   // without the column an index naming it would stop the boot.
   db.exec('CREATE INDEX IF NOT EXISTS idx_invoices_message_id ON invoices(user_id, message_id)');

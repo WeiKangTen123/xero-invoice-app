@@ -213,7 +213,14 @@ CREATE TABLE IF NOT EXISTS invoices (
   claim_quantity      REAL,     -- km, or days in half-day steps
   claim_rate          REAL,     -- per km, or per day, in the claim's currency
   claim_unit          TEXT,     -- 'km' | 'day'
-  claim_details       TEXT
+  claim_details       TEXT,
+  -- Which fields were filled from the last bill or invoice a person settled
+  -- for the same contact (utils/supplier-memory.js), and from which record:
+  -- JSON { accountCode: { fromId, fromNumber, fromDate }, currency: ..., xeroTenantId: ... }.
+  -- The review page says so beside each one. A field's entry is dropped when
+  -- its value is changed (invoice-store update), since it is then a person's
+  -- choice and no longer what was remembered. NULL = nothing was prefilled.
+  prefilled_from      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(user_id, status);

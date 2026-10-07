@@ -37,13 +37,20 @@ function _tenantError(message, code) {
 // chosen default while that is still connected, or to the only org there is.
 // With several connected and none chosen there is no right answer to guess,
 // so nothing is sent.
+//
+// A new one may also carry the company its contact's last bill went to
+// (utils/supplier-memory.js), which is used while it is connected. That is a
+// suggestion, not where the document lives: if the company has gone since,
+// the choice below is made as if nothing were stored, rather than refusing a
+// bill that is in no company at all.
 function chooseTenant(userId, invoiceData, tenants) {
   const connected = id => tenants.find(t => String(t.tenant_id) === String(id)) || null;
 
   if (invoiceData.xeroTenantId) {
     const stored = connected(invoiceData.xeroTenantId);
-    if (!stored) throw _tenantError(TENANT_GONE_MSG, 'XERO_TENANT_GONE');
-    return stored;
+    if (stored) return stored;
+    const remembered = !invoiceData.xeroInvoiceId && !!invoiceData.prefilledFrom?.xeroTenantId;
+    if (!remembered) throw _tenantError(TENANT_GONE_MSG, 'XERO_TENANT_GONE');
   }
 
   // With one org connected a default can only name that org or one that is

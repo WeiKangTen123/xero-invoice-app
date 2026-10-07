@@ -302,6 +302,10 @@ function parseTemplateFormat(rawText, email, defaults) {
     invoiceDate,
     dueDate,
     currency:         templateCurrency || _detectCurrency(text) || defaults.currency,
+    // Whether the document itself named the currency. The line above falls
+    // back to the Setup default, and supplier memory (utils/supplier-memory.js)
+    // must not mistake that fallback for a currency the supplier stated.
+    currencyStated:   !!(templateCurrency || _detectCurrency(text)),
     brandingThemeName,
     lineAmountTypes,
     lineItems,
@@ -392,6 +396,10 @@ function parseGenericFormat(text, email, defaults) {
     invoiceDate,
     dueDate,
     currency:         _detectCurrency(text) || defaults.currency,
+    // Whether the document itself named the currency. The line above falls
+    // back to the Setup default, and supplier memory (utils/supplier-memory.js)
+    // must not mistake that fallback for a currency the supplier stated.
+    currencyStated:   !!_detectCurrency(text),
     brandingThemeName:'Standard',
     lineAmountTypes:  'Exclusive',
     lineItems: [{
@@ -545,6 +553,7 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   // A model that answers "S$" or "sgd" is cleaned to the code Xero takes, the
   // same way the row builder cleans it (intake/record.js).
   const currency    = cleanCurrency(llm.currency) || _detectCurrency(text) || defaults.currency;
+  const currencyStated = !!(cleanCurrency(llm.currency) || _detectCurrency(text));
   const totalAmount = intake.money(llm.totalAmount) ?? 0;
   const subTotal    = intake.money(llm.subTotal);
   const taxAmount   = intake.money(llm.taxAmount);
@@ -577,6 +586,10 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     // Regex fallback covers the rare case the LLM leaves currency null on text that
     // actually does state it — belt-and-braces, not the primary detection path.
     currency,
+    // Whether the document itself named the currency. The line above falls
+    // back to the Setup default, and supplier memory (utils/supplier-memory.js)
+    // must not mistake that fallback for a currency the supplier stated.
+    currencyStated,
     brandingThemeName:'Standard',
     lineAmountTypes:  'Exclusive',
     lineItems,
@@ -651,6 +664,10 @@ async function parseImageBill(att, email, userId, defaults = _userDefaults(userI
     invoiceDate,
     dueDate:          intake.addDays(invoiceDate, 30),
     currency:         r?.currency || defaults.currency,
+    // Whether the document itself named the currency. The line above falls
+    // back to the Setup default, and supplier memory (utils/supplier-memory.js)
+    // must not mistake that fallback for a currency the supplier stated.
+    currencyStated:   !!r?.currency,
     brandingThemeName:'Standard',
     lineAmountTypes:  'Exclusive',
     lineItems,

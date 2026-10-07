@@ -435,7 +435,7 @@ describe('utils/invoice-store — every mapped field survives a round trip', () 
       if (field === 'hasPdf')      { sample[field] = true; continue; }
       if (field === 'duplicateOf') continue;   // FK to another invoice
       // Stored as JSON and handed back as the object it was.
-      if (field === 'claimDetails') { sample[field] = { note: `v-${field}` }; continue; }
+      if (field === 'claimDetails' || field === 'prefilledFrom') { sample[field] = { note: `v-${field}` }; continue; }
       sample[field] = MONEY.has(field) ? 12.34 : `v-${field}`;
     }
 
@@ -446,7 +446,7 @@ describe('utils/invoice-store — every mapped field survives a round trip', () 
     for (const [field, value] of Object.entries(sample)) {
       const got = saved[field];
       if (field === 'hasPdf') { if (got !== true) missing.push(field); continue; }
-      if (field === 'claimDetails') { if (JSON.stringify(got) !== JSON.stringify(value)) missing.push(field); continue; }
+      if (field === 'claimDetails' || field === 'prefilledFrom') { if (JSON.stringify(got) !== JSON.stringify(value)) missing.push(field); continue; }
       // Undefined means _rowToRecord forgot it. A differing value means the
       // column mapping is wrong. Both are the same class of bug.
       if (got === undefined || got === null || got !== value) missing.push(`${field} (got ${JSON.stringify(got)}, want ${JSON.stringify(value)})`);

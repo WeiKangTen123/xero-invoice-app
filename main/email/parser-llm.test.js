@@ -155,3 +155,29 @@ describe('the LLM bill path flags what does not add up', () => {
     expect(r.currency).toBe('AUD');
   });
 });
+
+// Supplier memory (utils/supplier-memory.js) carries a supplier's last
+// currency onto a bill that names none. The reader fills a missing currency
+// with the Setup default, so it says separately whether the document stated
+// one; without that, a home-currency bill from a supplier who last billed in
+// USD would be switched to USD.
+describe('whether the document stated its currency', () => {
+  const bill = (over = {}) => ({
+    vendorName: 'Acme', invoiceNumber: 'A-11', invoiceDate: '2026-09-01', documentType: 'invoice',
+    lineItems: [{ description: 'Design', amount: 1000 }], subTotal: 1000, taxAmount: 0, totalAmount: 1000, ...over,
+  });
+
+  test('a currency the reader found is stated, even when it is the Setup default', async () => {
+    extractWithRetry.mockResolvedValue(bill({ currency: 'SGD' }));
+    const r = await parsePDFWithLLM('text', EMAIL, 'a.pdf', 'u1', DEFAULTS);
+    expect(r.currency).toBe('SGD');
+    expect(r.currencyStated).toBe(true);
+  });
+
+  test('none found anywhere: the Setup default is used, and it is not stated', async () => {
+    extractWithRetry.mockResolvedValue(bill({ currency: null }));
+    const r = await parsePDFWithLLM('no money words here', EMAIL, 'a.pdf', 'u1', DEFAULTS);
+    expect(r.currency).toBe('SGD');
+    expect(r.currencyStated).toBe(false);
+  });
+});

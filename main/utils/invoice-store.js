@@ -76,6 +76,10 @@ const FIELD_TO_COLUMN = {
   // claim was made), the unit, and what was typed, as an object.
   claimKind: 'claim_kind', claimQuantity: 'claim_quantity', claimRate: 'claim_rate',
   claimUnit: 'claim_unit', claimDetails: 'claim_details',
+  // Which fields supplier memory filled in, and from which earlier record
+  // (utils/supplier-memory.js), as an object. Not editable through the
+  // invoice routes; update() below drops a field's entry when its value moves.
+  prefilledFrom: 'prefilled_from',
 };
 
 // Claims whose amount is quantity x rate. The amount on one of these is worked
@@ -99,6 +103,28 @@ function _detailsKey(details) {
   return JSON.stringify(Object.keys(d).sort().map(k => [k, norm(d[k])]));
 }
 
+// The provenance left after a patch, or undefined when it does not change.
+// A remembered value that a person (or any later write) replaces is theirs
+// now, so its "from last bill" note would be false; it is dropped here, in the
+// one write path every edit route, the chat assistant and bulk edits share.
+// The review page sends its whole form on Save, so a field is only counted as
+// edited when its value actually differs from what is stored.
+function _provenanceAfter(existing, patch) {
+  if (patch.prefilledFrom !== undefined) return undefined;   // written on purpose
+  const current = _parseDetails(existing.prefilled_from);
+  if (!current) return undefined;
+  const same = (a, b) => String(a ?? '').trim() === String(b ?? '').trim();
+  const kept = { ...current };
+  let changed = false;
+  for (const field of Object.keys(current)) {
+    const column = FIELD_TO_COLUMN[field];
+    if (!column || patch[field] === undefined || same(patch[field], existing[column])) continue;
+    delete kept[field];
+    changed = true;
+  }
+  return changed ? kept : undefined;
+}
+
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
 // but every caller outside this file works in decimal dollars — these two helpers
 // are the only place that boundary is crossed.
@@ -118,6 +144,9 @@ function _dollarsOrNull(value) {
 function _toBindable(field, value) {
   if (MONEY_FIELDS.has(field)) return _dollarsToCents(value);
   if (field === 'claimDetails' && value && typeof value === 'object') return JSON.stringify(value);
+  // An empty provenance is stored as nothing, so "was anything remembered"
+  // is a NULL check rather than a parse.
+  if (field === 'prefilledFrom') return value && typeof value === 'object' && Object.keys(value).length ? JSON.stringify(value) : null;
   if (typeof value === 'boolean') return value ? 1 : 0;
   if (value === undefined) return null;
   return value;
@@ -172,6 +201,7 @@ function _rowToRecord(row, reports, lineItems) {
     claimRate:         row.claim_rate ?? null,
     claimUnit:         row.claim_unit ?? null,
     claimDetails:      _parseDetails(row.claim_details),
+    prefilledFrom:     _parseDetails(row.prefilled_from),
     // What Xero says about it now (xero/status-sync.js). Not in
     // FIELD_TO_COLUMN on purpose: only the status check writes them, so no
     // edit, copy or split of a record can carry another record's Xero state.
@@ -262,9 +292,26 @@ function forUser(userId) {
     return _hydrateMany(rows);
   }
 
+  // One record, as the review page and every single-record route read it.
+  // setupAccountCode is not stored: it is the account posting falls back to
+  // when neither the record nor the Xero contact names one, so the page can
+  // say which account a record with none of its own will go to. Read only
+  // here, not for lists, which never show it.
   function getById(id) {
     const row = db.prepare('SELECT * FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
-    return _hydrate(row);
+    const record = _hydrate(row);
+    if (record) record.setupAccountCode = _setupAccountCode(record.invoiceType);
+    return record;
+  }
+
+  // Display only, so a failure to read Setup costs the hint, never the record.
+  function _setupAccountCode(invoiceType) {
+    try {
+      const { setupAccountFor } = require('./supplier-memory');
+      return setupAccountFor(require('./users').getUserDefaults(userId), invoiceType) || null;
+    } catch (_) {
+      return null;
+    }
   }
 
   function add(invoice) {
@@ -295,7 +342,9 @@ function forUser(userId) {
   }
 
   function update(id, patch) {
-    const existing = db.prepare('SELECT status, post_note, currency, claim_kind FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
+    // Every column, so the provenance check can compare any remembered field
+    // with what is stored without this list having to grow alongside it.
+    const existing = db.prepare('SELECT * FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
     if (!existing) return null;
 
     if (ALLOWANCE_KINDS.has(existing.claim_kind) && patch.claimQuantity === undefined) {
@@ -325,6 +374,8 @@ function forUser(userId) {
         : _toBindable(field, value));
     }
     if (closesSend) sets.push('post_note = NULL');
+    const provenance = _provenanceAfter(existing, patch);
+    if (provenance !== undefined) { sets.push('prefilled_from = ?'); args.push(_toBindable('prefilledFrom', provenance)); }
     // An exchange rate is a rate for the currency it came with. A person who
     // changes the currency would otherwise send the old rate with the new one.
     if (patch.currency !== undefined && patch.currencyRate === undefined && patch.currency !== existing.currency) {
@@ -580,6 +631,28 @@ function forUser(userId) {
     return hit ? _hydrate(hit) : null;
   }
 
+  // The newest bill (or sales invoice) from this contact that a person
+  // settled, for supplier memory to prefill a new one from. Settled means it
+  // went to Xero and Xero has not voided or deleted it, or someone marked it
+  // reviewed. A duplicate copies another row and an error row was never
+  // agreed to, so neither counts; nor do claims, which are one purchase each,
+  // not a supplier relationship. Contacts are compared normalised, as the
+  // duplicate checks compare them. Newest stored first, as lastBillFrom.
+  function lastSettledFrom(vendorName, invoiceType, excludeId = null) {
+    const normV = _normalizeVendor(vendorName);
+    if (!normV || !['ACCPAY', 'ACCREC'].includes(invoiceType)) return null;
+    const rows = db.prepare(`
+      SELECT * FROM invoices
+      WHERE user_id = ? AND invoice_type = ? AND claim_kind IS NULL AND id IS NOT ?
+        AND status NOT IN ('duplicate', 'error')
+        AND (status IN ('reviewed', 'posted') OR ${IN_XERO})
+        AND (xero_status IS NULL OR xero_status NOT IN ('VOIDED', 'DELETED'))
+      ORDER BY rowid DESC
+    `).all(userId, invoiceType, excludeId);
+    const hit = rows.find(r => _normalizeVendor(r.vendor_name || r.contact_name) === normV);
+    return hit ? _hydrate(hit) : null;
+  }
+
   // Another mileage or per diem claim for the same thing: the same kind, day
   // and quantity, and the same details typed. Only ever a warning (the claim
   // routes note it, they do not refuse it): two identical drives on one day
@@ -663,7 +736,7 @@ function forUser(userId) {
 
   return { getAll, getById, add, update, addPostingNote, addReport, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
            releaseInterrupted, count, countByStatus, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash,
-           findByMessage, lastBillFrom, listInXero, recordXeroStatus, markXeroChecked, findAllowanceDuplicate };
+           findByMessage, lastBillFrom, lastSettledFrom, listInXero, recordXeroStatus, markXeroChecked, findAllowanceDuplicate };
 }
 
 module.exports = { forUser, FIELD_TO_COLUMN, normalizeInvoiceNumber, ALLOWANCE_KINDS };

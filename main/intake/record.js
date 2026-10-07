@@ -64,7 +64,12 @@ function buildRecord({ id = newId(), document: doc, invoiceType, source, default
       description: li.description, unitAmount: li.unitAmount, discountRate: li.discountRate || 0,
     })),
     description:      doc.description || '',
-    accountCode:      defaults.accountCode || '',
+    // Only an account the document or a person named, passed as an extra.
+    // Setup's default is not written here: on the row it outranked the Xero
+    // contact's own default at posting, so that never applied. Posting falls
+    // back to the contact's default, then Setup's (xero/invoices.js), and
+    // supplier memory may fill this in before the row is stored.
+    accountCode:      '',
     taxAmount:        doc.taxAmount || 0,
     subTotal:         doc.subTotal || 0,
     paymentReference: doc.paymentReference || '',

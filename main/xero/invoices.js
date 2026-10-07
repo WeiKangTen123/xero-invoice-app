@@ -6,6 +6,7 @@ const axios                          = require('axios');
 const { resolveContact, cleanContactName, NO_NAME_MSG } = require('./contacts');
 const { withRetry, xeroErrMsg, _parseXeroErr } = require('./xero-utils');
 const logger                         = require('../utils/logger');
+const { setupAccountFor }            = require('../utils/supplier-memory');
 
 // Per-tenant base currency cache — avoids an extra Xero API call on every invoice.
 // Populated lazily on first currency mismatch, persists for the server lifetime.
@@ -199,13 +200,17 @@ async function buildLineItems(invoiceData, userConfig, accountingApi, tenantId, 
 
   const defaults    = require('../utils/users').defaultsFrom(userConfig);
   const zeroRate    = defaults.zeroTaxRate;
-  // The account, first that is set: the document's own, then the default the
-  // contact carries in Xero for this kind of document (a supplier set up to
-  // post to Rent should not land in General Expenses), then Setup's default.
-  // The contact's default never overrides an account the document names.
+  // The account, first that is set: the record's own (what the document or a
+  // person named, or what supplier memory carried over from this contact's
+  // last settled bill), then the default the contact carries in Xero for this
+  // kind of document (a supplier set up to post to Rent should not land in
+  // General Expenses), then Setup's default. The contact's default never
+  // overrides an account the record names. Intake no longer writes Setup's
+  // default onto the record, which is what let the contact's apply at all;
+  // a record with none still lands on Setup's here, never on nothing.
   const { contactAccountCode, ...taxPrefer } = prefer;
-  const accountCode = invoiceData.accountCode || contactAccountCode
-    || defaults.accountCode[invoiceData.invoiceType === 'ACCREC' ? 'invoice' : 'bill'];
+  const accountCode = String(invoiceData.accountCode || '').trim() || contactAccountCode
+    || setupAccountFor(defaults, invoiceData.invoiceType);
   const inclusive   = invoiceData.lineAmountTypes === 'Inclusive';
   const { total, sub, tax } = _figures(invoiceData);
 

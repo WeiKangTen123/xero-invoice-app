@@ -1,12 +1,25 @@
 import { fmtMoney } from '../../utils/format';
 import AccountCodeSelect from '../../components/AccountCodeSelect';
 import { ALLOWANCE_KINDS, isAllowanceClaim } from '../../components/receipts/allowance';
-import { AccountMiniField, MiniField } from './bits';
+import { AccountMiniField, MiniField, PrefillNote, accountFallbackText } from './bits';
 
-export default function SummaryCard({ id, inv, editing, form, updateField, isExpense, typeLabel }) {
+export default function SummaryCard({ id, inv, editing, form, updateField, isExpense, typeLabel, navigate, xeroCompany }) {
   // Mileage and per diem have no receipt, so no receipt date; the date is the
   // day driven or the first day away.
   const allowance = isAllowanceClaim(inv);
+  // Fields filled from this contact's last settled bill, and from which one.
+  // In the editor a note stays only while the field still holds that value:
+  // once it is changed it is the person's choice, and saving drops the note
+  // for good (the store does that on any edit).
+  const prefilled = inv.prefilledFrom || {};
+  const openRecord = navigate ? fromId => navigate(`/invoices/${fromId}`) : null;
+  const note = (field, lead) => (
+    <PrefillNote from={prefilled[field]} invoiceType={inv.invoiceType} onOpen={openRecord} lead={lead} />
+  );
+  const unchanged = field => !editing || String(form?.[field] ?? '') === String(inv[field] ?? '');
+  // A company chosen before sending: only supplier memory sets one today.
+  // Once sent, the record's company is shown with the Xero ID instead.
+  const companyBeforeSending = inv.xeroTenantId && !inv.xeroInvoiceId;
   return (
             <div className="card">
               {editing ? (
@@ -23,6 +36,9 @@ export default function SummaryCard({ id, inv, editing, form, updateField, isExp
                         onChange={e => updateField('totalAmount', e.target.value)} />
                     </div>
                   </div>
+                  {prefilled.currency && unchanged('currency') && (
+                    <div style={{ marginTop: -8, marginBottom: 12 }}>{note('currency', `Currency ${inv.currency}`)}</div>
+                  )}
                   <div style={{ display: 'flex', gap: 8 }}>
                     <div className="form-group" style={{ flex: 1 }}>
                       <label htmlFor="rv-subtotal" className="form-label">Subtotal</label>
@@ -72,6 +88,12 @@ export default function SummaryCard({ id, inv, editing, form, updateField, isExp
                       onChange={v => updateField('accountCode', v)}
                       invoiceType={form.invoiceType}
                     />
+                    {prefilled.accountCode && unchanged('accountCode') && note('accountCode')}
+                    {!String(form.accountCode || '').trim() && (
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
+                        Left blank: {accountFallbackText(inv.setupAccountCode, !!inv.xeroInvoiceId)}
+                      </div>
+                    )}
                   </div>
                 </>
               ) : (
@@ -89,6 +111,7 @@ export default function SummaryCard({ id, inv, editing, form, updateField, isExp
                       ) : (
                         <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Total amount</div>
                       )}
+                      {prefilled.currency && note('currency', `Currency ${inv.currency}`)}
                     </div>
                     <span className="badge badge-gray" style={{ fontSize: 11 }}>{typeLabel}</span>
                   </div>
@@ -96,9 +119,14 @@ export default function SummaryCard({ id, inv, editing, form, updateField, isExp
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px' }}>
                     {/* A claim is a receipt: it has a reference and a receipt date, and no due date. */}
                     <MiniField label={isExpense ? 'Claim ref' : 'Invoice #'} value={inv.invoiceNumber} mono />
-                    <AccountMiniField code={inv.accountCode} />
+                    <AccountMiniField code={inv.accountCode} setupCode={inv.setupAccountCode} sent={!!inv.xeroInvoiceId}
+                      note={prefilled.accountCode && note('accountCode')} />
                     <MiniField label={allowance ? 'Date' : isExpense ? 'Receipt date' : 'Invoice Date'} value={inv.invoiceDate} />
                     {!isExpense && <MiniField label="Due Date" value={inv.dueDate} />}
+                    {companyBeforeSending && (
+                      <MiniField label="Xero company" value={xeroCompany || 'Loading…'}
+                        note={prefilled.xeroTenantId && note('xeroTenantId')} />
+                    )}
                   </div>
                   <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
                     Source: {

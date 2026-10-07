@@ -687,7 +687,7 @@ function InvoiceReviewPage() {
           }}>
 
             {/* Summary card */}
-            <SummaryCard id={id} inv={inv} editing={editFigures} form={form} updateField={updateField} isExpense={isExpense} typeLabel={typeLabel} />
+            <SummaryCard id={id} inv={inv} editing={editFigures} form={form} updateField={updateField} isExpense={isExpense} typeLabel={typeLabel} navigate={navigate} xeroCompany={xeroCompany} />
 
             {/* Claim Purpose / Description card */}
             {(inv.description || editFigures || inv.invoiceType === 'EXPENSE') && (

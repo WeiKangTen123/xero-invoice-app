@@ -11,6 +11,7 @@ const { normaliseDocument, parseDate, addDays, currencyCode, num } = require('./
 const { findDuplicate } = require('./dedup');
 const { buildRecord } = require('./record');
 const { profileFor } = require('./profiles');
+const supplierMemory = require('../utils/supplier-memory');
 const { locateHeader, cellText, cellDate, cellNumber } = require('../claims/claim-form');
 const jobs   = require('../jobs');
 const logger = require('../utils/logger');
@@ -82,15 +83,21 @@ function intakeInvoice(userId, input, { source = 'form', defaults = {} } = {}) {
   });
   if (dup) return { duplicate: true, id: dup.match.id, reason: dup.reason, certain: dup.certain };
 
+  // The account is the one typed, or none: the customer's sales default in
+  // Xero, then Setup's, are applied at posting, and a Setup default written
+  // here would outrank the customer's. Before that, supplier memory fills
+  // what was not typed from the last invoice to this customer a person
+  // settled. Here the form says plainly whether a currency was given.
   const record = buildRecord({
     document: doc, invoiceType: 'ACCREC', source, defaults,
     extras: {
       invoiceNumber: doc.number || `INV-${Date.now()}`,
       invoiceDate:   doc.date || new Date().toISOString().slice(0, 10),
       dueDate:       doc.dueDate || addDays(doc.date || new Date().toISOString().slice(0, 10), 30),
-      accountCode:   input.accountCode || defaults.accountCode || '',
+      accountCode:   String(input.accountCode || '').trim(),
     },
   });
+  supplierMemory.prefill(userId, record, { store, currencyStated: !!doc.currency });
   store.add(record);
   logger.info('Invoice composed', { userId, id: record.id, source, customer: record.contactName, total: record.totalAmount });
   return { id: record.id, status: record.status };

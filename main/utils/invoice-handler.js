@@ -8,6 +8,7 @@ const { buildRecord } = require('../intake/record');
 const { profileFor } = require('../intake/profiles');
 const { normaliseDocument, bankAccountIds } = require('../intake/document');
 const { hashBuffer } = require('../intake/dedup');
+const supplierMemory = require('./supplier-memory');
 const logger              = require('./logger');
 const invoiceStore        = require('./invoice-store');
 const pdfStore            = require('./pdf-store');
@@ -202,12 +203,20 @@ function createHandler(userId, { submitDelayMs = XERO_SUBMIT_DELAY_MS } = {}) {
     // PDF it stored and the email it came from. Fields the parser already
     // decided are passed through as extras so the builder does not re-derive
     // them and this stays a pure refactor.
+    //
+    // The account is the exception. The reader reads none from the page and
+    // puts the Setup default on every document, and stored on the row that
+    // default outranked the Xero contact's own default at posting, so the
+    // contact's never applied. Only an account other than a Setup default is
+    // kept as the document's; otherwise the row has none, supplier memory may
+    // fill it, and posting falls back to the contact's default, then Setup's.
+    const userDefaults = getUserDefaults(userId);
     const record = buildRecord({
       id,
       document:    normaliseDocument(invoiceData),
       invoiceType: invoiceData.invoiceType || 'ACCPAY',
       source:      invoiceData.source      || 'pdf',
-      defaults:    { accountCode: invoiceData.accountCode || '', currency: invoiceData.currency || getUserDefaults(userId).currency },
+      defaults:    { currency: invoiceData.currency || userDefaults.currency },
       extras: {
         hasPdf,
         pdfFilename:   invoiceData.pdfFilename    || null,
@@ -222,10 +231,10 @@ function createHandler(userId, { submitDelayMs = XERO_SUBMIT_DELAY_MS } = {}) {
         vendorPhone:   invoiceData.vendorPhone    || '',
         projectName:   invoiceData.projectName    || '',
         totalAmount:   invoiceData.totalAmount    || 0,
-        currency:      invoiceData.currency       || getUserDefaults(userId).currency,
+        currency:      invoiceData.currency       || userDefaults.currency,
         lineItems:     invoiceData.lineItems      || [],
         description:   invoiceData.description    || '',
-        accountCode:   invoiceData.accountCode    || '',
+        accountCode:   supplierMemory.documentAccountCode(invoiceData.accountCode, userDefaults),
         taxAmount:     invoiceData.taxAmount      || 0,
         subTotal:      invoiceData.subTotal       || 0,
         paymentReference: invoiceData.paymentReference || '',
@@ -240,6 +249,14 @@ function createHandler(userId, { submitDelayMs = XERO_SUBMIT_DELAY_MS } = {}) {
         receiptMime:   photo?.file ? photo.mime : undefined,
       },
     });
+
+    // What this contact's last settled bill or invoice was coded to, the
+    // currency it was in when this one names none, and the company it went to.
+    // Fills only what the row does not already say, and never touches a
+    // figure, a number or a hold. The reader says whether the document named
+    // its currency (currencyStated); a path that does not say is read by the
+    // old rule, where the Setup default counts as "not stated".
+    supplierMemory.prefill(userId, record, { store: invStore, defaults: userDefaults, currencyStated: invoiceData.currencyStated });
 
     // Before the row is added, so the supplier's last bill is not this one.
     const bank = bankDetailsChange(invStore, record);

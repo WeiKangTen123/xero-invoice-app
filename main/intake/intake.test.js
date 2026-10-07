@@ -211,13 +211,16 @@ describe('intake/record — one row builder', () => {
     expect(claim.status).toBe('review-needed');
     expect(claim.invoiceType).toBe('EXPENSE');   // the store's own vocabulary, not the Xero type
   });
-  test('the row carries what the handler always wrote, with the same defaults', () => {
+  // Setup's account is no longer written onto the row: there it outranked the
+  // Xero contact's own default at posting. Posting applies it last instead.
+  test('the row carries what the handler always wrote, except the Setup account', () => {
     const r = buildRecord({ document: d, invoiceType: 'ACCPAY', source: 'email', defaults: { accountCode: '310' } });
     expect(r).toMatchObject({
       vendorName: 'Isetan', contactName: 'Isetan', invoiceNumber: 'A-1', invoiceDate: '2026-08-10',
-      totalAmount: 109, subTotal: 100, taxAmount: 9, currency: 'SGD', accountCode: '310',
+      totalAmount: 109, subTotal: 100, taxAmount: 9, currency: 'SGD', accountCode: '',
       hasPdf: false, reports: [],
     });
+    expect(buildRecord({ document: d, invoiceType: 'ACCPAY', source: 'email', extras: { accountCode: '469' } }).accountCode).toBe('469');
     expect(r.lineItems).toEqual([{ description: 'Goods', unitAmount: 100, discountRate: 0 }]);
     expect(r.id).toMatch(/^\d{13}[a-z0-9]{8}$/);   // utils/ids: eight random characters behind the timestamp
   });

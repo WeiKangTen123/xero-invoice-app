@@ -31,3 +31,29 @@ export function sendProblem(msg) {
   if (/interrupted/i.test(msg)) return 'interrupted';
   return null;
 }
+
+// ── Supplier memory ───────────────────────────────────────────────────────────
+// A field filled from the contact's last settled bill or invoice carries where
+// it came from (record.prefilledFrom, written by main/utils/supplier-memory.js)
+// and the page says so beside it, so a person checks a remembered value rather
+// than taking it for something read off this document.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// "3 Sep", or "3 Sep 2025" outside this year. An invoice date is a calendar
+// date as printed, so it is read as written rather than through a timezone,
+// which could move it a day.
+export function shortDate(ymd) {
+  const m = String(ymd || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return '';
+  const [, y, mo, d] = m;
+  const month = MONTHS[Number(mo) - 1];
+  if (!month) return '';
+  return `${Number(d)} ${month}${Number(y) === new Date().getFullYear() ? '' : ` ${y}`}`;
+}
+
+// "from last bill (INV-123, 3 Sep)"; a sales invoice's says "last invoice".
+export function prefillText(from, invoiceType) {
+  const what = invoiceType === 'ACCREC' ? 'last invoice' : 'last bill';
+  const detail = [from?.fromNumber, shortDate(from?.fromDate)].filter(Boolean).join(', ');
+  return `from ${what}${detail ? ` (${detail})` : ''}`;
+}
