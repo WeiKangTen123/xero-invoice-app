@@ -20,6 +20,14 @@ const TTL_MS = 10 * 60 * 1000;
 // desktop closes the dialog.
 const MAX_USES = 20;
 
+// Live codes one account may hold at once. Each dialog opening mints one, and
+// one that was never closed (a crashed tab, a laptop lid shut on it) stays live
+// for the rest of its ten minutes, so without a cap a script, or a dialog
+// opened over and over, left any number of upload links standing at once.
+// Three covers a person on two screens with a spare; making a fourth revokes
+// the oldest, which is the one least likely still to be on a screen.
+const MAX_PER_USER = 3;
+
 const _pairings = new Map(); // token -> { userId, expiresAt, uses, lastUploadAt, receiptIds }
 
 function _sweepExpired() {
@@ -29,10 +37,23 @@ function _sweepExpired() {
   }
 }
 
+// A user's pairings, oldest first. A Map iterates in insertion order and an
+// entry is never re-inserted, so this is creation order.
+function _tokensOf(userId) {
+  const id = String(userId);
+  const out = [];
+  for (const [token, entry] of _pairings) if (entry.userId === id) out.push(token);
+  return out;
+}
+
 function create(userId) {
   _sweepExpired();
+  const mine = _tokensOf(userId);
+  for (const old of mine.slice(0, Math.max(0, mine.length - MAX_PER_USER + 1))) _pairings.delete(old);
   // 32 bytes: this is a bearer credential, not a nonce, so it is sized to resist
-  // guessing rather than just collision.
+  // guessing rather than just collision. base64url, so it is always 43
+  // characters of [A-Za-z0-9_-]: main/index.js redacts it from request logs by
+  // its place in the URL (/capture/<token>, /pair/<token>).
   const token = crypto.randomBytes(32).toString('base64url');
   _pairings.set(token, { userId: String(userId), expiresAt: Date.now() + TTL_MS, uses: 0, lastUploadAt: null, receiptIds: [] });
   return token;
@@ -102,9 +123,30 @@ function status(token) {
   };
 }
 
+// True when the token names a pairing that could still take an upload. The
+// same test as verify() bar the account lookup, and without verify()'s side
+// effects, because the rate limiter asks it of every capture request before
+// any route has run (middleware/rate-limit-key.js); the route then calls
+// verify() itself.
+function isLive(token) {
+  if (!token || typeof token !== 'string') return false;
+  const entry = _pairings.get(token);
+  return !!entry && entry.expiresAt > Date.now() && entry.uses < MAX_USES;
+}
+
 // The desktop revokes when the dialog closes, so a QR code that was on screen
 // stops working the moment the user is done with it.
 function revoke(token) { return _pairings.delete(token); }
+
+// Every pairing an account holds, on sign-out. A dialog revokes its own code
+// only when it goes away in that tab, so signing out elsewhere, or with the
+// tab already closed, left a working upload link behind for an account nobody
+// was signed in to any more. Returns how many were revoked.
+function revokeForUser(userId) {
+  const mine = _tokensOf(userId);
+  for (const token of mine) _pairings.delete(token);
+  return mine.length;
+}
 
 // Only the owner may revoke or inspect — a token is not a capability to manage
 // other people's pairings.
@@ -116,4 +158,4 @@ function ownedBy(token, userId) {
 function activeCount() { _sweepExpired(); return _pairings.size; }
 function _reset() { _pairings.clear(); }
 
-module.exports = { create, verify, status, consume, revoke, ownedBy, activeCount, TTL_MS, MAX_USES, _reset };
+module.exports = { create, verify, isLive, status, consume, revoke, revokeForUser, ownedBy, activeCount, TTL_MS, MAX_USES, MAX_PER_USER, _reset };

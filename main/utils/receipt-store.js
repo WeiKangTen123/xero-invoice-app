@@ -1,6 +1,8 @@
 const fs     = require('fs');
 const path   = require('path');
 const logger = require('./logger');
+const fileSignature = require('./file-signature');
+const { MAX_INPUT_PIXELS } = require('./thumbnailer');
 
 // Per-user receipt files for expense claims, on disk beside the PDF store.
 //
@@ -86,7 +88,10 @@ async function fitToLimit(buffer, mime, { maxBytes = MAX_BYTES } = {}) {
   for (const step of SHRINK_STEPS) {
     let out;
     try {
-      out = await lib(buffer)
+      // The pixel cap is checked from the header, before anything is decoded:
+      // a few MB of PNG can declare a canvas of billions of pixels, and
+      // sharp's own default (about 268 million) is far beyond any receipt.
+      out = await lib(buffer, { limitInputPixels: MAX_INPUT_PIXELS })
         .rotate()                                  // honour the EXIF orientation a phone camera writes
         .resize({ width: step.edge, height: step.edge, fit: 'inside', withoutEnlargement: true })
         // JPEG has no transparency; without this a transparent PNG
@@ -96,6 +101,9 @@ async function fitToLimit(buffer, mime, { maxBytes = MAX_BYTES } = {}) {
         .toBuffer();
     } catch (err) {
       logger.warn('Receipt photo could not be shrunk', { bytes: buffer.length, mime: type, error: err.message });
+      if (/pixel limit/i.test(err.message || '')) {
+        return { buffer, mime, shrunk: false, reason: `the photo ${over}, and at more than ${Math.round(MAX_INPUT_PIXELS / 1e6)} megapixels it is too large to open safely` };
+      }
       return { buffer, mime, shrunk: false, reason: `the photo ${over}, and it could not be decoded to shrink it` };
     }
     // Always JPEG once re-encoded: a photographed receipt as PNG is several
@@ -111,6 +119,12 @@ function extensionFor(mime) { return MIME_EXT[String(mime || '').toLowerCase()] 
 function isAcceptedMime(mime) { return extensionFor(mime) !== null; }
 function acceptedMimes() { return Object.keys(MIME_EXT); }
 
+// What a receipt's bytes actually are, judged against the types this store
+// keeps. { mime } for one it will take (the type the CONTENT shows, which is
+// what it should be stored and served as), or { error } with a sentence for
+// the person who sent it. See utils/file-signature.js.
+function identify(buffer) { return fileSignature.check(buffer, acceptedMimes()); }
+
 function forUser(userId) {
   if (_stores.has(userId)) return _stores.get(userId);
 
@@ -123,6 +137,14 @@ function forUser(userId) {
     if (!ext) throw new Error(`Unsupported receipt type: ${mime}`);
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('Receipt file is empty');
     if (buffer.length > MAX_BYTES) throw new Error(`Receipt is ${buffer.length} bytes; the limit is ${MAX_BYTES}`);
+    // The bytes must be what the type says. The routes identify() a file before
+    // getting here; this is for any path that does not, so a renamed file can
+    // never reach disk under an extension it is not.
+    const found = identify(buffer);
+    if (found.error) throw new Error(found.error);
+    if (found.mime !== String(mime).toLowerCase()) {
+      throw new Error(`Receipt contents are ${found.mime}, not ${mime} as declared`);
+    }
 
     ensureDir();
     const filename = `${id}.${ext}`;
@@ -183,4 +205,4 @@ function forUser(userId) {
   return store;
 }
 
-module.exports = { forUser, extensionFor, isAcceptedMime, acceptedMimes, fitToLimit, MAX_BYTES, MIME_EXT, SHRINK_STEPS };
+module.exports = { forUser, extensionFor, isAcceptedMime, acceptedMimes, identify, fitToLimit, MAX_BYTES, MIME_EXT, SHRINK_STEPS };

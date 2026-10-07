@@ -40,6 +40,16 @@ function sharp() {
   return _sharp;
 }
 
+// The most pixels any receipt image may declare before sharp will open it.
+//
+// sharp's default is about 268 million, and it is checked from the header,
+// before decoding: a PNG of a few MB, almost all of it one flat colour, can
+// declare a canvas of hundreds of millions of pixels and take gigabytes to
+// decode. Fifty million is above the largest photo a phone saves by default
+// (a 48MP iPhone frame is about 49 million) and far above any receipt. Every
+// place sharp is opened on a receipt uses it (receipt-store's fitToLimit too).
+const MAX_INPUT_PIXELS = 50_000_000;
+
 // A fixed set, not an arbitrary number. A free-form ?w= lets one caller fill the
 // disk with a thousand near-identical renderings of the same receipt, and every
 // distinct value is a cache entry nothing will ever read again.
@@ -88,7 +98,8 @@ async function thumbnailPath(sourcePath, destDir, filename, width, mime) {
   } catch (_) { /* fall through and regenerate */ }
 
   try {
-    await lib(sourcePath)
+    // Over the pixel cap this throws, and the original is served instead.
+    await lib(sourcePath, { limitInputPixels: MAX_INPUT_PIXELS })
       .rotate()                                   // honour the EXIF orientation a phone camera writes
       .resize({ width: w, withoutEnlargement: true })
       .jpeg({ quality: 78, mozjpeg: true })
@@ -100,4 +111,4 @@ async function thumbnailPath(sourcePath, destDir, filename, width, mime) {
   }
 }
 
-module.exports = { thumbnailPath, derivativeName, isDerivative, isResizable, allowedWidth, WIDTHS };
+module.exports = { thumbnailPath, derivativeName, isDerivative, isResizable, allowedWidth, WIDTHS, MAX_INPUT_PIXELS };

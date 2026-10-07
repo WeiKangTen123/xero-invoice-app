@@ -40,11 +40,12 @@ function makeZip(files) {
 }
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+const PNG  = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52]);
 
 describe('claims/claim-archive', () => {
   test('extracts the receipt images', async () => {
     const zip = makeZip([
-      { name: 'claims/a.png', data: JPEG },
+      { name: 'claims/a.png', data: PNG },
       { name: 'claims/b.jpg', data: JPEG },
     ]);
     const r = await readArchive(zip);
@@ -96,6 +97,74 @@ describe('claims/claim-archive', () => {
       { name: 'claims/r.png', data: JPEG },
     ]));
     expect(r.entries).toHaveLength(1);
+  });
+
+  // The name only says what an entry claims to be. A script or a program
+  // renamed receipt.jpg used to be stored, sent to the model and served back
+  // from this origin as an image.
+  describe('what an entry really is', () => {
+    const EXE  = Buffer.concat([Buffer.from('MZ'), Buffer.from([0x90, 0x00, 0x03, 0x00]), Buffer.alloc(58)]);
+    const HEIC = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypheic'), Buffer.alloc(12)]);
+
+    test('a renamed text file or program is left out, and the summary says why', async () => {
+      const zip = makeZip([
+        { name: 'c/real.jpg', data: JPEG },
+        { name: 'c/notes.jpg', data: Buffer.from('dinner with client, SGD 80') },
+        { name: 'c/setup.pdf', data: EXE },
+      ]);
+      for (const r of [await openArchive(zip), await readArchive(zip)]) {
+        expect(r.entries.map(e => e.name)).toEqual(['c/real.jpg']);
+        expect(r.skipped.map(x => x.name)).toEqual(['c/notes.jpg', 'c/setup.pdf']);
+        for (const x of r.skipped) expect(x.reason).toBe('its contents are not a JPEG, PNG or PDF, whatever its name says');
+        expect(r.error).toBeNull();
+      }
+    });
+
+    test('a HEIC photo renamed .jpg is named, not called "not an image"', async () => {
+      const r = await openArchive(makeZip([{ name: 'c/IMG_0001.jpg', data: HEIC }]));
+      expect(r.entries).toEqual([]);
+      expect(r.skipped[0].reason).toBe('it is a HEIC image, which Xero does not accept');
+    });
+
+    test('a real receipt under the wrong extension is kept, as the type it is', async () => {
+      const r = await openArchive(makeZip([
+        { name: 'c/screenshot.jpg', data: PNG },
+        { name: 'c/photo.png', data: JPEG },
+      ]));
+      expect(r.entries.map(e => [e.name, e.mime])).toEqual([['c/screenshot.jpg', 'image/png'], ['c/photo.png', 'image/jpeg']]);
+      expect(r.skipped).toEqual([]);
+    });
+
+    test('an empty file is left out rather than stored', async () => {
+      const r = await openArchive(makeZip([{ name: 'c/blank.jpg', data: Buffer.alloc(0) }]));
+      expect(r.entries).toEqual([]);
+      expect(r.skipped[0].reason).toMatch(/not a JPEG, PNG or PDF/);
+    });
+
+    test('a file left out does not count towards the size cap', async () => {
+      const junk = Buffer.alloc(64, 0x41);
+      const r = await openArchive(makeZip([{ name: 'c/a.jpg', data: junk }, { name: 'c/b.jpg', data: JPEG }]),
+        { maxTotalBytes: JPEG.length });
+      expect(r.entries.map(e => e.name)).toEqual(['c/b.jpg']);
+      expect(r.totalBytes).toBe(JPEG.length);
+      expect(r.error).toBeNull();
+    });
+
+    test('compressed entries are checked from their first bytes, and still read in full afterwards', async () => {
+      // Real archives deflate their entries; only the head is inflated to check one.
+      const JSZip = require('jszip');
+      const big = Buffer.concat([PNG, require('crypto').randomBytes(256 * 1024)]);
+      const z = new JSZip();
+      z.file('c/receipt.png', big);
+      z.file('c/readme.jpg', 'not a photo at all '.repeat(500));
+      z.file('c/scan.pdf', Buffer.from(`%PDF-1.4 ${'x'.repeat(5000)}`));
+      const zip = await z.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+
+      const r = await openArchive(zip);
+      expect(r.entries.map(e => [e.name, e.mime])).toEqual([['c/receipt.png', 'image/png'], ['c/scan.pdf', 'application/pdf']]);
+      expect(r.skipped).toEqual([{ name: 'c/readme.jpg', reason: 'its contents are not a JPEG, PNG or PDF, whatever its name says' }]);
+      expect((await r.entries[0].read()).equals(big)).toBe(true);
+    });
   });
 
   // A zip that deflates to a few MB can unpack to a hundred 15MB files.

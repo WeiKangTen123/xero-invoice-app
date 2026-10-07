@@ -84,6 +84,27 @@ describe('utils/receipt-store — fitting a receipt under Xero\'s 3MB limit', ()
     expect(r.reason).toMatch(/could not be decoded/);
   });
 
+  // A few MB of PNG can declare a canvas of billions of pixels. sharp's default
+  // cap (about 268 million) would let it decode to gigabytes first.
+  test('sharp is opened with the receipt pixel cap, not its own far larger default', async () => {
+    const { MAX_INPUT_PIXELS } = require('./thumbnailer');
+    expect(MAX_INPUT_PIXELS).toBe(50_000_000);
+    sharp.outputs.push(900 * 1024);
+    await fitToLimit(Buffer.alloc(5 * MB), 'image/png');
+    expect(sharp).toHaveBeenCalledWith(expect.any(Buffer), { limitInputPixels: MAX_INPUT_PIXELS });
+  });
+
+  test('a photo over the pixel cap is left as it was, and the reason says why', async () => {
+    // The message libvips gives when the header declares too many pixels.
+    sharp.outputs.push(new Error('Input image exceeds pixel limit'));
+    const original = Buffer.alloc(4 * MB);
+    const r = await fitToLimit(original, 'image/png');
+    expect(r.shrunk).toBe(false);
+    expect(r.buffer).toBe(original);
+    expect(r.reason).toMatch(/more than 50 megapixels it is too large to open safely/);
+    expect(sharp.chains).toHaveLength(1);   // no smaller step is tried on a file that cannot be opened
+  });
+
   test('a PDF over the limit is left alone, and the reason says why', async () => {
     // There is no renderer to re-encode a PDF, and dropping pages to make it
     // fit would be worse than not attaching it.

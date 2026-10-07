@@ -221,6 +221,38 @@ describe('routes/auth password and account state', () => {
     }
   });
 
+  // A QR code left on screen is an upload link that needs no sign-in, so it
+  // must not outlive the session that made it.
+  test('POST /logout revokes every phone-capture link the account holds, and only its own', async () => {
+    const pairing = require('../utils/pairing');
+    pairing._reset();
+    const u = await users.createUser('pair-out@test.com', 'password123', 'user');
+    const other = await users.createUser('pair-stay@test.com', 'password123', 'user');
+    const mine = [pairing.create(u.id), pairing.create(u.id)];
+    const theirs = pairing.create(other.id);
+    expect(mine.every(t => pairing.verify(t))).toBe(true);
+
+    await request(serverFor(app)).post('/api/auth/logout').set('Authorization', `Bearer ${tokenFor(u)}`).expect(200);
+    expect(mine.map(t => pairing.verify(t))).toEqual([null, null]);
+    expect(pairing.verify(theirs)).not.toBeNull();
+    pairing._reset();
+  });
+
+  test('POST /logout still signs out, and still stops the watcher, if revoking the links fails', async () => {
+    const pairing = require('../utils/pairing');
+    const registry = require('../email/watcher-registry');
+    jest.spyOn(pairing, 'revokeForUser').mockImplementation(() => { throw new Error('boom'); });
+    const stop = jest.spyOn(registry, 'stop');
+    try {
+      const u = await users.createUser('pair-boom@test.com', 'password123', 'user');
+      const res = await request(serverFor(app)).post('/api/auth/logout').set('Authorization', `Bearer ${tokenFor(u)}`).expect(200);
+      expect(res.body.ok).toBe(true);
+      expect(stop).toHaveBeenCalledWith(u.id);
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
   test('POST /login refuses a disabled account, and only once the password is right', async () => {
     const u = await users.createUser('off@test.com', 'password123', 'user');
     users.setDisabled(u.id, true);

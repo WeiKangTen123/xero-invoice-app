@@ -96,7 +96,8 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
 }));
 
 // Get current user (validate token)
-// POST /api/auth/logout — stops this user's mailbox watcher.
+// POST /api/auth/logout — stops this user's mailbox watcher and revokes their
+// phone-capture links.
 //
 // Logout was purely client-side (drop the token, forget the user), so the server
 // never learned about it and the watcher kept polling for an account nobody was
@@ -110,6 +111,15 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
 // reconnect backoff has no connection, so isRunning() is false, and skipping
 // the stop left its pending reconnect to start it again after logout.
 router.post('/logout', requireAuth, (req, res) => {
+  // A QR code left on screen is an upload link into this account that needs no
+  // sign-in, so it must not outlive the session that made it. Done first and
+  // on its own, so a watcher that fails to stop cannot leave the links working.
+  try {
+    const revoked = require('../utils/pairing').revokeForUser(req.user.id);
+    if (revoked) logger.info('Logout — phone capture links revoked', { userId: req.user.id, count: revoked });
+  } catch (err) {
+    logger.warn('Logout: could not revoke phone capture links', { userId: req.user.id, error: err.message });
+  }
   try {
     const registry = require('../email/watcher-registry');
     const wasRunning = registry.isRunning(req.user.id);

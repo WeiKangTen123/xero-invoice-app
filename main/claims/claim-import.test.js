@@ -320,10 +320,14 @@ describe('pacing', () => {
 describe('claims/claim-import — receipts over the 3MB attachment limit', () => {
   beforeEach(() => { claimImport._reset(); require('sharp').outputs.length = 0; });
   const MB = 1024 * 1024;
+  // An oversized file that is what its name says: the archive reader checks
+  // each entry's first bytes (claim-archive.js) and leaves out anything else.
+  const sized = (header, bytes) => { const b = Buffer.alloc(bytes); Buffer.from(header).copy(b); return b; };
+  const PNG_HEADER = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
   test('an oversized photo is shrunk before it is read and before it is stored', async () => {
     require('sharp').outputs.push(600 * 1024, 600 * 1024);   // once to read, once to store
-    const zip = makeZip([{ name: 'c/IMG_0001.png', data: Buffer.alloc(Math.round(3.5 * MB)) }]);
+    const zip = makeZip([{ name: 'c/IMG_0001.png', data: sized(PNG_HEADER, Math.round(3.5 * MB)) }]);
     let captured = null;
     const parseReceipts = jest.fn(async (u, imgs) => imgs.map(() => ({ merchant: 'Grab', date: '2026-02-23', total: 15.8 })));
     const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] },
@@ -345,7 +349,7 @@ describe('claims/claim-import — receipts over the 3MB attachment limit', () =>
     // A PDF cannot be re-encoded here. The claim is created anyway; only the
     // attachment is missing, and the store error claim-record writes onto the
     // row says why in words a person can act on.
-    const zip = makeZip([{ name: 'c/hotel.pdf', data: Buffer.alloc(Math.round(3.5 * MB)) }]);
+    const zip = makeZip([{ name: 'c/hotel.pdf', data: sized(Buffer.from('%PDF-1.4'), Math.round(3.5 * MB)) }]);
     let storeError = null;
     const createRecord = jest.fn(async ({ receipt, store }) => {
       try { await store('u1', 'id1', receipt.buffer, receipt.mime); } catch (err) { storeError = err.message; }

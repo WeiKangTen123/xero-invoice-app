@@ -1080,7 +1080,11 @@ describe('routes/receipts — reading a receipt again', () => {
   });
 
   const auth = () => `Bearer ${jwt.sign({ id: testUser.id, email: testUser.email, role: testUser.role }, jwtSecret())}`;
-  const upload = (mime = 'image/jpeg') => request(server).post('/api/receipts').set('Authorization', auth()).send({ mime, data: jpeg() });
+  // The bytes have to be what the type says: the route stores a receipt as the
+  // type its contents show, so a "PDF" made of JPEG bytes would be a photo.
+  const pdf = () => Buffer.from(`%PDF-1.4 ${++_n}`).toString('base64');
+  const upload = (mime = 'image/jpeg') => request(server).post('/api/receipts').set('Authorization', auth())
+    .send({ mime, data: mime === 'application/pdf' ? pdf() : jpeg() });
   const reread = id => request(server).post(`/api/receipts/${id}/reread`).set('Authorization', auth());
 
   test('fills in a receipt that failed to read the first time', async () => {

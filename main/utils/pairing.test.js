@@ -244,3 +244,88 @@ describe('utils/pairing — the account behind the link', () => {
     expect(pairing.verify(theirs)).not.toBeNull();
   });
 });
+
+// Every dialog opening mints a code, and a code nobody closed stays live for
+// its ten minutes. These bound how many upload links one account can have
+// standing at once, and make sure signing out takes them all down.
+describe('utils/pairing — how many links an account holds', () => {
+  beforeEach(() => { pairing._reset(); jest.useRealTimers(); });
+  afterAll(() => { pairing._reset(); });
+
+  test('an account holds at most MAX_PER_USER live codes; the next revokes the oldest', () => {
+    expect(pairing.MAX_PER_USER).toBe(3);
+    const [a, b, c] = [pairing.create('u1'), pairing.create('u1'), pairing.create('u1')];
+    expect([a, b, c].every(t => pairing.verify(t))).toBe(true);
+
+    const d = pairing.create('u1');
+    expect(pairing.verify(a)).toBeNull();          // the oldest went
+    expect(pairing.verify(b)).not.toBeNull();
+    expect(pairing.verify(c)).not.toBeNull();
+    expect(pairing.verify(d)).not.toBeNull();
+
+    pairing.create('u1');
+    expect(pairing.verify(b)).toBeNull();          // and then the next oldest
+    expect(pairing.activeCount()).toBe(3);
+  });
+
+  test("one account's codes never push out another's", () => {
+    const theirs = pairing.create('u2');
+    for (let i = 0; i < 10; i++) pairing.create('u1');
+    expect(pairing.verify(theirs)).not.toBeNull();
+    expect(pairing.activeCount()).toBe(4);
+  });
+
+  test('an expired code does not count towards the cap', () => {
+    jest.useFakeTimers();
+    const [a, b] = [pairing.create('u1'), pairing.create('u1')];
+    jest.advanceTimersByTime(pairing.TTL_MS + 1);
+    const fresh = [pairing.create('u1'), pairing.create('u1'), pairing.create('u1')];
+    expect(fresh.every(t => pairing.verify(t))).toBe(true);
+    expect(pairing.verify(a)).toBeNull();
+    expect(pairing.verify(b)).toBeNull();
+  });
+
+  test('revokeForUser takes down every code the account holds, and only that account\'s', () => {
+    const mine = [pairing.create('u1'), pairing.create('u1')];
+    const theirs = pairing.create('u2');
+    expect(pairing.revokeForUser('u1')).toBe(2);
+    expect(mine.map(t => pairing.verify(t))).toEqual([null, null]);
+    expect(pairing.status(mine[0])).toBeNull();
+    expect(pairing.verify(theirs)).not.toBeNull();
+    expect(pairing.revokeForUser('u1')).toBe(0);
+  });
+
+  test('revokeForUser matches a numeric id the way create() stores it', () => {
+    const t = pairing.create(12345);
+    expect(pairing.revokeForUser('12345')).toBe(1);
+    expect(pairing.verify(t)).toBeNull();
+  });
+});
+
+describe('utils/pairing — isLive, the rate limiter\'s question', () => {
+  beforeEach(() => { pairing._reset(); jest.useRealTimers(); });
+
+  test('true only for a code that could still take an upload', () => {
+    const t = pairing.create('u1');
+    expect(pairing.isLive(t)).toBe(true);
+    expect(pairing.isLive('made-up')).toBe(false);
+    expect(pairing.isLive('')).toBe(false);
+    expect(pairing.isLive(null)).toBe(false);
+    pairing.revoke(t);
+    expect(pairing.isLive(t)).toBe(false);
+  });
+
+  test('a spent code is not live, though status() can still describe it', () => {
+    const t = pairing.create('u1');
+    for (let i = 0; i < pairing.MAX_USES; i++) pairing.consume(t, `r${i}`);
+    expect(pairing.isLive(t)).toBe(false);
+    expect(pairing.status(t).spent).toBe(true);
+  });
+
+  test('an expired code is not live, and asking does not change anything', () => {
+    jest.useFakeTimers();
+    const t = pairing.create('u1');
+    jest.advanceTimersByTime(pairing.TTL_MS + 1);
+    expect(pairing.isLive(t)).toBe(false);
+  });
+});

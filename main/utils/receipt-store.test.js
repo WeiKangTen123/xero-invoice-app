@@ -7,7 +7,13 @@ const store = require('./receipt-store');
 // Each test writes under main/data/users/<id>/receipts. The ids are unique per
 // test so nothing collides, and clearAll tidies up after.
 const uid = () => `test-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]); // enough to be a real buffer
+// Enough of each format's header to pass save()'s check of the contents;
+// nothing here inspects pixels.
+const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+const PNG  = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
+const PDF  = Buffer.from('%PDF-1.4 1 0 obj');
+// A filled buffer as large as the test needs, that still opens as a JPEG.
+const jpegOf = size => { const b = Buffer.alloc(size, 1); JPEG.copy(b); return b; };
 
 describe('utils/receipt-store', () => {
   const created = [];
@@ -38,7 +44,7 @@ describe('utils/receipt-store', () => {
     test('returns the stored filename so callers never reconstruct it', () => {
       const { s } = userStore();
       expect(s.save('abc', JPEG, 'image/jpeg')).toBe('abc.jpg');
-      expect(s.save('def', JPEG, 'application/pdf')).toBe('def.pdf');
+      expect(s.save('def', PDF, 'application/pdf')).toBe('def.pdf');
     });
 
     test('the file is actually on disk and reads back byte-identical', () => {
@@ -69,7 +75,43 @@ describe('utils/receipt-store', () => {
 
     test('a file exactly at the cap is allowed', () => {
       const { s } = userStore();
-      expect(() => s.save('r1', Buffer.alloc(store.MAX_BYTES, 1), 'image/jpeg')).not.toThrow();
+      expect(() => s.save('r1', jpegOf(store.MAX_BYTES), 'image/jpeg')).not.toThrow();
+    });
+
+    // The routes identify() a file before saving it; this is the second way in,
+    // so a renamed file cannot reach disk under an extension it is not.
+    test('refuses a renamed text file or program, and writes nothing', () => {
+      const { s } = userStore();
+      const exe = Buffer.concat([Buffer.from('MZ'), Buffer.alloc(62)]);
+      expect(() => s.save('r1', Buffer.from('just some text'), 'image/jpeg')).toThrow(/not a JPEG, PNG or PDF/);
+      expect(() => s.save('r2', exe, 'application/pdf')).toThrow(/not a JPEG, PNG or PDF/);
+      expect(s.exists('r1.jpg')).toBe(false);
+      expect(s.exists('r2.pdf')).toBe(false);
+    });
+
+    test('refuses bytes that are a different receipt type than declared', () => {
+      // The extension comes from the declared type, so a PNG saved as a JPEG
+      // would be served back under the wrong type. Callers pass identify()'s.
+      const { s } = userStore();
+      expect(() => s.save('r1', PNG, 'image/jpeg')).toThrow(/image\/png, not image\/jpeg/);
+      expect(s.save('r1', PNG, 'image/png')).toBe('r1.png');
+    });
+  });
+
+  describe('identify — what an upload actually is', () => {
+    test('accepts real JPEG, PNG and PDF headers, as the type the bytes show', () => {
+      expect(store.identify(JPEG)).toEqual({ mime: 'image/jpeg' });
+      expect(store.identify(PNG)).toEqual({ mime: 'image/png' });
+      expect(store.identify(PDF)).toEqual({ mime: 'application/pdf' });
+    });
+
+    test('refuses a renamed text file with a sentence a person can act on', () => {
+      expect(store.identify(Buffer.from('hello')).error).toMatch(/not a JPEG, PNG or PDF/);
+    });
+
+    test('names a HEIC photo rather than calling it "not an image"', () => {
+      const heic = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypheic'), Buffer.alloc(4)]);
+      expect(store.identify(heic).error).toMatch(/HEIC image, which Xero does not accept/);
     });
   });
 
@@ -118,7 +160,7 @@ describe('utils/receipt-store', () => {
     test('clearAll empties the directory without removing it', () => {
       const { s } = userStore();
       s.save('r1', JPEG, 'image/jpeg');
-      s.save('r2', JPEG, 'image/png');
+      s.save('r2', PNG, 'image/png');
       s.clearAll();
       expect(s.exists('r1.jpg')).toBe(false);
       expect(s.exists('r2.png')).toBe(false);

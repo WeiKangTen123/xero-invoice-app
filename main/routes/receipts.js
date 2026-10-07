@@ -32,10 +32,46 @@ const logger       = require('../utils/logger');
 
 // Browsers cannot attach an Authorization header to an <img src>, so image
 // access uses the same short-lived, single-purpose token the PDF route uses.
-const IMAGE_TOKEN_TTL = '5m';
+// It travels as ?token=<JWT>; main/index.js redacts that from request logs.
+const IMAGE_TOKEN_TTL_MS = 5 * 60 * 1000;
 
 function issueImageToken(userId, invoiceId) {
-  return jwt.sign({ userId, invoiceId, purpose: 'receipt' }, jwtSecret(), { expiresIn: IMAGE_TOKEN_TTL });
+  return jwt.sign({ userId, invoiceId, purpose: 'receipt' }, jwtSecret(), { expiresIn: IMAGE_TOKEN_TTL_MS / 1000 });
+}
+
+// The pairing dialog's tokens, handed out again on every poll until they are
+// close to expiring.
+//
+// The dialog polls every three seconds, and a fresh token per receipt per poll
+// gave every thumbnail a new URL each time, so the browser fetched each one
+// again: ten receipts on screen were two hundred image requests a minute. An
+// <img> carries no login, so all of them counted against the office's shared
+// IP limit, and in a couple of minutes everyone behind that IP was refused. A
+// token that stays the same keeps the URL the same, and the browser fetches
+// each thumbnail once per token instead of once per poll.
+//
+// Reused only by the poll. GET /:id/token still mints a fresh one, because the
+// review page refreshes on a timer that assumes a token's whole five minutes.
+// Swapped for a new one with a minute left, so a thumbnail the browser fetches
+// just after a poll never arrives with a token that has already died.
+const IMAGE_TOKEN_REUSE_MIN_MS = 60 * 1000;
+const _pollTokens = new Map();   // `${userId}:${invoiceId}` -> { token, expiresAt }
+
+function _sweepPollTokens(now) {
+  for (const [key, held] of _pollTokens) {
+    if (held.expiresAt - now <= IMAGE_TOKEN_REUSE_MIN_MS) _pollTokens.delete(key);
+  }
+}
+
+function pollImageToken(userId, invoiceId, now = Date.now()) {
+  const key = `${userId}:${invoiceId}`;
+  const held = _pollTokens.get(key);
+  if (held && held.expiresAt - now > IMAGE_TOKEN_REUSE_MIN_MS) return held.token;
+  const token = issueImageToken(userId, invoiceId);
+  // jwt counts expiry in whole seconds from a rounded-down "now", so the real
+  // expiry can be up to a second before this; the minute's margin covers it.
+  _pollTokens.set(key, { token, expiresAt: now + IMAGE_TOKEN_TTL_MS });
+  return token;
 }
 
 function verifyImageToken(token, invoiceId) {
@@ -117,6 +153,21 @@ function storeReceipt(userId, { mime, data, filename, source }) {
       error: `Receipt is ${mb(buffer.length)}; Xero accepts at most ${mb(receiptStore.MAX_BYTES)}. Try a lower-resolution photo.`,
     } };
   }
+
+  // The declared type is only what the sender says. The bytes decide what is
+  // stored: a file that is no JPEG, PNG or PDF is refused here, from either
+  // the desktop or a phone link, before it is written, read by the model or
+  // served back; a real receipt that was merely mislabelled is stored as what
+  // it is, so it comes back with the right Content-Type.
+  const found = receiptStore.identify(buffer);
+  if (found.error) {
+    logger.warn('Receipt refused: contents are not an accepted type', { userId, declared: mime, source: source || 'upload' });
+    return { status: 415, body: { error: found.error } };
+  }
+  if (found.mime !== String(mime).toLowerCase()) {
+    logger.info('Receipt type corrected from its contents', { userId, declared: mime, actual: found.mime });
+  }
+  mime = found.mime;
 
   // Already here?
   //
@@ -410,6 +461,8 @@ router.get('/pair/:token', requireAuth, (req, res) => {
   if (!state) return res.json({ alive: false, spent: false, uploads: 0, receipts: [] });
 
   const store = invoiceStore.forUser(req.user.id);
+  const now = Date.now();
+  _sweepPollTokens(now);
   const receipts = state.receiptIds
     .map(id => {
       const r = store.getById(id);
@@ -420,7 +473,8 @@ router.get('/pair/:token', requireAuth, (req, res) => {
         vendorName:  r.vendorName,
         totalAmount: r.totalAmount,
         currency:    r.currency,
-        imageToken:  issueImageToken(req.user.id, r.id),
+        // The same token poll after poll, so the thumbnail's URL stays put.
+        imageToken:  pollImageToken(req.user.id, r.id, now),
       };
     })
     .filter(Boolean);

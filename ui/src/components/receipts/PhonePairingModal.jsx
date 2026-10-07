@@ -12,6 +12,13 @@ import { fmtMoney } from '../../utils/format';
 //
 // Blocking the page costs nothing here — while pairing you are holding a phone,
 // not using the desktop.
+
+// Best-effort: a code that is not revoked still dies on its own within ten
+// minutes, and signing out revokes every code the account holds.
+function revokePairing(token) {
+  api.delete(`/receipts/pair/${token}`).catch(() => { /* it expires anyway */ });
+}
+
 export default function PhonePairingModal({ onClose, onArrived }) {
   const [pair, setPair]       = useState(null);
   const [receipts, setRcpts]  = useState([]);
@@ -19,14 +26,29 @@ export default function PhonePairingModal({ onClose, onArrived }) {
   const [spent, setSpent]     = useState(false);
   const [error, setError]     = useState('');
 
-  // Mint the pairing once, on open.
+  // Mint the pairing once, on open. A code that arrives after the dialog has
+  // already gone was never shown to anyone, so it is revoked straight away
+  // rather than left as a live upload link for its ten minutes.
   useEffect(() => {
     let active = true;
     api.post('/receipts/pair', {})
-      .then(res => { if (active) { setPair(res); setSecs(Math.round(res.expiresInMs / 1000)); } })
+      .then(res => {
+        if (!active) { if (res?.token) revokePairing(res.token); return; }
+        setPair(res);
+        setSecs(Math.round(res.expiresInMs / 1000));
+      })
       .catch(err => { if (active) setError(err.message || 'Could not create a pairing code'); });
     return () => { active = false; };
   }, []);
+
+  // Revoke when the dialog goes away, however it goes: the close button, Escape,
+  // or navigating to another page with it still open. Only the close button
+  // used to revoke, so leaving the page left the code on its way out working
+  // for the rest of its ten minutes.
+  useEffect(() => {
+    if (!pair?.token) return undefined;
+    return () => revokePairing(pair.token);
+  }, [pair]);
 
   // Poll for arrivals. One request carries the countdown, the count and the
   // photos, so the panel needs nothing else.
@@ -56,13 +78,9 @@ export default function PhonePairingModal({ onClose, onArrived }) {
     return () => { stop = true; clearInterval(timer); };
   }, [pair, onArrived]);
 
-  // Revoke on close so a code that was on screen dies immediately rather than
-  // lingering for the rest of its ten minutes.
-  async function close() {
-    const token = pair?.token;
-    onClose();
-    if (token) { try { await api.delete(`/receipts/pair/${token}`); } catch { /* it expires anyway */ } }
-  }
+  // Closing unmounts the dialog, and the revoke-on-unmount effect takes the code
+  // down then, so a code that was on screen dies at once rather than lingering.
+  function close() { onClose(); }
 
   const mmss = `${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, '0')}`;
   const expired = secsLeft <= 0 && !!pair;
@@ -137,7 +155,10 @@ export default function PhonePairingModal({ onClose, onArrived }) {
                       {/* 76px tiles, so they ask for a 160px copy — 2x for a
                           retina screen — rather than the stored receipt, which
                           can be 3MB. The server falls back to the original if it
-                          cannot scale, so this never fails to show a photo. */}
+                          cannot scale, so this never fails to show a photo.
+                          The poll hands back the same token until it is near
+                          expiry, so this URL holds still between polls and the
+                          browser fetches each thumbnail once, not every 3s. */}
                       <img src={`/api/receipts/${r.id}/image?w=160&token=${encodeURIComponent(r.imageToken)}`}
                            alt="" loading="lazy" decoding="async" width={76} height={76}
                            style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -162,7 +183,7 @@ export default function PhonePairingModal({ onClose, onArrived }) {
 
         <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 16, paddingTop: 12,
                       borderTop: '1px solid var(--border)', lineHeight: 1.55 }}>
-          The link uploads only — it cannot read your data, and it stops working when you close this.
+          The link uploads only — it cannot read your data, and it stops working when you close this or sign out.
         </div>
     </Modal>
   );

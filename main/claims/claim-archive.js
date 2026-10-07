@@ -1,5 +1,6 @@
 const yauzl  = require('yauzl');
 const logger = require('../utils/logger');
+const fileSignature = require('../utils/file-signature');
 
 // Opens a .zip of receipt images in memory.
 //
@@ -9,7 +10,8 @@ const logger = require('../utils/logger');
 //
 // Nothing is written to disk here — entries come back as buffers (readArchive)
 // or as readers (openArchive) for the caller to store through receipt-store,
-// which already enforces the type and size rules.
+// which already enforces the type and size rules. Each entry's type is the one
+// its first bytes show (utils/file-signature.js), not the one its name gives.
 
 // Mirrors receipt-store's accepted types: anything else cannot become a Xero
 // attachment, so there is no point extracting it.
@@ -33,6 +35,17 @@ function mimeFor(name) {
   return IMAGE_EXT[ext] || null;
 }
 
+const ACCEPTED = [...new Set(Object.values(IMAGE_EXT))];
+
+// Why an entry whose name looks right is still not a receipt, for the import
+// summary. Kept short like the other reasons, and never containing "limit
+// reached", which the importer reads as a cap having been hit.
+function signatureReason(found) {
+  return found
+    ? `it is a ${fileSignature.label(found)} image, which Xero does not accept`
+    : `its contents are not a ${fileSignature.labelList(ACCEPTED)}, whatever its name says`;
+}
+
 // macOS metadata, hidden files, and directory entries.
 function isJunk(name) {
   return name.startsWith('__MACOSX/')
@@ -48,6 +61,30 @@ function _readEntry(zip, entry) {
       stream.on('data', c => chunks.push(c));
       stream.on('error', reject);
       stream.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+  });
+}
+
+// The first few bytes of an entry, enough to tell what it is; null when it
+// cannot be opened. Only that much is inflated: the stream is dropped as soon
+// as it has delivered them, so peeking at a hundred photos costs next to
+// nothing and holds none of them.
+function _readHead(zip, entry, bytes = fileSignature.HEAD_BYTES) {
+  return new Promise(resolve => {
+    zip.openReadStream(entry, (err, stream) => {
+      if (err || !stream) return resolve(null);
+      const chunks = [];
+      let got = 0;
+      let settled = false;
+      const finish = value => { if (!settled) { settled = true; resolve(value); } };
+      stream.on('data', c => {
+        chunks.push(c);
+        got += c.length;
+        if (got >= bytes) { finish(Buffer.concat(chunks)); stream.destroy(); }
+      });
+      stream.on('error', () => finish(null));
+      stream.on('end', () => finish(Buffer.concat(chunks)));
+      stream.on('close', () => finish(Buffer.concat(chunks)));
     });
   });
 }
@@ -80,25 +117,43 @@ function openArchive(buffer, { maxTotalBytes = MAX_TOTAL_BYTES } = {}) {
       const skipped = [];
       let totalBytes = 0;
       let overSize = false;
+      let finished = false;
+      const next = () => { if (!finished) zip.readEntry(); };
 
       zip.on('entry', entry => {
         const name = entry.fileName;
 
-        if (isJunk(name)) return zip.readEntry();
-        if (entries.length >= MAX_ENTRIES) { skipped.push({ name, reason: 'archive limit reached' }); return zip.readEntry(); }
+        if (isJunk(name)) return next();
+        if (entries.length >= MAX_ENTRIES) { skipped.push({ name, reason: 'archive limit reached' }); return next(); }
 
-        const mime = mimeFor(name);
-        if (!mime) { skipped.push({ name, reason: 'not a receipt file type' }); return zip.readEntry(); }
-        if (entry.uncompressedSize > MAX_ENTRY_BYTES) { skipped.push({ name, reason: 'file too large' }); return zip.readEntry(); }
-        if (totalBytes + entry.uncompressedSize > maxTotalBytes) {
-          overSize = true;
-          skipped.push({ name, reason: SIZE_LIMIT_REASON });
-          return zip.readEntry();
-        }
+        if (!mimeFor(name)) { skipped.push({ name, reason: 'not a receipt file type' }); return next(); }
+        if (entry.uncompressedSize > MAX_ENTRY_BYTES) { skipped.push({ name, reason: 'file too large' }); return next(); }
 
-        totalBytes += entry.uncompressedSize;
-        entries.push({ name, mime, size: entry.uncompressedSize, read: () => _readEntry(zip, entry) });
-        zip.readEntry();
+        // The name only says what the file claims to be. Its first bytes say
+        // what it is, so a script or a program renamed receipt.jpg is left
+        // out here, before it is stored, read by the model or served back; a
+        // real receipt under the wrong extension (a PNG saved as .jpg) is kept,
+        // as the type it really is. Checked before the size total, so a file
+        // that is not taken does not count towards it.
+        _readHead(zip, entry).then(head => {
+          if (finished) return;
+          if (!head) { skipped.push({ name, reason: 'could not be read' }); return next(); }
+          const found = fileSignature.check(head, ACCEPTED);
+          if (!found.mime) {
+            logger.warn('Claim archive entry is not what its name says', { name, found: found.found });
+            skipped.push({ name, reason: signatureReason(found.found) });
+            return next();
+          }
+          if (totalBytes + entry.uncompressedSize > maxTotalBytes) {
+            overSize = true;
+            skipped.push({ name, reason: SIZE_LIMIT_REASON });
+            return next();
+          }
+
+          totalBytes += entry.uncompressedSize;
+          entries.push({ name, mime: found.mime, size: entry.uncompressedSize, read: () => _readEntry(zip, entry) });
+          next();
+        });
       });
 
       // An archive over the size cap is reported as an ERROR, not only as
@@ -108,8 +163,8 @@ function openArchive(buffer, { maxTotalBytes = MAX_TOTAL_BYTES } = {}) {
       const sizeError = () => (overSize
         ? `the archive unpacks to more than ${Math.round(maxTotalBytes / 1048576)}MB; split it into smaller archives`
         : null);
-      zip.on('end',   () => resolve({ entries, skipped, error: sizeError(), totalBytes }));
-      zip.on('error', e => resolve({ entries, skipped, error: e.message, totalBytes }));
+      zip.on('end',   () => { finished = true; resolve({ entries, skipped, error: sizeError(), totalBytes }); });
+      zip.on('error', e => { finished = true; resolve({ entries, skipped, error: e.message, totalBytes }); });
       zip.readEntry();
     });
   });

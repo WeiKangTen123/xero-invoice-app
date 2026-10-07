@@ -30,6 +30,33 @@ async function writeJpeg(name, width = 240, height = 320) {
   return p;
 }
 
+// A valid PNG of any size that costs next to nothing to build or hold: one
+// bit per pixel and every pixel white, so 64 million pixels deflate to about
+// 22KB. That is the shape of a decompression bomb: tiny on disk, enormous
+// once decoded.
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+const crc32 = buf => { let c = 0xffffffff; for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+function flatPng(width, height) {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 1;                                            // one bit per pixel, greyscale
+  const row = Buffer.alloc(1 + Math.ceil(width / 8), 0xff); row[0] = 0;   // no filter, all white
+  const raw = Buffer.alloc(row.length * height);
+  for (let y = 0; y < height; y++) row.copy(raw, y * row.length);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', require('zlib').deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
 describe('utils/thumbnailer — which requests are honoured', () => {
   test('only whitelisted widths, so one caller cannot fill the disk with variants', () => {
     expect(thumbnailer.allowedWidth(160)).toBe(160);
@@ -113,6 +140,21 @@ describe('utils/thumbnailer — falling back rather than failing', () => {
     const p = path.join(dir, 'broken.jpg');
     fs.writeFileSync(p, Buffer.from('this is not a jpeg'));
     await expect(thumbnailer.thumbnailPath(p, dir, 'broken.jpg', 160, 'image/jpeg')).resolves.toBeNull();
+  });
+
+  test('an image declaring more pixels than the cap is declined without being decoded', async () => {
+    const bomb = path.join(dir, 'bomb.png');
+    fs.writeFileSync(bomb, flatPng(8000, 8000));            // 64 million pixels
+    // A real, valid PNG: its header reads fine when nothing caps it.
+    expect((await sharp(bomb).metadata()).width).toBe(8000);
+    expect(await thumbnailer.thumbnailPath(bomb, dir, 'bomb.png', 160, 'image/png')).toBeNull();
+
+    // Built the same way under the cap, it scales as normal, so what was
+    // refused above is the size and not the file.
+    const flat = path.join(dir, 'flat.png');
+    fs.writeFileSync(flat, flatPng(400, 300));
+    const out = await thumbnailer.thumbnailPath(flat, dir, 'flat.png', 160, 'image/png');
+    expect((await sharp(out).metadata()).width).toBe(160);
   });
 
   test('a missing source is declined rather than throwing', async () => {
