@@ -10,7 +10,12 @@ import { useEffect, useRef } from 'react';
 //
 // `interval` may be a number or a function returning one, so a caller can back
 // off when idle and tighten up when something is in flight.
-export function useVisiblePolling(fn, interval) {
+//
+// `enabled` switches the whole thing off — no timer, no refresh on return — for
+// a poll that only means something while some job is running. Turning it back
+// on starts the clock again; it does not call `fn` at once, the same as on
+// mount, so a caller that wants an immediate answer asks for it itself.
+export function useVisiblePolling(fn, interval, enabled = true) {
   const fnRef       = useRef(fn);
   const intervalRef = useRef(interval);
 
@@ -22,7 +27,14 @@ export function useVisiblePolling(fn, interval) {
   });
 
   useEffect(() => {
+    if (!enabled) return undefined;
     let id = null;
+    // A call still in flight. `fn` is awaited, so a slow request holds the next
+    // one back rather than overlapping it: the period is measured from when the
+    // last call finished, and a tab coming back into view while one is still
+    // out does not send a second alongside it.
+    let running = false;
+    let stopped = false;
     const period = () => {
       const v = intervalRef.current;
       return typeof v === 'function' ? v() : v;
@@ -31,24 +43,31 @@ export function useVisiblePolling(fn, interval) {
     function stop() {
       if (id) { clearTimeout(id); id = null; }
     }
-    // setTimeout rather than setInterval so the delay is re-read each cycle and
-    // a slow call cannot stack up behind itself.
+    async function run() {
+      if (running) return;
+      running = true;
+      try { await fnRef.current(); }
+      catch (_) { /* the caller owns its errors; a throw must not end the poll */ }
+      finally { running = false; }
+      schedule();
+    }
     function schedule() {
       stop();
-      if (document.hidden) return;
-      id = setTimeout(() => { fnRef.current(); schedule(); }, period());
+      if (stopped || document.hidden) return;
+      id = setTimeout(run, period());
     }
 
     schedule();
     function onVisibility() {
       if (document.hidden) { stop(); return; }
-      fnRef.current();
-      schedule();
+      stop();
+      run();
     }
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      stopped = true;
       stop();
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, []);
+  }, [enabled]);
 }

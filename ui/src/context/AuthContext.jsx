@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 
 const AuthContext = createContext(null);
@@ -6,15 +6,40 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser]       = useState(null);
   const [loading, setLoading] = useState(true);
+  // Set when the session could not be checked at all — the server down, a
+  // deploy mid-restart, the laptop offline — as opposed to checked and refused.
+  const [authError, setAuthError] = useState('');
+  const [checking,  setChecking]  = useState(false);
 
-  useEffect(() => {
+  // Only a 401 means the token is no good. Every failure used to sign the user
+  // out, so a 502 during a deploy or a moment without wifi threw away a valid
+  // session and sent them to the login form. Now anything else keeps the token
+  // and the app offers to try again (see SessionRetry in App.jsx).
+  const checkSession = useCallback(async () => {
     const token = localStorage.getItem('token');
-    if (!token) { setLoading(false); return; }
-    api.get('/auth/me')
-      .then(d => setUser(d.user))
-      .catch(() => localStorage.removeItem('token'))
-      .finally(() => setLoading(false));
+    if (!token) { setUser(null); setAuthError(''); setLoading(false); return; }
+    setChecking(true);
+    try {
+      const d = await api.get('/auth/me');
+      setUser(d.user);
+      setAuthError('');
+    } catch (err) {
+      if (err.status === 401) {
+        // Only the token this check sent is condemned. One stored since, by a
+        // sign-in in another tab, is left for its own requests to judge.
+        if (localStorage.getItem('token') === token) localStorage.removeItem('token');
+        setUser(null);
+        setAuthError('');
+      } else {
+        setAuthError(err.message || 'Could not reach the server');
+      }
+    } finally {
+      setChecking(false);
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => { checkSession(); }, [checkSession]);
 
   // Re-fetches /auth/me without a full page reload — used after Setup saves a
   // preference (like timezone) that other already-mounted components read off
@@ -28,6 +53,7 @@ export function AuthProvider({ children }) {
     const data = await api.post('/auth/login', { email, password });
     localStorage.setItem('token', data.token);
     setUser(data.user);
+    setAuthError('');
     return data.user;
   }
 
@@ -38,6 +64,7 @@ export function AuthProvider({ children }) {
     try { await api.post('/auth/logout', {}); } catch (_) { /* leaving anyway */ }
     localStorage.removeItem('token');
     setUser(null);
+    setAuthError('');
   }
 
   // The server signs this account's other sessions out and hands back a fresh
@@ -53,11 +80,12 @@ export function AuthProvider({ children }) {
     const data = await api.post('/auth/login', { email, password });
     localStorage.setItem('token', data.token);
     setUser(data.user);
+    setAuthError('');
     return data.user;
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, register, refreshUser, changePassword }}>
+    <AuthContext.Provider value={{ user, loading, authError, checking, retrySession: checkSession, login, logout, register, refreshUser, changePassword }}>
       {children}
     </AuthContext.Provider>
   );

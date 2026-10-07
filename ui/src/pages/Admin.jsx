@@ -1,11 +1,20 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import Modal from '../components/Modal';
+import RetryAlert from '../components/RetryAlert';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney } from '../utils/format';
+import { staggerIn } from '../utils/stagger';
+
+const ADMIN_TABS = [
+  { key: 'users',      label: '👥 Users' },
+  { key: 'reports',    label: '⚠ Reports' },
+  { key: 'monitoring', label: '📊 Monitoring' },
+  { key: 'logs',       label: '📄 Logs' },
+];
 
 function Avatar({ email }) {
   return (
@@ -92,7 +101,17 @@ export default function Admin() {
   const { user: me } = useAuth();
   const confirm = useConfirm();
   const navigate     = useNavigate();
-  const [tab, setTab] = useState('users');
+  // The open tab is in the address, so Back from a flagged invoice opened on
+  // Reports returns to Reports rather than to Users, and a reload stays put.
+  // Replaced rather than pushed: Back leaves the page instead of walking
+  // through every tab clicked on the way.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = ADMIN_TABS.some(t => t.key === searchParams.get('tab')) ? searchParams.get('tab') : 'users';
+  function setTab(key) {
+    const next = new URLSearchParams(searchParams);
+    if (key === 'users') next.delete('tab'); else next.set('tab', key);
+    setSearchParams(next, { replace: true });
+  }
   // Set when the admin clicks a user in Monitoring's per-user table to drill into
   // that user's logs — lifted up here (rather than living inside LogsPanel) so a
   // click from a different tab can both switch to Logs AND pre-filter it.
@@ -106,6 +125,8 @@ export default function Admin() {
   }
   const [users,   setUsers]   = useState([]);
   const [loading, setLoading] = useState(true);
+  // A failed load said "No users found", which an admin could take literally.
+  const [usersErr, setUsersErr] = useState('');
   const [email,   setEmail]   = useState('');
   const [pass,    setPass]    = useState('');
   const [showPass, setShowPass] = useState(false);
@@ -133,7 +154,8 @@ export default function Admin() {
   }
 
   async function fetchUsers() {
-    try { const d = await api.get('/admin/users'); setUsers(d.users || []); } catch (_) {}
+    try { const d = await api.get('/admin/users'); setUsers(d.users || []); setUsersErr(''); }
+    catch (err) { setUsersErr(err.message || 'Could not load the users'); }
   }
 
   useEffect(() => {
@@ -204,9 +226,9 @@ export default function Admin() {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, marginBottom: 20, width: 'fit-content' }}>
-        {[{ key: 'users', label: '👥 Users' }, { key: 'reports', label: '⚠ Reports' }, { key: 'monitoring', label: '📊 Monitoring' }, { key: 'logs', label: '📄 Logs' }].map(t => (
-          <button key={t.key} type="button" onClick={() => setTab(t.key)} style={{
+      <div role="tablist" aria-label="Admin sections" style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, marginBottom: 20, width: 'fit-content', maxWidth: '100%', overflowX: 'auto' }}>
+        {ADMIN_TABS.map(t => (
+          <button key={t.key} type="button" role="tab" aria-selected={tab === t.key} onClick={() => setTab(t.key)} style={{
             padding: '7px 18px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
             background: tab === t.key ? 'var(--accent-gradient)' : 'transparent',
             color: tab === t.key ? '#fff' : 'var(--text-muted)',
@@ -236,8 +258,13 @@ export default function Admin() {
               <div className="card-title">Users</div>
               <div className="card-subtitle" style={{ marginBottom: 0 }}>{users.length} account{users.length !== 1 ? 's' : ''} total</div>
             </div>
-            <button className="btn btn-outline btn-sm" onClick={fetchUsers}>↻</button>
+            <button className="btn btn-outline btn-sm" onClick={fetchUsers} aria-label="Refresh users" title="Refresh users">↻</button>
           </div>
+
+          {usersErr && (
+            <RetryAlert message={users.length ? `Could not refresh the list. ${usersErr}` : `Could not load the users. ${usersErr}`}
+                        onRetry={fetchUsers} />
+          )}
 
           {loading ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)', padding: '16px 0' }}>
@@ -245,10 +272,12 @@ export default function Admin() {
               Loading...
             </div>
           ) : users.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-state-icon">👥</div>
-              <div>No users found</div>
-            </div>
+            !usersErr && (
+              <div className="empty-state">
+                <div className="empty-state-icon">👥</div>
+                <div>No users found</div>
+              </div>
+            )
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               {users.map((u, i) => {
@@ -258,7 +287,7 @@ export default function Admin() {
                 const lastAdmin = u.role === 'admin' && !u.disabledAt && admins.length <= 1;
                 const inFlight  = key => busy === `${key}:${u.id}`;
                 return (
-                  <div key={u.id} style={{ animation: `fadeUp 0.25s ease ${i * 40}ms both` }}>
+                  <div key={u.id} style={{ animation: staggerIn(i, 40, '0.25s') }}>
                     {/* Clicking a row opens its controls below it. Your own row has
                         none: every control here is refused on yourself, and your own
                         password is changed from Setup. The other rows are buttons to
@@ -461,11 +490,14 @@ function ReportsPanel({ navigate, timezone }) {
   const [loading,   setLoading]   = useState(true);
   const [resolving, setResolving] = useState(null);
   const [error,     setError]     = useState('');
+  // A failed load said "All clear — no reported issues", the one thing it
+  // must never say without having looked.
+  const [loadErr,   setLoadErr]   = useState('');
 
   async function fetchReports() {
     setLoading(true);
-    try { const d = await api.get('/admin/reports'); setReports(d.reports || []); }
-    catch (_) {}
+    try { const d = await api.get('/admin/reports'); setReports(d.reports || []); setLoadErr(''); }
+    catch (err) { setLoadErr(err.message || 'Could not load the reports'); }
     finally { setLoading(false); }
   }
 
@@ -506,7 +538,7 @@ function ReportsPanel({ navigate, timezone }) {
           {reports.length > 0 && (
             <span className="badge badge-red">{reports.length} open</span>
           )}
-          <button className="btn btn-outline btn-sm" onClick={fetchReports}>↻</button>
+          <button className="btn btn-outline btn-sm" onClick={fetchReports} aria-label="Refresh reports" title="Refresh reports">↻</button>
         </div>
       </div>
 
@@ -516,12 +548,19 @@ function ReportsPanel({ navigate, timezone }) {
         </div>
       )}
 
+      {loadErr && (
+        <RetryAlert message={reports.length ? `Could not refresh the reports. ${loadErr}` : `Could not load the reports. ${loadErr}`}
+                    onRetry={fetchReports} />
+      )}
+
       {reports.length === 0 ? (
+        !loadErr && (
         <div className="empty-state" style={{ padding: '40px 0' }}>
           <div className="empty-state-icon">✓</div>
           <div style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: 14 }}>All clear</div>
           <div style={{ fontSize: 13 }}>No reported issues</div>
         </div>
+        )
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {reports.map(inv => (
@@ -550,9 +589,11 @@ function ReportsPanel({ navigate, timezone }) {
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
+                  {/* Takes this tab's address along, so Back on the review
+                      returns to Reports rather than to the AR & AP list. */}
                   <button
                     className="btn btn-outline btn-sm"
-                    onClick={() => navigate(`/invoices/${inv.id}`)}
+                    onClick={() => navigate(`/invoices/${inv.id}`, { state: { from: '/admin?tab=reports', depth: 1 } })}
                   >
                     View →
                   </button>
@@ -617,13 +658,15 @@ function MonitoringPanel({ timezone, onViewLogs }) {
   const [daily,   setDaily]   = useState(null);
   const [busy,    setBusy]    = useState(null);   // `key:userId` while a control is in flight
   const [actionError, setActionError] = useState('');
+  // A failed first load used to render nothing at all — not even a heading.
+  const [loadErr, setLoadErr] = useState('');
 
   // `silent` refreshes the table in place after a control, instead of
   // replacing the whole panel with the spinner.
   async function fetchMonitoring({ silent = false } = {}) {
     if (!silent) setLoading(true);
-    try { setData(await api.get('/admin/monitoring')); }
-    catch (_) {}
+    try { setData(await api.get('/admin/monitoring')); setLoadErr(''); }
+    catch (err) { setLoadErr(err.message || 'Could not load monitoring data'); }
     finally { if (!silent) setLoading(false); }
   }
 
@@ -649,9 +692,11 @@ function MonitoringPanel({ timezone, onViewLogs }) {
     await control(e, 'auto', u, () => api.patch(`/admin/users/${u.id}/auto-process`, { autoProcess: false }));
   }
 
+  // `false` for a failed load, so the chart can say so rather than draw an
+  // empty month as if nothing had been processed.
   async function fetchDaily() {
     try { setDaily((await api.get('/admin/stats/daily?days=30')).days); }
-    catch (_) { setDaily([]); }
+    catch (_) { setDaily(false); }
   }
 
   useEffect(() => { fetchMonitoring(); fetchDaily(); }, []);
@@ -665,7 +710,9 @@ function MonitoringPanel({ timezone, onViewLogs }) {
     );
   }
 
-  if (!data) return null;
+  if (!data) {
+    return <RetryAlert message={`Could not load monitoring data. ${loadErr}`} onRetry={() => { fetchMonitoring(); fetchDaily(); }} />;
+  }
   const { system, users } = data;
 
   return (
@@ -674,8 +721,13 @@ function MonitoringPanel({ timezone, onViewLogs }) {
       <div className="card">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
           <div className="card-title">System Health</div>
-          <button className="btn btn-outline btn-sm" onClick={() => { fetchMonitoring(); fetchDaily(); }}>↻</button>
+          <button className="btn btn-outline btn-sm" onClick={() => { fetchMonitoring(); fetchDaily(); }}
+                  aria-label="Refresh monitoring" title="Refresh monitoring">↻</button>
         </div>
+        {loadErr && (
+          <RetryAlert message={`Could not refresh — these figures are from the last load. ${loadErr}`}
+                      onRetry={() => fetchMonitoring({ silent: true })} />
+        )}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
           <StatCard label="Uptime"        value={formatUptime(system.uptimeSeconds)} />
           <StatCard label="Node"          value={system.nodeVersion} />
@@ -694,6 +746,8 @@ function MonitoringPanel({ timezone, onViewLogs }) {
         <div className="card-subtitle">Every user combined, by day processed</div>
         {daily === null ? (
           <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
+        ) : daily === false ? (
+          <RetryAlert message="Could not load the daily volume." onRetry={() => { setDaily(null); fetchDaily(); }} style={{ marginBottom: 0 }} />
         ) : (
           <DailyVolumeChart data={daily} />
         )}
@@ -935,6 +989,9 @@ function LogsPanel({ timezone, initialUserId, initialUserEmail }) {
   const [lines,   setLines]   = useState(200);
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Kept apart from "no matching entries": a log that could not be read is
+  // not a quiet log.
+  const [loadErr, setLoadErr] = useState('');
 
   // Overrides exist because a setState is not visible until the next render;
   // a change handler that sets a value and fetches in the same breath must
@@ -948,8 +1005,10 @@ function LogsPanel({ timezone, initialUserId, initialUserEmail }) {
       if (q.trim())      params.set('q', q.trim());
       const d = await api.get(`/admin/logs?${params.toString()}`);
       setEntries(d.entries || []);
-    } catch (_) {
+      setLoadErr('');
+    } catch (err) {
       setEntries([]);
+      setLoadErr(err.message || 'Could not read the log');
     } finally {
       setLoading(false);
     }
@@ -971,7 +1030,7 @@ function LogsPanel({ timezone, initialUserId, initialUserEmail }) {
             Live tail of the active log file — no SSH needed for day-to-day debugging.
           </div>
         </div>
-        <button className="btn btn-outline btn-sm" onClick={() => fetchLogs()}>↻</button>
+        <button className="btn btn-outline btn-sm" onClick={() => fetchLogs()} aria-label="Refresh logs" title="Refresh logs">↻</button>
       </div>
 
       {initialUserId && userId === initialUserId && (
@@ -1007,17 +1066,17 @@ function LogsPanel({ timezone, initialUserId, initialUserEmail }) {
           ))}
         </div>
         <input
-          type="text" className="form-input" placeholder="Filter by user ID…"
+          type="text" className="form-input" placeholder="Filter by user ID…" aria-label="Filter by user ID"
           value={userId} onChange={e => setUserId(e.target.value)}
           style={{ maxWidth: 190 }}
         />
         <input
-          type="text" className="form-input" placeholder="Search message…"
+          type="text" className="form-input" placeholder="Search message…" aria-label="Search log messages"
           value={q} onChange={e => setQ(e.target.value)}
           style={{ maxWidth: 220 }}
         />
         <select
-          className="form-input" value={lines}
+          className="form-input" value={lines} aria-label="Lines to show"
           onChange={e => { const n = Number(e.target.value); setLines(n); fetchLogs(undefined, undefined, n); }}
           style={{ maxWidth: 110 }}
         >
@@ -1031,6 +1090,8 @@ function LogsPanel({ timezone, initialUserId, initialUserEmail }) {
           <span style={{ width: 14, height: 14, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.65s linear infinite', display: 'inline-block' }} />
           Loading...
         </div>
+      ) : loadErr ? (
+        <RetryAlert message={`Could not read the log. ${loadErr}`} onRetry={() => fetchLogs()} style={{ marginBottom: 0 }} />
       ) : entries.length === 0 ? (
         <div className="empty-state" style={{ padding: '30px 0' }}>
           <div className="empty-state-icon">📄</div>

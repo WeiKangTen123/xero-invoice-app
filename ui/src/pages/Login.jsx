@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import { api } from '../api/client';
+import { returnPathFrom } from '../utils/returnTo';
 
 export default function Login() {
   const { login, register } = useAuth();
   const { theme, toggle }   = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [mode, setMode]       = useState('login');
   const [firstRun, setFirstRun] = useState(false);
@@ -43,7 +45,9 @@ export default function Login() {
     try {
       if (mode === 'login') await login(email, password);
       else                  await register(email, password);
-      navigate('/dashboard');
+      // Back to the page that sent you here, if it was one of ours. Replaced
+      // rather than pushed, so Back from there does not return to this form.
+      navigate(returnPathFrom(location), { replace: true });
     } catch (err) {
       triggerError(err.message);
     } finally {
@@ -126,6 +130,7 @@ export default function Login() {
           boxShadow:      isDark ? '0 2px 8px rgba(0,0,0,0.25)' : '0 2px 10px rgba(99,102,241,0.2)',
         }}
         title={`Switch to ${isDark ? 'light' : 'dark'} theme`}
+        aria-label={`Switch to ${isDark ? 'light' : 'dark'} theme`}
       >
         {isDark ? '☀' : '◑'}
       </button>
@@ -257,6 +262,10 @@ export default function Login() {
                     onChange={e => setEmail(e.target.value)}
                     required
                     autoFocus
+                    // Lets a password manager fill this in, and offer to save
+                    // the pair when an account is created.
+                    autoComplete="username"
+                    inputMode="email"
                   />
                   <span className="input-icon" style={{ left: 12, top: '50%', transform: 'translateY(-50%)', position: 'absolute', color: 'var(--text-muted)', fontSize: 15 }}>✉</span>
                 </div>
@@ -273,6 +282,7 @@ export default function Login() {
                     onChange={e => setPassword(e.target.value)}
                     required
                     minLength={mode === 'register' ? 8 : 1}
+                    autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
                     style={{ paddingRight: 42 }}
                   />
                   <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontSize: 15 }}>🔒</span>
@@ -286,6 +296,8 @@ export default function Login() {
                       transition: 'color 0.15s',
                     }}
                     title={showPass ? 'Hide password' : 'Show password'}
+                    aria-label={showPass ? 'Hide password' : 'Show password'}
+                    aria-pressed={showPass}
                   >
                     {showPass ? '🙈' : '👁'}
                   </button>

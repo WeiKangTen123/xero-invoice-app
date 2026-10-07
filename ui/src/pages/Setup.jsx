@@ -1,10 +1,12 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../api/client';
 import ChartOfAccounts from '../components/ChartOfAccounts';
 import HelpTooltip from '../components/HelpTooltip';
 import AccountCodeSelect from '../components/AccountCodeSelect';
+import RetryAlert from '../components/RetryAlert';
 import { useAuth } from '../context/AuthContext';
 import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
+import { useUnsavedChanges } from '../utils/useUnsavedChanges';
 
 const HELP = {
   XERO_CLIENT_ID:        'Your Xero Custom Connection client ID. Found in developer.xero.com → My Apps → your app.',
@@ -147,6 +149,8 @@ function Field({ name, meta, value, onChange }) {
             type="button"
             onClick={() => setShow(v => !v)}
             title={show ? 'Hide' : 'Show'}
+            aria-label={show ? `Hide ${name}` : `Show ${name}`}
+            aria-pressed={show}
             style={{
               position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)',
               background: 'none', border: 'none', cursor: 'pointer',
@@ -363,6 +367,9 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
       // connection moved. Without this, disconnecting left the previous
       // organisation's chart of accounts sitting below, looking live.
       onConnectionChange?.();
+      // And the app-wide "reconnect Xero" banner, which otherwise would not
+      // look again for up to ten minutes after the reconnect it asked for.
+      window.dispatchEvent(new CustomEvent('xero-connection-changed'));
     }
   }
 
@@ -396,7 +403,10 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
       if (flag) {
         ['xero_oauth', 'code', 'state'].forEach(k => params.delete(k));
         const qs = params.toString();
-        window.history.replaceState({}, '', `${window.location.pathname}${qs ? '?' + qs : ''}`);
+        // The router keeps its own bookkeeping in history.state (which entry
+        // this is, for Back and for asking before leaving unsaved edits), so it
+        // is carried over rather than wiped with {}.
+        window.history.replaceState(window.history.state, '', `${window.location.pathname}${qs ? '?' + qs : ''}`);
       }
       fetchTenants();
     }
@@ -541,10 +551,13 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
   const [adding,  setAdding]  = useState(false);
   const [removing, setRemoving] = useState(null);
   const [error,   setError]   = useState('');
+  const [loadErr, setLoadErr] = useState('');
 
+  // A failed load is not an empty list: "No API keys added yet" over keys
+  // that are there would invite adding them all again.
   async function fetchKeys() {
-    try { const d = await api.get('/setup/llm-keys'); setKeys(d.keys); }
-    catch (_) { setKeys([]); }
+    try { const d = await api.get('/setup/llm-keys'); setKeys(d.keys); setLoadErr(''); }
+    catch (err) { setLoadErr(err.message || 'Could not load the keys'); }
   }
 
   useEffect(() => { fetchKeys(); }, []);
@@ -606,8 +619,11 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
 
       {error && <div className="alert alert-error" style={{ marginBottom: 12 }}><span className="alert-icon">✕</span>{error}</div>}
 
+      {loadErr && (
+        <RetryAlert message={`Could not load your API keys. ${loadErr}`} onRetry={fetchKeys} style={{ marginBottom: 12 }} />
+      )}
       {keys === null ? (
-        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Loading keys…</div>
+        !loadErr && <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Loading keys…</div>
       ) : keys.length === 0 && !showNew ? (
         <div className="empty-state" style={{ padding: '20px 0' }}>
           <div className="empty-state-icon">🔑</div>
@@ -626,6 +642,7 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
                 onClick={() => handleRemove(k.id)}
                 style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
                 title="Remove key"
+                aria-label={`Remove key ${i + 1}${k.label ? ` (${k.label})` : ''}`}
               >
                 {removing === k.id ? '...' : '✕'}
               </button>
@@ -738,10 +755,24 @@ function ChangePasswordCard({ idx }) {
   );
 }
 
+// The form's values, one per setting, from the server's sectioned answer.
+// TIMEZONE that has never been saved defaults to the account's current
+// effective timezone rather than showing blank.
+function flatten(data, timezone) {
+  const flat = {};
+  for (const section of Object.values(data))
+    for (const [k, fieldMeta] of Object.entries(section)) flat[k] = fieldMeta.value || '';
+  if (!flat.TIMEZONE) flat.TIMEZONE = timezone || DEFAULT_TIMEZONE;
+  return flat;
+}
+
 export default function Setup() {
   const { user, refreshUser } = useAuth();
   const [config,  setConfig]  = useState(null);
+  const [loadErr, setLoadErr] = useState('');
   const [values,  setValues]  = useState({});
+  // The values as last loaded or saved, which is what "unsaved changes" means.
+  const [savedValues, setSavedValues] = useState({});
   const [saving,  setSaving]  = useState(false);
   const [testing, setTesting] = useState({});
   const [msgs,    setMsgs]    = useState({});
@@ -749,19 +780,36 @@ export default function Setup() {
   // data refetches instead of showing a disconnected organisation's figures.
   const [xeroVersion, setXeroVersion] = useState(0);
   const [saved,   setSaved]   = useState(false);
+  const savedTimer = useRef(null);
+  useEffect(() => () => clearTimeout(savedTimer.current), []);
 
-  useEffect(() => {
-    api.get('/setup').then(data => {
+  // Read through a ref so loading does not depend on `user`. It used to: every
+  // save calls refreshUser(), which hands back a new user object, which
+  // refetched the settings and overwrote the form — including anything typed
+  // in the moment after pressing Save.
+  const timezoneRef = useRef(user?.timezone);
+  timezoneRef.current = user?.timezone;
+
+  const load = useCallback(async () => {
+    setLoadErr('');
+    try {
+      const data = await api.get('/setup');
+      const flat = flatten(data, timezoneRef.current);
       setConfig(data);
-      const flat = {};
-      for (const section of Object.values(data))
-        for (const [k, fieldMeta] of Object.entries(section)) flat[k] = fieldMeta.value || '';
-      // TIMEZONE has never been explicitly saved yet — default the dropdown to
-      // this account's current effective timezone rather than showing it blank.
-      if (!flat.TIMEZONE) flat.TIMEZONE = user?.timezone || DEFAULT_TIMEZONE;
       setValues(flat);
-    }).catch(() => {});
-  }, [user]);
+      setSavedValues(flat);
+    } catch (err) {
+      setLoadErr(err.message || 'Could not load your settings');
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const dirty = !!config && Object.keys({ ...values, ...savedValues })
+    .some(k => (values[k] ?? '') !== (savedValues[k] ?? ''));
+  useUnsavedChanges(dirty, {
+    message: 'Some settings on this page have not been saved. Leaving now throws them away.',
+  });
 
   function handleChange(key, val) {
     setValues(prev => ({ ...prev, [key]: val }));
@@ -771,22 +819,41 @@ export default function Setup() {
     e.preventDefault();
     setSaving(true);
     setSaved(false);
+    // The last attempt's error goes as soon as there is a new attempt. It used
+    // to stay up for good, above a success banner once the next save worked.
+    setMsgs(prev => ({ ...prev, _save: null }));
+    const sent = values;
     try {
-      await api.post('/setup', values);
-      setSaved(true);
-      const fresh = await api.get('/setup');
-      setConfig(fresh);
-      const flat = {};
-      for (const section of Object.values(fresh))
-        for (const [k, fieldMeta] of Object.entries(section)) flat[k] = fieldMeta.value || '';
-      setValues(flat);
-      // Picks up a changed TIMEZONE (or any other /auth/me-visible field) so every
-      // already-mounted component reading it (Admin.jsx's timestamps, etc.)
-      // reflects the change immediately instead of needing a full reload.
-      refreshUser();
-      setTimeout(() => setSaved(false), 3500);
+      await api.post('/setup', sent);
     } catch (err) {
       setMsgs(prev => ({ ...prev, _save: { ok: false, text: err.message } }));
+      setSaving(false);
+      return;
+    }
+    setSaved(true);
+    clearTimeout(savedTimer.current);
+    savedTimer.current = setTimeout(() => setSaved(false), 3500);
+    // Picks up a changed TIMEZONE (or any other /auth/me-visible field) so every
+    // already-mounted component reading it (Admin.jsx's timestamps, etc.)
+    // reflects the change immediately instead of needing a full reload.
+    refreshUser();
+    try {
+      // The server's view after the save: a secret comes back blank and
+      // "saved", a value worked out from the email address appears. Fields
+      // edited since Save was pressed keep what was typed.
+      const fresh = await api.get('/setup');
+      const flat  = flatten(fresh, timezoneRef.current);
+      setConfig(fresh);
+      setSavedValues(flat);
+      setValues(prev => {
+        const next = { ...flat };
+        for (const k of Object.keys(prev)) if (prev[k] !== sent[k]) next[k] = prev[k];
+        return next;
+      });
+    } catch (_) {
+      // Saved, but the page could not reread it. What was sent is what is
+      // saved, as far as this page knows.
+      setSavedValues(sent);
     } finally {
       setSaving(false);
     }
@@ -803,6 +870,15 @@ export default function Setup() {
     } finally {
       setTesting(prev => ({ ...prev, [type]: false }));
     }
+  }
+
+  if (!config && loadErr) {
+    return (
+      <div>
+        <div className="page-header"><h1>Setup</h1></div>
+        <RetryAlert message={`Could not load your settings. ${loadErr}`} onRetry={load} />
+      </div>
+    );
   }
 
   if (!config) {
@@ -875,6 +951,9 @@ export default function Setup() {
           background: 'linear-gradient(to top, var(--bg-primary) 80%, transparent)',
           zIndex: 10,
         }}>
+          {dirty && (
+            <span style={{ fontSize: 12, color: 'var(--warning)', fontWeight: 600 }}>Unsaved changes</span>
+          )}
           <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             Secrets are hidden by default — click 👁 to reveal
           </span>

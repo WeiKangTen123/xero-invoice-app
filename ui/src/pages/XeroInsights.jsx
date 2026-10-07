@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
+import RetryAlert from '../components/RetryAlert';
 import { useAuth } from '../context/AuthContext';
 import { formatRelative } from '../utils/formatDate';
 import { fmtMoney, fmtMoneyShort } from '../utils/format';
@@ -73,7 +74,16 @@ export default function XeroInsights() {
   const [data,      setData]      = useState(null); // null = loading
   const [error,     setError]     = useState('');
   const [refreshing,setRefreshing]= useState(false);
-  const [tab,       setTab]       = useState('overview');
+  // The open tab is in the address, so a reload, a shared link or Back from
+  // another page lands on it instead of on Overview. Replaced rather than
+  // pushed, so Back leaves the dashboard rather than stepping through tabs.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = TABS.some(t => t.key === searchParams.get('tab')) ? searchParams.get('tab') : 'overview';
+  function setTab(key) {
+    const next = new URLSearchParams(searchParams);
+    if (key === 'overview') next.delete('tab'); else next.set('tab', key);
+    setSearchParams(next, { replace: true });
+  }
   const [activeTenantId, setActiveTenantId] = useState(null);
   const [, forceTick] = useState(0); // re-render every 15s so "synced Xs ago" stays live
 
@@ -434,7 +444,7 @@ export default function XeroInsights() {
     return (
       <div>
         <div className="page-header"><h1>Dashboard</h1></div>
-        <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>
+        <RetryAlert message={error} onRetry={() => fetchSummary({ force: true })} busy={refreshing} />
       </div>
     );
   }
@@ -502,7 +512,7 @@ export default function XeroInsights() {
         </div>
       </div>
 
-      {error && <div className="alert alert-error" style={{ marginTop: 14 }}><span className="alert-icon">✕</span>{error}</div>}
+      {error && <RetryAlert message={error} onRetry={() => fetchSummary({ force: true })} busy={refreshing} style={{ marginTop: 14 }} />}
 
       <div className="card org-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 14, margin: '18px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -585,9 +595,9 @@ export default function XeroInsights() {
             background: 'linear-gradient(to right, transparent, var(--bg-card))',
           }} />
         )}
-        <div ref={tabsRef} className="mobile-scroll-x" style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, maxWidth: '100%', overflowX: 'auto' }}>
+        <div ref={tabsRef} role="tablist" aria-label="Dashboard sections" className="mobile-scroll-x" style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 4, maxWidth: '100%', overflowX: 'auto' }}>
           {TABS.map(t => (
-            <button key={t.key} type="button" className="tab-pill" onClick={() => setTab(t.key)} style={{
+            <button key={t.key} type="button" role="tab" aria-selected={tab === t.key} className="tab-pill" onClick={() => setTab(t.key)} style={{
               padding: '7px 16px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 600,
               background: tab === t.key ? 'var(--accent-gradient)' : 'transparent',
               color: tab === t.key ? '#fff' : 'var(--text-muted)',
@@ -641,7 +651,7 @@ export default function XeroInsights() {
           shows only its own report's, so a failed load of the report the bar
           is drawn from said nothing there — unless both failed alike. */}
       {tab === 'cashflow' && perf.error && perf.error !== cashflow.error && (
-        <div className="alert alert-error" style={{ marginBottom: 16 }}><span className="alert-icon">✕</span>{perf.error}</div>
+        <RetryAlert message={perf.error} onRetry={() => fetchPerf({ force: true })} busy={perf.status === 'loading'} style={{ marginBottom: 16 }} />
       )}
 
       {/* The budget tabs' period. Monthly, like the budgets themselves: Xero
@@ -671,7 +681,7 @@ export default function XeroInsights() {
             <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading performance data…</div>
           )}
           {perf.error && (
-            <div className="alert alert-error" style={{ marginBottom: 16 }}><span className="alert-icon">✕</span>{perf.error}</div>
+            <RetryAlert message={perf.error} onRetry={() => fetchPerf({ force: true })} busy={perf.status === 'loading'} style={{ marginBottom: 16 }} />
           )}
           {perf.data && !perf.error && (
             <OverviewPanel data={perf.data} from={monthFrom} to={monthTo}
@@ -687,7 +697,7 @@ export default function XeroInsights() {
             <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading figures…</div>
           )}
           {perf.error && (
-            <div className="alert alert-error"><span className="alert-icon">✕</span>{perf.error}</div>
+            <RetryAlert message={perf.error} onRetry={() => fetchPerf({ force: true })} busy={perf.status === 'loading'} />
           )}
           {perf.data && !perf.error && (
             <AnalysisPanel
@@ -705,11 +715,12 @@ export default function XeroInsights() {
             <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading revenue data…</div>
           )}
           {perf.error && (
-            <div className="alert alert-error"><span className="alert-icon">✕</span>{perf.error}</div>
+            <RetryAlert message={perf.error} onRetry={() => fetchPerf({ force: true })} busy={perf.status === 'loading'} />
           )}
           {perf.data && !perf.error && (
             <RevenuePanel data={perf.data} from={monthFrom} to={monthTo}
-                          selectedLine={revenueLine} onSelectLine={setRevenueLine} />
+                          selectedLine={revenueLine} onSelectLine={setRevenueLine}
+                          onRecurringChange={() => fetchPerf()} />
           )}
         </>
       )}
@@ -720,7 +731,7 @@ export default function XeroInsights() {
             <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading profitability data…</div>
           )}
           {perf.error && (
-            <div className="alert alert-error"><span className="alert-icon">✕</span>{perf.error}</div>
+            <RetryAlert message={perf.error} onRetry={() => fetchPerf({ force: true })} busy={perf.status === 'loading'} />
           )}
           {perf.data && !perf.error && (
             <ProfitabilityPanel data={perf.data} from={monthFrom} to={monthTo} />
@@ -734,7 +745,7 @@ export default function XeroInsights() {
             <div className="card" style={{ padding: 30, color: 'var(--text-muted)', fontSize: 13 }}>Loading cash flow…</div>
           )}
           {cashflow.error && (
-            <div className="alert alert-error"><span className="alert-icon">✕</span>{cashflow.error}</div>
+            <RetryAlert message={cashflow.error} onRetry={() => fetchCashflow({ force: true })} busy={cashflow.status === 'loading'} />
           )}
           {cashflow.data && !cashflow.error && <CashFlowPanel data={cashflow.data} />}
         </>
@@ -744,7 +755,7 @@ export default function XeroInsights() {
       {/* Banking's cash figures come from the performance report, and without
           this a failed load just left them out with no word why. */}
       {tab === 'banking' && perf.error && (
-        <div className="alert alert-error" style={{ marginBottom: 16 }}><span className="alert-icon">✕</span>{perf.error}</div>
+        <RetryAlert message={perf.error} onRetry={() => fetchPerf({ force: true })} busy={perf.status === 'loading'} style={{ marginBottom: 16 }} />
       )}
       {tab === 'banking' && <BankingTab user={user} isMobile={isMobile} banking={banking} selectedBankAccount={selectedBankAccount} setSelectedBankAccount={setSelectedBankAccount} statement={statement} perf={bankingPerf} viewStatement={viewStatement} bankBalances={bankBalances} currency={currency} />}
 

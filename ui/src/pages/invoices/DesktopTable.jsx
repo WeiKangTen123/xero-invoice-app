@@ -1,10 +1,21 @@
 import { fmtMoney } from '../../utils/format';
 import { formatDateTime } from '../../utils/formatDate';
-import { TypeBadge } from '../../components/Badges';
+import { TypeBadge, ConfidenceBadge } from '../../components/Badges';
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
+import { staggerIn } from '../../utils/stagger';
 import { receivedLabel, totalsLabel } from './helpers';
 
-export default function DesktopTable({ user, navigate, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
+// Reset so the group heading's button looks like the row it always was; the
+// button is there for the keyboard and screen readers, not for its looks.
+// Reset property by property rather than with `all: unset`, which would take
+// the browser's focus ring with it — the one thing a keyboard user needs here.
+const GROUP_BUTTON = {
+  display: 'block', width: '100%', boxSizing: 'border-box', textAlign: 'left',
+  background: 'none', border: 'none', margin: 0, font: 'inherit', color: 'inherit',
+  padding: '14px 10px 8px', cursor: 'pointer', borderRadius: 6,
+};
+
+export default function DesktopTable({ user, openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
   return (
           <div style={{ overflowX: 'auto' }}>
             <table className="data-table">
@@ -34,21 +45,25 @@ export default function DesktopTable({ user, navigate, invoices, selected, delet
                 {groups.flatMap(g => [
                   // A full-width row inside the same table — separate tables per
                   // group would let the columns drift out of alignment.
+                  // The heading is a real button, so a keyboard can open and
+                  // close a group the way a mouse always could.
                   <tr key={`h-${g.key}`} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td colSpan={10} style={{ padding: '14px 10px 8px', cursor: 'pointer' }}
-                        onClick={() => toggleGroup(g.key)}>
-                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-                        <span style={{ fontSize: 10, color: 'var(--text-muted)', width: 10 }}>{isOpen(g) ? '▼' : '▶'}</span>
-                        <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.06em', textTransform: 'uppercase' }}>{g.label}</span>
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {g.rows.length}</span>
-                        {/* How much came in — the main reason to group at all. */}
-                        <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
-                          {totalsLabel(g.totals)}
+                    <td colSpan={10} style={{ padding: 0 }}>
+                      <button type="button" onClick={() => toggleGroup(g.key)} aria-expanded={isOpen(g)}
+                              style={GROUP_BUTTON}>
+                        <span style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+                          <span aria-hidden="true" style={{ fontSize: 10, color: 'var(--text-muted)', width: 10 }}>{isOpen(g) ? '▼' : '▶'}</span>
+                          <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.06em', textTransform: 'uppercase' }}>{g.label}</span>
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {g.rows.length}</span>
+                          {/* How much came in — the main reason to group at all. */}
+                          <span style={{ marginLeft: 'auto', fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
+                            {totalsLabel(g.totals)}
+                          </span>
                         </span>
-                      </div>
-                      {g.note && (
-                        <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginLeft: 20, marginTop: 3 }}>↳ {g.note}</div>
-                      )}
+                        {g.note && (
+                          <span style={{ display: 'block', fontSize: 10.5, color: 'var(--text-muted)', marginLeft: 20, marginTop: 3 }}>↳ {g.note}</span>
+                        )}
+                      </button>
                     </td>
                   </tr>,
                   ...(isOpen(g) ? g.rows : []).map((inv, i) => {
@@ -61,13 +76,13 @@ export default function DesktopTable({ user, navigate, invoices, selected, delet
                       key={inv.id}
                       style={{
                         cursor: 'pointer',
-                        animation: `fadeUp 0.2s ease ${i * 25}ms both`,
+                        animation: staggerIn(i),
                         background: isSelected
                           ? 'var(--accent-subtle)'
                           : isDup ? 'rgba(239,68,68,0.04)' : needsAttention ? 'rgba(245,158,11,0.04)' : undefined,
                         transition: 'background 0.15s, opacity 0.2s',
                       }}
-                      onClick={() => navigate(`/invoices/${inv.id}`)}
+                      onClick={() => openRecord(inv.id)}
                     >
                       <td style={{ paddingRight: 0 }} onClick={e => toggleSelect(inv.id, e)}>
                         <input
@@ -89,7 +104,10 @@ export default function DesktopTable({ user, navigate, invoices, selected, delet
                             {isDup ? '⚠' : (inv.vendorName || '?').slice(0, 2).toUpperCase()}
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                            <span style={{ fontWeight: 500 }}>{inv.vendorName || '—'}</span>
+                            <span style={{ fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                              {inv.vendorName || '—'}
+                              <ConfidenceBadge confidence={inv.confidence} style={{ fontSize: 10.5, padding: '1px 6px' }} />
+                            </span>
                             {isDup && (
                               <span style={{ fontSize: 10.5, color: 'var(--danger)', fontWeight: 600, marginTop: 1 }}>
                                 ↳ ⚠ Duplicate {inv.duplicateOf ? `of #${inv.duplicateOf.slice(-6)}` : 'detected'}
@@ -155,7 +173,7 @@ export default function DesktopTable({ user, navigate, invoices, selected, delet
                         <div style={{ display: 'flex', gap: 6 }}>
                           <button
                             className="btn btn-outline btn-sm"
-                            onClick={() => navigate(`/invoices/${inv.id}`)}
+                            onClick={() => openRecord(inv.id)}
                             style={isDup
                               ? { background: 'rgba(239,68,68,0.08)', color: 'var(--danger)', borderColor: 'rgba(239,68,68,0.3)' }
                               : inv.status === 'reviewed'
@@ -178,6 +196,7 @@ export default function DesktopTable({ user, navigate, invoices, selected, delet
                             onClick={e => promptDeleteOne(inv, e)}
                             style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)', minWidth: 28 }}
                             title={inv.invoiceType === 'EXPENSE' || inv.receiptFile ? 'Delete this receipt' : 'Delete this invoice'}
+                            aria-label={`Delete ${inv.vendorName || inv.invoiceNumber || 'this record'}`}
                           >
                             {deleteLoading && deleteTarget?.invoice?.id === inv.id ? '...' : '✕'}
                           </button>

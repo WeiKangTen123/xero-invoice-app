@@ -1,9 +1,9 @@
 import { fmtMoney } from '../../utils/format';
-import { TypeBadge } from '../../components/Badges';
+import { TypeBadge, ConfidenceBadge } from '../../components/Badges';
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { totalsLabel } from './helpers';
 
-export default function MobileList({ navigate, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, filtered, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
+export default function MobileList({ openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, filtered, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup }) {
   return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {/* Mobile Select-all row if items exist */}
@@ -21,30 +21,38 @@ export default function MobileList({ navigate, invoices, selected, deleteTarget,
 
             {groups.map(g => (
               <div key={`g-m-${g.key}`} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {/* Group heading */}
-                <div
+                {/* Group heading — a button, so it opens from the keyboard and
+                    says to a screen reader whether it is open. */}
+                <button
+                  type="button"
                   onClick={() => toggleGroup(g.key)}
+                  aria-expanded={isOpen(g)}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
+                    width: '100%',
                     padding: '8px 10px',
                     background: 'var(--bg-secondary)',
+                    border: 'none',
+                    font: 'inherit',
+                    color: 'inherit',
+                    textAlign: 'left',
                     borderRadius: 8,
                     cursor: 'pointer',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{isOpen(g) ? '▼' : '▶'}</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span aria-hidden="true" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{isOpen(g) ? '▼' : '▶'}</span>
                     <span style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: '.04em', textTransform: 'uppercase' }}>{g.label}</span>
                     <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {g.rows.length}</span>
-                  </div>
+                  </span>
                   {g.totals.length ? (
                     <span style={{ fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
                       {totalsLabel(g.totals)}
                     </span>
                   ) : null}
-                </div>
+                </button>
 
                 {isOpen(g) && g.rows.map((inv) => {
                   const { cls, label } = statusMeta(inv.status);
@@ -55,7 +63,7 @@ export default function MobileList({ navigate, invoices, selected, deleteTarget,
                   return (
                     <div
                       key={inv.id}
-                      onClick={() => navigate(`/invoices/${inv.id}`)}
+                      onClick={() => openRecord(inv.id)}
                       style={{
                         padding: '12px 14px',
                         borderRadius: 12,
@@ -134,6 +142,7 @@ export default function MobileList({ navigate, invoices, selected, deleteTarget,
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingTop: 4, borderTop: '1px solid var(--border)' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <TypeBadge type={inv.invoiceType} />
+                          <ConfidenceBadge confidence={inv.confidence} />
                           {inv.receiptFile
                             ? <span className="badge badge-yellow">{inv.source === 'phone' ? '📱' : '🧾'}</span>
                             : inv.hasPdf
@@ -149,7 +158,7 @@ export default function MobileList({ navigate, invoices, selected, deleteTarget,
                         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }} onClick={e => e.stopPropagation()}>
                           <button
                             className="btn btn-outline btn-sm"
-                            onClick={() => navigate(`/invoices/${inv.id}`)}
+                            onClick={() => openRecord(inv.id)}
                             style={{
                               fontSize: 11.5,
                               padding: '4px 10px',
@@ -174,6 +183,7 @@ export default function MobileList({ navigate, invoices, selected, deleteTarget,
                             onClick={e => promptDeleteOne(inv, e)}
                             style={{ background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)', padding: '4px 8px', fontSize: 12 }}
                             title="Delete"
+                            aria-label={`Delete ${inv.vendorName || inv.invoiceNumber || 'this record'}`}
                           >
                             ✕
                           </button>

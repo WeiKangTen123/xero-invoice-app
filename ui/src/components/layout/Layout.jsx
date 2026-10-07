@@ -4,6 +4,7 @@ import Sidebar from './Sidebar';
 import Header from './Header';
 import BottomNav from './BottomNav';
 import ChatAssistant from '../ChatAssistant';
+import XeroConnectionBanner from './XeroConnectionBanner';
 import { useViewMode } from '../../context/ViewModeContext';
 
 export default function Layout() {
@@ -32,6 +33,9 @@ export default function Layout() {
 
       <div className="main-content">
         <Header />
+        {/* Between the header and the page so it shows on every page without
+            each page making room for it, and scrolls away with none of them. */}
+        <XeroConnectionBanner isMobile={isMobile} />
         <div className="page-body">
           {/* Page chunks load on demand (see App.jsx), so the boundary sits
               here rather than around the whole app — the sidebar, header and

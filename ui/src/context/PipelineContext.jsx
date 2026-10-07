@@ -23,10 +23,14 @@ export function PipelineProvider({ children }) {
 
   useEffect(() => { refresh(); }, [refresh]);
   // Every 3 s while the queue is busy, 15 s when idle, nothing while the tab
-  // is hidden; the hook refreshes at once when the tab is shown again.
+  // is hidden; the hook refreshes at once when the tab is shown again. A send
+  // to Xero in progress counts as busy too: the AR & AP list refreshes when
+  // these counts move, and "Send all" otherwise took up to 15 s per step to
+  // show each document arrive.
   useVisiblePolling(refresh, () => {
-    const q = statusRef.current?.queue;
-    return (q?.processing > 0 || q?.pending > 0) ? 3000 : 15000;
+    const s = statusRef.current;
+    const q = s?.queue;
+    return (q?.processing > 0 || q?.pending > 0 || s?.xero?.submitting > 0) ? 3000 : 15000;
   });
 
   return (

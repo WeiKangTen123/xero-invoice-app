@@ -2,14 +2,17 @@ import { useTheme } from '../../context/ThemeContext';
 import { useViewMode } from '../../context/ViewModeContext';
 import { useLocation, Link } from 'react-router-dom';
 
-function getBreadcrumbs(pathname) {
+// `listPath` is the list a review was opened from, tab and filters included
+// (the list passes it along when it opens a record), so the crumb leads back
+// to that rather than to a fresh, unfiltered list.
+function getBreadcrumbs(pathname, listPath = '/invoices') {
   if (pathname === '/dashboard')  return [{ label: 'Dashboard' }];
   if (pathname === '/automation') return [{ label: 'Automation' }];
   if (pathname === '/setup')      return [{ label: 'Setup' }];
   if (pathname === '/admin')      return [{ label: 'Admin' }];
   if (pathname === '/invoices')   return [{ label: 'AR & AP' }];
   if (pathname.startsWith('/invoices/')) return [
-    { label: 'AR & AP', to: '/invoices' },
+    { label: 'AR & AP', to: listPath },
     { label: 'Review' },
   ];
   return [];
@@ -18,8 +21,9 @@ function getBreadcrumbs(pathname) {
 export default function Header() {
   const { theme, toggle } = useTheme();
   const { mode, isMobile, toggleViewMode, setMobileDrawerOpen } = useViewMode();
-  const { pathname } = useLocation();
-  const crumbs = getBreadcrumbs(pathname);
+  const { pathname, state } = useLocation();
+  const from = typeof state?.from === 'string' && state.from.startsWith('/invoices') ? state.from : undefined;
+  const crumbs = getBreadcrumbs(pathname, from);
 
   return (
     <header style={{
@@ -118,6 +122,7 @@ export default function Header() {
         <button
           onClick={toggle}
           title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+          aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
           style={{
             width: 32, height: 32,
             borderRadius: '50%',

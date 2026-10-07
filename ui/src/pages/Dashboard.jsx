@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import { usePipeline } from '../context/PipelineContext';
 import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
+import RetryAlert from '../components/RetryAlert';
 import { formatDate, formatTime } from '../utils/formatDate';
 import { useVisiblePolling } from '../utils/useVisiblePolling';
 import ProcessToggle from '../components/ProcessToggle';
@@ -22,12 +24,13 @@ function StatCard({ label, value, sub, icon, iconBg, color, delay = 0 }) {
   );
 }
 
-function Toggle({ checked, onChange, disabled }) {
+function Toggle({ checked, onChange, disabled, label }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       style={{
@@ -245,8 +248,13 @@ export default function Dashboard() {
   const { user } = useAuth();
   // Status comes from the shared PipelineContext — no need for a separate polling loop here.
   const { status, refresh: refreshStatus } = usePipeline();
+  const toast = useToast();
 
   const [invoices,    setInvoices]    = useState([]);
+  // The recent list's last failure. With rows on screen it is a note that they
+  // may be stale; with none it replaces "No invoices yet", which would be a
+  // claim about the account this page could not check.
+  const [recentErr,   setRecentErr]   = useState('');
   const [invoiceTotal, setInvoiceTotal] = useState(0);
   const [settings,    setSettings]    = useState({ autoProcess: true });
   const [loading,     setLoading]     = useState(true);
@@ -262,11 +270,19 @@ export default function Dashboard() {
       const d = await api.get(`/invoices?recent=${RECENT_ROWS}`);
       setInvoices(d.invoices || []);
       setInvoiceTotal(d.total ?? (d.invoices || []).length);
-    } catch (_) {}
+      setRecentErr('');
+    } catch (err) {
+      setRecentErr(err.message || 'Could not load recent invoices');
+    }
   }, []);
 
+  // Unread, the switch would sit at its default of "on" and look like the
+  // account's real setting — so a failure is shown, and the switch is held
+  // until the setting is known.
+  const [settingsErr, setSettingsErr] = useState('');
   const fetchSettings = useCallback(async () => {
-    try { setSettings(await api.get('/process/settings')); } catch (_) {}
+    try { setSettings(await api.get('/process/settings')); setSettingsErr(''); }
+    catch (err) { setSettingsErr(err.message || 'Could not load the processing settings'); }
   }, []);
 
   useEffect(() => {
@@ -277,13 +293,19 @@ export default function Dashboard() {
   // pausing while the tab is hidden the way PipelineContext already does.
   useVisiblePolling(fetchInvoices, 15000);
 
+  // The switch only moves once the server has agreed, so a failure leaves it
+  // where it was. That alone looked like a click that did nothing; the toast
+  // says it was refused and why.
   async function handleAutoProcessToggle(val) {
     setTogglingAP(true);
     try {
       const updated = await api.patch('/process/settings', { autoProcess: val });
       setSettings(updated);
-    } catch (_) {}
-    setTogglingAP(false);
+    } catch (err) {
+      toast.error(`Could not turn auto-submit ${val ? 'on' : 'off'}: ${err.message || 'the server did not answer'}`);
+    } finally {
+      setTogglingAP(false);
+    }
   }
 
   async function handleRescan() {
@@ -402,6 +424,10 @@ export default function Dashboard() {
           <div className="card-title" style={{ marginBottom: 4 }}>Processing mode</div>
           <div className="card-subtitle">Control how detected invoices are handled.</div>
 
+          {settingsErr && (
+            <RetryAlert message={`Could not read whether auto-submit is on. ${settingsErr}`} onRetry={fetchSettings} />
+          )}
+
           {/* Auto-process row */}
           <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -424,7 +450,8 @@ export default function Dashboard() {
             <Toggle
               checked={settings.autoProcess}
               onChange={handleAutoProcessToggle}
-              disabled={togglingAP}
+              disabled={togglingAP || !!settingsErr}
+              label="Auto-submit to Xero"
             />
           </div>
 
@@ -490,7 +517,11 @@ export default function Dashboard() {
             ↻ Refresh
           </button>
         </div>
-        <InvoiceTable invoices={invoices} timezone={user?.timezone} />
+        {recentErr && (
+          <RetryAlert message={invoices.length ? `Could not refresh — showing the list as last loaded. ${recentErr}` : recentErr}
+                      onRetry={fetchInvoices} />
+        )}
+        {(invoices.length > 0 || !recentErr) && <InvoiceTable invoices={invoices} timezone={user?.timezone} />}
       </div>
     </div>
   );

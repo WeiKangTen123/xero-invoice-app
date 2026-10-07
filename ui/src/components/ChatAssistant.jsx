@@ -255,6 +255,19 @@ export default function ChatAssistant() {
     };
   }, [open]);
 
+  // Focus follows the panel: into the message box when it opens, back to the
+  // launcher when it closes — but only if focus was inside the panel, so
+  // closing it by clicking elsewhere does not pull focus away from that click.
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (open) {
+      taRef.current?.focus({ preventScroll: true });
+    } else if (wasOpen.current && panelRef.current?.contains(document.activeElement)) {
+      buttonRef.current?.focus({ preventScroll: true });
+    }
+    wasOpen.current = open;
+  }, [open]);
+
   useEffect(() => {
     if (!pinnedId) { setPinInfo(null); return; }
     api.get(`/invoices/${pinnedId}`).then(d => setPinInfo(d.invoice)).catch(() => setPinInfo(null));
@@ -305,7 +318,11 @@ export default function ChatAssistant() {
         ref={buttonRef}
         onClick={() => setOpen(true)}
         title="Ask about your invoices"
+        aria-label="Open the invoice assistant"
+        aria-expanded={open}
         aria-hidden={open}
+        // Invisible while the panel is open, so out of the Tab order too.
+        tabIndex={open ? -1 : 0}
         style={{
           position: 'fixed',
           right: isMobile ? 16 : 26,
@@ -332,9 +349,18 @@ export default function ChatAssistant() {
         💬
       </button>
 
+      {/* Slid off-screen when closed, but still in the page, and its buttons
+          and message box were still reached by Tab — focus vanished off the
+          edge of the screen. `visibility: hidden` takes it out of the Tab
+          order and away from screen readers; it flips only after the slide
+          out has finished, so closing still animates. */}
       <div
         ref={panelRef}
+        role="dialog"
+        aria-label="Invoice assistant"
+        aria-hidden={!open}
         style={{
+        visibility: open ? 'visible' : 'hidden',
         position: 'fixed',
         top: 0,
         right: 0,
@@ -347,7 +373,9 @@ export default function ChatAssistant() {
         display: 'flex',
         flexDirection: 'column',
         transform: open ? 'translateX(0)' : 'translateX(100%)',
-        transition: 'transform 0.25s cubic-bezier(0.4,0,0.2,1)',
+        transition: open
+          ? 'transform 0.25s cubic-bezier(0.4,0,0.2,1), visibility 0s'
+          : 'transform 0.25s cubic-bezier(0.4,0,0.2,1), visibility 0s linear 0.25s',
         zIndex: 201,
       }}>
         <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -355,7 +383,8 @@ export default function ChatAssistant() {
             <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 7 }}>
               <span style={{ color: 'var(--accent)' }}>✦</span> Invoice Assistant
             </h2>
-            <button onClick={() => setOpen(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 15 }}>✕</button>
+            <button onClick={() => setOpen(false)} aria-label="Close the assistant" title="Close"
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 15 }}>✕</button>
           </div>
           {companies && companies.length > 1 && (
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-muted)' }}>
@@ -430,11 +459,14 @@ export default function ChatAssistant() {
               placeholder="e.g. change the invoice number to 2026099"
               onChange={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 90) + 'px'; }}
               onKeyDown={onKeyDown}
+              aria-label="Message the assistant"
               style={{ flex: 1, border: 'none', background: 'none', resize: 'none', outline: 'none', fontFamily: 'inherit', fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.5, maxHeight: 90, padding: '3px 0' }}
             />
             <button
               onClick={send}
               disabled={sending || !input.trim()}
+              aria-label="Send message"
+              title="Send"
               style={{ width: 29, height: 29, borderRadius: 8, border: 'none', cursor: 'pointer', background: 'var(--accent-gradient)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, opacity: sending || !input.trim() ? 0.5 : 1 }}
             >
               ➤

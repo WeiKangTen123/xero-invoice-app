@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
+import RetryAlert from '../components/RetryAlert';
 import ReceiptUpload from '../components/receipts/ReceiptUpload';
 import BillIntake from '../components/bills/BillIntake';
 import InvoiceIntake from '../components/invoices/InvoiceIntake';
@@ -11,6 +12,7 @@ import { useViewMode } from '../context/ViewModeContext';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useToast } from '../context/ToastContext';
+import { usePipeline } from '../context/PipelineContext';
 import { useVisiblePolling } from '../utils/useVisiblePolling';
 import ActiveClaimBanner from './invoices/ActiveClaimBanner';
 import ClaimBatchCards from './invoices/ClaimBatchCards';
@@ -27,27 +29,74 @@ function clearedMessage(r) {
   return r?.message || 'Cleared. Anything already posted to Xero was kept.';
 }
 
+// The filters a link or a Back can restore, with the value each takes when the
+// parameter is absent. A value outside the known set falls back too, so a stale
+// or hand-edited link narrows nothing rather than hiding every row.
+const STATUS_KEYS   = ['all', 'posted', 'reviewed', 'pending', 'needs-action', 'duplicate', 'reported'];
+const RECEIVED_KEYS = ['all', 'today', '7d', '30d', 'month', 'custom'];
+const DATE_RE       = /^\d{4}-\d{2}-\d{2}$/;
+
+// Moves in the pipeline that change what this list holds or how its rows read:
+// a document read off an email, a send to Xero starting, landing or failing.
+// When any of them moves, the list is fetched again in the background.
+function pipelineSignature(s) {
+  if (!s) return '';
+  return [s.invoiceCount, s.queue?.pending, s.queue?.processing,
+          s.xero?.pending, s.xero?.submitting, s.xero?.posted, s.xero?.error].join('|');
+}
+
 export default function Invoices() {
   const { isMobile } = useViewMode();
   const { user } = useAuth();
   const confirm = useConfirm();
   const toast   = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
+  const { status: pipelineStatus, refresh: refreshPipeline } = usePipeline();
   const [invoices,     setInvoices]     = useState([]);
+  // `loading` is the first load only, the one time there are no rows to keep on
+  // screen. Every later fetch runs behind the table (`refreshing`): swapping
+  // the list for a spinner on each refresh lost the place of whoever was reading.
   const [loading,      setLoading]      = useState(true);
+  const [refreshing,   setRefreshing]   = useState(false);
+  const [loaded,       setLoaded]       = useState(false);
+  const [loadError,    setLoadError]    = useState('');
   const [clearing,      setClearing]      = useState(false);
   const [submittingAll, setSubmittingAll] = useState(false);
   const [submitMsg,     setSubmitMsg]     = useState('');
   const [selected,      setSelected]      = useState(new Set());
   const [deleteTarget,  setDeleteTarget]  = useState(null); // { type: 'single', invoice } | { type: 'bulk', count, ids } | { type: 'clear' }
   const [deleteLoading, setDeleteLoading] = useState(false);
-  const [filter,       setFilter]       = useState('');
   // The tab lives in the URL so Back from a review lands where you left, and so
   // a link can point at one. A query param rather than /invoices/claims because
   // /invoices/:id already exists and a path segment invites a collision there
   // for no gain.
+  //
+  // The filters live there too, for the same reason: they were component state,
+  // so opening a bill and coming back reset status, search and date range, and
+  // the reader had to find their place again. Written with `replace`, so typing
+  // in the search box does not leave one history entry per letter for Back to
+  // step through.
   const [searchParams, setSearchParams] = useSearchParams();
   const tab    = tabByKey(searchParams.get('tab')).key;
+  const paramIn = (key, allowed) => (allowed.includes(searchParams.get(key)) ? searchParams.get(key) : 'all');
+  const statusFilter   = paramIn('status', STATUS_KEYS);
+  const receivedFilter = paramIn('received', RECEIVED_KEYS);
+  const customFrom     = DATE_RE.test(searchParams.get('from') || '') ? searchParams.get('from') : '';
+  const customTo       = DATE_RE.test(searchParams.get('to')   || '') ? searchParams.get('to')   : '';
+  const filter         = searchParams.get('q') || '';
+  // A parameter at its default is removed rather than written out, so the
+  // plain list keeps its plain address.
+  function setParam(key, value, fallback = '') {
+    const next = new URLSearchParams(searchParams);
+    if (!value || value === fallback) next.delete(key); else next.set(key, value);
+    setSearchParams(next, { replace: true });
+  }
+  const setStatusFilter   = v => setParam('status', v, 'all');
+  const setReceivedFilter = v => setParam('received', v, 'all');
+  const setCustomFrom     = v => setParam('from', v);
+  const setCustomTo       = v => setParam('to', v);
+  const setFilter         = v => setParam('q', v);
   const setTab = (key) => {
     // Selection is a set of ids from the tab you were on. Carrying it across
     // would let a bulk delete on AP remove the AR rows you ticked earlier.
@@ -56,30 +105,83 @@ export default function Invoices() {
     if (key === DEFAULT_TAB) next.delete('tab'); else next.set('tab', key);
     setSearchParams(next, { replace: true });
   };
-  const [receivedFilter, setReceivedFilter] = useState('all');
-  const [customFrom,   setCustomFrom]   = useState('');
-  const [customTo,     setCustomTo]     = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
   const [activeClaimJob, setActiveClaimJob] = useState(null);
   const [claimModalJobId, setClaimModalJobId] = useState(null);
 
-  function fetchInvoices() {
-    setLoading(true);
-    api.get('/invoices')
-      .then(d => setInvoices(d.invoices || []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+  // A background claim import drives the persistent progress banner. Asked on
+  // arrival and with every refetch of the list (an import adds rows, so that
+  // is when one may have started), then polled every 3.5 s only while one is
+  // running. It used to poll for as long as the page was open, almost always
+  // to hear that nothing was running.
+  const checkActiveClaim = useCallback(() => (
+    api.get('/claims/active').then(res => setActiveClaimJob(res.job || null)).catch(() => {})
+  ), []);
+  useVisiblePolling(checkActiveClaim, 3500, !!activeClaimJob);
+
+  // Only the newest request is applied, so a slow fetch started before a
+  // delete cannot land afterwards and put the deleted row back.
+  const fetchSeq = useRef(0);
+  const fetchInvoices = useCallback(async () => {
+    const n = ++fetchSeq.current;
+    setRefreshing(true);
+    checkActiveClaim();
+    try {
+      const d = await api.get('/invoices');
+      if (n !== fetchSeq.current) return;
+      setInvoices(d.invoices || []);
+      setLoaded(true);
+      setLoadError('');
+    } catch (err) {
+      if (n === fetchSeq.current) setLoadError(err.message || 'Could not load the list');
+    } finally {
+      if (n === fetchSeq.current) { setLoading(false); setRefreshing(false); }
+    }
+  }, [checkActiveClaim]);
+
+  useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
+
+  // A fetch already out when rows are removed here predates the removal, and
+  // would put them back when it lands. Its answer is dropped instead.
+  function dropFetchInFlight() {
+    fetchSeq.current++;
+    setRefreshing(false);
   }
 
-  useEffect(() => { fetchInvoices(); }, []);
+  // The chat assistant changes records from outside this page and announces
+  // each one. Any of them may be on this list, so the list is fetched again.
+  useEffect(() => {
+    const onUpdated = () => fetchInvoices();
+    window.addEventListener('invoice-updated', onUpdated);
+    return () => window.removeEventListener('invoice-updated', onUpdated);
+  }, [fetchInvoices]);
 
-  // A background claim import drives the persistent progress banner. Checked
-  // now, then every 3.5 s while the tab is visible; a hidden tab asks nothing.
-  function checkActiveClaim() {
-    api.get('/claims/active').then(res => setActiveClaimJob(res.job || null)).catch(() => {});
-  }
-  useEffect(() => { checkActiveClaim(); }, []);
-  useVisiblePolling(checkActiveClaim, 3500);
+  // New mail read, a send landing in Xero: the pipeline status (polled for the
+  // sidebar anyway) moves, and the list follows it. The first status seen is
+  // only remembered, not acted on: it is not a change, and the mount fetch is
+  // already out.
+  const pipelineSig  = pipelineSignature(pipelineStatus);
+  const lastPipeline = useRef(null);
+  useEffect(() => {
+    if (!pipelineSig) return;
+    if (lastPipeline.current !== null && lastPipeline.current !== pipelineSig) fetchInvoices();
+    lastPipeline.current = pipelineSig;
+  }, [pipelineSig, fetchInvoices]);
+
+  // A claim import finishing in the background has just added its claims;
+  // the banner going away is the moment to show them.
+  const hadClaimJob = useRef(false);
+  useEffect(() => {
+    if (hadClaimJob.current && !activeClaimJob) fetchInvoices();
+    hadClaimJob.current = !!activeClaimJob;
+  }, [activeClaimJob, fetchInvoices]);
+
+  // Opening a record takes this list's address along (tab, filters, search),
+  // so Back on the review page returns here as it was. `depth` counts the
+  // history entries between here and the record: stepping between receipts in
+  // a batch adds one each, and Back goes that many steps back.
+  const openRecord = id => navigate(`/invoices/${id}`, {
+    state: { from: `${location.pathname}${location.search}`, depth: 1 },
+  });
 
   useEffect(() => {
     setSelected(s => {
@@ -118,7 +220,13 @@ export default function Invoices() {
         sent ? `sending ${countOf(sent, tabNow)}` : 'nothing sent',
         skipped ? `${skipped} skipped — no longer pending` : '',
       ].filter(Boolean).join(', '));
-      setTimeout(() => { setSubmitMsg(''); fetchInvoices(); }, 4000);
+      // The rows turn "Submitting" now, and each one's arrival in Xero moves
+      // the pipeline counts, which refetch the list as it happens (see above).
+      // It used to be fetched once, four seconds later, whether or not
+      // anything had been sent by then.
+      fetchInvoices();
+      refreshPipeline();
+      setTimeout(() => setSubmitMsg(''), 4000);
     } catch (err) {
       setSubmitMsg(err.message);
       setTimeout(() => setSubmitMsg(''), 4000);
@@ -178,6 +286,7 @@ export default function Invoices() {
       if (deleteTarget.type === 'single') {
         const id = deleteTarget.invoice.id;
         await api.delete(`/invoices/${id}`);
+        dropFetchInFlight();
         setInvoices(prev => prev.filter(i => i.id !== id));
         setSelected(prev => { const n = new Set(prev); n.delete(id); return n; });
       } else if (deleteTarget.type === 'bulk') {
@@ -189,6 +298,7 @@ export default function Invoices() {
         const results = await Promise.allSettled(ids.map(id => api.delete(`/invoices/${id}`)));
         const gone    = new Set(ids.filter((_, k) => results[k].status === 'fulfilled'));
         const refused = results.filter(r => r.status === 'rejected').map(r => r.reason);
+        dropFetchInFlight();
         setInvoices(prev => prev.filter(i => !gone.has(i.id)));
         setSelected(prev => new Set([...prev].filter(id => !gone.has(id))));
         if (refused.length) {
@@ -588,7 +698,12 @@ export default function Invoices() {
           <span style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
             {filtered.length} of {invoices.length}
           </span>
-          <button className="btn btn-outline btn-sm" onClick={fetchInvoices}>↻</button>
+          {/* Refreshes behind the table: the rows stay put and only this
+              button shows that a fetch is out. */}
+          <button className="btn btn-outline btn-sm" onClick={fetchInvoices} disabled={refreshing}
+                  aria-label="Refresh the list" title="Refresh the list">
+            {refreshing ? <span className="btn-spinner" style={{ borderColor: 'rgba(0,0,0,0.15)', borderTopColor: 'var(--accent)' }} /> : '↻'}
+          </button>
 
           {selected.size > 0 && (
             <button
@@ -613,11 +728,23 @@ export default function Invoices() {
           )}
         </div>
 
+        {/* A list that loaded once and then failed to refresh keeps its rows,
+            and says they may be out of date. */}
+        {loaded && loadError && (
+          <RetryAlert message={`Could not refresh the list — showing it as last loaded. ${loadError}`}
+                      onRetry={fetchInvoices} busy={refreshing} />
+        )}
+
         {loading ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)', padding: '28px 0' }}>
             <span style={{ width: 16, height: 16, border: '2px solid var(--border)', borderTopColor: 'var(--accent)', borderRadius: '50%', animation: 'spin 0.65s linear infinite', display: 'inline-block' }} />
             Loading invoices...
           </div>
+        ) : !loaded ? (
+          // Never loaded at all. The empty state here used to say "No bills
+          // yet", which is a claim about the account this page could not check.
+          <RetryAlert message={`Could not load your ${activeTab.long.toLowerCase()}. ${loadError}`}
+                      onRetry={fetchInvoices} busy={refreshing} style={{ marginBottom: 0 }} />
         ) : filtered.length === 0 ? (
           // Three different situations read very differently, and lumping them
           // under "No invoices found" leaves someone on an empty Claims tab
@@ -639,7 +766,7 @@ export default function Invoices() {
                     : 'They arrive as the emailed template — or type one in, or import a spreadsheet, above'}
             </div>
           </div>
-        ) : isMobile ? <MobileList navigate={navigate} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} filtered={filtered} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} /> : <DesktopTable user={user} navigate={navigate} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} />}
+        ) : isMobile ? <MobileList openRecord={openRecord} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} filtered={filtered} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} /> : <DesktopTable user={user} openRecord={openRecord} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} />}
       </div>
 
       {/* Floating Mobile Selection Bar */}

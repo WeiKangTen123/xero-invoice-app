@@ -9,9 +9,13 @@ function clearSession() {
   // Hard-navigate to login so all React state is wiped — avoids stale UI
   // showing for a split second after an expired-token 401.
   // Phone capture pages (/capture/:token) are deliberately unauthenticated and must never redirect to login.
+  // The page being left rides along as ?next=, so signing in again lands back
+  // on it — tab, filters and all — instead of on the dashboard. Login checks it
+  // is a path on this site before following it (utils/returnTo.js).
   const path = window.location.pathname;
   if (!path.startsWith('/login') && !path.startsWith('/capture')) {
-    window.location.href = '/login';
+    const here = `${path}${window.location.search}${window.location.hash}`;
+    window.location.href = here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`;
   }
 }
 

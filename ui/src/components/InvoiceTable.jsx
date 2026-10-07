@@ -2,6 +2,7 @@ import { StatusBadge } from './Badges';
 import { typeMeta } from '../utils/badges';
 import { fmtMoney } from '../utils/format';
 import { formatDateTime } from '../utils/formatDate';
+import { staggerIn } from '../utils/stagger';
 
 export default function InvoiceTable({ invoices, timezone }) {
   if (!invoices?.length) {
@@ -32,7 +33,7 @@ export default function InvoiceTable({ invoices, timezone }) {
           {invoices.map((inv, i) => {
             const { label, cls } = typeMeta(inv.invoiceType);
             return (
-              <tr key={inv.id} style={{ animation: `fadeUp 0.2s ease ${i * 0.03}s both` }}>
+              <tr key={inv.id} style={{ animation: staggerIn(i, 30) }}>
                 <td>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
                     <div style={{

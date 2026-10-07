@@ -1,7 +1,9 @@
+import { ConfidenceBadge } from '../../components/Badges';
 import { Spinner, StatusPill } from './bits';
-import { listPathFor } from './helpers';
 
-export default function TopBar({ isMobile, navigate, inv, setReporting, marking, submitting, editing, saving, setShowDeleteModal, deleting, markReviewed, submitToXero, startEdit, cancelEdit, saveEdit, isExpense, canSubmit, canReview, canEdit }) {
+// `onBack` is the page's own Back (see goBack in InvoiceReview.jsx), which
+// returns to the list as it was left rather than to a fresh one.
+export default function TopBar({ isMobile, onBack, inv, setReporting, marking, submitting, editing, saving, setShowDeleteModal, deleting, markReviewed, submitToXero, startEdit, cancelEdit, saveEdit, isExpense, canSubmit, canReview, canEdit }) {
   return (
         <div style={{
           display: 'flex',
@@ -12,7 +14,7 @@ export default function TopBar({ isMobile, navigate, inv, setReporting, marking,
           gap: 12
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button className="btn btn-ghost btn-sm" onClick={() => navigate(listPathFor(inv))} style={{ gap: 6 }}>← Back</button>
+            <button className="btn btn-ghost btn-sm" onClick={onBack} style={{ gap: 6 }}>← Back</button>
             <div>
               <h1 style={{ fontSize: isMobile ? 18 : 20, fontWeight: 700, letterSpacing: '-0.4px' }}>
                 {inv.vendorName || 'Unknown Vendor'}
@@ -25,6 +27,7 @@ export default function TopBar({ isMobile, navigate, inv, setReporting, marking,
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', width: isMobile ? '100%' : 'auto' }}>
             <StatusPill status={inv.status} />
+            <ConfidenceBadge confidence={inv.confidence} />
 
             {/* Post to Xero — creates a new draft, or (for an already-posted invoice)
                 updates the existing Xero bill in place rather than duplicating it */}

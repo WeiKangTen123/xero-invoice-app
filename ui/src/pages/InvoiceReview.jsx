@@ -1,6 +1,8 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../api/client';
+import { useUnsavedChanges } from '../utils/useUnsavedChanges';
+import { safeReturnPath } from '../utils/returnTo';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
 import { useConfirm } from '../context/ConfirmContext';
 import { useToast } from '../context/ToastContext';
@@ -22,8 +24,13 @@ import TopBar from './invoice-review/TopBar';
 import { InfoRow } from './invoice-review/bits';
 import { MARKABLE, SUBMITTABLE, listPathFor, sendProblem } from './invoice-review/helpers';
 
-
-
+// After "Post to Xero" the server sends in the background and this page asks
+// how it went every two seconds. It used to ask forever, and said nothing when
+// an ask failed, so a send stuck on the server or a dropped connection left
+// "Posting..." spinning indefinitely. Two minutes is far longer than a healthy
+// send takes; after that the page stops watching and says so.
+const SUBMIT_POLL_MS    = 2000;
+const SUBMIT_TIMEOUT_MS = 2 * 60 * 1000;
 
 function InvoiceReviewPage() {
   const { user } = useAuth();
@@ -31,7 +38,32 @@ function InvoiceReviewPage() {
   const toast   = useToast();
   const { isMobile } = useViewMode();
   const { id }   = useParams();
-  const navigate = useNavigate();
+  const rawNavigate = useNavigate();
+  const location = useLocation();
+
+  // Where Back leads. The page that opened this record hands over its own
+  // address (see openRecord in Invoices.jsx, and Admin's Reports), with how
+  // many history entries ago that was; Back steps back exactly that far, so
+  // the list comes back with its tab, filters and search as they were, and the
+  // browser's own Back agrees with this button. It used to push a fresh
+  // /invoices, which reset the filters and left the review sitting behind it
+  // in history. Opened any other way (a pasted link) there is nothing to
+  // return to, and Back goes to the list tab the record belongs to.
+  const backTo    = safeReturnPath(location.state?.from);
+  const backDepth = Number(location.state?.depth) || 0;
+
+  // Moving from this record to another (a sibling receipt, the original of a
+  // duplicate) takes the way back along, one step further from the list.
+  const navigate = useCallback((to, opts = {}) => {
+    if (typeof to !== 'string') return rawNavigate(to, opts);
+    return rawNavigate(to, backTo ? { ...opts, state: { from: backTo, depth: backDepth + 1 } } : opts);
+  }, [rawNavigate, backTo, backDepth]);
+
+  function goBack() {
+    if (backTo && backDepth > 0) rawNavigate(-backDepth);
+    // Replaced rather than pushed: Back from the list should not reopen this.
+    else rawNavigate(backTo || listPathFor(inv), { replace: true });
+  }
 
   const [inv,        setInv]        = useState(null);
   const [loading,    setLoading]    = useState(true);
@@ -57,6 +89,7 @@ function InvoiceReviewPage() {
   const [submitting,    setSubmitting]    = useState(false);
   const [submitErr,     setSubmitErr]     = useState('');
   const [submitOk,      setSubmitOk]      = useState(false);
+  const [submitNote,    setSubmitNote]    = useState('');   // the send poll's own news: lost contact, gave up
   const [wasRepost,     setWasRepost]     = useState(false);
   const [editing,       setEditing]       = useState(false);
   const [form,          setForm]          = useState(null);
@@ -264,7 +297,7 @@ function InvoiceReviewPage() {
     setDeleteErr('');
     try {
       await api.delete(`/invoices/${id}`);
-      navigate(listPathFor(inv), { replace: true });
+      goBack();
     } catch (err) {
       setDeleteErr(err.message || 'Failed to delete');
       setDeleting(false);
@@ -272,42 +305,90 @@ function InvoiceReviewPage() {
     }
   }
 
-  const _pollRef = useRef(null);
+  // One ask at a time: each is scheduled when the last has answered, so a
+  // slow server is never asked twice at once. `alive` stops an answer that
+  // lands after the page has gone from setting state or asking again.
+  const pollRef  = useRef(null);
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; clearTimeout(pollRef.current); };
+  }, []);
+
+  function watchSubmission() {
+    clearTimeout(pollRef.current);
+    const startedAt = Date.now();
+    let lastError = '';
+    async function tick() {
+      try {
+        const d = await api.get(`/invoices/${id}`);
+        if (!aliveRef.current) return;
+        lastError = '';
+        const status = d.invoice?.status;
+        if (status !== 'submitting') {
+          setSubmitting(false);
+          setSubmitNote('');
+          setInv(d.invoice);
+          if (status === 'posted') setSubmitOk(true);
+          else if (status === 'error') setSubmitErr(d.invoice?.errorMsg || 'Xero submission failed');
+          return;
+        }
+        setSubmitNote('');
+      } catch (err) {
+        if (!aliveRef.current) return;
+        // The send runs on the server whether or not this page can see it, so
+        // a failed ask is reported and retried, not taken as the send failing.
+        lastError = err.message || 'no answer';
+        setSubmitNote(`Lost touch with the server while waiting for Xero (${lastError}). Still trying…`);
+      }
+      if (Date.now() - startedAt >= SUBMIT_TIMEOUT_MS) {
+        setSubmitting(false);
+        setSubmitNote(lastError
+          ? `Could not find out how the send went (${lastError}). It may still have reached Xero — check again before sending it twice.`
+          : 'Xero is taking longer than usual. The send carries on without this page — check again in a minute.');
+        return;
+      }
+      pollRef.current = setTimeout(tick, SUBMIT_POLL_MS);
+    }
+    pollRef.current = setTimeout(tick, SUBMIT_POLL_MS);
+  }
 
   async function submitToXero() {
     setSubmitting(true);
     setSubmitErr('');
+    setSubmitNote('');
     setWasRepost(inv.status === 'posted');
     try {
       // Server fires submission in background and returns 202 immediately.
       await api.post(`/invoices/${id}/submit`, {});
       setInv(prev => ({ ...prev, status: 'submitting' }));
-
-      // Poll every 2s until status is no longer 'submitting'.
-      _pollRef.current = setInterval(async () => {
-        try {
-          const d = await api.get(`/invoices/${id}`);
-          const status = d.invoice?.status;
-          if (status !== 'submitting') {
-            clearInterval(_pollRef.current);
-            setSubmitting(false);
-            setInv(d.invoice);
-            if (status === 'posted') setSubmitOk(true);
-            else if (status === 'error') setSubmitErr(d.invoice?.errorMsg || 'Xero submission failed');
-          }
-        } catch (_) {}
-      }, 2000);
+      watchSubmission();
     } catch (err) {
       setSubmitErr(err.message);
       setSubmitting(false);
     }
   }
 
-  useEffect(() => () => clearInterval(_pollRef.current), []);
+  // After the watch gave up: look again, for another two minutes if need be.
+  function checkSubmissionAgain() {
+    setSubmitNote('');
+    setSubmitting(true);
+    watchSubmission();
+  }
 
   // ── Edit mode ─────────────────────────────────────────────────────────────
+  // The form as it was when editing began, to tell real edits from merely
+  // having pressed Edit. Leaving with real edits asks first — Back, a sidebar
+  // link, the arrow keys to the next receipt, closing the tab — because Save is
+  // the only thing that keeps them.
+  const formAtStart = useRef('');
+  const dirty = editing && !!form && JSON.stringify(form) !== formAtStart.current;
+  useUnsavedChanges(dirty, {
+    message: 'Your changes to this record have not been saved. Leaving now throws them away.',
+  });
+
   function startEdit() {
-    setForm({
+    const initial = {
       vendorName:       inv.vendorName       || '',
       contactEmail:     inv.contactEmail     || '',
       contactAddress:   inv.contactAddress   || '',
@@ -323,7 +404,9 @@ function InvoiceReviewPage() {
       accountCode:      inv.accountCode      || '',
       paymentReference: inv.paymentReference || '',
       lineItems:        (inv.lineItems || []).map(li => ({ ...li })),
-    });
+    };
+    formAtStart.current = JSON.stringify(initial);
+    setForm(initial);
     setSaveErr('');
     setEditing(true);
   }
@@ -383,6 +466,10 @@ function InvoiceReviewPage() {
       setInv(d.invoice);
       if (editing && form) {
         setForm(f => ({ ...f, totalAmount: chosenAmount, errorMsg: null }));
+        // Already saved on the server, so not an unsaved edit.
+        try {
+          formAtStart.current = JSON.stringify({ ...JSON.parse(formAtStart.current), totalAmount: chosenAmount, errorMsg: null });
+        } catch (_) { /* no snapshot to update */ }
       }
     } catch (err) {
       setSaveErr(err.message);
@@ -405,7 +492,13 @@ function InvoiceReviewPage() {
     return (
       <div style={{ padding: 32 }}>
         <div className="alert alert-error"><span className="alert-icon">✕</span>{fetchErr || 'Invoice not found'}</div>
-        <button className="btn btn-outline" onClick={() => navigate(listPathFor(inv))}>← Back to Invoices</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-outline" onClick={goBack}>← Back to Invoices</button>
+          {/* A failed fetch is worth asking again; a record that is not there is not. */}
+          {fetchErr && (
+            <button className="btn btn-primary" onClick={() => { setFetchErr(''); setLoading(true); fetchInvoice(); }}>Retry</button>
+          )}
+        </div>
       </div>
     );
   }
@@ -439,7 +532,7 @@ function InvoiceReviewPage() {
       <div style={{ animation: 'fadeUp 0.3s ease' }}>
 
         {/* Top bar */}
-        <TopBar isMobile={isMobile} navigate={navigate} inv={inv} setReporting={setReporting} marking={marking} submitting={submitting} editing={editing} saving={saving} setShowDeleteModal={setShowDeleteModal} deleting={deleting} markReviewed={markReviewed} submitToXero={submitToXero} startEdit={startEdit} cancelEdit={cancelEdit} saveEdit={saveEdit} isExpense={isExpense} canSubmit={canSubmit} canReview={canReview} canEdit={canEdit} />
+        <TopBar isMobile={isMobile} onBack={goBack} inv={inv} setReporting={setReporting} marking={marking} submitting={submitting} editing={editing} saving={saving} setShowDeleteModal={setShowDeleteModal} deleting={deleting} markReviewed={markReviewed} submitToXero={submitToXero} startEdit={startEdit} cancelEdit={cancelEdit} saveEdit={saveEdit} isExpense={isExpense} canSubmit={canSubmit} canReview={canReview} canEdit={canEdit} />
 
         {deleteErr && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
@@ -450,6 +543,18 @@ function InvoiceReviewPage() {
         {saveErr && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
             <span className="alert-icon">✕</span>{saveErr}
+          </div>
+        )}
+
+        {submitNote && (
+          <div className="alert alert-warning" role="status" style={{ marginBottom: 12, alignItems: 'center' }}>
+            <span className="alert-icon">⏳</span>
+            <span style={{ flex: 1 }}>{submitNote}</span>
+            {!submitting && (
+              <button type="button" className="btn btn-outline btn-sm" onClick={checkSubmissionAgain} style={{ flexShrink: 0 }}>
+                Check again
+              </button>
+            )}
           </div>
         )}
 
