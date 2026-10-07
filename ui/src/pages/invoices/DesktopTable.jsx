@@ -5,6 +5,7 @@ import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { staggerIn } from '../../utils/stagger';
 import { receivedLabel, totalsLabel } from './helpers';
 import { SORT_FIELDS, dueInfo } from './list-view';
+import { claimKindLabel, claimSourceBadge } from '../../components/receipts/allowance';
 
 // Reset so the group heading's button looks like the row it always was; the
 // button is there for the keyboard and screen readers, not for its looks.
@@ -130,11 +131,11 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                             fontSize: 11, fontWeight: 700,
                             color: isDup ? 'var(--danger)' : needsAttention ? 'var(--warning)' : 'var(--accent)',
                           }}>
-                            {isDup ? '⚠' : (inv.vendorName || '?').slice(0, 2).toUpperCase()}
+                            {isDup ? '⚠' : (inv.vendorName || claimKindLabel(inv) || '?').slice(0, 2).toUpperCase()}
                           </div>
                           <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                             <span style={{ fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                              {inv.vendorName || '—'}
+                              {inv.vendorName || claimKindLabel(inv) || '—'}
                               <ConfidenceBadge confidence={inv.confidence} style={{ fontSize: 10.5, padding: '1px 6px' }} />
                             </span>
                             {isDup && (
@@ -198,7 +199,9 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                         {receivedLabel(inv.receivedAt || inv.processedAt)}
                       </td>
                       <td>
-                        {inv.receiptFile
+                        {claimSourceBadge(inv)
+                          ? <span className={claimSourceBadge(inv).className} title={claimSourceBadge(inv).title}>{claimSourceBadge(inv).text}</span>
+                          : inv.receiptFile
                           ? <span className="badge badge-yellow" title={inv.source === 'phone' ? 'Captured with phone' : 'Receipt photo'}>
                               {inv.source === 'phone' ? '📱 Phone' : '🧾 Receipt'}
                             </span>

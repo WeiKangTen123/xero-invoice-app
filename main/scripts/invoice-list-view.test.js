@@ -325,3 +325,12 @@ describe('the page uses them', () => {
     expect(page()).toMatch(/const overdue\s*=\s*tabRows\.filter/);
   });
 });
+
+describe('CSV: claims with no merchant', () => {
+  test('a mileage or per diem claim is named by its kind, as in the list', () => {
+    const row = kind => csv.invoiceCsvRow({ invoiceType: 'EXPENSE', vendorName: '', claimKind: kind, totalAmount: 25.2 });
+    expect(row('mileage')[3]).toBe('Mileage claim');
+    expect(row('per_diem')[3]).toBe('Per diem claim');
+    expect(csv.invoiceCsvRow({ invoiceType: 'EXPENSE', vendorName: 'FairPrice', claimKind: 'receipt' })[3]).toBe('FairPrice');
+  });
+});

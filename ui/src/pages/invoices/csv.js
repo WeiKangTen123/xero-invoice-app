@@ -46,13 +46,17 @@ export function toCsv(rows) {
 // Two decimals and no thousands separator, so a spreadsheet reads a number.
 const money = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? '' : Number(v).toFixed(2));
 
+// A mileage or per diem claim has no merchant; it is named by its kind, as
+// in the list (components/receipts/allowance.js claimKindLabel).
+const CLAIM_KIND_WORDS = { mileage: 'Mileage claim', per_diem: 'Per diem claim' };
+
 export function invoiceCsvRow(inv, { xeroStatusLabel } = {}) {
   return [
     inv.invoiceDate || '',
     // Expense claims have no due date, as on screen.
     inv.invoiceType === 'EXPENSE' ? '' : (inv.dueDate || ''),
     TYPE_WORDS[inv.invoiceType] || inv.invoiceType || '',
-    inv.vendorName || '',
+    inv.vendorName || CLAIM_KIND_WORDS[inv.claimKind] || '',
     inv.invoiceNumber || '',
     inv.currency || '',
     money(inv.subTotal),

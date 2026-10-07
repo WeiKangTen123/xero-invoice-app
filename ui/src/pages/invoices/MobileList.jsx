@@ -3,6 +3,7 @@ import { TypeBadge, ConfidenceBadge, XeroStatusBadge } from '../../components/Ba
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { totalsLabel } from './helpers';
 import { dueInfo } from './list-view';
+import { claimKindLabel, claimSourceBadge } from '../../components/receipts/allowance';
 
 // sortValue is the URL form of the sort ('' for the list grouped by arrival)
 // and sortOptions the choices for this tab; on a phone there are no column
@@ -106,11 +107,11 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                             fontSize: 12, fontWeight: 700,
                             color: isDup ? 'var(--danger)' : needsAttention ? 'var(--warning)' : 'var(--accent)',
                           }}>
-                            {isDup ? '⚠' : (inv.vendorName || '?').slice(0, 2).toUpperCase()}
+                            {isDup ? '⚠' : (inv.vendorName || claimKindLabel(inv) || '?').slice(0, 2).toUpperCase()}
                           </div>
                           <div style={{ minWidth: 0 }}>
                             <div style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {inv.vendorName || '—'}
+                              {inv.vendorName || claimKindLabel(inv) || '—'}
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
                               <code style={{ fontSize: 11, background: 'var(--bg-card)', padding: '1px 6px', borderRadius: 4, color: 'var(--text-secondary)' }}>
@@ -163,7 +164,9 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <TypeBadge type={inv.invoiceType} />
                           <ConfidenceBadge confidence={inv.confidence} />
-                          {inv.receiptFile
+                          {claimSourceBadge(inv)
+                            ? <span className={claimSourceBadge(inv).className} title={claimSourceBadge(inv).title}>{claimSourceBadge(inv).text.split(' ')[0]}</span>
+                            : inv.receiptFile
                             ? <span className="badge badge-yellow">{inv.source === 'phone' ? '📱' : '🧾'}</span>
                             : inv.hasPdf
                               ? <span className="badge badge-green">📄</span>

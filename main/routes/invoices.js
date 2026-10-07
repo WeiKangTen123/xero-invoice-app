@@ -199,6 +199,12 @@ router.post('/sync-xero-status', requireAuth, asyncHandler(async (req, res) => {
 // so the Invoices page and the Automation page's recent table render alike.
 const _listRow = inv => ({
   id:            inv.id,
+  // Mileage and per diem claims have no merchant and no file; the list names
+  // and badges them by kind (ui/src/components/receipts/allowance.js).
+  claimKind:     inv.claimKind,
+  claimQuantity: inv.claimQuantity,
+  claimRate:     inv.claimRate,
+  claimUnit:     inv.claimUnit,
   status:        inv.status,
   hasPdf:        inv.hasPdf,
   pdfFilename:   inv.pdfFilename,
@@ -347,6 +353,8 @@ router.get('/:id/pdf', (req, res, next) => {
 // ── PATCH /api/invoices/:id ───────────────────────────────────────────────────
 // Correct LLM-extracted fields before or instead of submitting to Xero.
 // Blocked on already-posted and auto-deduplicated invoices.
+const PRICED_CLAIM_KINDS = new Set(['mileage', 'per_diem']);
+const PRICED_FIELDS      = new Set(['totalAmount', 'subTotal', 'taxAmount', 'lineItems', 'currency']);
 router.patch('/:id', requireAuth, asyncHandler(async (req, res, next) => {
   try {
     const inv = invoiceStore.forUser(req.user.id).getById(req.params.id);
@@ -354,6 +362,17 @@ router.patch('/:id', requireAuth, asyncHandler(async (req, res, next) => {
 
     if (!EDITABLE_STATUSES.has(inv.status)) {
       return res.status(409).json({ error: `Invoice with status "${inv.status}" cannot be edited` });
+    }
+
+    // A mileage or per diem claim is priced on the server from its distance or
+    // days and the rate it was made at (routes/claims.js). Its figures change
+    // by changing those, never directly, or the amount would stop matching
+    // the quantity x rate its own line states. Refused rather than ignored.
+    if (PRICED_CLAIM_KINDS.has(inv.claimKind)) {
+      const priced = Object.keys(req.body || {}).filter(k => PRICED_FIELDS.has(k));
+      if (priced.length) {
+        return res.status(409).json({ error: 'This claim is priced from its distance or days and the rate. Edit those instead of the amounts.', fields: priced });
+      }
     }
 
     const patch = {};
