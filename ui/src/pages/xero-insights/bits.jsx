@@ -90,17 +90,37 @@ export function lastLoaded(text, failed) {
 // and "12 invoices" rather than "12 sales invoices awaiting payment". The icon
 // is dropped there by CSS (see .mobile-mode .kpi-card-icon) because a 40px
 // square leaves too little beside it to read.
-export function KpiCard({ icon, tone, label, value, sub }) {
+//
+// With `onClick` the card opens something below it (the ageing for its side):
+// it becomes a button for the keyboard and screen readers, says so with a
+// chevron, and `active` marks it while what it opened is showing.
+export function KpiCard({ icon, tone, label, value, sub, onClick, active = false, controls, actionLabel }) {
+  const action = onClick ? {
+    role: 'button', tabIndex: 0, onClick, 'aria-expanded': active, 'aria-controls': controls,
+    title: actionLabel,
+    onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } },
+  } : {};
   return (
-    <div className="card kpi-card" style={{ display: 'flex', gap: 13 }}>
+    <div className="card kpi-card" {...action} style={{
+      display: 'flex', gap: 13,
+      ...(onClick ? { cursor: 'pointer' } : {}),
+      ...(active ? { borderColor: 'var(--accent)', boxShadow: '0 0 0 1px var(--accent)' } : {}),
+    }}>
       <div className="kpi-card-icon" style={{
         width: 40, height: 40, borderRadius: 10,
         background: `var(--${tone}-subtle)`, color: `var(--${tone})`,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         fontSize: 17, flexShrink: 0,
       }}>{icon}</div>
-      <div style={{ minWidth: 0 }}>
-        <div className="kpi-card-label" style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600 }}>{label}</div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div className="kpi-card-label" style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600 }}>
+          {label}
+          {onClick && (
+            <span aria-hidden="true" style={{ marginLeft: 5, color: active ? 'var(--accent)' : 'var(--text-muted)' }}>
+              {active ? '▴' : '▾'}
+            </span>
+          )}
+        </div>
         <div className="kpi-card-value" style={{ fontSize: 20, fontWeight: 800, margin: '3px 0 2px' }}>{value}</div>
         <div className="kpi-card-sub" style={{ fontSize: 11, color: 'var(--text-muted)' }}>{sub}</div>
       </div>

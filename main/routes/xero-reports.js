@@ -34,12 +34,16 @@ function _resolveTenant(req) {
 // drifts between them.
 const force = req => req.query.force === 'true';
 const tz    = req => getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
-function report(label, fetch, { needs = [] } = {}) {
+// `check` refuses a query the report cannot answer: it returns the reason, and
+// the request is a 400 before any Xero call is made.
+function report(label, fetch, { needs = [], check = null } = {}) {
   return asyncHandler(async (req, res) => {
     try {
       const { tenants, tenantId } = _resolveTenant(req);
       if (!tenantId) return res.json({ connected: false, tenants: [] });
       for (const q of needs) if (!req.query[q]) return res.status(400).json({ error: `${q} is required` });
+      const refused = check && check(req);
+      if (refused) return res.status(400).json({ error: refused });
       const data = await fetch(req, tenantId);
       res.json({ connected: true, ...data, tenants, activeTenantId: tenantId });
     } catch (err) {
@@ -81,6 +85,17 @@ router.get('/performance', requireAuth, report('Performance overview',
     cashFlow: req.query.cashFlow === 'true', customers: req.query.customers === 'true', force: force(req),
     ..._compareFromQuery(req),
   })));
+// GET /api/xero-reports/ageing?side=receivables|payables
+// What is owed each way by days past due, and by contact with each contact's
+// invoices. Built from the summary's invoice fetch and one paged read of
+// unallocated credit notes, both cached: with the dashboard's summary loaded
+// it costs at most the credit notes, and switching side or looking again costs
+// nothing. Takes no period, as the summary takes none: it is "right now", aged
+// to today in the user's timezone. Any other side, or none, is a 400.
+const AGEING_SIDES = new Set(['receivables', 'payables']);
+router.get('/ageing', requireAuth, report('Ageing',
+  (req, t) => reports.getAgeing(req.user.id, t, { side: req.query.side, timezone: tz(req), force: force(req) }),
+  { check: req => (AGEING_SIDES.has(req.query.side) ? null : 'side must be receivables or payables') }));
 // Xero has no cash-flow-statement endpoint, so this is built from Bank Summary,
 // Payments, Bank Transactions and Invoices. Every one of those is a read.
 router.get('/cash-flow', requireAuth, report('Cash flow',

@@ -1,14 +1,15 @@
 const { withRetry }      = require('./xero-utils');
 const logger             = require('../utils/logger');
 const { _cacheGet, _cacheSet, _dedupe } = require('./report-cache');
-const { _apiFor, _allInvoices } = require('./report-fetch');
+const { _apiFor, _allInvoices, LIST_PAGE_SIZE, LIST_MAX_PAGES } = require('./report-fetch');
 const { _toBase, _foreignCurrency } = require('./currency');
 const { _raisedByMonth } = require('./cash-flow');
 
 // What is owed each way right now: receivables, payables, what is overdue, how
 // it ages, and the most recent invoices. It takes no period, and getPerformance
 // reads its totals for debtor and creditor days rather than fetching every
-// invoice a second time.
+// invoice a second time. The ageing view (./ageing) reads the invoices still
+// owed from this same fetch, for the same reason.
 
 // ── Snapshot summary (Receivables/Payables/status — always "right now") ─────
 
@@ -111,10 +112,51 @@ function _buildSummary(org, invoices) {
   };
 }
 
+// Pure. The invoices and bills still owed, cut down to what the ageing view
+// reads, so they can be cached beside the summary. The summary itself keeps
+// only fifty rows and its totals, and every invoice the fetch returned, paid
+// ones included, is far too much to hold in memory per organisation.
+//
+// Approved and not yet paid down to nothing: Xero's AUTHORISED takes in a
+// part-paid invoice, and AmountDue is what remains of it, where Total would
+// count the part already paid. Drafts, invoices awaiting approval and voided
+// ones are left out, as in Xero's own Aged Receivables and Payables reports.
+// The two dates are kept as Xero sent them; ./ageing reads them as calendar
+// days.
+function _outstandingOf(invoices = []) {
+  const out = [];
+  for (const inv of invoices) {
+    if (!inv || inv.status !== 'AUTHORISED') continue;
+    if (inv.type !== 'ACCREC' && inv.type !== 'ACCPAY') continue;
+    const amountDue = Number(inv.amountDue || 0);
+    if (!(amountDue > 0)) continue;
+    out.push({
+      invoiceId:    inv.invoiceID || null,
+      type:         inv.type,
+      contactId:    inv.contact?.contactID || null,
+      contactName:  inv.contact?.name || '',
+      number:       inv.invoiceNumber || '',
+      reference:    inv.reference || '',
+      date:         inv.date || null,
+      dueDate:      inv.dueDate || null,
+      amountDue,
+      // Named as on the invoice, so _toBase and _foreignCurrency read these
+      // records exactly as they read the invoices themselves.
+      currencyCode: inv.currencyCode ? String(inv.currencyCode) : '',
+      currencyRate: inv.currencyRate ?? null,
+    });
+  }
+  return out;
+}
+
 async function _getSummaryRaw(userId, tenantId, { force = false } = {}) {
   const key    = `summary:${userId}:${tenantId}`;
   const cached = _cacheGet(key, force);
-  if (cached) return cached;
+  // The two entries come from one fetch, so they count as a hit only together.
+  // Should the cache ever drop one without the other, the summary is fetched
+  // again rather than the ageing view finding nothing to read and showing an
+  // empty ledger as "nothing outstanding".
+  if (cached && _cacheGet(_outstandingKey(userId, tenantId), force)) return cached;
 
   const tokenCache = require('../utils/token-cache').forUser(userId);
   const token      = await tokenCache.getValidToken(tenantId);
@@ -125,14 +167,43 @@ async function _getSummaryRaw(userId, tenantId, { force = false } = {}) {
     _allInvoices(api, tenantId, { order: 'Date DESC', statuses: ['AUTHORISED', 'PAID'] }),
   ]);
 
-  const data = _buildSummary(orgRes.body.organisations?.[0] || {}, invoices);
+  const org  = orgRes.body.organisations?.[0] || {};
+  const data = _buildSummary(org, invoices);
+  _cacheSet(_outstandingKey(userId, tenantId), {
+    baseCurrency: org.baseCurrency || '',
+    invoices: _outstandingOf(invoices),
+    // The fetch is newest first and stops at the page cap, so an organisation
+    // past it loses its OLDEST invoices — exactly the ones ageing is about. Said
+    // rather than shown as a clean ledger.
+    capped: invoices.length >= LIST_PAGE_SIZE * LIST_MAX_PAGES,
+  });
   logger.info('Insights summary fetched', { userId, tenantId, invoiceCount: data.invoices.length });
   return _cacheSet(key, data);
 }
+
+function _outstandingKey(userId, tenantId) { return `outstanding:${userId}:${tenantId}`; }
 
 // Bound after the declaration, through the one in-flight map in
 // ./report-cache, so getPerformance's read of it shares the /summary route's
 // request rather than starting its own.
 const getSummary             = _dedupe('getSummary', _getSummaryRaw);
 
-module.exports = { getSummary, _buildSummary };
+// The invoices still owed, from the summary's own fetch: one read of Xero
+// serves the headline totals and the ageing view alike, and the two cannot
+// disagree about what is outstanding. A dashboard has always loaded its summary
+// by the time anyone opens the ageing, so this normally costs no Xero call at
+// all. `cached` says whether this call went to Xero.
+async function _getOutstanding(userId, tenantId, { force = false } = {}) {
+  const key = _outstandingKey(userId, tenantId);
+  const hit = _cacheGet(key, force);
+  if (hit) return hit;
+  // Asked for exactly as the /summary route asks, so it shares that request
+  // when both arrive together, and the summary's cache entry is refreshed with
+  // it.
+  const summary = await getSummary(userId, tenantId, { force });
+  const filled  = _cacheGet(key, false);
+  if (!filled) throw new Error('The outstanding invoices could not be read from the summary');
+  return { ...filled, cached: summary.cached !== false };
+}
+
+module.exports = { getSummary, _buildSummary, _outstandingOf, _getOutstanding };

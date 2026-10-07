@@ -14,6 +14,7 @@ import { KpiCard, lastLoaded } from './xero-insights/bits';
 import BankingTab from './xero-insights/BankingTab';
 import BudgetTab from './xero-insights/BudgetTab';
 import VarianceTab from './xero-insights/VarianceTab';
+import AgeingSection from './xero-insights/AgeingSection';
 
 // Tabs that need the performance report. Cash Flow has its own report, but its
 // period bar is drawn from this one's months.
@@ -21,6 +22,10 @@ const PERF_TABS = ['overview', 'revenue', 'banking', 'profit', 'analysis', 'cash
 // Tabs that show the comparison with the same months last year. It costs a
 // second report from Xero (last year's months), so only these ask for it.
 const COMPARE_TABS = ['overview', 'profit'];
+// The ageing section's two sides. Which one is open lives in the address, like
+// the tab, so a reload or a shared link opens on it.
+const AGEING_SIDES = ['receivables', 'payables'];
+const AGEING_IDLE = { status: 'idle', data: null, error: '' };
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
@@ -87,6 +92,20 @@ export default function XeroInsights() {
     if (key === 'overview') next.delete('tab'); else next.set('tab', key);
     setSearchParams(next, { replace: true });
   }
+  // Receivables and payables ageing, opened from the two headline cards. Null
+  // while closed, and nothing is fetched until it is opened.
+  const ageingSide = AGEING_SIDES.includes(searchParams.get('ageing')) ? searchParams.get('ageing') : null;
+  function setAgeingSide(side) {
+    const next = new URLSearchParams(searchParams);
+    if (side) next.set('ageing', side); else next.delete('ageing');
+    setSearchParams(next, { replace: true });
+  }
+  // One entry per side, so switching back to a side already loaded shows it at
+  // once; the server answers either from the same cached reads anyway.
+  const [ageing, setAgeing] = useState({ receivables: AGEING_IDLE, payables: AGEING_IDLE });
+  // Set by a link from further down the page, so the section scrolls into view
+  // when it opens; the cards sit directly above it and need no scroll.
+  const scrollToAgeing = useRef(false);
   const [activeTenantId, setActiveTenantId] = useState(null);
   const [, forceTick] = useState(0); // re-render every 15s so "synced Xs ago" stays live
 
@@ -118,7 +137,7 @@ export default function XeroInsights() {
   // the slower, older answer land last and sit under the newer period's label.
   // The summary, the bank account list and a bank statement are counted the
   // same way, as a switch of organisation can leave any of them in flight.
-  const seq = useRef({ perf: 0, cashflow: 0, budget: 0, analysis: 0, summary: 0, banking: 0, statement: 0 });
+  const seq = useRef({ perf: 0, cashflow: 0, budget: 0, analysis: 0, summary: 0, banking: 0, statement: 0, ageingReceivables: 0, ageingPayables: 0 });
 
   // Performance overview — feeds BOTH the Overview and Revenue tabs from one
   // fetch. monthFrom/monthTo index into data.months, so changing the range
@@ -236,7 +255,27 @@ export default function XeroInsights() {
     setStatement({ status: 'idle', data: [], error: '' });
     if (tab === 'banking') fetchBanking();
     else { seq.current.banking++; setBanking({ status: 'idle', data: [], error: '' }); }
+    // Both sides of the ageing belong to the previous organisation. Dropped,
+    // and the open side, if any, is fetched again by the effect below.
+    seq.current.ageingReceivables++;
+    seq.current.ageingPayables++;
+    setAgeing({ receivables: AGEING_IDLE, payables: AGEING_IDLE });
   }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The ageing is fetched when a side is opened and that side has not been
+  // loaded yet: on opening it, on switching side, after a switch of
+  // organisation, or on arriving with ?ageing= in the address. Waits for the
+  // summary, which it is built from, so the two share one read of Xero.
+  useEffect(() => {
+    if (!ageingSide || !data?.connected || ageing[ageingSide].status !== 'idle') return;
+    fetchAgeing(ageingSide);
+  }, [ageingSide, data?.connected, ageing]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!ageingSide || !scrollToAgeing.current) return;
+    scrollToAgeing.current = false;
+    document.getElementById('dashboard-ageing')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [ageingSide]);
 
   // Only to keep the "synced Xs ago" labels honest — no fetching. It still
   // re-rendered this whole page every 15 s in a backgrounded tab, and the
@@ -287,6 +326,33 @@ export default function XeroInsights() {
     api.get(`/xero-reports/bank-accounts${activeTenantId ? `?tenantId=${activeTenantId}` : ''}`)
       .then(d => { if (n === seq.current.banking) setBanking({ status: 'done', data: d.bankAccounts || [], error: '' }); })
       .catch(err => { if (n === seq.current.banking) setBanking({ status: 'done', data: [], error: err.message }); });
+  }
+
+  // Counted per side, so a quick switch from one side to the other cannot let
+  // the first answer land under the second's switch, nor strand the first as
+  // loading. A Refresh keeps the figures on screen while it reloads.
+  function fetchAgeing(side, opts = {}) {
+    const k = side === 'payables' ? 'ageingPayables' : 'ageingReceivables';
+    const n = ++seq.current[k];
+    setAgeing(s => ({ ...s, [side]: { status: 'loading', error: '', data: s[side].data } }));
+    const params = new URLSearchParams({ side });
+    if (activeTenantId) params.set('tenantId', activeTenantId);
+    if (opts.force) params.set('force', 'true');
+    api.get(`/xero-reports/ageing?${params.toString()}`)
+      .then(d => { if (n === seq.current[k]) setAgeing(s => ({ ...s, [side]: { status: 'done', data: d, error: '' } })); })
+      .catch(err => {
+        if (n === seq.current[k]) setAgeing(s => ({ ...s, [side]: { status: 'done', data: s[side].data, error: err.message || 'Something went wrong' } }));
+      });
+  }
+
+  // From a link further down the page: open the side and bring it into view.
+  function openAgeingFromBelow(side) {
+    if (ageingSide === side) {
+      document.getElementById('dashboard-ageing')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    scrollToAgeing.current = true;
+    setAgeingSide(side);
   }
 
   // A Refresh keeps the figures on screen while it reloads; a new period or
@@ -532,6 +598,14 @@ export default function XeroInsights() {
             if (PERF_TABS.includes(tab)) fetchPerf({ force: true });
             if (tab === 'cashflow') fetchCashflow({ force: true });
             if (tab === 'budget' || tab === 'variance') fetchBudget({ force: true });
+            // The open side is re-read; the other is dropped and reloads from
+            // the refreshed cache when it is next opened.
+            if (ageingSide) {
+              const other = ageingSide === 'receivables' ? 'payables' : 'receivables';
+              seq.current[other === 'payables' ? 'ageingPayables' : 'ageingReceivables']++;
+              setAgeing(s => ({ ...s, [other]: AGEING_IDLE }));
+              fetchAgeing(ageingSide, { force: true });
+            }
           }}>
             {refreshing ? <span className="btn-spinner" /> : '↻'} Refresh
           </button>
@@ -563,6 +637,8 @@ export default function XeroInsights() {
         <KpiCard
           icon="↗" tone="success"
           label={isMobile ? 'Receivables' : 'Total Receivables'}
+          onClick={() => setAgeingSide(ageingSide === 'receivables' ? null : 'receivables')}
+          active={ageingSide === 'receivables'} controls="dashboard-ageing" actionLabel="Receivables by age and customer"
           value={isMobile ? fmtMoneyShort(kpis.totalReceivables, currency) : fmtMoney(kpis.totalReceivables, currency)}
           sub={isMobile
             ? `${kpis.receivablesCount} invoice${kpis.receivablesCount !== 1 ? 's' : ''}`
@@ -571,6 +647,8 @@ export default function XeroInsights() {
         <KpiCard
           icon="▣" tone="danger"
           label={isMobile ? 'Payables' : 'Total Payables'}
+          onClick={() => setAgeingSide(ageingSide === 'payables' ? null : 'payables')}
+          active={ageingSide === 'payables'} controls="dashboard-ageing" actionLabel="Payables by age and supplier"
           value={isMobile ? fmtMoneyShort(kpis.totalPayables, currency) : fmtMoney(kpis.totalPayables, currency)}
           sub={isMobile
             ? `${kpis.payablesCount} bill${kpis.payablesCount !== 1 ? 's' : ''}`
@@ -601,6 +679,13 @@ export default function XeroInsights() {
             : `${kpis.overdueReceivablesCount} invoice${kpis.overdueReceivablesCount !== 1 ? 's' : ''} and ${kpis.overduePayablesCount} bill${kpis.overduePayablesCount !== 1 ? 's' : ''} past due`}
         />
       </div>
+
+      {/* Under the two cards that open it, on every tab: what is owed each way
+          is "right now", not part of any tab's period. */}
+      {ageingSide && (
+        <AgeingSection side={ageingSide} onSide={setAgeingSide} state={ageing[ageingSide]} isMobile={isMobile}
+                       onRetry={() => fetchAgeing(ageingSide, { force: true })} onClose={() => setAgeingSide(null)} />
+      )}
 
       {/* Gradient overlays rather than a CSS mask on the strip itself: a mask
           would fade the strip's own background and border at the edge, leaving
@@ -773,7 +858,7 @@ export default function XeroInsights() {
           {cashflow.error && (
             <RetryAlert message={cashflow.error} onRetry={() => fetchCashflow({ force: true })} busy={cashflow.status === 'loading'} />
           )}
-          {cashflow.data && !cashflow.error && <CashFlowPanel data={cashflow.data} />}
+          {cashflow.data && !cashflow.error && <CashFlowPanel data={cashflow.data} onOpenAgeing={openAgeingFromBelow} />}
         </>
       )}
 

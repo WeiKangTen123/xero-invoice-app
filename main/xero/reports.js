@@ -15,6 +15,7 @@
 //   ./bank               bank statement, Bank Summary, bank account currencies
 //   ./budget-variance    Budget vs Actual, and the P&L rows the rest read
 //   ./performance        the dashboard figures
+//   ./ageing             receivables and payables by age and by contact
 //   ./cash-flow-report   the Cash Flow tab, fetched (./cash-flow does the sums)
 //   ./ai-commentary      variance reasons and the financial narrative
 //
@@ -44,6 +45,7 @@ const {
   _buildCustomerRevenue, _buildQuotePipeline, _growthPct, _buildGrowth, _sectionTotal,
   _isRecurringName, _buildPerformance, _buildWatchList, _recurringFor, _xeroDay,
 } = require('./performance');
+const { getAgeing, _buildAgeing, _creditsOf } = require('./ageing');
 const { getCashFlow, _buildInvoiceHygiene } = require('./cash-flow-report');
 const {
   getVarianceInsights, getFinancialNarrative, _narrateFrom, INSIGHT_CACHE_TTL_MS,
@@ -116,6 +118,7 @@ module.exports = {
   FORCE_GRACE_MS, DIRECTORY_TTL_MS,
   getSummary, getAccounts, getBankAccounts, getContacts,
   getBankTransactions, getBankSummary, getBudgetVariance, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
+  getAgeing, _buildAgeing, _creditsOf,
   _buildSummary, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildBankSummary,
   _splitIntoReportWindows, _clampReportFrom,

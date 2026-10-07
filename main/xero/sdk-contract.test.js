@@ -43,6 +43,8 @@ const USED = {
   // reports: where, order and page (2, 3, 4)
   getPayments:         ['xeroTenantId', 'ifModifiedSince', 'where', 'order', 'page'],
   getBankTransactions: ['xeroTenantId', 'ifModifiedSince', 'where', 'order', 'page'],
+  // ageing: unallocated credit notes by where, order and page (2, 3, 4)
+  getCreditNotes:      ['xeroTenantId', 'ifModifiedSince', 'where', 'order', 'page'],
   // reports: P&L by month, standardLayout=true (9) on every call
   getReportProfitAndLoss: ['xeroTenantId', 'fromDate', 'toDate', 'periods', 'timeframe',
     'trackingCategoryID', 'trackingCategoryID2', 'trackingOptionID', 'trackingOptionID2', 'standardLayout'],

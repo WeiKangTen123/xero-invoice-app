@@ -26,7 +26,7 @@ export function unreconciledText(u, cur) {
   return `The payment records don't tie to the bank statement${parts.length ? `: ${parts.join(' ')}` : '.'}`;
 }
 
-export function CashFlowPanel({ data }) {
+export function CashFlowPanel({ data, onOpenAgeing }) {
   const cur = data.organisation?.currency || '';
   const m   = data.movement;
   const wc  = data.workingCapital;
@@ -231,6 +231,16 @@ export function CashFlowPanel({ data }) {
             <div style={{ fontSize: 11.5, color: 'var(--warning)', marginTop: 12 }}>
               ▲ {fmtMoney(wc.overdue, cur)} is past its due date.
             </div>
+          )}
+          {/* The customer-by-customer view, with each invoice behind it, is the
+              ageing section under the headline cards; this links to it rather
+              than repeating it. */}
+          {onOpenAgeing && (
+            <button type="button" onClick={() => onOpenAgeing('receivables')}
+                    style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', marginTop: 12,
+                             fontSize: 11.5, color: 'var(--accent)', fontWeight: 600, textAlign: 'left' }}>
+              By customer, with every invoice →
+            </button>
           )}
         </Surface>
       </div>
