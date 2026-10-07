@@ -41,6 +41,7 @@ function run() {
   _ensureColumn('user_credentials', 'xero_oauth_refresh_token', 'xero_oauth_refresh_token TEXT');
   _ensureColumn('user_credentials', 'xero_oauth_connected_at',  'xero_oauth_connected_at TEXT');
   _ensureColumn('user_credentials', 'timezone', 'timezone TEXT');
+  _ensureColumn('user_credentials', 'claim_payee_name', 'claim_payee_name TEXT');
   _ensureColumn('users', 'last_seen_at', 'last_seen_at TEXT');
   _ensureColumn('users', 'sessions_valid_from', 'sessions_valid_from TEXT');
   _ensureColumn('users', 'disabled_at', 'disabled_at TEXT');
@@ -49,6 +50,8 @@ function run() {
     ['receipt_page', 'receipt_page INTEGER'], ['receipt_group', 'receipt_group TEXT'], ['received_at', 'received_at TEXT'],
     ['receipt_hash', 'receipt_hash TEXT'], ['vendor_phone', 'vendor_phone TEXT'], ['project_name', 'project_name TEXT'],
     ['parsed_at', 'parsed_at TEXT'], ['xero_tenant_id', 'xero_tenant_id TEXT'],
+    ['line_amount_types', 'line_amount_types TEXT'], ['branding_theme_name', 'branding_theme_name TEXT'],
+    ['currency_rate', 'currency_rate REAL'], ['post_note', 'post_note TEXT'],
   ]) _ensureColumn('invoices', col, ddl);
 
   // 1. SHA-256 of every stored receipt that predates the hash column.

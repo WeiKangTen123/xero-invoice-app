@@ -18,7 +18,10 @@ const oauthState = require('../utils/oauth-state');
 // column-for-column. budgets.read isn't needed for that report, but it's the
 // only way to enumerate budgets or read tracking-category ones, and requesting
 // it now avoids a SECOND reconnect later for anyone who reconnects today.
-const SCOPES = `offline_access ${require('./xero-utils').SCOPES}`;
+// accounting.attachments (in OAUTH_SCOPES) lets a posted bill carry its PDF and
+// a claim its receipt; a connection made before it was added must reconnect
+// once for attachments to work, and posts without them until then.
+const SCOPES = `offline_access ${require('./xero-utils').OAUTH_SCOPES}`;
 const AUTHORIZE_URL = 'https://login.xero.com/identity/connect/authorize';
 const TOKEN_URL      = 'https://identity.xero.com/connect/token';
 

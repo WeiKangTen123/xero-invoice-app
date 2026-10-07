@@ -59,6 +59,48 @@ function cellNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// What claimants type in the currency column, as the code Xero takes. The
+// column used to be stored as typed, so "S$" reached Xero and was refused.
+// A bare "$" is not here: it is SGD on one form and USD on the next.
+const CURRENCY_ALIASES = {
+  'S$': 'SGD', 'SG$': 'SGD', 'SGD$': 'SGD', 'US$': 'USD', 'USD$': 'USD', 'A$': 'AUD', 'AU$': 'AUD',
+  'NZ$': 'NZD', 'C$': 'CAD', 'CA$': 'CAD', 'HK$': 'HKD', 'NT$': 'TWD', 'RM': 'MYR', 'RMB': 'CNY',
+  '£': 'GBP', '€': 'EUR', '₹': 'INR', '฿': 'THB', '₱': 'PHP', '₩': 'KRW', 'RP': 'IDR',
+};
+
+// A three-letter code, or null when the text names no currency it can be sure
+// of. Null lets the caller fall back and say so, rather than store junk.
+function normaliseCurrency(raw) {
+  const text = String(raw ?? '').trim().toUpperCase();
+  if (!text) return null;
+  if (/^[A-Z]{3}$/.test(text)) return text;
+  const compact = text.replace(/[\s.]/g, '');
+  if (CURRENCY_ALIASES[compact]) return CURRENCY_ALIASES[compact];
+  // "SGD (S$)", "SGD 12.50"
+  const code = text.match(/(?:^|[^A-Z])([A-Z]{3})(?![A-Z])/);
+  return code ? code[1] : null;
+}
+
+// Xero's CurrencyRate is units of the document's currency per ONE unit of the
+// org's base currency (Xero shows "1 SGD = 0.74 USD"). A claim form's rate runs
+// the other way, AMOUNT x RATE = the base amount, so it is turned round. When
+// the form also gives the base amount, that settles which way the claimant
+// wrote it; with no rate at all, the two amounts give it. Six decimals is what
+// Xero keeps.
+function xeroCurrencyRate({ amount, exchangeRate, baseAmount }) {
+  const amt  = Number(amount);
+  const rate = Number(exchangeRate);
+  const base = Number(baseAmount);
+  const round6 = n => Math.round(n * 1e6) / 1e6;
+  const close  = (a, b) => Math.abs(a - b) <= Math.max(0.01, Math.abs(b) * 0.01);
+  if (rate > 0) {
+    if (amt > 0 && base > 0 && close(amt / rate, base) && !close(amt * rate, base)) return round6(rate);
+    return round6(1 / rate);
+  }
+  if (amt > 0 && base > 0) return round6(amt / base);
+  return null;
+}
+
 // Header matching is loose on purpose: real forms wrap headings onto two lines
 // ("LOCAL TRAVEL COST\n(SGD)") and vary in case and punctuation.
 function normaliseHeader(text) {
@@ -151,15 +193,24 @@ async function parseClaimForm(buffer) {
       .map(c => ({ label: c.label, value: cellNumber(row.getCell(c.col).value) }))
       .filter(c => c.value !== null && c.value !== 0);
 
+    const currencyText = cellText(get('currency'));
+    const currency     = normaliseCurrency(currencyText);
+    const exchangeRate = cellNumber(get('exchangeRate'));
+    const baseAmount   = cellNumber(get('baseAmount'));
     rows.push({
       rowNumber,
       no:           cellText(get('no')).replace(/\.0$/, '') || String(rows.length + 1),
       date:         cellDate(get('date')),
       description,
-      currency:     cellText(get('currency')).toUpperCase() || null,
+      currency,
+      // What was typed, kept only when it could not be read as a currency, so
+      // the claim can say so instead of quietly taking the default.
+      currencyUnread: currency ? null : (currencyText || null),
       amount,
-      exchangeRate: cellNumber(get('exchangeRate')),
-      baseAmount:   cellNumber(get('baseAmount')),
+      exchangeRate,
+      baseAmount,
+      // The form's rate in Xero's terms; see xeroCurrencyRate.
+      currencyRate: xeroCurrencyRate({ amount, exchangeRate, baseAmount }),
       // Empty in the real form — the gap the AI is meant to fill.
       category:     ticked.length === 1 ? ticked[0].label : null,
       categoryAmbiguous: ticked.length > 1,
@@ -169,4 +220,7 @@ async function parseClaimForm(buffer) {
   return { rows, categories: header.categories.map(c => c.label), title, error: null };
 }
 
-module.exports = { parseClaimForm, locateHeader, excelSerialToISO, cellText, cellDate, cellNumber, normaliseHeader };
+module.exports = {
+  parseClaimForm, locateHeader, excelSerialToISO, cellText, cellDate, cellNumber, normaliseHeader,
+  normaliseCurrency, xeroCurrencyRate,
+};

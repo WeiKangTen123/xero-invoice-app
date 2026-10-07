@@ -66,18 +66,35 @@ function accountForCategory(category, accounts) {
   return null;
 }
 
+// The company whose chart decides the account: the one the claim will be
+// posted to, chosen the way queue/processor.js chooses it. A claim already in
+// Xero names its company; otherwise the only one connected, else the account's
+// chosen default. With several connected and none chosen there is no right
+// chart to read. The first connected company used to be read whatever the
+// claim's destination, so a code from one company's chart could be posted to
+// another's.
+function targetTenantId(userId, tenants, tenantId) {
+  const connected = id => tenants.find(t => String(t.tenantId) === String(id)) || null;
+  if (tenantId) return connected(tenantId)?.tenantId || null;
+  if (tenants.length === 1) return tenants[0].tenantId;
+  const defaultTenantId = require('../utils/settings-store').forUser(userId).get('defaultTenantId');
+  return (defaultTenantId && connected(defaultTenantId)?.tenantId) || null;
+}
+
 // Reads the org's chart of accounts (a cached GET; no write of any kind) and
 // answers with a code, or null. Never throws: a claim must be storable whether
 // or not Xero is connected.
-async function resolveAccountCode(userId, category) {
+async function resolveAccountCode(userId, category, { tenantId } = {}) {
   if (!category) return null;
   try {
     const tokenCache = require('../utils/token-cache');
     const tenants    = tokenCache.getPersistedTenants(userId) || [];
     if (!tenants.length) return null;
+    const target = targetTenantId(userId, tenants, tenantId);
+    if (!target) return null;
 
     const reports  = require('../xero/reports');
-    const { accounts } = await reports.getAccounts(userId, tenants[0].tenantId);
+    const { accounts } = await reports.getAccounts(userId, target);
     const code = accountForCategory(category, accounts);
     if (code) logger.info('Claim account chosen from category', { userId, category, code });
     return code;
@@ -87,4 +104,4 @@ async function resolveAccountCode(userId, category) {
   }
 }
 
-module.exports = { accountForCategory, resolveAccountCode, CATEGORY_HINTS };
+module.exports = { accountForCategory, resolveAccountCode, targetTenantId, CATEGORY_HINTS };

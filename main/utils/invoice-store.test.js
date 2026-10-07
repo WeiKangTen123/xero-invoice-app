@@ -569,3 +569,63 @@ describe('normalizeInvoiceNumber', () => {
     expect(normalizeInvoiceNumber(undefined)).toBeNull();
   });
 });
+
+// Read from the document and dropped at the store, so every row went to Xero
+// tax-exclusive and without its theme; and a claim's exchange rate.
+describe('invoice-store — what posting needs survives the store', () => {
+  let store;
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    const u = await require('./users').createUser(`post${Date.now()}${Math.random()}@test.com`, 'password123', 'user');
+    store = require('./invoice-store').forUser(u.id);
+  });
+  const row = (extra = {}) => ({
+    id: `p-${Math.random().toString(36).slice(2, 8)}`, status: 'pending', vendorName: 'Acme',
+    invoiceNumber: 'N-1', invoiceDate: '2026-09-01', totalAmount: 109, processedAt: new Date().toISOString(), ...extra,
+  });
+
+  test('lineAmountTypes, brandingThemeName and currencyRate round-trip through add and update', () => {
+    const r = store.add(row({ lineAmountTypes: 'Inclusive', brandingThemeName: 'Special Projects', currencyRate: 0.740741 }));
+    expect(r).toMatchObject({ lineAmountTypes: 'Inclusive', brandingThemeName: 'Special Projects', currencyRate: 0.740741 });
+    expect(store.update(r.id, { lineAmountTypes: 'Exclusive', currencyRate: null }))
+      .toMatchObject({ lineAmountTypes: 'Exclusive', brandingThemeName: 'Special Projects', currencyRate: null });
+  });
+
+  test('changing the currency drops a rate that was given for the old one', () => {
+    const r = store.add(row({ currency: 'USD', currencyRate: 0.74 }));
+    expect(store.update(r.id, { currency: 'USD', description: 'x' }).currencyRate).toBe(0.74);
+    expect(store.update(r.id, { currency: 'EUR' }).currencyRate).toBeNull();
+    expect(store.update(r.id, { currency: 'USD', currencyRate: 0.75 }).currencyRate).toBe(0.75);
+  });
+
+  // The handler's closing patch after a successful send sets errorMsg: null.
+  // A note recorded during that send must survive it, or nobody sees it.
+  test('a note recorded mid-send survives the send\'s closing errorMsg: null, and the row is posted', () => {
+    const r = store.add(row());
+    store.claimForSubmit(r.id);
+    store.addPostingNote(r.id, 'Sent to Xero, but the attachment failed: x.');
+    store.addPostingNote(r.id, 'Second note.');
+    expect(store.getById(r.id).errorMsg).toBeNull();          // not shown until the send ends
+    const done = store.update(r.id, { status: 'posted', xeroInvoiceId: 'xero-n1', errorMsg: null });
+    expect(done.status).toBe('posted');
+    expect(done.errorMsg).toBe('Sent to Xero, but the attachment failed: x. Second note.');
+
+    // Later edits behave as before: a person can clear it.
+    expect(store.update(r.id, { errorMsg: null }).errorMsg).toBeNull();
+  });
+
+  test('a send that fails keeps its own message, and the next send starts clean', () => {
+    const r = store.add(row());
+    store.claimForSubmit(r.id);
+    store.addPostingNote(r.id, 'stale note');
+    expect(store.update(r.id, { status: 'error', errorMsg: 'Xero refused it' }).errorMsg).toBe('Xero refused it');
+    store.claimForSubmit(r.id);
+    expect(store.update(r.id, { status: 'posted', xeroInvoiceId: 'xero-n2', errorMsg: null }).errorMsg).toBeNull();
+  });
+
+  test('a note on a row that is not mid-send is shown at once', () => {
+    const r = store.add(row({ status: 'posted', xeroInvoiceId: 'xero-n3' }));
+    expect(store.addPostingNote(r.id, 'Check the total.').errorMsg).toBe('Check the total.');
+  });
+});

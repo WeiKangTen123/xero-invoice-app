@@ -2,6 +2,8 @@
 // chart of accounts. Xero is mocked: the matching is the thing under test.
 jest.mock('../utils/token-cache', () => ({ getPersistedTenants: jest.fn(() => []) }));
 jest.mock('../xero/reports',      () => ({ getAccounts: jest.fn() }));
+let mockDefaultTenant = null;
+jest.mock('../utils/settings-store', () => ({ forUser: () => ({ get: key => (key === 'defaultTenantId' ? mockDefaultTenant : undefined) }) }));
 jest.mock('../utils/gemini-client', () => ({ callGemini: jest.fn(), GEMINI_MODELS: [] }));
 
 const { accountForCategory, resolveAccountCode, CATEGORY_HINTS } = require('./category-account');
@@ -138,5 +140,48 @@ describe('resolveAccountCode — reading the chart from Xero', () => {
 describe('the hint table and the reader agree', () => {
   test('the hints cover exactly the categories the reader can return', () => {
     expect(Object.keys(CATEGORY_HINTS).sort()).toEqual([...CATEGORY_NAMES].sort());
+  });
+});
+
+// The chart used to be read from whichever company was connected first, so a
+// code from one company's chart could be posted to another's. It is now read
+// from the company the claim goes to, chosen as queue/processor.js chooses.
+describe('resolveAccountCode — the company whose chart is read', () => {
+  const TWO = [{ tenantId: 't-1', tenantName: 'First' }, { tenantId: 't-2', tenantName: 'Second' }];
+  beforeEach(() => {
+    mockDefaultTenant = null;
+    reports.getAccounts.mockResolvedValue({ accounts: XERO_DEFAULT });
+  });
+
+  test('several connected and a default chosen: the chart of the default company', async () => {
+    tokenCache.getPersistedTenants.mockReturnValue(TWO);
+    mockDefaultTenant = 't-2';
+    expect(await resolveAccountCode('u1', 'Staff Welfare')).toBe('420');
+    expect(reports.getAccounts).toHaveBeenCalledWith('u1', 't-2');
+  });
+
+  test('several connected and none chosen: no chart is guessed at', async () => {
+    tokenCache.getPersistedTenants.mockReturnValue(TWO);
+    expect(await resolveAccountCode('u1', 'Staff Welfare')).toBeNull();
+    expect(reports.getAccounts).not.toHaveBeenCalled();
+  });
+
+  test('a claim already in Xero reads the chart of its own company, whatever the default', async () => {
+    tokenCache.getPersistedTenants.mockReturnValue(TWO);
+    mockDefaultTenant = 't-2';
+    await resolveAccountCode('u1', 'Staff Welfare', { tenantId: 't-1' });
+    expect(reports.getAccounts).toHaveBeenCalledWith('u1', 't-1');
+  });
+
+  test('a company no longer connected is not read', async () => {
+    tokenCache.getPersistedTenants.mockReturnValue(TWO);
+    expect(await resolveAccountCode('u1', 'Staff Welfare', { tenantId: 't-gone' })).toBeNull();
+    expect(reports.getAccounts).not.toHaveBeenCalled();
+  });
+
+  test('a default that is no longer connected is not read either', async () => {
+    tokenCache.getPersistedTenants.mockReturnValue(TWO);
+    mockDefaultTenant = 't-gone';
+    expect(await resolveAccountCode('u1', 'Staff Welfare')).toBeNull();
   });
 });

@@ -58,6 +58,14 @@ const FIELD_TO_COLUMN = {
   // reference. Built on every parse and never stored until now.
   vendorPhone: 'vendor_phone', projectName: 'project_name',
   parsedAt: 'parsed_at',
+  // Whether the line amounts include tax, and the sales invoice's branding
+  // theme. Both were read from the document and dropped at this boundary, so
+  // every row went to Xero tax-exclusive whatever the invoice said.
+  lineAmountTypes: 'line_amount_types', brandingThemeName: 'branding_theme_name',
+  // Xero's CurrencyRate for a foreign-currency claim: units of the claim's
+  // currency per one unit of the org's base currency (claim-form.js turns the
+  // form's own rate round). Null means Xero uses its daily rate.
+  currencyRate: 'currency_rate',
 };
 
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
@@ -113,6 +121,9 @@ function _rowToRecord(row, reports, lineItems) {
     vendorPhone:       row.vendor_phone,
     projectName:       row.project_name,
     parsedAt:          row.parsed_at,
+    lineAmountTypes:   row.line_amount_types,
+    brandingThemeName: row.branding_theme_name,
+    currencyRate:      row.currency_rate,
     receiptFile:       row.receipt_file,
     receiptMime:       row.receipt_mime,
     // Which part of the shared file this record owns. Null on an ordinary
@@ -228,8 +239,14 @@ function forUser(userId) {
   }
 
   function update(id, patch) {
-    const existing = db.prepare('SELECT 1 FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
+    const existing = db.prepare('SELECT status, post_note, currency FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
     if (!existing) return null;
+
+    // The patch that ends a send: the row was claimed ('submitting') and is
+    // being moved on. A successful send clears errorMsg; a note recorded during
+    // that same send (addPostingNote) takes its place instead of being wiped by
+    // the success it belongs to.
+    const closesSend = existing.status === 'submitting' && patch.status !== undefined && patch.status !== 'submitting';
 
     const sets = ['updated_at = ?'];
     const args = [new Date().toISOString()];
@@ -242,10 +259,38 @@ function forUser(userId) {
       const column = FIELD_TO_COLUMN[field];
       if (!column || column === 'id' || column === 'user_id') continue;
       sets.push(`${column} = ?`);
-      args.push(_toBindable(field, value));
+      args.push(field === 'errorMsg' && value === null && closesSend && existing.post_note
+        ? existing.post_note
+        : _toBindable(field, value));
+    }
+    if (closesSend) sets.push('post_note = NULL');
+    // An exchange rate is a rate for the currency it came with. A person who
+    // changes the currency would otherwise send the old rate with the new one.
+    if (patch.currency !== undefined && patch.currencyRate === undefined && patch.currency !== existing.currency) {
+      sets.push('currency_rate = NULL');
     }
     db.prepare(`UPDATE invoices SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`).run(...args, id, userId);
     if ('lineItems' in patch) _replaceLineItems(id, patch.lineItems);
+    return getById(id);
+  }
+
+  // Something that went wrong after Xero accepted the document — an attachment
+  // it refused, a total that came back different — said where a person will
+  // see it, without un-posting the row. Mid-send the handler's closing patch is
+  // still to come and clears errorMsg, so the note waits in post_note and
+  // update() puts it in errorMsg then. Several notes from one send are kept.
+  function addPostingNote(id, note) {
+    if (!note) return null;
+    const row = db.prepare('SELECT status, post_note, error_msg FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
+    if (!row) return null;
+    if (row.status === 'submitting') {
+      const combined = [row.post_note, note].filter(Boolean).join(' ');
+      db.prepare('UPDATE invoices SET post_note = ? WHERE id = ? AND user_id = ?').run(combined, id, userId);
+    } else {
+      const combined = [row.error_msg, note].filter(Boolean).join(' ');
+      db.prepare('UPDATE invoices SET error_msg = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+        .run(combined, new Date().toISOString(), id, userId);
+    }
     return getById(id);
   }
 
@@ -350,7 +395,8 @@ function forUser(userId) {
       const row = db.prepare('SELECT status FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
       if (!row) return { claimed: false, reason: 'not found' };
       if (row.status === 'submitting') return { claimed: false, reason: 'already submitting' };
-      db.prepare("UPDATE invoices SET status = 'submitting', error_msg = NULL WHERE id = ? AND user_id = ?").run(id, userId);
+      // post_note belongs to one send; a new send starts without the last one's.
+      db.prepare("UPDATE invoices SET status = 'submitting', error_msg = NULL, post_note = NULL WHERE id = ? AND user_id = ?").run(id, userId);
       return { claimed: true };
     });
     return claim();
@@ -367,11 +413,11 @@ function forUser(userId) {
     const now = new Date().toISOString();
     const release = db.transaction(() => {
       const held = db.prepare(`
-        UPDATE invoices SET status = 'review-needed', error_msg = ?, updated_at = ?
+        UPDATE invoices SET status = 'review-needed', error_msg = ?, updated_at = ?, post_note = NULL
         WHERE user_id = ? AND status = 'submitting' AND xero_invoice_id IS NULL
       `).run(message, now, userId).changes;
       const kept = db.prepare(`
-        UPDATE invoices SET status = 'posted', error_msg = ?, updated_at = ?
+        UPDATE invoices SET status = 'posted', error_msg = ?, updated_at = ?, post_note = NULL
         WHERE user_id = ? AND status = 'submitting' AND ${IN_XERO}
       `).run(message, now, userId).changes;
       return held + kept;
@@ -438,7 +484,7 @@ function forUser(userId) {
       .get(userId, filename).n;
   }
 
-  return { getAll, getById, add, update, addReport, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
+  return { getAll, getById, add, update, addPostingNote, addReport, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
            releaseInterrupted, count, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash };
 }
 

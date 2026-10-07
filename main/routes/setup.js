@@ -23,10 +23,18 @@ const { automaticImapValues } = require('../email/imap-settings');
 const USER_SECTIONS = {
   xero:        ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_ID', 'XERO_OAUTH_CLIENT_SECRET'],
   imap:        ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS', 'IMAP_FILTER_FROM', 'IMAP_POLL_INTERVAL_MS', 'IMAP_LOOKBACK_DAYS'],
-  defaults:    ['DEFAULT_ACCOUNT_CODE', 'DEFAULT_CURRENCY', 'ZERO_TAX_RATE'],
+  // CLAIM_PAYEE_NAME: the claimant as a Xero contact. Without it an expense
+  // claim is posted as a bill owed to the shop on the receipt.
+  defaults:    ['DEFAULT_ACCOUNT_CODE', 'DEFAULT_CURRENCY', 'ZERO_TAX_RATE', 'CLAIM_PAYEE_NAME'],
   // Display-only preference — every timestamp is stored in UTC regardless; this only
   // controls what timezone it's FORMATTED in for this user (see ui's formatDate.js).
   preferences: ['TIMEZONE'],
+};
+
+// Plain-language labels for fields whose key does not explain itself. Sent with
+// the field so the Setup page can show it in place of the key.
+const FIELD_LABELS = {
+  CLAIM_PAYEE_NAME: 'Your name for expense claims (the payee in Xero)',
 };
 
 // Shared/global fields — stored in .env; only admins can set these
@@ -108,6 +116,7 @@ router.get('/', requireAuth, (req, res) => {
         value: SECRET_KEYS.has(key) ? '' : val,
         isSet: val.length > 0,
         auto:  auto[key] ?? null,
+        ...(FIELD_LABELS[key] && { label: FIELD_LABELS[key] }),
       };
     }
   }

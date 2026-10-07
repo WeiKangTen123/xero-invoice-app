@@ -25,6 +25,8 @@ const CONFIG_KEY_TO_COLUMN = {
   XERO_OAUTH_REFRESH_TOKEN: 'xero_oauth_refresh_token',
   XERO_OAUTH_CONNECTED_AT:  'xero_oauth_connected_at',
   TIMEZONE:                 'timezone',
+  // Who an expense claim is owed to in Xero: the claimant, not the shop.
+  CLAIM_PAYEE_NAME:         'claim_payee_name',
 };
 
 // IANA timezone used to FORMAT timestamps for display when a user hasn't picked

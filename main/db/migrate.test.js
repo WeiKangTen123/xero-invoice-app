@@ -25,6 +25,20 @@ describe('db/migrate', () => {
     expect(cols('user_settings')).toContain('default_tenant_id');
   });
 
+  // Tax-inclusive, branding theme, a claim's exchange rate, a note from the
+  // send in progress, and the claimant's payee name.
+  test('the posting columns and the claim payee column exist, and are added to an older database', () => {
+    run();
+    const cols = table => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+    for (const c of ['line_amount_types', 'branding_theme_name', 'currency_rate', 'post_note']) {
+      db.exec(`ALTER TABLE invoices DROP COLUMN ${c}`);
+    }
+    db.exec('ALTER TABLE user_credentials DROP COLUMN claim_payee_name');
+    run();
+    for (const c of ['line_amount_types', 'branding_theme_name', 'currency_rate', 'post_note']) expect(cols('invoices')).toContain(c);
+    expect(cols('user_credentials')).toContain('claim_payee_name');
+  });
+
   test('a deployed database without them gains both on the next boot', () => {
     run();
     db.exec('ALTER TABLE invoices DROP COLUMN xero_tenant_id');

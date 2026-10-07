@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS user_credentials (
   -- IANA timezone name (e.g. 'Asia/Singapore'), used only to FORMAT timestamps for
   -- display — every timestamp is still stored in UTC everywhere in this schema.
   -- Defaults to 'Asia/Singapore' at the application layer when unset, not here.
-  timezone TEXT
+  timezone TEXT,
+  -- The claimant's name as a Xero contact. When set, expense claims are posted
+  -- as owed to this person, not to the merchant on the receipt.
+  claim_payee_name TEXT
 );
 
 -- 1:1 with users — app behaviour toggles (was data/users/<id>/settings.json)
@@ -136,7 +139,19 @@ CREATE TABLE IF NOT EXISTS invoices (
   -- page's Phone and Project rows were always empty and a manual submit sent
   -- a different payload from an automatic one.
   vendor_phone      TEXT,
-  project_name      TEXT
+  project_name      TEXT,
+  -- 'Inclusive' or 'Exclusive' (line amounts with or without tax) and the
+  -- sales invoice's branding theme, as read from the document. Never stored
+  -- before, so every row went to Xero tax-exclusive.
+  line_amount_types   TEXT,
+  branding_theme_name TEXT,
+  -- Xero CurrencyRate for a foreign-currency claim: units of the claim's
+  -- currency per one unit of the org's base currency. NULL = Xero's daily rate.
+  currency_rate       REAL,
+  -- A note from the send in progress (an attachment Xero refused, a total that
+  -- came back different). invoice-store.js moves it into error_msg when the
+  -- send's closing update would otherwise clear that.
+  post_note           TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(user_id, status);

@@ -83,3 +83,37 @@ describe('routes/setup — mailbox settings the user should not have to type', (
     expect(all.IMAP_HOST).toMatchObject({ value: 'mail.example.com', isSet: true, auto: 'imap.gmail.com' });
   });
 });
+
+// Expense claims were posted as bills owed to the shop on the receipt. The
+// claimant's own name, set here, is who Xero records the claim as owed to.
+describe('routes/setup — the payee name for expense claims', () => {
+  let app, users, jwtSecret, user;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users = require('../utils/users');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    app = express();
+    app.use(express.json());
+    app.use('/api/setup', require('./setup'));
+    user = await users.createUser(`payee${Date.now()}@test.com`, 'password123', 'user');
+  });
+
+  const auth = () => `Bearer ${jwt.sign({ id: user.id, email: user.email, role: user.role }, jwtSecret())}`;
+
+  test('appears in the defaults section with a plain label, and saves and clears', async () => {
+    let { body } = await request(serverFor(app)).get('/api/setup').set('Authorization', auth()).expect(200);
+    expect(body.defaults.CLAIM_PAYEE_NAME).toMatchObject({
+      value: '', isSet: false, label: 'Your name for expense claims (the payee in Xero)',
+    });
+
+    await request(serverFor(app)).post('/api/setup').set('Authorization', auth()).send({ CLAIM_PAYEE_NAME: 'Jane Tan' }).expect(200);
+    expect(users.getUserConfig(user.id).CLAIM_PAYEE_NAME).toBe('Jane Tan');
+    ({ body } = await request(serverFor(app)).get('/api/setup').set('Authorization', auth()).expect(200));
+    expect(body.defaults.CLAIM_PAYEE_NAME).toMatchObject({ value: 'Jane Tan', isSet: true });
+
+    await request(serverFor(app)).post('/api/setup').set('Authorization', auth()).send({ CLAIM_PAYEE_NAME: '' }).expect(200);
+    expect(users.getUserConfig(user.id).CLAIM_PAYEE_NAME).toBeUndefined();
+  });
+});

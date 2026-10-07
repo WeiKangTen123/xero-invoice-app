@@ -19,6 +19,7 @@ const HELP = {
   DEFAULT_ACCOUNT_CODE:  'Xero account used for line items when the parser detects no account. Picked from your connected organisation\'s chart of accounts — or type any code your org uses.',
   DEFAULT_CURRENCY:      'Default invoice currency code (e.g. SGD, USD, AUD).',
   ZERO_TAX_RATE:         'Tax rate name in Xero for zero-rated items (e.g. NONE, TAX001).',
+  CLAIM_PAYEE_NAME:      'Your name as the payee on expense claims sent to Xero, exactly as your contact appears there. The shop goes into each line\'s description. Leave blank to keep sending claims to the shop as the contact.',
   SLACK_WEBHOOK_URL:     'Optional Slack incoming webhook URL for error notifications.',
   XERO_OAUTH_CLIENT_ID:     'Client ID from your own Xero "Web app" (not Custom Connection). Each user brings their own — not shared with other accounts.',
   XERO_OAUTH_CLIENT_SECRET: 'Client secret for the same Xero Web app.',

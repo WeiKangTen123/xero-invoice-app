@@ -9,7 +9,10 @@ jest.mock('xero-node', () => ({
     getBrandingThemes: jest.fn(async () => ({ body: { brandingThemes: [] } })),
   })),
 }));
-jest.mock('./contacts', () => ({ getOrCreateContact: jest.fn(async () => 'contact-1') }));
+jest.mock('./contacts', () => ({
+  ...jest.requireActual('./contacts'),
+  resolveContact: jest.fn(async () => ({ contactID: 'contact-1' })),
+}));
 jest.mock('./xero-utils', () => ({ withRetry: fn => fn(), xeroErrMsg: e => e?.message || String(e) }));
 jest.mock('../utils/token-cache', () => ({ forUser: () => ({ getValidToken: async () => 'token' }) }));
 jest.mock('../utils/pdf-store', () => ({ forUser: () => ({ getPath: () => null }) }));

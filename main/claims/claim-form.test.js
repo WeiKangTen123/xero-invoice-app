@@ -138,3 +138,46 @@ describe('claims/claim-form', () => {
     });
   });
 });
+
+// The currency column was stored as typed ("S$"), which Xero refuses; and the
+// form's exchange rate was read but never reached Xero.
+describe('claims/claim-form — currency and exchange rate', () => {
+  const { normaliseCurrency, xeroCurrencyRate } = require('./claim-form');
+
+  test('symbols and codes become three-letter codes; text that names none is null', () => {
+    expect(normaliseCurrency('S$')).toBe('SGD');
+    expect(normaliseCurrency(' s$ ')).toBe('SGD');
+    expect(normaliseCurrency('usd')).toBe('USD');
+    expect(normaliseCurrency('US$')).toBe('USD');
+    expect(normaliseCurrency('RM')).toBe('MYR');
+    expect(normaliseCurrency('€')).toBe('EUR');
+    expect(normaliseCurrency('SGD (S$)')).toBe('SGD');
+    expect(normaliseCurrency('$')).toBeNull();          // SGD on one form, USD on the next
+    expect(normaliseCurrency('Baht')).toBeNull();
+    expect(normaliseCurrency('')).toBeNull();
+    expect(normaliseCurrency(null)).toBeNull();
+  });
+
+  // Xero's CurrencyRate is foreign units per one base unit; the form's rate is
+  // base per foreign (AMOUNT x RATE = SGD AMOUNT).
+  test('the form\'s rate is turned round into Xero\'s terms', () => {
+    expect(xeroCurrencyRate({ amount: 100, exchangeRate: 1.35 })).toBe(0.740741);
+    expect(xeroCurrencyRate({ amount: 100, exchangeRate: 1.35, baseAmount: 135 })).toBe(0.740741);
+    // Written the other way round, which the base amount shows.
+    expect(xeroCurrencyRate({ amount: 100, exchangeRate: 0.74, baseAmount: 135.14 })).toBe(0.74);
+    // No rate, but both amounts.
+    expect(xeroCurrencyRate({ amount: 100, baseAmount: 135 })).toBe(0.740741);
+    expect(xeroCurrencyRate({ amount: 100 })).toBeNull();
+  });
+
+  test('rows carry the cleaned currency, what could not be read, and the rate for Xero', async () => {
+    const r = await parseClaimForm(await makeForm({ rows: [
+      { no: 1, date: new Date(Date.UTC(2026, 1, 23)), description: 'Taxi', currency: 'S$', amount: 15.8, fx: 1 },
+      { no: 2, date: new Date(Date.UTC(2026, 1, 24)), description: 'Hotel', currency: 'USD', amount: 100, fx: 1.35 },
+      { no: 3, date: new Date(Date.UTC(2026, 1, 25)), description: 'Food', currency: 'Baht', amount: 50, fx: 0.04 },
+    ] }));
+    expect(r.rows.map(x => x.currency)).toEqual(['SGD', 'USD', null]);
+    expect(r.rows.map(x => x.currencyUnread)).toEqual([null, null, 'Baht']);   // as typed
+    expect(r.rows.map(x => x.currencyRate)).toEqual([1, 0.740741, 25]);
+  });
+});

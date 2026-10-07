@@ -3,6 +3,10 @@ const logger = require('../utils/logger');
 
 // The scope list lives with the other Xero helpers so OAuth and Custom
 // Connection cannot drift apart again (they had: budgets were OAuth-only).
+// accounting.attachments is the one deliberate difference: it is not asked
+// for here, because Xero refuses a client-credentials request that names a
+// scope the connection was never granted, and that would stop every Custom
+// Connection set up without it from connecting at all (see xero-utils.js).
 const { SCOPES } = require('./xero-utils');
 
 async function refreshClientCredentialsToken(userId) {

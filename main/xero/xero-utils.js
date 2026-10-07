@@ -139,4 +139,14 @@ const SCOPES = 'accounting.invoices accounting.contacts accounting.settings.read
   + 'accounting.banktransactions.read accounting.reports.profitandloss.read accounting.reports.banksummary.read '
   + 'accounting.payments.read accounting.reports.budgetsummary.read accounting.budgets.read';
 
-module.exports = { withRetry, xeroErrMsg, _parseXeroErr, isScopeError, SCOPES };
+// Attaching the bill's PDF or the claim's receipt needs this, and without it
+// every attachment was refused and only logged. Only the Web app (OAuth) flow
+// asks for it. A Custom Connection's token request names its scopes outright,
+// and Xero refuses the whole request when one of them was never granted to
+// that connection, so adding it to SCOPES would disconnect every Custom
+// Connection set up without it. Those connections post as before, and an
+// attachment that is refused leaves a note on the row (xero/invoices.js).
+const ATTACHMENTS_SCOPE = 'accounting.attachments';
+const OAUTH_SCOPES = `${SCOPES} ${ATTACHMENTS_SCOPE}`;
+
+module.exports = { withRetry, xeroErrMsg, _parseXeroErr, isScopeError, SCOPES, OAUTH_SCOPES, ATTACHMENTS_SCOPE };
