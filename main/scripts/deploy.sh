@@ -129,12 +129,24 @@ TIMEOUT=$(command -v timeout || command -v gtimeout || true)
 # behind `|| true`. Read as empty output, an unreachable server looks like a
 # server with nothing to report. Any other status is the remote command's own,
 # returned as before.
+#
+# A temporary failure of Google's own API — gcloud could not even look the VM
+# up ("Could not fetch resource", a 5xx page saying to try again in 30
+# seconds) — is retried twice before giving up: the command never reached the
+# box, so running it again cannot do anything twice. A deploy stopped on one
+# such 502 on 2026-10-07.
 remote() {
-  local limit="${2:-$SSH_TIMEOUT}" rc=0 start=$SECONDS
-  "$TIMEOUT" --foreground -k 10 "$limit" \
-    gcloud compute ssh "$INSTANCE" --zone="$ZONE" --quiet \
-      --command="sudo -u $RUNAS -H bash -lc \"cd $APP && $1\"" \
-    </dev/null >"$TMP/out" 2>"$TMP/err" || rc=$?
+  local limit="${2:-$SSH_TIMEOUT}" rc attempt start
+  for attempt in 1 2 3; do
+    rc=0; start=$SECONDS
+    "$TIMEOUT" --foreground -k 10 "$limit" \
+      gcloud compute ssh "$INSTANCE" --zone="$ZONE" --quiet \
+        --command="sudo -u $RUNAS -H bash -lc \"cd $APP && $1\"" \
+      </dev/null >"$TMP/out" 2>"$TMP/err" || rc=$?
+    [ "$rc" -ne 0 ] && google_api_hiccup && [ "$attempt" -lt 3 ] || break
+    info "Google's API had a temporary error (attempt $attempt); trying again in $((attempt * 20))s" >&2
+    sleep $((attempt * 20))
+  done
   if [ "$rc" -eq 124 ] || { [ "$rc" -eq 137 ] && [ $((SECONDS - start)) -ge "$limit" ]; }; then
     unreachable "no answer from the server within ${limit}s" "$1"
   elif [ "$rc" -eq 255 ] || ssh_itself_failed; then
@@ -142,6 +154,14 @@ remote() {
   fi
   cat "$TMP/out"
   return "$rc"
+}
+
+# True only when gcloud failed before connecting to the VM because Google's API
+# answered with a server error. An authentication, permission or network
+# failure, or anything from the box itself, is not retried.
+google_api_hiccup() {
+  grep -q 'Could not fetch resource' "$TMP/err" 2>/dev/null || return 1
+  grep -Eq '\b50[0234]\b|temporary error|try again|backendError|[Ii]nternal error' "$TMP/err" 2>/dev/null
 }
 
 ssh_itself_failed() {
@@ -280,20 +300,41 @@ fi
 # Untracked files are NOT removed automatically. main/.env.bak lives there, and a
 # deploy script that deletes untracked files on a production box is one bad glob
 # away from taking the environment with it. Report and stop instead.
-UNTRACKED_BLOCKERS=$(remote "git fetch -q origin 2>/dev/null; git diff --name-only HEAD ${LOCAL_SHA} 2>/dev/null" || true)
-if [ -n "$UNTRACKED_BLOCKERS" ]; then
-  CLASH=""
+#
+# Only a file the incoming commits ADD can collide with an untracked file on
+# the box; a tracked file that changes is in nobody's way. The list comes from
+# the local repository, which has both commits, and the box is asked about up
+# to 50 paths per ssh call. This used to be one or two ssh calls per changed
+# file — around a hundred for a week of commits — and one passing 502 from
+# Google's API on any of them stopped the deploy.
+if git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+  ADDED=$(git diff --name-only --diff-filter=A "$BEFORE" "$LOCAL_SHA")
+else
+  ADDED=$(remote "git fetch -q origin 2>/dev/null; git diff --name-only --diff-filter=A HEAD ${LOCAL_SHA} 2>/dev/null" || true)
+fi
+CLASH=""
+if [ -n "$ADDED" ]; then
+  # Paths are passed to the box inside single quotes; one containing a quote
+  # cannot be, so it is not guessed at.
+  grep -q "'" <<<"$ADDED" && die "an incoming path contains a quote character; check the box for untracked files in the way by hand"
+  BATCH=""; N=0
+  check_batch() {
+    [ -z "$BATCH" ] && return 0
+    CLASH="$CLASH$(remote "ls -d --$BATCH 2>/dev/null || true")"$'\n'
+    BATCH=""; N=0
+  }
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    if remote "test -f '$f' && git ls-files --error-unmatch '$f' >/dev/null 2>&1 || echo MISSING" | grep -q MISSING; then
-      remote "test -f '$f' && echo UNTRACKED" | grep -q UNTRACKED && CLASH="$CLASH $f"
-    fi
-  done <<< "$UNTRACKED_BLOCKERS"
-  if [ -n "$CLASH" ]; then
-    red "  ✗ untracked files on the server are in the way of the incoming commit:"
-    for f in $CLASH; do info "      $f"; done
-    die "remove them on the server, then run again"
-  fi
+    BATCH="$BATCH '$f'"; N=$((N + 1))
+    [ "$N" -ge 50 ] && check_batch
+  done <<< "$ADDED"
+  check_batch
+  CLASH=$(printf '%s\n' "$CLASH" | tr -d '\r' | sed '/^[[:space:]]*$/d')
+fi
+if [ -n "$CLASH" ]; then
+  red "  ✗ untracked files on the server are in the way of the incoming commit:"
+  printf '%s\n' "$CLASH" | sed 's/^/        /'
+  die "remove them on the server, then run again"
 fi
 
 # Fast-forward to exactly the commit checked above, not to whatever master's
