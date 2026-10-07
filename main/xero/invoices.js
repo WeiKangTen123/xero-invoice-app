@@ -264,6 +264,15 @@ function _referenceField(invoiceData) {
 const NO_MERCHANT_MSG = 'This claim has no merchant name, so Xero has no one to put it under. '
   + 'Add the merchant, or set "Your name for expense claims" in Setup so claims are owed to you, then send it again.';
 
+// Mileage and per diem claims (routes/claims.js): no shop, no receipt. The
+// amount is owed to the claimant and nobody else, and there is no file to
+// attach, which is not a failure to report.
+const ALLOWANCE_KINDS = new Set(['mileage', 'per_diem']);
+const isAllowanceClaim = invoiceData => ALLOWANCE_KINDS.has(invoiceData && invoiceData.claimKind);
+
+const NO_PAYEE_MSG = 'A mileage or per diem claim is owed to you, so Xero needs your name as the contact. '
+  + 'Set "Your name for expense claims" in Setup, then send it again.';
+
 // A claim posted to the claimant still has to say where the money went: the
 // merchant leads each line's text unless the text already names it.
 function _withMerchant(invoiceData, merchant) {
@@ -288,6 +297,13 @@ function _withMerchant(invoiceData, merchant) {
 // one it goes to the merchant as before. Nothing to name it by is refused here
 // rather than posted to a made-up contact.
 function _contactFor(invoiceData, userConfig) {
+  // An allowance has no merchant to fall back to or to name in the lines: it
+  // goes to the payee as it is, or not at all.
+  if (isAllowanceClaim(invoiceData)) {
+    const payee = cleanContactName(userConfig.CLAIM_PAYEE_NAME);
+    if (!payee) throw new Error(NO_PAYEE_MSG);
+    return { details: { vendorName: payee, invoiceType: invoiceData.invoiceType }, data: invoiceData, payee: true };
+  }
   const isClaim  = invoiceData.invoiceType === 'EXPENSE';
   const payee    = isClaim ? cleanContactName(userConfig.CLAIM_PAYEE_NAME) : null;
   const merchant = cleanContactName(invoiceData.contactName) || cleanContactName(invoiceData.vendorName);
@@ -517,6 +533,10 @@ function _permissionNote(userId) {
 // which is how an attachment refused the first time arrives once Xero has
 // been reconnected and the row is sent again.
 async function _attachFiles(userId, tenantId, invoiceID, invoiceData, accountingApi, { onlyMissing = false } = {}) {
+  // Mileage and per diem have no receipt by design. Nothing is looked up, sent
+  // or noted: "the attachment failed" on one would be a false alarm, and a
+  // correction would spend a call asking Xero what it holds.
+  if (isAllowanceClaim(invoiceData)) return [];
   const notes = [];
   let attachments;
   try {
@@ -707,5 +727,5 @@ module.exports = {
   createDraftInvoice, updateDraftInvoice,
   // Exposed for tests only — internal to the create/update flow above.
   buildLineItems, resolveTaxType, getOrgTaxRates, createIdempotencyKey,
-  NO_MERCHANT_MSG,
+  NO_MERCHANT_MSG, NO_PAYEE_MSG,
 };

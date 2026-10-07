@@ -4,12 +4,14 @@ import { api } from '../api/client';
 import { useUnsavedChanges } from '../utils/useUnsavedChanges';
 import { safeReturnPath } from '../utils/returnTo';
 import DeleteConfirmModal from '../components/DeleteConfirmModal';
+import { allowanceForm, claimKindLabel, isAllowanceClaim } from '../components/receipts/allowance';
 import { useConfirm } from '../context/ConfirmContext';
 import { useToast } from '../context/ToastContext';
 import { TYPE_META, typeMeta } from '../utils/badges';
 import { useViewMode } from '../context/ViewModeContext';
 import { useAuth } from '../context/AuthContext';
 import { formatDateTime } from '../utils/formatDate';
+import AllowanceCard from './invoice-review/AllowanceCard';
 import DiscrepancyBanner from './invoice-review/DiscrepancyBanner';
 import DuplicateBanner from './invoice-review/DuplicateBanner';
 import EmailBodyCard from './invoice-review/EmailBodyCard';
@@ -389,6 +391,16 @@ function InvoiceReviewPage() {
   });
 
   function startEdit() {
+    // A mileage or per diem claim is edited by what was typed, not by its
+    // figures: the server prices it again (see saveEdit).
+    if (isAllowanceClaim(inv)) {
+      const initial = { ...allowanceForm(inv), accountCode: inv.accountCode || '' };
+      formAtStart.current = JSON.stringify(initial);
+      setForm(initial);
+      setSaveErr('');
+      setEditing(true);
+      return;
+    }
     const initial = {
       vendorName:       inv.vendorName       || '',
       contactEmail:     inv.contactEmail     || '',
@@ -433,6 +445,13 @@ function InvoiceReviewPage() {
     setSaving(true);
     setSaveErr('');
     try {
+      if (isAllowanceClaim(inv)) {
+        const d = await api.patch(`/claims/allowance/${id}`, form);
+        setInv(d.claim);
+        setEditing(false);
+        setForm(null);
+        return;
+      }
       const d = await api.patch(`/invoices/${id}`, form);
       setInv(d.invoice);
       setEditing(false);
@@ -505,6 +524,11 @@ function InvoiceReviewPage() {
   }
 
   const isExpense  = inv.invoiceType === 'EXPENSE' || !!inv.receiptFile;
+  // Mileage or per diem: no receipt and no merchant. Its own card stands where
+  // the receipt would, and editing it edits what was typed, not the amount,
+  // so the figure cards below are shown but never put into edit mode.
+  const allowance  = isAllowanceClaim(inv);
+  const editFigures = editing && !allowance;
   const typeLabel  = isExpense ? TYPE_META.EXPENSE.long : typeMeta(inv.invoiceType).long;
   const canSubmit  = SUBMITTABLE.has(inv.status) && !submitOk && !editing;
   const canReview  = MARKABLE.has(inv.status) && !editing;
@@ -645,12 +669,12 @@ function InvoiceReviewPage() {
         )}
 
         {/* Main layout: PDF left, info panel right (sticky — stays in view while the PDF scrolls) */}
-        <div style={{ display: 'grid', gridTemplateColumns: (inv.hasPdf || inv.receiptFile) ? (isMobile ? '1fr' : '1fr 500px') : '1fr', gap: 20, alignItems: 'start' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: (inv.hasPdf || inv.receiptFile || allowance) ? (isMobile ? '1fr' : '1fr 500px') : '1fr', gap: 20, alignItems: 'start' }}>
 
           {/* PDF Viewer — fills its full grid column; the #zoom=page-width fragment on
               the iframe src (below) tells the native PDF viewer to fit-scale itself,
               so it never letterboxes no matter how wide the column is */}
-          {inv.receiptFile ? <ReceiptViewer isMobile={isMobile} id={id} navigate={navigate} inv={inv} receiptUrl={receiptUrl} receiptRot={receiptRot} setReceiptRot={setReceiptRot} group={group} merging={merging} approvingNext={approvingNext} rereading={rereading} rereadMsg={rereadMsg} saving={saving} receiptBox={receiptBox} rereadReceipt={rereadReceipt} mergeBack={mergeBack} approveAndNext={approveAndNext} /> : inv.hasPdf ? <PdfViewer isMobile={isMobile} inv={inv} pdfUrl={pdfUrl} pdfErr={pdfErr} setPdfRetry={setPdfRetry} /> : <EmailBodyCard inv={inv} />}
+          {allowance ? <AllowanceCard inv={inv} editing={editing} form={form} updateField={updateField} /> : inv.receiptFile ? <ReceiptViewer isMobile={isMobile} id={id} navigate={navigate} inv={inv} receiptUrl={receiptUrl} receiptRot={receiptRot} setReceiptRot={setReceiptRot} group={group} merging={merging} approvingNext={approvingNext} rereading={rereading} rereadMsg={rereadMsg} saving={saving} receiptBox={receiptBox} rereadReceipt={rereadReceipt} mergeBack={mergeBack} approveAndNext={approveAndNext} /> : inv.hasPdf ? <PdfViewer isMobile={isMobile} inv={inv} pdfUrl={pdfUrl} pdfErr={pdfErr} setPdfRetry={setPdfRetry} /> : <EmailBodyCard inv={inv} />}
 
           {/* Info panel — sticky + independently scrollable so it stays visible while
               you scroll a multi-page PDF, instead of scrolling away with the page */}
@@ -663,15 +687,15 @@ function InvoiceReviewPage() {
           }}>
 
             {/* Summary card */}
-            <SummaryCard id={id} inv={inv} editing={editing} form={form} updateField={updateField} isExpense={isExpense} typeLabel={typeLabel} />
+            <SummaryCard id={id} inv={inv} editing={editFigures} form={form} updateField={updateField} isExpense={isExpense} typeLabel={typeLabel} />
 
             {/* Claim Purpose / Description card */}
-            {(inv.description || editing || inv.invoiceType === 'EXPENSE') && (
+            {(inv.description || editFigures || inv.invoiceType === 'EXPENSE') && (
               <div className="card">
                 <div className="card-title" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span>📝</span> {inv.invoiceType === 'EXPENSE' ? 'Claim Purpose / Description' : 'Description'}
                 </div>
-                {editing ? (
+                {editFigures ? (
                   <div className="form-group" style={{ marginBottom: 0 }}>
                     <textarea
                       className="form-input"
@@ -722,8 +746,9 @@ function InvoiceReviewPage() {
               </div>
             )}
 
-            {/* Vendor card */}
-            <div className="card">
+            {/* Vendor card. None for a mileage or per diem claim: there is no
+                shop, and the claimant is the contact in Xero. */}
+            {!allowance && <div className="card">
               <div className="card-title" style={{ marginBottom: 12 }}>{isExpense ? 'Merchant' : inv.invoiceType === 'ACCREC' ? 'Client / Contact' : 'Vendor / Contact'}</div>
               {editing ? (
                 <>
@@ -754,11 +779,11 @@ function InvoiceReviewPage() {
                   {!isExpense && <InfoRow label="From email" value={inv.sourceEmail} />}
                 </>
               )}
-            </div>
+            </div>}
 
             {/* Line items + payment reference — merged into one card since both relate
                 to "what am I actually paying for" and payment ref is short */}
-            {((editing ? form.lineItems : inv.lineItems)?.length > 0 || inv.paymentReference || editing) && <LineItemsCard id={id} inv={inv} editing={editing} form={form} updateField={updateField} updateLineItem={updateLineItem} />}
+            {((editFigures ? form.lineItems : inv.lineItems)?.length > 0 || inv.paymentReference || editFigures) && <LineItemsCard id={id} inv={inv} editing={editFigures} form={form} updateField={updateField} updateLineItem={updateLineItem} />}
 
             {/* Reports */}
             {inv.reports?.length > 0 && (
@@ -810,10 +835,10 @@ function InvoiceReviewPage() {
 
       <DeleteConfirmModal
         isOpen={showDeleteModal}
-        title={isExpense ? 'Delete Receipt' : 'Delete Invoice'}
-        itemName={inv.vendorName || inv.invoiceNumber || inv.id}
+        title={allowance ? 'Delete Claim' : isExpense ? 'Delete Receipt' : 'Delete Invoice'}
+        itemName={inv.vendorName || claimKindLabel(inv) || inv.invoiceNumber || inv.id}
         isExpense={isExpense}
-        confirmLabel={isExpense ? 'Delete Receipt' : 'Delete Invoice'}
+        confirmLabel={allowance ? 'Delete Claim' : isExpense ? 'Delete Receipt' : 'Delete Invoice'}
         loading={deleting}
         onConfirm={handleDelete}
         onClose={() => { if (!deleting) setShowDeleteModal(false); }}

@@ -1,8 +1,12 @@
 import { fmtMoney } from '../../utils/format';
 import AccountCodeSelect from '../../components/AccountCodeSelect';
+import { ALLOWANCE_KINDS, isAllowanceClaim } from '../../components/receipts/allowance';
 import { AccountMiniField, MiniField } from './bits';
 
 export default function SummaryCard({ id, inv, editing, form, updateField, isExpense, typeLabel }) {
+  // Mileage and per diem have no receipt, so no receipt date; the date is the
+  // day driven or the first day away.
+  const allowance = isAllowanceClaim(inv);
   return (
             <div className="card">
               {editing ? (
@@ -93,11 +97,12 @@ export default function SummaryCard({ id, inv, editing, form, updateField, isExp
                     {/* A claim is a receipt: it has a reference and a receipt date, and no due date. */}
                     <MiniField label={isExpense ? 'Claim ref' : 'Invoice #'} value={inv.invoiceNumber} mono />
                     <AccountMiniField code={inv.accountCode} />
-                    <MiniField label={isExpense ? 'Receipt date' : 'Invoice Date'} value={inv.invoiceDate} />
+                    <MiniField label={allowance ? 'Date' : isExpense ? 'Receipt date' : 'Invoice Date'} value={inv.invoiceDate} />
                     {!isExpense && <MiniField label="Due Date" value={inv.dueDate} />}
                   </div>
                   <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
                     Source: {
+                      allowance ? `${ALLOWANCE_KINDS[inv.claimKind].long} (typed in, no receipt)` :
                       inv.source === 'claim' ? 'Expense Claim (Imported)' :
                       inv.source === 'phone' ? 'Mobile Camera Upload' :
                       inv.source === 'upload' ? 'Direct Receipt Upload' :

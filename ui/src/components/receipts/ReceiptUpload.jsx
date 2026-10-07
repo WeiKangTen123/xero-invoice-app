@@ -1,10 +1,12 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 // api/client prepends BASE = '/api', so paths here start at the route AFTER it.
 // Writing '/api/receipts' would request '/api/api/receipts' and 404.
 import { api } from '../../api/client';
 import { prepareReceipt, blobToBase64, humanSize, ACCEPT_ATTR } from './receipt-upload';
 import PhonePairingModal from './PhonePairingModal';
 import ClaimImport from './ClaimImport';
+import AllowanceClaimModal from './AllowanceClaimModal';
+import { ALLOWANCE_KINDS } from './allowance';
 
 // Add-receipt controls for AR & AP. Expense claims are the only document type
 // the user creates by hand — bills and invoices arrive by email on their own —
@@ -19,6 +21,28 @@ export default function ReceiptUpload({ onUploaded }) {
   const [note, setNote]     = useState('');
   const [pairing, setPairing] = useState(false);
   const [importing, setImporting] = useState(false);
+  // Mileage and per diem are offered only once a rate is set for them in
+  // Setup; null until asked, and a failed ask simply leaves them out.
+  const [allowances, setAllowances] = useState(null);
+  const [adding, setAdding] = useState(null);   // 'mileage' | 'per_diem' | null
+
+  useEffect(() => {
+    let active = true;
+    api.get('/claims/allowance/settings')
+      .then(d => { if (active) setAllowances(d); })
+      .catch(() => { if (active) setAllowances(null); });
+    return () => { active = false; };
+  }, []);
+
+  // A possible duplicate is saved anyway (it is only a warning), so say so
+  // here, where the person who typed it is looking.
+  function allowanceAdded(res) {
+    setError('');
+    setNote(res?.duplicate
+      ? `Added, but it matches ${res.duplicate.invoiceNumber || 'another claim'}, so it is marked as a possible duplicate. Check it before approving.`
+      : '');
+    if (onUploaded) onUploaded();
+  }
 
   async function handleFiles(files) {
     const list = Array.from(files || []);
@@ -88,6 +112,17 @@ export default function ReceiptUpload({ onUploaded }) {
         >
           📷 Use my phone
         </button>
+        {Object.entries(ALLOWANCE_KINDS).filter(([kind]) => allowances?.[kind]?.enabled).map(([kind, meta]) => (
+          <button
+            key={kind}
+            className="btn btn-sm"
+            onClick={() => setAdding(kind)}
+            style={{ whiteSpace: 'nowrap' }}
+            title={`A ${meta.label.toLowerCase()} claim, no receipt needed: priced at the rate in Setup`}
+          >
+            {meta.icon} Add {meta.label.toLowerCase()}
+          </button>
+        ))}
       </div>
 
       {note && !error && (
@@ -120,6 +155,10 @@ export default function ReceiptUpload({ onUploaded }) {
 
       {importing && (
         <ClaimImport onClose={() => setImporting(false)} onImported={onUploaded} />
+      )}
+
+      {adding && allowances && (
+        <AllowanceClaimModal kind={adding} settings={allowances} onClose={() => setAdding(null)} onAdded={allowanceAdded} />
       )}
     </div>
   );

@@ -22,6 +22,10 @@ const HELP = {
   DEFAULT_CURRENCY:      'Default invoice currency code (e.g. SGD, USD, AUD).',
   ZERO_TAX_RATE:         'Tax rate name in Xero for zero-rated items (e.g. NONE, TAX001).',
   CLAIM_PAYEE_NAME:      'Your name as the payee on expense claims sent to Xero, exactly as your contact appears there. The shop goes into each line\'s description. Leave blank to keep sending claims to the shop as the contact.',
+  MILEAGE_RATE:          'What a km driven for work is paid at, in your default currency, up to 4 decimal places (e.g. 0.60). Blank turns mileage claims off. A claim keeps the rate it was made at.',
+  MILEAGE_ACCOUNT_CODE:  'The Xero account mileage claims are coded to. Blank uses your claim account.',
+  PER_DIEM_RATE:         'The daily travel allowance, in your default currency (e.g. 80.00). Half days are paid at half. Blank turns per diem claims off. A claim keeps the rate it was made at.',
+  PER_DIEM_ACCOUNT_CODE: 'The Xero account per diem claims are coded to. Blank uses your claim account.',
   SLACK_WEBHOOK_URL:     'Optional Slack incoming webhook URL for error notifications.',
   XERO_OAUTH_CLIENT_ID:     'Client ID from your own Xero "Web app" (not Custom Connection). Each user brings their own — not shared with other accounts.',
   XERO_OAUTH_CLIENT_SECRET: 'Client secret for the same Xero Web app.',
@@ -45,6 +49,10 @@ const SECTION_META = {
     helpUrl: 'https://myaccount.google.com/apppasswords', helpLabel: 'Generate a Gmail App Password ↗',
   },
   defaults:    { label: 'Invoice Defaults', desc: 'Fallback values when fields cannot be detected automatically', icon: '⚙', testKey: null },
+  allowances:  {
+    label: 'Mileage and allowances', icon: '🚗', testKey: null,
+    desc: 'Expense claims with no receipt: a rate per km driven, and a daily allowance for travel. Set a rate to offer that claim on the claims tab; leave it blank to keep it off.',
+  },
   preferences: { label: 'Preferences',      desc: 'Personal display settings — do not affect processing', icon: '🕒', testKey: null },
   optional:    { label: 'Optional',         desc: 'Slack error notifications', icon: '◎', testKey: null },
   xeroOAuth: {
@@ -72,10 +80,52 @@ function HelpLink({ url, label }) {
   );
 }
 
+// The allowance rates: a number, not free text, and blank means off.
+const RATE_FIELDS = {
+  MILEAGE_RATE:  { unit: 'per km',  example: '0.60' },
+  PER_DIEM_RATE: { unit: 'per day', example: '80.00' },
+};
+const ALLOWANCE_ACCOUNT_FIELDS = new Set(['MILEAGE_ACCOUNT_CODE', 'PER_DIEM_ACCOUNT_CODE']);
+
 function Field({ name, meta, value, onChange }) {
   const [show, setShow] = useState(false);
   const isSecret  = isSecretKey(name);
   const isReadOnly = !!meta.readOnly;
+  // The server sends a plain label for a key that does not explain itself.
+  const label = meta.label || name;
+
+  if (RATE_FIELDS[name]) {
+    const rate = RATE_FIELDS[name];
+    return (
+      <div className="form-group">
+        <label htmlFor={`setting-${name}`} className="form-label">
+          {label}
+          {HELP[name] && <HelpTooltip text={HELP[name]} />}
+        </label>
+        <input
+          id={`setting-${name}`} className="form-input" inputMode="decimal" autoComplete="off"
+          placeholder={`Off — enter a rate ${rate.unit}, e.g. ${rate.example}`}
+          value={value} onChange={e => onChange(name, e.target.value)} readOnly={isReadOnly}
+        />
+        <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>
+          {String(value || '').trim() ? `On: claims are priced at this rate ${rate.unit}.` : 'Off: not offered on the claims tab.'}
+        </div>
+      </div>
+    );
+  }
+
+  if (ALLOWANCE_ACCOUNT_FIELDS.has(name)) {
+    return (
+      <div className="form-group">
+        <label className="form-label">
+          {label}
+          {HELP[name] && <HelpTooltip text={HELP[name]} />}
+        </label>
+        <AccountCodeSelect value={value} onChange={v => onChange(name, v)} invoiceType="EXPENSE" disabled={isReadOnly} />
+        {meta.hint && <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>{meta.hint}</div>}
+      </div>
+    );
+  }
 
   // Same picker the invoice editor uses, so the default is chosen from the real
   // chart of accounts rather than typed from memory. No invoiceType here — this
@@ -116,7 +166,7 @@ function Field({ name, meta, value, onChange }) {
   return (
     <div className="form-group">
       <label htmlFor={`setting-${name}`} className="form-label">
-        {name}
+        {label}
         {HELP[name] && <HelpTooltip text={HELP[name]} />}
         {isReadOnly && <span className="badge badge-gray" style={{ marginLeft: 4 }}>Read-only</span>}
       </label>
@@ -932,7 +982,7 @@ export default function Setup() {
 
         <LlmKeysCard idx={2} testing={testing} msgs={msgs} onTest={runTest} />
 
-        {['defaults', 'preferences', 'optional', 'xeroOAuth'].map((key, i) => {
+        {['defaults', 'allowances', 'preferences', 'optional', 'xeroOAuth'].map((key, i) => {
           const sectionData = config[key];
           if (!sectionData) return null;
           return (

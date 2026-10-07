@@ -1,4 +1,5 @@
 import { ConfidenceBadge, XeroStatusBadge } from '../../components/Badges';
+import { claimKindLabel } from '../../components/receipts/allowance';
 import { Spinner, StatusPill } from './bits';
 
 // `onBack` is the page's own Back (see goBack in InvoiceReview.jsx), which
@@ -20,7 +21,8 @@ export default function TopBar({ isMobile, onBack, inv, setReporting, marking, s
             <button className="btn btn-ghost btn-sm" onClick={onBack} style={{ gap: 6 }}>← Back</button>
             <div>
               <h1 style={{ fontSize: isMobile ? 18 : 20, fontWeight: 700, letterSpacing: '-0.4px' }}>
-                {inv.vendorName || 'Unknown Vendor'}
+                {/* A mileage or per diem claim has no merchant: its kind stands in. */}
+                {inv.vendorName || claimKindLabel(inv) || 'Unknown Vendor'}
               </h1>
               <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 2 }}>
                 {inv.pdfFilename || inv.invoiceNumber}

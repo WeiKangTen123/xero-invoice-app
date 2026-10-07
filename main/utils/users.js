@@ -27,6 +27,12 @@ const CONFIG_KEY_TO_COLUMN = {
   TIMEZONE:                 'timezone',
   // Who an expense claim is owed to in Xero: the claimant, not the shop.
   CLAIM_PAYEE_NAME:         'claim_payee_name',
+  // Claims with no receipt: the rate per km and per day, and the account each
+  // is coded to (Setup -> Mileage and allowances).
+  MILEAGE_RATE:             'mileage_rate',
+  MILEAGE_ACCOUNT_CODE:     'mileage_account_code',
+  PER_DIEM_RATE:            'per_diem_rate',
+  PER_DIEM_ACCOUNT_CODE:    'per_diem_account_code',
 };
 
 // IANA timezone used to FORMAT timestamps for display when a user hasn't picked
@@ -116,6 +122,88 @@ function defaultsFrom(config = {}) {
 
 function getUserDefaults(userId) {
   return defaultsFrom(userId ? getUserConfig(userId) : {});
+}
+
+// ── Mileage and per diem ──────────────────────────────────────────────────────
+// A claim with no receipt is priced from a rate the user sets once. A rate is
+// money per unit, so it must be positive; the ceiling catches a slipped digit
+// (60 a km is a typo for 0.60, not a policy) rather than expressing one; and
+// the precision is what the amount is worked out at. Per km goes to four
+// places because real rates do (0.585); per day is money, so to the cent.
+const ALLOWANCE_RATES = {
+  MILEAGE_RATE:  { kind: 'mileage',  label: 'Mileage rate per km', decimals: 4, max: 100 },
+  PER_DIEM_RATE: { kind: 'per_diem', label: 'Per diem daily rate', decimals: 2, max: 10000 },
+};
+const ALLOWANCE_ACCOUNTS = {
+  MILEAGE_ACCOUNT_CODE:  { label: 'Mileage account' },
+  PER_DIEM_ACCOUNT_CODE: { label: 'Per diem account' },
+};
+
+// At least two places, up to four: 0.6 reads as 0.60, 0.585 keeps its third
+// place. The same form on the Setup page, in a claim's line text and on the
+// review page, so a rate looks the same wherever it is quoted.
+function formatRate(n) {
+  return Number(n).toFixed(4).replace(/0{1,2}$/, '');
+}
+
+// The allowance settings in a Setup patch, checked. Returns { values, errors }:
+// `values` is the patch with each allowance setting normalised ('' clears it,
+// a rate is stored in formatRate's form), `errors` one { field, error } per
+// value refused. Other keys pass through untouched. Nothing is saved when
+// anything is refused, so a half-valid form never half-applies.
+function checkAllowanceSettings(patch = {}) {
+  const values = { ...patch };
+  const errors = [];
+  for (const [key, rule] of Object.entries(ALLOWANCE_RATES)) {
+    if (patch[key] === undefined || patch[key] === null) continue;
+    const raw = String(patch[key]).trim();
+    if (raw === '') { values[key] = ''; continue; }
+    const n = Number(raw);
+    if (!/^(\d+(\.\d+)?|\.\d+)$/.test(raw) || !(n > 0) || (raw.split('.')[1] || '').length > rule.decimals) {
+      errors.push({ field: key, error: `${rule.label} must be a positive number with at most ${rule.decimals} decimal places, or blank to turn it off` });
+    } else if (n > rule.max) {
+      errors.push({ field: key, error: `${rule.label} must be at most ${rule.max.toLocaleString('en-US')}` });
+    } else {
+      values[key] = formatRate(n);
+    }
+  }
+  for (const [key, rule] of Object.entries(ALLOWANCE_ACCOUNTS)) {
+    if (patch[key] === undefined || patch[key] === null) continue;
+    const raw = String(patch[key]).trim();
+    if (raw === '') { values[key] = ''; continue; }
+    // Xero's own limit: an account code is up to ten letters and digits.
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,9}$/.test(raw)) {
+      errors.push({ field: key, error: `${rule.label} must be a Xero account code (up to 10 letters and digits), or blank for your claim account` });
+    } else {
+      values[key] = raw;
+    }
+  }
+  return { values, errors };
+}
+
+// What a new mileage or per diem claim is priced and coded with, keyed by the
+// claim kind. A null rate means that kind is off. A stored value that would
+// not pass the Setup check now (written before the check, or by hand) also
+// reads as off, rather than pricing a claim from it. The account falls back to
+// the claim account, the way every default here falls back.
+function allowanceSettingsFrom(config = {}) {
+  const defaults = defaultsFrom(config);
+  const out = { currency: defaults.currency };
+  for (const [key, rule] of Object.entries(ALLOWANCE_RATES)) {
+    const raw = config[key];
+    const { errors } = checkAllowanceSettings({ [key]: raw });
+    const usable = raw != null && String(raw).trim() !== '' && !errors.length;
+    const accountKey = key.replace('_RATE', '_ACCOUNT_CODE');
+    out[rule.kind] = {
+      rate:        usable ? Number(raw) : null,
+      accountCode: config[accountKey] || defaults.accountCode.claim,
+    };
+  }
+  return out;
+}
+
+function getAllowanceSettings(userId) {
+  return allowanceSettingsFrom(userId ? getUserConfig(userId) : {});
 }
 
 // ── User CRUD ─────────────────────────────────────────────────────────────────
@@ -376,6 +464,7 @@ module.exports = {
   passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, PASSWORD_MIN_LENGTH,
   getAllUsers, updateUserRole, deleteUser, readUsers,
   getUserConfig, saveUserConfig, getUserDefaults, defaultsFrom, getSetupStatus, getImapSettings, ensureUserDirectories,
+  checkAllowanceSettings, allowanceSettingsFrom, getAllowanceSettings, formatRate,
   getGeminiKeys, addGeminiKey, removeGeminiKey,
   touchLastSeen, isOnline, DEFAULT_TIMEZONE,
   CONFIG_KEY_TO_COLUMN, ENCRYPTED_COLUMNS, // exposed for the one-time JSON->SQLite importer

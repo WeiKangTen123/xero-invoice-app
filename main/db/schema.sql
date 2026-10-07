@@ -63,7 +63,16 @@ CREATE TABLE IF NOT EXISTS user_credentials (
   timezone TEXT,
   -- The claimant's name as a Xero contact. When set, expense claims are posted
   -- as owed to this person, not to the merchant on the receipt.
-  claim_payee_name TEXT
+  claim_payee_name TEXT,
+  -- Claims with no receipt: a rate per km driven and a daily travel
+  -- allowance, each with the Xero account it is coded to. A blank rate turns
+  -- that kind of claim off; a blank account means the claim account. Text,
+  -- like every default here, holding the number as it was typed and checked
+  -- (routes/setup.js); the rate a claim used is copied onto the claim itself.
+  mileage_rate          TEXT,
+  mileage_account_code  TEXT,
+  per_diem_rate         TEXT,
+  per_diem_account_code TEXT
 );
 
 -- 1:1 with users — app behaviour toggles (was data/users/<id>/settings.json)
@@ -193,7 +202,18 @@ CREATE TABLE IF NOT EXISTS invoices (
   xero_amount_due     INTEGER,  -- cents, as Xero reports it
   xero_amount_paid    INTEGER,  -- cents
   xero_paid_on        TEXT,     -- YYYY-MM-DD, Xero's FullyPaidOnDate
-  xero_synced_at      TEXT      -- when Xero last confirmed the four above
+  xero_synced_at      TEXT,     -- when Xero last confirmed the four above
+  -- An expense claim with no receipt behind it: mileage or a per diem. The
+  -- amount is quantity x rate, worked out here and never taken from the
+  -- browser, and the rate is the one in Setup when the claim was made, kept so
+  -- a later change there does not reprice it. claim_details is JSON of what
+  -- was typed (from/to/purpose, or destination/dates/purpose). NULL kind on a
+  -- receipt claim and on every bill and invoice.
+  claim_kind          TEXT,     -- 'mileage' | 'per_diem' (NULL = receipt)
+  claim_quantity      REAL,     -- km, or days in half-day steps
+  claim_rate          REAL,     -- per km, or per day, in the claim's currency
+  claim_unit          TEXT,     -- 'km' | 'day'
+  claim_details       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(user_id, status);

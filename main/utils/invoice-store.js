@@ -71,7 +71,33 @@ const FIELD_TO_COLUMN = {
   messageId: 'message_id',
   // How sure the reader was: 'high', 'medium' or 'low'.
   confidence: 'confidence',
+  // A claim with no receipt (routes/claims.js): 'mileage' or 'per_diem', the
+  // km or days claimed, the rate it was priced at (copied from Setup when the
+  // claim was made), the unit, and what was typed, as an object.
+  claimKind: 'claim_kind', claimQuantity: 'claim_quantity', claimRate: 'claim_rate',
+  claimUnit: 'claim_unit', claimDetails: 'claim_details',
 };
+
+// Claims whose amount is quantity x rate. The amount on one of these is worked
+// out by routes/claims.js from what was typed, so an edit that names an
+// amount without the quantity it came from (the generic editor, the chat
+// assistant) leaves the figures as they are. Otherwise the amount would stop
+// being what the km or days say it is, with nothing on the row to show it.
+const ALLOWANCE_KINDS = new Set(['mileage', 'per_diem']);
+const PRICED_FIELDS   = ['totalAmount', 'subTotal', 'taxAmount', 'lineItems', 'currency'];
+
+function _parseDetails(text) {
+  if (!text) return null;
+  try { const v = JSON.parse(text); return v && typeof v === 'object' ? v : null; } catch { return null; }
+}
+
+// The details two claims are compared on: every value, with case, spacing and
+// punctuation set aside, so "Client A" and "client a." are the same trip.
+function _detailsKey(details) {
+  const d = details || {};
+  const norm = v => (typeof v === 'string' ? v.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() : v ?? null);
+  return JSON.stringify(Object.keys(d).sort().map(k => [k, norm(d[k])]));
+}
 
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
 // but every caller outside this file works in decimal dollars — these two helpers
@@ -91,6 +117,7 @@ function _dollarsOrNull(value) {
 // undefined (both of which show up on invoice records, e.g. hasPdf) need coercing.
 function _toBindable(field, value) {
   if (MONEY_FIELDS.has(field)) return _dollarsToCents(value);
+  if (field === 'claimDetails' && value && typeof value === 'object') return JSON.stringify(value);
   if (typeof value === 'boolean') return value ? 1 : 0;
   if (value === undefined) return null;
   return value;
@@ -138,6 +165,13 @@ function _rowToRecord(row, reports, lineItems) {
     currencyRate:      row.currency_rate,
     messageId:         row.message_id,
     confidence:        row.confidence,
+    // Every expense claim has a kind; one with none recorded is a receipt,
+    // which is every claim made before mileage and per diem existed.
+    claimKind:         row.claim_kind || (row.invoice_type === 'EXPENSE' ? 'receipt' : null),
+    claimQuantity:     row.claim_quantity ?? null,
+    claimRate:         row.claim_rate ?? null,
+    claimUnit:         row.claim_unit ?? null,
+    claimDetails:      _parseDetails(row.claim_details),
     // What Xero says about it now (xero/status-sync.js). Not in
     // FIELD_TO_COLUMN on purpose: only the status check writes them, so no
     // edit, copy or split of a record can carry another record's Xero state.
@@ -261,8 +295,13 @@ function forUser(userId) {
   }
 
   function update(id, patch) {
-    const existing = db.prepare('SELECT status, post_note, currency FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
+    const existing = db.prepare('SELECT status, post_note, currency, claim_kind FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
     if (!existing) return null;
+
+    if (ALLOWANCE_KINDS.has(existing.claim_kind) && patch.claimQuantity === undefined) {
+      patch = { ...patch };
+      for (const field of PRICED_FIELDS) delete patch[field];
+    }
 
     // The patch that ends a send: the row was claimed ('submitting') and is
     // being moved on. A successful send clears errorMsg; a note recorded during
@@ -541,6 +580,24 @@ function forUser(userId) {
     return hit ? _hydrate(hit) : null;
   }
 
+  // Another mileage or per diem claim for the same thing: the same kind, day
+  // and quantity, and the same details typed. Only ever a warning (the claim
+  // routes note it, they do not refuse it): two identical drives on one day
+  // are unusual, not impossible. Rows marked duplicate, and failed ones never
+  // in Xero, are left out, as in every other duplicate check here.
+  function findAllowanceDuplicate({ kind, date, quantity, details, excludeId = null }) {
+    if (!ALLOWANCE_KINDS.has(kind) || !date || !(Number(quantity) > 0)) return null;
+    const rows = db.prepare(`
+      SELECT * FROM invoices
+      WHERE user_id = ? AND claim_kind = ? AND invoice_date = ? AND ABS(claim_quantity - ?) < 0.001
+        AND id IS NOT ? AND (status NOT IN ('duplicate', 'error') OR ${IN_XERO})
+      ORDER BY rowid
+    `).all(userId, kind, date, Number(quantity), excludeId);
+    const want = _detailsKey(details);
+    const hit = rows.find(r => _detailsKey(_parseDetails(r.claim_details)) === want);
+    return hit ? _hydrate(hit) : null;
+  }
+
   // Split siblings share one stored file, so it may only be deleted once nothing
   // references it. A count answers that without loading anything.
   function countByReceiptFile(filename) {
@@ -606,7 +663,7 @@ function forUser(userId) {
 
   return { getAll, getById, add, update, addPostingNote, addReport, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
            releaseInterrupted, count, countByStatus, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash,
-           findByMessage, lastBillFrom, listInXero, recordXeroStatus, markXeroChecked };
+           findByMessage, lastBillFrom, listInXero, recordXeroStatus, markXeroChecked, findAllowanceDuplicate };
 }
 
-module.exports = { forUser, FIELD_TO_COLUMN, normalizeInvoiceNumber };
+module.exports = { forUser, FIELD_TO_COLUMN, normalizeInvoiceNumber, ALLOWANCE_KINDS };

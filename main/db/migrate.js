@@ -59,6 +59,10 @@ function run() {
   _ensureColumn('user_credentials', 'xero_oauth_connected_at',  'xero_oauth_connected_at TEXT');
   _ensureColumn('user_credentials', 'timezone', 'timezone TEXT');
   _ensureColumn('user_credentials', 'claim_payee_name', 'claim_payee_name TEXT');
+  // Mileage and per diem rates, and the account each is coded to (Setup).
+  for (const col of ['mileage_rate', 'mileage_account_code', 'per_diem_rate', 'per_diem_account_code']) {
+    _ensureColumn('user_credentials', col, `${col} TEXT`);
+  }
   _ensureColumn('users', 'last_seen_at', 'last_seen_at TEXT');
   _ensureColumn('users', 'sessions_valid_from', 'sessions_valid_from TEXT');
   _ensureColumn('users', 'disabled_at', 'disabled_at TEXT');
@@ -143,9 +147,19 @@ function run() {
     ['xero_amount_paid', 'xero_amount_paid INTEGER'], ['xero_paid_on', 'xero_paid_on TEXT'],
     ['xero_synced_at', 'xero_synced_at TEXT'],
   ]) _ensureColumn('invoices', col, ddl);
+  // A claim with no receipt: mileage or a per diem, its quantity, the rate it
+  // was priced at, the unit and what was typed (JSON). NULL on every existing
+  // row, which is what a receipt claim, a bill and an invoice all are.
+  for (const [col, ddl] of [
+    ['claim_kind', 'claim_kind TEXT'], ['claim_quantity', 'claim_quantity REAL'],
+    ['claim_rate', 'claim_rate REAL'], ['claim_unit', 'claim_unit TEXT'], ['claim_details', 'claim_details TEXT'],
+  ]) _ensureColumn('invoices', col, ddl);
   // Here rather than in schema.sql: the schema runs first, and on a database
   // without the column an index naming it would stop the boot.
   db.exec('CREATE INDEX IF NOT EXISTS idx_invoices_message_id ON invoices(user_id, message_id)');
+  // The duplicate check on a new mileage or per diem claim looks up the same
+  // kind on the same day (invoice-store findAllowanceDuplicate).
+  db.exec('CREATE INDEX IF NOT EXISTS idx_invoices_claim_kind ON invoices(user_id, claim_kind, invoice_date)');
 }
 
 module.exports = { run };
