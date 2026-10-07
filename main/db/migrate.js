@@ -14,16 +14,33 @@ function _ensureColumn(table, column, ddl) {
 // a step whose number is at or below it is skipped. Before this the backfill,
 // the settings-table rebuild and the column drop re-ran on every boot, and
 // nothing said what state a database was in.
+//
+// Each step runs in one transaction with its version bump, so a step either
+// happened and is recorded, or did not happen at all. Before, a step that
+// threw part-way left whatever it had written so far in place, unrecorded,
+// for the retry to trip over. Returns false when the step failed.
 function _step(n, name, fn) {
   const current = db.pragma('user_version', { simple: true });
-  if (current >= n) return;
+  if (current >= n) return true;
   try {
-    fn();
-    db.pragma(`user_version = ${n}`);
+    db.transaction(() => {
+      fn();
+      db.pragma(`user_version = ${n}`);
+    })();
+    return true;
   } catch (err) {
-    // A failed step must not stop the server booting; it is logged and tried
-    // again next boot, since the version was not advanced.
-    require('../utils/logger').warn(`migration step ${n} (${name}) skipped`, { error: err.message });
+    // Rolled back and not recorded, so the next boot tries again. The server
+    // still boots, deliberately: every step so far is a backfill or a
+    // tidy-up the running code does not depend on, and refusing to start
+    // over one would take the whole app down for something a person can fix
+    // while it runs. It is an error and a Slack alert, though, not a quiet
+    // warning — a step that fails on every boot needs someone to look.
+    const msg = `migration step ${n} (${name}) failed and was rolled back; it will be retried on the next boot`;
+    require('../utils/logger').error(msg, { error: err.message, stack: err.stack });
+    try {
+      require('../utils/notify').notifyError({ context: msg, error: err.message }).catch(() => {});
+    } catch {}
+    return false;
   }
 }
 
@@ -54,52 +71,63 @@ function run() {
     ['currency_rate', 'currency_rate REAL'], ['post_note', 'post_note TEXT'],
   ]) _ensureColumn('invoices', col, ddl);
 
-  // 1. SHA-256 of every stored receipt that predates the hash column.
-  _step(1, 'receipt_hash backfill', () => {
-    const unhashed = db.prepare("SELECT id, user_id, receipt_file FROM invoices WHERE receipt_file IS NOT NULL AND (receipt_hash IS NULL OR receipt_hash = '')").all();
-    const crypto = require('crypto');
-    const hashStmt = db.prepare('UPDATE invoices SET receipt_hash = ? WHERE id = ?');
-    for (const r of unhashed) {
-      const p = path.join(require('../utils/paths').userDir(r.user_id), 'receipts', r.receipt_file);
-      if (fs.existsSync(p)) hashStmt.run(crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'), r.id);
-    }
-  });
-
-  // 2. Rebuilds user_settings so a NEW account starts with auto-submit off.
-  //    Value-preserving — see the module for why.
-  _step(2, 'auto_process default', () => require('./migrate-autoprocess-default').run());
-
-  // 3. Credentials written before at-rest encryption existed are encrypted
-  //    in place. encrypt() output is left alone by isEncrypted(), so nothing
-  //    is double-encrypted. (This was a standalone script nobody ran.)
-  _step(3, 'encrypt plaintext credentials', () => {
-    const { encrypt, isEncrypted } = require('../utils/crypto');
-    const { ENCRYPTED_COLUMNS }    = require('../utils/users');
-    const cols = [...ENCRYPTED_COLUMNS];
-    for (const row of db.prepare(`SELECT user_id, ${cols.join(', ')} FROM user_credentials`).all()) {
-      const sets = [], args = [];
-      for (const column of cols) {
-        const value = row[column];
-        if (value == null || value === '' || isEncrypted(value)) continue;
-        sets.push(`${column} = ?`); args.push(encrypt(value));
+  const steps = [
+    // 1. SHA-256 of every stored receipt that predates the hash column.
+    [1, 'receipt_hash backfill', () => {
+      const unhashed = db.prepare("SELECT id, user_id, receipt_file FROM invoices WHERE receipt_file IS NOT NULL AND (receipt_hash IS NULL OR receipt_hash = '')").all();
+      const crypto = require('crypto');
+      const hashStmt = db.prepare('UPDATE invoices SET receipt_hash = ? WHERE id = ?');
+      for (const r of unhashed) {
+        const p = path.join(require('../utils/paths').userDir(r.user_id), 'receipts', r.receipt_file);
+        if (fs.existsSync(p)) hashStmt.run(crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'), r.id);
       }
-      if (sets.length) db.prepare(`UPDATE user_credentials SET ${sets.join(', ')} WHERE user_id = ?`).run(...args, row.user_id);
-    }
-  });
+    }],
 
-  // 4. Nvidia and OpenRouter were removed from the LLM client; their columns
-  //    held live keys in plaintext. Dropped, values and all.
-  _step(4, 'drop dead provider columns', () => {
-    for (const column of ['nvidia_api_key', 'openrouter_api_key', 'openrouter_model']) {
-      const cols = db.prepare('PRAGMA table_info(user_credentials)').all().map(c => c.name);
-      if (cols.includes(column)) db.exec(`ALTER TABLE user_credentials DROP COLUMN ${column}`);
-    }
-  });
+    // 2. Rebuilds user_settings so a NEW account starts with auto-submit off.
+    //    Value-preserving — see the module for why.
+    [2, 'auto_process default', () => require('./migrate-autoprocess-default').run()],
+
+    // 3. Credentials written before at-rest encryption existed are encrypted
+    //    in place. encrypt() output is left alone by isEncrypted(), so nothing
+    //    is double-encrypted. (This was a standalone script nobody ran.)
+    [3, 'encrypt plaintext credentials', () => {
+      const { encrypt, isEncrypted } = require('../utils/crypto');
+      const { ENCRYPTED_COLUMNS }    = require('../utils/users');
+      const cols = [...ENCRYPTED_COLUMNS];
+      for (const row of db.prepare(`SELECT user_id, ${cols.join(', ')} FROM user_credentials`).all()) {
+        const sets = [], args = [];
+        for (const column of cols) {
+          const value = row[column];
+          if (value == null || value === '' || isEncrypted(value)) continue;
+          sets.push(`${column} = ?`); args.push(encrypt(value));
+        }
+        if (sets.length) db.prepare(`UPDATE user_credentials SET ${sets.join(', ')} WHERE user_id = ?`).run(...args, row.user_id);
+      }
+    }],
+
+    // 4. Nvidia and OpenRouter were removed from the LLM client; their columns
+    //    held live keys in plaintext. Dropped, values and all.
+    [4, 'drop dead provider columns', () => {
+      for (const column of ['nvidia_api_key', 'openrouter_api_key', 'openrouter_model']) {
+        const cols = db.prepare('PRAGMA table_info(user_credentials)').all().map(c => c.name);
+        if (cols.includes(column)) db.exec(`ALTER TABLE user_credentials DROP COLUMN ${column}`);
+      }
+    }],
+  ];
+  // In order, and no further than the first failure: the version is a high-
+  // water mark, so if a later step succeeded after an earlier one failed, the
+  // version would move past the failed step and it would never run again.
+  for (const [n, name, fn] of steps) {
+    if (!_step(n, name, fn)) break;
+  }
 
   // After the steps, not with the columns above: step 2 rebuilds user_settings
   // with only the columns it knew about, so on a database old enough to run it
   // a column added beforehand would be dropped again by the rebuild.
   _ensureColumn('user_settings', 'default_tenant_id', 'default_tenant_id TEXT');
+  // Whether the account's mailbox watcher should be running, so a restart can
+  // bring back the watchers that were on (email/watcher-registry).
+  _ensureColumn('user_settings', 'watcher_enabled', 'watcher_enabled INTEGER NOT NULL DEFAULT 0');
 }
 
 module.exports = { run };

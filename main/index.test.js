@@ -60,11 +60,93 @@ describe('index — error handler', () => {
     expect(logged).not.toMatch(/hunter2|someone@test\.com|is not valid JSON|Unexpected token/);
   });
 
-  test('any other error is still a 500 with nothing of it shown to the client', async () => {
+  // Every error used to become a 500 — a photo over the body limit told the
+  // phone the server had broken. A 4xx the error carries is the answer now.
+  test('a body over the limit is a 413 with a plain message, not a 500 and not an alert', async () => {
+    const [error] = watchLog();
+    const post = jest.spyOn(require('axios'), 'post').mockResolvedValue({});
+    process.env.SLACK_WEBHOOK_URL = 'http://slack.test/hook';
+    try {
+      const big = JSON.stringify({ email: 'a@test.com', blob: 'x'.repeat(11 * 1024 * 1024) });
+      const res = await request(server).post('/api/auth/login').set('Content-Type', 'application/json').send(big).expect(413);
+      expect(res.body).toEqual({ error: 'That is too large to send; the limit is 10MB.' });
+      expect(error.mock.calls.map(c => c[0])).not.toContain('Unhandled error');
+      expect(post).not.toHaveBeenCalled();
+    } finally { process.env.SLACK_WEBHOOK_URL = ''; post.mockRestore(); }
+  });
+
+  test("the client's own 4xx keeps its status and its message", async () => {
     watchLog();
+    // body-parser's 415: the charset is the client's choice.
     const res = await request(server).post('/api/auth/login')
-      .set('Content-Type', 'application/json; charset=latin1').send('{"email":"a@test.com"}').expect(500);
-    expect(res.body).toEqual({ error: 'Internal server error' });
+      .set('Content-Type', 'application/json; charset=latin1').send('{"email":"a@test.com"}').expect(415);
+    expect(res.body).toEqual({ error: 'unsupported charset "LATIN1"' });
+  });
+
+  describe('errors thrown inside a signed-in request', () => {
+    const db = require('./db');
+    let user, token, failWith;
+    beforeAll(async () => {
+      user  = await users.createUser(`err${Date.now()}@test.com`, 'password123', 'user');
+      token = require('jsonwebtoken').sign({ id: user.id, email: user.email, role: user.role }, require('./middleware/auth-middleware').jwtSecret());
+    });
+    // GET /api/auth/me reads the account's credentials after requireAuth has
+    // put the user on the request; that one read is made to fail.
+    beforeEach(() => {
+      const prepare = db.prepare.bind(db);
+      jest.spyOn(db, 'prepare').mockImplementation(sql => {
+        if (/^SELECT \* FROM user_credentials/.test(sql)) throw failWith();
+        return prepare(sql);
+      });
+    });
+    afterEach(() => { db.prepare.mockRestore(); process.env.SLACK_WEBHOOK_URL = ''; });
+    const me = () => request(server).get('/api/auth/me').set('Authorization', `Bearer ${token}`);
+
+    test('err.statusCode in the 4xx range is honoured too', async () => {
+      watchLog();
+      failWith = () => Object.assign(new Error('That company is already connected'), { statusCode: 409 });
+      const res = await me().expect(409);
+      expect(res.body).toEqual({ error: 'That company is already connected' });
+    });
+
+    test("an upstream service's 4xx is this server's 500, not the client's fault", async () => {
+      watchLog();
+      failWith = () => Object.assign(new Error('Request failed with status code 400'), { status: 400, response: { status: 400 } });
+      const res = await me().expect(500);
+      expect(res.body).toEqual({ error: 'Internal server error' });
+    });
+
+    test('a 500 is logged with its stack, method, path and user, and shows the client nothing', async () => {
+      const [error] = watchLog();
+      failWith = () => new Error(`disk I/O error ${Date.now()}`);
+      const res = await me().expect(500);
+      expect(res.body).toEqual({ error: 'Internal server error' });
+      expect(error).toHaveBeenCalledWith('Unhandled error', expect.objectContaining({
+        error:  expect.stringMatching(/^disk I\/O error/),
+        stack:  expect.stringMatching(/^Error: disk I\/O error[\s\S]*index\.test\.js/),
+        method: 'GET', path: '/api/auth/me', userId: user.id,
+      }));
+    });
+
+    test('a 500 alerts Slack once per distinct message, however often it repeats', async () => {
+      watchLog();
+      const post = jest.spyOn(require('axios'), 'post').mockResolvedValue({});
+      process.env.SLACK_WEBHOOK_URL = 'http://slack.test/hook';
+      try {
+        const stamp = Date.now();
+        failWith = () => new Error(`database is locked ${stamp}`);
+        await me().expect(500);
+        await me().expect(500);
+        await me().expect(500);
+        failWith = () => new Error(`something else broke ${stamp}`);
+        await me().expect(500);
+        await new Promise(r => setImmediate(r));
+        const texts = post.mock.calls.map(([, body]) => body.text);
+        expect(texts).toHaveLength(2);
+        expect(texts[0]).toMatch(new RegExp(`GET /api/auth/me answered 500 \\(user ${user.id}\\)[\\s\\S]*database is locked ${stamp}`));
+        expect(texts[1]).toMatch(`something else broke ${stamp}`);
+      } finally { post.mockRestore(); }
+    });
   });
 });
 

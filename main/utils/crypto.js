@@ -10,18 +10,29 @@ const ENC_PREFIX = 'enc:v1:';
 const IV_LEN     = 12;
 const TAG_LEN    = 16;
 
+// What is wrong with a key, or null when it is usable. This is the one rule
+// for a key, shared by _key() and the startup check in index.js, so the server
+// can never refuse at boot a key this module would have used. That matters
+// because the rule is looser than "exactly 64 hex characters": Buffer.from(…,
+// 'hex') reads upper case and stops at the first non-hex character, so a key
+// with a stray trailing character has always worked and may have credentials
+// encrypted under it. A stricter check at boot would lock out a server whose
+// stored data decrypts fine.
+function keyProblem(raw) {
+  if (!raw) {
+    return 'ENCRYPTION_KEY not set — required to store/read credentials securely. ' +
+      'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"';
+  }
+  if (Buffer.from(raw, 'hex').length !== 32) return 'ENCRYPTION_KEY must be 64 hex characters (32 bytes)';
+  return null;
+}
+
 function _key() {
   let raw = process.env.ENCRYPTION_KEY;
   if (!raw && process.env.NODE_ENV === 'test') raw = '0'.repeat(64); // fixed key, tests only
-  if (!raw) {
-    throw new Error(
-      'ENCRYPTION_KEY not set — required to store/read credentials securely. ' +
-      'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
-    );
-  }
-  const key = Buffer.from(raw, 'hex');
-  if (key.length !== 32) throw new Error('ENCRYPTION_KEY must be 64 hex characters (32 bytes)');
-  return key;
+  const problem = keyProblem(raw);
+  if (problem) throw new Error(problem);
+  return Buffer.from(raw, 'hex');
 }
 
 function encrypt(plaintext) {
@@ -51,4 +62,4 @@ function isEncrypted(value) {
   return typeof value === 'string' && value.startsWith(ENC_PREFIX);
 }
 
-module.exports = { encrypt, decrypt, isEncrypted };
+module.exports = { encrypt, decrypt, isEncrypted, keyProblem };

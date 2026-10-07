@@ -392,11 +392,13 @@ HEALTH_OUT=""; RUNNING=""
 for try in 1 2 3 4 5 6; do
   HEALTH_OUT=$(curl -sk --max-time 10 "$HEALTH" || true)
   RUNNING=$(echo "$HEALTH_OUT" | sed -n 's/.*"commit":"\([0-9a-f]*\)".*/\1/p')
-  if echo "$HEALTH_OUT" | grep -q healthy && [ "$RUNNING" = "$LOCAL_SHA" ]; then break; fi
+  if echo "$HEALTH_OUT" | grep -q '"status":"healthy"' && [ "$RUNNING" = "$LOCAL_SHA" ]; then break; fi
   if [ "$try" -lt 6 ]; then sleep 5; fi
 done
 info "${HEALTH_OUT:-no response from $HEALTH}"
-echo "$HEALTH_OUT" | grep -q healthy || die "health check did not report healthy"
+# "unhealthy" contains "healthy": match the status field itself, now that the
+# health check can really report a failing database (503, status "unhealthy").
+echo "$HEALTH_OUT" | grep -q '"status":"healthy"' || die "health check did not report healthy"
 [ "$RUNNING" = "$LOCAL_SHA" ] || die "the running process reports commit '${RUNNING:-none}', not $LOCAL_SHA — it did not restart onto the new code"
 grn "  ✓ running process is on $RUNNING"
 

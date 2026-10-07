@@ -35,4 +35,25 @@ async function notifyError({ context, error, email }) {
   logger.error('Error notification sent', { context, error });
 }
 
-module.exports = { notifyInvoiceCreated, notifyError };
+// notifyError, at most once per key per window. For alerts raised by traffic
+// rather than by a one-off event: a broken route fails on every request, and
+// one Slack message per request would bury the channel, and the message that
+// mattered, within minutes. The first occurrence is sent; repeats inside the
+// window are dropped (they are still in the log). Resolves true when sent.
+const THROTTLE_WINDOW_MS = 10 * 60 * 1000;
+const _lastSent = new Map();
+
+function notifyErrorThrottled({ key, windowMs = THROTTLE_WINDOW_MS, now = Date.now(), ...alert }) {
+  const k = key ?? String(alert.error);
+  const last = _lastSent.get(k);
+  if (last !== undefined && now - last < windowMs) return Promise.resolve(false);
+  _lastSent.set(k, now);
+  // Messages that carry an id are each distinct, so the map is swept of
+  // expired keys as it grows rather than kept for the life of the process.
+  if (_lastSent.size > 500) {
+    for (const [old, at] of _lastSent) if (now - at >= windowMs) _lastSent.delete(old);
+  }
+  return notifyError(alert).then(() => true);
+}
+
+module.exports = { notifyInvoiceCreated, notifyError, notifyErrorThrottled, THROTTLE_WINDOW_MS };
