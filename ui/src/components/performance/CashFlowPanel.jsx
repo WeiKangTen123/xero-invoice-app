@@ -51,7 +51,14 @@ export function CashFlowPanel({ data }) {
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Metric label="Cash at bank" value={data.cash.available ? fmtMoney(data.cash.closing, cur) : '—'}
                 meter={null}
-                footLeft={data.cash.available ? `${data.cash.accounts.length} account${data.cash.accounts.length === 1 ? '' : 's'}` : 'Bank summary unavailable'}
+                footLeft={data.cash.available
+                  ? `${data.cash.accounts.length} account${data.cash.accounts.length === 1 ? '' : 's'}`
+                    // Foreign-currency accounts are listed on Banking in their own
+                    // currency and kept out of every figure here, so say so.
+                    + (data.cash.baseOnly && data.cash.foreignAccounts?.length
+                      ? ` · excludes ${data.cash.foreignAccounts.length} foreign-currency`
+                      : '')
+                  : 'Bank summary unavailable'}
                 footRight="Closing balance" />
         <Metric label="Cash in" value={fmtMoney(data.cash.available ? data.cash.cashIn : m.cashIn, cur)} meter={null}
                 tone="var(--success)"

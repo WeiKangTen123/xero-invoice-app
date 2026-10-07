@@ -142,7 +142,8 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
           <div style={{ marginTop: 12, padding: '8px 10px', borderRadius: 8, background: 'var(--bg-secondary)',
                         fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.55 }}>
             <strong style={{ color: 'var(--warning)' }}>Inferred, not reported.</strong>{' '}
-            Xero has no "this account is recurring" flag, so this split is guessed from account names.
+            Xero has no "this account is recurring" flag, so this split is guessed from account names,
+            except where you have set an account's type on the Revenue tab.
             {data.recurringAccounts.length > 0
               ? ` Treated as recurring: ${data.recurringAccounts.join(', ')}.`
               : ' No account name matched, so everything counts as project revenue.'}

@@ -149,20 +149,37 @@ function _apiFor(token) {
 // forecast, supplier spend — was computed on the 100 most recent. Pages until
 // a short page; the cap is a safety net that logs when hit. Always summaryOnly:
 // no caller here needs line items, and it keeps each page small.
-const INVOICE_PAGE_SIZE = 100;
-const INVOICE_MAX_PAGES = 20;
 async function _allInvoices(api, tenantId, { where, order, statuses }) {
+  return _allPages(page => api.getInvoices(
+    tenantId, undefined, where, order, undefined, undefined, undefined,
+    statuses, page, undefined, undefined, undefined, true,
+  ), 'invoices', { what: 'Invoice', tenantId });
+}
+
+// Payments, bank transactions, contacts and quotes have the same problem the
+// other way round: called without `page` they are not capped at 100, they
+// return every matching record in one response — up to 100,000 of them — and
+// Xero bills GET requests by the volume they return. xero-node 7 has no
+// pageSize argument on any of these methods, so a page is Xero's fixed 100,
+// and a page shorter than that is the last one. Every list fetch in this file
+// goes through here, invoices included, so they all stop the same way: at a
+// short page, or at the cap, which is a cost ceiling and is logged when hit
+// because the figures built on that list are then incomplete.
+const LIST_PAGE_SIZE = 100;
+// 10,000 records. These lists used to come back whole in one unpaged request,
+// so a cap low enough to bite in an ordinary busy year (20 pages = 2,000
+// payments) would quietly undercount cash figures that were complete before.
+// The cap is only there to stop a runaway fetch.
+const LIST_MAX_PAGES = 100;
+async function _allPages(fetchPage, field, { what, tenantId, maxPages = LIST_MAX_PAGES }) {
   const out = [];
-  for (let page = 1; page <= INVOICE_MAX_PAGES; page++) {
-    const res = await withRetry(() => api.getInvoices(
-      tenantId, undefined, where, order, undefined, undefined, undefined,
-      statuses, page, undefined, undefined, undefined, true,
-    ));
-    const batch = res.body.invoices || [];
+  for (let page = 1; page <= maxPages; page++) {
+    const res = await withRetry(() => fetchPage(page));
+    const batch = res?.body?.[field] || [];
     out.push(...batch);
-    if (batch.length < INVOICE_PAGE_SIZE) return out;
+    if (batch.length < LIST_PAGE_SIZE) return out;
   }
-  logger.warn('Invoice fetch hit the page cap; figures may be incomplete', { tenantId, pages: INVOICE_MAX_PAGES });
+  logger.warn(`${what} fetch hit the page cap; figures may be incomplete`, { tenantId, pages: maxPages });
   return out;
 }
 
@@ -400,10 +417,12 @@ async function _getContactsRaw(userId, tenantId, { force = false } = {}) {
   const token      = await tokenCache.getValidToken(tenantId);
   const api        = _apiFor(token);
 
-  const res = await withRetry(() => api.getContacts(
-    tenantId, undefined, undefined, 'Name ASC', undefined, undefined, undefined, true
-  ));
-  const data = { contacts: _buildContacts(res.body.contacts || []) };
+  // Paged (see _allPages): unpaged, an org with years of customers and
+  // suppliers came back as one response of every contact it ever had.
+  const contacts = await _allPages(page => api.getContacts(
+    tenantId, undefined, undefined, 'Name ASC', undefined, page, undefined, true
+  ), 'contacts', { what: 'Contact', tenantId });
+  const data = { contacts: _buildContacts(contacts) };
   return _cacheSet(key, data, DIRECTORY_TTL_MS);
 }
 
@@ -473,10 +492,12 @@ async function _getBankTransactionsRaw(userId, tenantId, accountId, { force = fa
   // Bounded to the last year. Unbounded, this pulled the account's entire
   // history on every miss — and paid for it — for a statement view that
   // shows recent movement.
+  // And paged within that year (see _allPages), so a busy account costs a few
+  // pages rather than one response of everything.
   const since = _fmtXeroDate(_addDays(_partsFromDate(new Date()), -365));
-  const res = await withRetry(() => api.getBankTransactions(
-    tenantId, undefined, `BankAccount.AccountID==Guid("${accountId}") && Date >= ${since}`, 'Date DESC'
-  ));
+  const bankTransactions = await _allPages(page => api.getBankTransactions(
+    tenantId, undefined, `BankAccount.AccountID==Guid("${accountId}") && Date >= ${since}`, 'Date DESC', page
+  ), 'bankTransactions', { what: 'Bank transaction', tenantId });
 
   // Bank transactions alone miss real cash movement that goes through
   // Payment records instead (paying a bill, receiving a customer payment
@@ -487,21 +508,33 @@ async function _getBankTransactionsRaw(userId, tenantId, accountId, { force = fa
   // view breaking on their scope error.
   let payments = [];
   try {
-    const payRes = await withRetry(() => api.getPayments(
-      tenantId, undefined, `Account.AccountID==Guid("${accountId}") && Date >= ${since}`, 'Date DESC'
-    ));
-    payments = _buildPayments(payRes.body.payments || []);
+    payments = _buildPayments(await _allPages(page => api.getPayments(
+      tenantId, undefined, `Account.AccountID==Guid("${accountId}") && Date >= ${since}`, 'Date DESC', page
+    ), 'payments', { what: 'Payment', tenantId }));
   } catch (err) {
     if (!isScopeError(err)) throw err; // a real failure, not just a missing scope, should still surface
     logger.info('Skipping Payments in statement — not yet reconnected under accounting.payments.read', { userId, tenantId });
   }
 
-  const transactions = [..._buildBankTransactions(res.body.bankTransactions || []), ...payments]
+  const transactions = [..._buildBankTransactions(bankTransactions), ...payments]
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   const data = { transactions };
   return _cacheSet(key, data);
 }
 
+
+// The bank account list, read for the currency of each Bank Summary line (see
+// _bankByCurrency). It is directory data, cached for hours, so on a warm cache
+// this costs nothing. Never fails a report: without it every line is taken to
+// be in base currency, as every total assumed before the list was consulted.
+async function _bankAccountList(userId, tenantId, force) {
+  try {
+    return (await getBankAccounts(userId, tenantId, { force })).bankAccounts || [];
+  } catch (err) {
+    logger.warn('Bank account currencies unavailable; bank totals assume base currency', { userId, tenantId, error: err.message });
+    return [];
+  }
+}
 
 // Xero formats report cell values like "1,234.56" or "(123.45)" for negatives —
 // never a plain parseable number.
@@ -1206,17 +1239,60 @@ function _sectionTotal(rows, kind, n) {
 
 // Recurring revenue is a business concept Xero doesn't record — there's no flag
 // on an account saying "this is subscription income". The account NAME is the
-// only signal available, and it's a reliable one because people name these
-// accounts deliberately ("Sales - Maintenance (Recurring)"). Every classified
-// account is reported back so the UI can show its working rather than assert it.
-const RECURRING_PATTERN = /recurring|subscription|maintenance|retainer|manage(d)?\s*service|support|licen[cs]e|hosting|saas|manag(e|ed)/i;
-function _isRecurringName(label) { return RECURRING_PATTERN.test(label || ''); }
+// only signal available, and it's a good one when people name these accounts
+// deliberately ("Sales - Maintenance (Recurring)"). Every classified account
+// is reported back so the UI can show its working rather than assert it, and
+// the person can correct any of them (see _recurringFor).
+//
+// Only words that mean recurring on their own. The pattern used to accept any
+// "manage", "support" or "licence", which made "Project Management Fees",
+// "Management Consulting" and "Software Licence Sale" recurring — one-off work
+// read as the steadiest revenue the business has. "Managed services" and a
+// support contract or plan still count; plain management or support does not.
+const RECURRING_PATTERN = /recurring|subscription|maintenance|retainer|hosting|saas|\bmanaged\s+(\w+\s+)?services?\b|\bsupport\s+(contracts?|plans?|agreements?|subscriptions?)\b/i;
+// A licence is recurring when it is licensing, and not when it is sold once.
+const LICENCE_PATTERN  = /\blicen[cs](e|es|ing)\b/i;
+const ONE_OFF_LICENCE  = /\blicen[cs]es?\s+sales?\b|\bsales?\s+of\b.*\blicen[cs]|\bperpetual\b|\bone[-\s]?off\b/i;
+function _isRecurringName(label) {
+  const s = String(label || '');
+  if (RECURRING_PATTERN.test(s)) return true;
+  return LICENCE_PATTERN.test(s) && !ONE_OFF_LICENCE.test(s);
+}
+
+// Whether a revenue account counts as recurring: the person's own answer when
+// they have given one, otherwise the guess from its name. `override` holds the
+// labels they marked each way (settings-store recurringAccounts and
+// notRecurringAccounts), matched on the label with case and spacing ignored,
+// as report lines are. Marked per account rather than as one whole list, so an
+// account nobody has looked at yet, or another connected organisation's, still
+// gets the name-based guess.
+function _recurringFor(label, override) {
+  const byName = _isRecurringName(label);
+  const k = _norm(label);
+  if (override?.notRecurring?.some(l => _norm(l) === k)) return { recurring: false, byName, source: 'set' };
+  if (override?.recurring?.some(l => _norm(l) === k))    return { recurring: true,  byName, source: 'set' };
+  return { recurring: byName, byName, source: 'name' };
+}
+
+// The person's recurring/not-recurring marks, or null. Never fails a report:
+// a missing column or table (a database the migration has not reached yet)
+// means no marks, and every account falls back to its name.
+function _recurringOverride(userId) {
+  try {
+    const s = require('../utils/settings-store').forUser(userId).recurringOverrides();
+    return { recurring: s.recurringAccounts || [], notRecurring: s.notRecurringAccounts || [] };
+  } catch (err) {
+    logger.info('Recurring account marks unavailable; classifying by name', { userId, error: err.message });
+    return null;
+  }
+}
 
 const _zeros = n => Array(n).fill(0);
 const _sum   = a => a.reduce((s, v) => s + v, 0);
 
 // Pure. Reshapes budget-variance rows into the series the dashboard charts need.
-function _buildPerformance({ months, rows, cash }) {
+// `recurringOverride` is the person's own marks (see _recurringFor).
+function _buildPerformance({ months, rows, cash, recurringOverride = null }) {
   const n = months.length;
   // A section Xero didn't emit (this org books no cost of sales, so there is no
   // cost-of-sales section at all) must read as a flat zero series, not undefined.
@@ -1242,14 +1318,22 @@ function _buildPerformance({ months, rows, cash }) {
   // and the recurring/project split.
   const serviceLines = rows
     .filter(r => r.kind === 'account' && ['revenue', 'otherIncome'].includes(_sectionKind(r.section)))
-    .map(r => ({
-      label:       r.label,
-      section:     r.section,
-      otherIncome: _sectionKind(r.section) === 'otherIncome',
-      recurring:   _isRecurringName(r.label),
-      actual:      r.monthly.map(m => m.actual),
-      budget:      r.monthly.map(m => m.budget),
-    }));
+    .map(r => {
+      const rec = _recurringFor(r.label, recurringOverride);
+      return {
+        label:       r.label,
+        section:     r.section,
+        otherIncome: _sectionKind(r.section) === 'otherIncome',
+        recurring:   rec.recurring,
+        // What the name alone suggests, and whether the person decided
+        // instead ('set') — so the screen can say which, and offer the guess
+        // back when they clear their mark.
+        recurringByName: rec.byName,
+        recurringSource: rec.source,
+        actual:      r.monthly.map(m => m.actual),
+        budget:      r.monthly.map(m => m.budget),
+      };
+    });
 
   // Recurring vs project, summed from the classified accounts rather than a
   // separate Xero figure — Xero has no such split.
@@ -1440,24 +1524,56 @@ function _buildInvoiceHygiene(invoices = [], baseCurrency = '') {
   return { issues, duplicateNumbers: [...byNumber].filter(([, l]) => l.length > 1).length, undated, currency };
 }
 
+// The calendar day of a Xero date, as YYYY-MM-DD. xero-node turns Xero's
+// "/Date(ms)/" into a Date object for some fields and leaves others as an ISO
+// string with no offset; the string's own day is taken as written, since
+// parsing it would read it in the server's timezone.
+function _xeroDay(value) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    const iso = /^(\d{4}-\d{2}-\d{2})/.exec(value);
+    if (iso) return iso[1];
+    const ms = /^\/Date\((-?\d+)/.exec(value);
+    if (ms) return new Date(Number(ms[1])).toISOString().slice(0, 10);
+  }
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
+
 // Pure. Work quoted but not yet invoiced — revenue that exists commercially and
 // nowhere in the accounts. SENT and ACCEPTED are the live pipeline; INVOICED has
 // already become an invoice and would be double-counted, and DRAFT was never
 // put in front of the customer.
-function _buildQuotePipeline(quotes = [], baseCurrency = '') {
+//
+// A SENT quote whose expiry date has passed is an offer the customer can no
+// longer take up, and it used to be counted as live pipeline indefinitely. It
+// is left out, and counted under `expired` so the screen can say how much was.
+// It expires at the end of its expiry day: one expiring today still counts.
+// An ACCEPTED quote stays whatever its expiry date — the customer agreed, and
+// the work is still to be invoiced.
+function _buildQuotePipeline(quotes = [], baseCurrency = '', { todayISO = new Date().toISOString().slice(0, 10) } = {}) {
   const live = { sent: 0, accepted: 0 };
   const counts = { sent: 0, accepted: 0 };
+  const expired = { count: 0, total: 0 };
+  const counted = [];
   for (const q of quotes) {
     const status = String(q.status || '').toUpperCase();
     const total  = _toBase(q, q.total, baseCurrency);
-    if (status === 'SENT')     { live.sent += total; counts.sent++; }
-    if (status === 'ACCEPTED') { live.accepted += total; counts.accepted++; }
+    if (status === 'SENT') {
+      const expiry = _xeroDay(q.expiryDateString || q.expiryDate);
+      if (expiry && expiry < todayISO) { expired.count++; expired.total += total; continue; }
+      live.sent += total; counts.sent++; counted.push(q);
+    }
+    if (status === 'ACCEPTED') { live.accepted += total; counts.accepted++; counted.push(q); }
   }
   return {
     sent: live.sent, accepted: live.accepted,
     total: live.sent + live.accepted,
     counts,
-    currency: _foreignCurrency(quotes, baseCurrency),
+    expired,
+    // Only the quotes in the total: an expired one in another currency is not
+    // a currency the figure on screen was built from.
+    currency: _foreignCurrency(counted, baseCurrency),
     available: true,
   };
 }
@@ -1492,17 +1608,30 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
   // cost three calls to produce one number. Banking opts in explicitly.
   const balanceFrom = _fmtISODate(_addDays(_todayPartsInTz(timezone), -31));
   const from = cashFlow ? bv.fiscalYear.fromISO : balanceFrom;
-  let cash = { total: 0, cashIn: 0, cashOut: 0, net: 0, accounts: [], available: false, flowScope: cashFlow ? 'period' : 'last31d' };
+  let cash = {
+    total: 0, cashIn: 0, cashOut: 0, net: 0, accounts: [], foreignAccounts: [], baseOnly: false,
+    currency: baseCurrency, available: false, flowScope: cashFlow ? 'period' : 'last31d',
+  };
   try {
-    const bank = await getBankSummary(userId, tenantId, { from, to: today, force });
+    const [bank, bankAccounts] = await Promise.all([
+      getBankSummary(userId, tenantId, { from, to: today, force }),
+      _bankAccountList(userId, tenantId, force),
+    ]);
+    // Every total here is base-currency accounts only; an account in another
+    // currency is listed under foreignAccounts in its own (see _bankByCurrency).
+    const byCur = _bankByCurrency(bank, bankAccounts, baseCurrency);
+    const line = a => ({ name: a.name, currency: a.currency, balance: a.closingBalance, cashIn: a.cashReceived, cashOut: a.cashSpent });
     cash = {
-      total:     bank.accounts.reduce((s, a) => s + a.closingBalance, 0),
+      total:     byCur.closing,
       // Cash movement, not just the closing position — the Banking tab renders
       // this, which is why the old standalone Cash In/Out fetch could go.
-      cashIn:    bank.cashIn,
-      cashOut:   bank.cashOut,
-      net:       bank.net,
-      accounts:  bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance, cashIn: a.cashReceived, cashOut: a.cashSpent })),
+      cashIn:    byCur.cashIn,
+      cashOut:   byCur.cashOut,
+      net:       byCur.net,
+      accounts:  byCur.accounts.map(line),
+      foreignAccounts: byCur.foreignAccounts.map(line),
+      baseOnly:  byCur.baseOnly,
+      currency:  baseCurrency,
       available: true,
       flowScope: cashFlow ? 'period' : 'last31d',
     };
@@ -1515,7 +1644,7 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
 
   // Only the Revenue tab shows this, so Overview never pays for the extra call.
   let customerRevenue = { customers: [], total: 0, count: 0, average: null, available: false };
-  let quotePipeline   = { sent: 0, accepted: 0, total: 0, counts: { sent: 0, accepted: 0 }, available: false };
+  let quotePipeline   = { sent: 0, accepted: 0, total: 0, counts: { sent: 0, accepted: 0 }, expired: { count: 0, total: 0 }, available: false };
   if (customers) {
     try {
       const tokenCache = require('../utils/token-cache').forUser(userId);
@@ -1529,10 +1658,18 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
       // Quoted-but-not-invoiced work exists commercially and nowhere in the
       // accounts, so the forward view otherwise stops at issued invoices.
       try {
-        // Only this fiscal year's quotes: the pipeline is built from them, and
-        // an unfiltered call returned every quote the org ever raised.
-        const qRes = await withRetry(() => api.getQuotes(tenantId, undefined, bv.fiscalYear.fromISO));
-        quotePipeline = _buildQuotePipeline(qRes.body.quotes || [], baseCurrency);
+        // The period rule: quotes DATED on or after the first day of the period
+        // on screen, with no upper bound, and judged live or expired as of
+        // today. The pipeline is what is open now, so a quote raised after the
+        // period still counts; the lower bound is a cost bound, because an
+        // unfiltered call returned every quote the org ever raised. A quote
+        // raised before the period that is still open is therefore not
+        // counted, which is why the payload says where the window starts.
+        // Paged like every other list (see _allPages).
+        const quotes = await _allPages(page => api.getQuotes(
+          tenantId, undefined, bv.fiscalYear.fromISO, undefined, undefined, undefined, undefined, undefined, page,
+        ), 'quotes', { what: 'Quote', tenantId });
+        quotePipeline = { ..._buildQuotePipeline(quotes, baseCurrency, { todayISO: today }), fromISO: bv.fiscalYear.fromISO };
       } catch (qErr) {
         logger.warn('Performance: quotes unavailable', { userId, tenantId, error: qErr.message });
       }
@@ -1543,7 +1680,7 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
   }
 
   const actualThroughIdx = bv.months.filter(m => m.source === 'actual').length - 1;
-  const built = _buildPerformance({ months: bv.months, rows: bv.rows, cash });
+  const built = _buildPerformance({ months: bv.months, rows: bv.rows, cash, recurringOverride: _recurringOverride(userId) });
   const watchList = _buildWatchList({ months: bv.months, totals: built.totals, actualThroughIdx });
   // Momentum, not just level — a dashboard that shows revenue but never whether
   // it is rising makes the reader do the differencing in their head.
@@ -1587,7 +1724,8 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
     quotePipeline,
     watchList,
     // Surfaced so the UI can show which accounts were treated as recurring —
-    // a guess made from names should never be invisible.
+    // a guess made from names should never be invisible. The person's own
+    // marks are applied; each service line says whether it was theirs.
     recurringAccounts: built.serviceLines.filter(l => l.recurring).map(l => l.label),
     cached:    bv.cached,
     fetchedAt: bv.fetchedAt,
@@ -1612,16 +1750,22 @@ const INSIGHT_CACHE_TTL_MS = 30 * 60 * 1000; // reasons only change when the fig
 // Numbers big enough to be a money amount rather than a percentage or a count.
 // Prompts, grounding and the facts the model is allowed to see — see
 // ./ai-insights. Re-exported below so tests reach them through this module.
+// The two model calls are made there too (requestVarianceInsights,
+// requestNarrative): this file fetches and caches, ai-insights asks and checks.
 const {
   _buildCategoryVariances,
   _groundNarrative,
   _insightIsGrounded,
-  _insightPrompt,
   _largeNumbersIn,
   _narrativeFacts,
   _narrativePrompt,
   _parseInsights,
   _varianceCandidates,
+  // A reply that could not be read, or no reply at all, is not an answer to
+  // keep for half an hour: the next look should ask again.
+  INSIGHT_FAILURE_TTL_MS,
+  requestVarianceInsights,
+  requestNarrative,
 } = require('./ai-insights');
 
 async function _getVarianceInsightsRaw(userId, tenantId, { timezone = 'UTC', force = false, reanalyse = false, period } = {}) {
@@ -1650,18 +1794,27 @@ async function _getVarianceInsightsRaw(userId, tenantId, { timezone = 'UTC', for
   const cached = _cacheGet(key, force || reanalyse, { noGrace: true });
   if (cached) return cached;
 
-  const { callGemini } = require('../utils/gemini-client');
-  try {
-    const messages = _insightPrompt(perf.organisation.name, perf.fiscalYear.label, closed, categories, candidates);
-    const res = await callGemini(userId, messages, { temperature: 0.2, maxTokens: 800 });
-    const { categories: parsedCats, lines: parsedLines } = _parseInsights(res?.message?.content ?? res?.content ?? res, categories, candidates);
-    
-    logger.info('Variance insights generated', { userId, tenantId, categories: parsedCats.length, lines: parsedLines.length });
-    return _cacheSet(key, { generated: true, categories: parsedCats, lines: parsedLines, source: 'gemini', fetchedAt: new Date().toISOString() }, INSIGHT_CACHE_TTL_MS);
-  } catch (err) {
-    logger.warn('Variance insights model unavailable, using computed defaults', { userId, tenantId, error: err.message });
-    return _cacheSet(key, { generated: true, categories: categories.map(c => ({ ...c, reason: c.defaultReason })), lines: candidates, source: 'figures', fetchedAt: new Date().toISOString() }, INSIGHT_CACHE_TTL_MS);
+  // The call, held to a JSON schema, then parsed and grounded (ai-insights).
+  // It never throws: what comes back is the model's answer, or the computed
+  // defaults with `failed` saying why ('unparsed', 'truncated' or
+  // 'unavailable') and a short cacheTtlMs.
+  const out = await requestVarianceInsights(userId, {
+    org: perf.organisation.name, fyLabel: perf.fiscalYear.label, closed, categories, candidates,
+  });
+  const fetchedAt = new Date().toISOString();
+  // A fallback used to be labelled source:'gemini' and kept for thirty minutes,
+  // so the page presented the computed defaults as the model's analysis and a
+  // Re-analyse was the only way past them. It is labelled as figures, and kept
+  // for no longer than INSIGHT_FAILURE_TTL_MS whatever the marker asks.
+  if (out.failed) {
+    return _cacheSet(key, {
+      generated: true, categories: out.categories, lines: out.lines, source: 'figures', failed: out.failed, fetchedAt,
+    }, Math.min(out.cacheTtlMs || INSIGHT_FAILURE_TTL_MS, INSIGHT_FAILURE_TTL_MS));
   }
+  logger.info('Variance insights generated', { userId, tenantId, categories: out.categories.length, lines: out.lines.length });
+  return _cacheSet(key, {
+    generated: true, categories: out.categories, lines: out.lines, source: 'gemini', fetchedAt,
+  }, out.cacheTtlMs || INSIGHT_CACHE_TTL_MS);
 }
 
 // ── Cash flow ───────────────────────────────────────────────────────────────
@@ -1693,6 +1846,8 @@ const {
   _buildUnreconciled,
   _buildPaymentDays,
   _raisedByMonth,
+  _bankByCurrency,
+  _recordAccountId,
 } = require('./cash-flow');
 
 async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = false, period } = {}) {
@@ -1720,16 +1875,18 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
   const lookbackFrom = { year: fromP.year - Math.floor(INVOICE_LOOKBACK_MONTHS / 12), month: fromP.month, day: 1 };
   const invoiceWhere = `Date >= ${_fmtXeroDate(lookbackFrom)}`;
 
-  // Every call here is a GET. Nothing in this path writes to Xero.
-  const [bank, payRes, btRes, invRes] = await Promise.all([
+  // Every call here is a GET. Nothing in this path writes to Xero. Payments and
+  // bank transactions are paged (see _allPages).
+  const [bank, bankAccounts, payments, bankTransactions, invRes] = await Promise.all([
     getBankSummary(userId, tenantId, { from: first, to: last, force }).catch(err => {
       logger.warn('Cash flow: bank summary unavailable', { userId, error: err.message });
       return null;
     }),
-    withRetry(() => api.getPayments(tenantId, undefined, dateWhere, 'Date DESC'))
-      .catch(err => { logger.warn('Cash flow: payments unavailable', { userId, error: err.message }); return { body: {} }; }),
-    withRetry(() => api.getBankTransactions(tenantId, undefined, dateWhere, 'Date DESC'))
-      .catch(err => { logger.warn('Cash flow: bank transactions unavailable', { userId, error: err.message }); return { body: {} }; }),
+    _bankAccountList(userId, tenantId, force),
+    _allPages(page => api.getPayments(tenantId, undefined, dateWhere, 'Date DESC', page), 'payments', { what: 'Payment', tenantId })
+      .catch(err => { logger.warn('Cash flow: payments unavailable', { userId, error: err.message }); return []; }),
+    _allPages(page => api.getBankTransactions(tenantId, undefined, dateWhere, 'Date DESC', page), 'bankTransactions', { what: 'Bank transaction', tenantId })
+      .catch(err => { logger.warn('Cash flow: bank transactions unavailable', { userId, error: err.message }); return []; }),
     // Deliberately reaches back BEFORE the period: the forecast needs every OPEN
     // invoice, including ones raised earlier that are still unpaid. Bounded at
     // INVOICE_LOOKBACK_MONTHS rather than left unfiltered, because Xero now
@@ -1747,12 +1904,22 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
 
   const invoices = invRes;
   const baseCurrency = perf.organisation?.currency || '';
-  const movement = _buildCashMovement({
-    payments:         payRes.body.payments || [],
-    bankTransactions: btRes.body.bankTransactions || [],
-    months,
-    baseCurrency,
-  });
+  const movement = _buildCashMovement({ payments, bankTransactions, months, baseCurrency });
+
+  // The bank's figures below are its base-currency accounts only (see
+  // _bankByCurrency). The records are every account's, converted to base, and
+  // stay that way for the movement shown on this tab. But where they are set
+  // against the bank — the tie-out and the waterfall — a record moved through
+  // an account the bank figures leave out has nothing on the other side to
+  // meet, and would read as a gap that is only the currency. So those two
+  // compare the base-currency accounts' records with the base-currency
+  // accounts' figures.
+  const byCur = bank ? _bankByCurrency(bank, bankAccounts, baseCurrency) : null;
+  const foreignIds = new Set((byCur?.foreignAccounts || []).map(a => a.accountId).filter(Boolean));
+  const inBase = r => !foreignIds.has(_recordAccountId(r));
+  const banked = foreignIds.size
+    ? _buildCashMovement({ payments: payments.filter(inBase), bankTransactions: bankTransactions.filter(inBase), months, baseCurrency })
+    : movement;
 
   const S = a => a.reduce((x, y) => x + y, 0);
   const revenue  = S(perf.totals.revenue.actual);
@@ -1764,18 +1931,22 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
   // so the forecast can see older unpaid bills.
   const supplierSpend = _buildSupplierSpend(invoices, { baseCurrency, fromISO: first, toISO: last });
   const hygiene = _buildInvoiceHygiene(invoices, baseCurrency);
-  const closing  = bank ? bank.accounts.reduce((s, a) => s + a.closingBalance, 0) : 0;
-  const opening  = bank ? bank.accounts.reduce((s, a) => s + (a.openingBalance || 0), 0) : 0;
+  // Base-currency accounts only, so a lower figure than the sum of every
+  // account whenever one is in another currency; the payload says so. The
+  // forecast, the runway and the cover alert start from it too, which errs on
+  // the side of less cash rather than adding unlike currencies.
+  const closing  = byCur ? byCur.closing : 0;
+  const opening  = byCur ? byCur.opening : 0;
   // The Bank Summary's received and spent count a transfer between the org's
   // own accounts twice over — out of one account and into another — although
   // no money came into or left the business. Taken off here, so "cash in" on
   // this tab is money that actually arrived, and it is measured on the same
   // terms as the movement figures it sits beside and is checked against.
-  const bankIn   = bank ? bank.cashIn  - movement.transfers.in  : 0;
-  const bankOut  = bank ? bank.cashOut - movement.transfers.out : 0;
+  const bankIn   = byCur ? byCur.cashIn  - banked.transfers.in  : 0;
+  const bankOut  = byCur ? byCur.cashOut - banked.transfers.out : 0;
   const forecast = _buildCashForecast({ invoices, openingBalance: closing, today, baseCurrency });
   const runway   = _buildRunway({ months, monthly: movement.monthly, closing, today });
-  const waterfall = _buildCashWaterfall({ opening, closing, movement });
+  const waterfall = _buildCashWaterfall({ opening, closing, movement: banked });
 
   // The bank statement is what actually happened. Payments and bank transactions
   // explain WHERE it came from — but they are separate records, and they can
@@ -1786,8 +1957,8 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
   // Only when there is a bank figure to compare with. Without one, every
   // payment recorded used to read as missing from a bank that was simply not
   // fetched.
-  const unreconciled = bank
-    ? _buildUnreconciled({ movement, bankIn: bank.cashIn, bankOut: bank.cashOut })
+  const unreconciled = byCur
+    ? _buildUnreconciled({ movement: banked, bankIn: byCur.cashIn, bankOut: byCur.cashOut })
     : { inGap: 0, outGap: 0, transfersIn: 0, transfersOut: 0, material: false };
 
   const alerts = _buildAlerts({
@@ -1810,8 +1981,12 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
       // From the bank statement, not inferred from the payment records, less
       // transfers between the org's own accounts (see bankIn above).
       cashIn: bankIn, cashOut: bankOut, net: bankIn - bankOut,
-      transfersIn: movement.transfers.in, transfersOut: movement.transfers.out,
-      accounts: bank ? bank.accounts.map(a => ({ name: a.name, balance: a.closingBalance })) : [],
+      transfersIn: banked.transfers.in, transfersOut: banked.transfers.out,
+      accounts: byCur ? byCur.accounts.map(a => ({ name: a.name, currency: a.currency, balance: a.closingBalance })) : [],
+      // Listed in their own currency, and in none of the figures above.
+      foreignAccounts: byCur ? byCur.foreignAccounts.map(a => ({ name: a.name, currency: a.currency, balance: a.closingBalance })) : [],
+      baseOnly: !!byCur?.baseOnly,
+      currency: baseCurrency,
     },
     movement,
     waterfall,
@@ -1849,9 +2024,6 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
 //   * it is read-only — it proposes nothing and can act on nothing
 //   * if it fails, the card simply does not render; figures never wait on it
 const NARRATIVE_CACHE_TTL_MS = 30 * 60 * 1000;
-// Long enough for a rate limit to ease. Nothing waits on this — the card is
-// fetched separately from the figures — so a pause costs the reader nothing.
-const NARRATIVE_RETRY_DELAY_MS = 2500;
 
 async function _narrateFrom(userId, tenantId, cf, { force = false } = {}) {
   const facts = _narrativeFacts(cf);
@@ -1860,27 +2032,13 @@ async function _narrateFrom(userId, tenantId, cf, { force = false } = {}) {
   const cached = _cacheGet(key, force, { noGrace: true });
   if (cached) return cached;
 
-  // Required lazily, exactly as getVarianceInsights does — reports.js has no
-  // module-level Gemini import.
-  const { callGemini } = require('../utils/gemini-client');
-
-  // Two attempts, WITH a pause between them. callGemini already rotates through
-  // every model and every key before it throws, so an immediate retry re-sends a
-  // request that just failed on all of them. The gap is the point.
-  let raw = null;
-  for (let attempt = 1; attempt <= 2 && raw === null; attempt++) {
-    if (attempt > 1) await new Promise(r => setTimeout(r, NARRATIVE_RETRY_DELAY_MS));
-    try {
-      raw = await callGemini(userId, [
-        { role: 'system', content: 'You are a careful financial analyst. Return plain sentences only.' },
-        { role: 'user',   content: _narrativePrompt(facts) },
-      ], { temperature: 0.2, maxTokens: 350 });
-    } catch (err) {
-      logger.warn('Financial narrative attempt failed', { userId, tenantId, attempt, error: err.message });
-    }
-  }
+  // Two attempts with a pause between them, except after a cut-off reply:
+  // gemini-client has already asked again with a larger limit, so the same
+  // request would stop in the same place and the second attempt only spent
+  // the user's quota (see requestNarrative). Never throws.
+  const { raw, reason } = await requestNarrative(userId, facts);
   // The card simply will not render. Figures never wait on this.
-  if (raw === null) return { available: false, reason: 'unavailable' };
+  if (raw === null) return { available: false, reason: reason || 'unavailable' };
 
   const { text, dropped } = _groundNarrative(raw, facts.allowed);
   if (dropped) logger.warn('Narrative sentences dropped as ungrounded', { userId, tenantId, dropped });
@@ -1949,6 +2107,8 @@ module.exports = {
   _toBase, _foreignCurrency, _closedCount, _growthPct, _buildGrowth, _buildRunway, _buildCashWaterfall,
   _buildAlerts, ALERT_THRESHOLDS,
   _isTransfer, _isReceiptPayment, _isLive, _buildUnreconciled, _buildPaymentDays, _raisedByMonth, _sectionTotal, _periodCacheTtl, _pruneCache, _cache, CACHE_MAX_ENTRIES, TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _mapWithConcurrency, _variancePct, _sectionKind, _isRecurringName, _buildPerformance, _buildWatchList,
+  _allPages, LIST_PAGE_SIZE, LIST_MAX_PAGES, _recurringFor, _xeroDay, _bankByCurrency,
+  INSIGHT_CACHE_TTL_MS, INSIGHT_FAILURE_TTL_MS,
   _largeNumbersIn, _insightIsGrounded, _varianceCandidates, _parseInsights, _buildCategoryVariances,
   _narrativeFacts, _groundNarrative, _narrativePrompt, _narrateFrom,
   _canonical, _dedupeKey,

@@ -1,10 +1,19 @@
 import { fmtMoney } from '../../utils/format';
 import { formatDateTime } from '../../utils/formatDate';
 import { BarList, GroupedMonthlyBars } from '../../components/performance/PerformancePanels';
-import { balanceFor } from './balances';
+import { balanceFor, balancesByName } from './balances';
 import { SourceNote } from './bits';
 
 export default function BankingTab({ user, isMobile, banking, selectedBankAccount, setSelectedBankAccount, statement, perf, viewStatement, bankBalances, currency }) {
+  // Accounts in a currency other than the organisation's. Every total and
+  // chart on this tab is base-currency accounts only — adding a USD balance to
+  // an SGD one gives a number in neither — so these are listed on their own,
+  // each in its own currency, and the totals say they leave them out.
+  const foreign = perf.data?.cash?.foreignAccounts || [];
+  const baseOnly = !!perf.data?.cash?.baseOnly && foreign.length > 0;
+  // The accounts table joins balances by name, and the page's lookup holds
+  // only the base-currency accounts, so the others are looked up here.
+  const foreignBalances = balancesByName(foreign);
   return (
         <>
           {/* Moved from Overview: cash movement belongs with the accounts it
@@ -15,6 +24,11 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
               <div>
                 <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.07em', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 3 }}>Cash at bank</div>
                 <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(perf.data.cash.total, currency)}</div>
+                {baseOnly && (
+                  <div style={{ fontSize: 10.5, color: 'var(--warning)', marginTop: 2 }}>
+                    Base-currency accounts only{currency ? ` (${currency})` : ''}
+                  </div>
+                )}
               </div>
               <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap', fontSize: 12.5 }}>
                 <div><span style={{ color: 'var(--text-muted)' }}>Cash in </span><b style={{ color: 'var(--success)' }}>{fmtMoney(perf.data.cash.cashIn, currency)}</b></div>
@@ -30,6 +44,21 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                 {perf.data.fiscalYear?.label} · Xero Bank Summary
                 <div>Includes transfers between your own accounts</div>
               </div>
+              {baseOnly && (
+                <div style={{ flexBasis: '100%', fontSize: 11.5, lineHeight: 1.5, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                  <div style={{ color: 'var(--text-muted)', marginBottom: 4 }}>
+                    Not in the figures above — held in another currency, shown in its own:
+                  </div>
+                  <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+                    {foreign.map(a => (
+                      <div key={a.name}>
+                        <span style={{ color: 'var(--text-muted)' }}>{a.name} </span>
+                        <b style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(a.balance, a.currency)}</b>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -42,6 +71,7 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                 <div className="card-title">Where the money sits</div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
                   Closing balance per account, and its share of total cash.
+                  {baseOnly && ' Base-currency accounts only.'}
                 </div>
                 <BarList
                   currency={currency}
@@ -57,6 +87,7 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                 <div className="card-title">Movement by account</div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
                   Which account is actually doing the work this period.
+                  {baseOnly && ' Base-currency accounts only.'}
                 </div>
                 <GroupedMonthlyBars
                   rawLabels
@@ -97,7 +128,10 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                     <th style={{ padding: '6px 10px' }}>Status</th><th style={{ padding: '6px 10px' }}></th>
                   </tr></thead>
                   <tbody>{banking.data.map(a => {
-                    const bal = balanceFor(bankBalances, a);
+                    const bal = balanceFor(bankBalances, a) || balanceFor(foreignBalances, a);
+                    // The currency the Bank Summary line was read in, which is
+                    // the account's own; the list's own field otherwise.
+                    const balCur = bal?.currency || a.currency || currency;
                     return (
                     <tr key={a.accountId} style={{ borderTop: '1px solid var(--border)', background: selectedBankAccount?.accountId === a.accountId ? 'var(--bg-hover)' : undefined }}>
                       <td style={{ padding: '9px 10px' }}>
@@ -106,13 +140,13 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                       </td>
                       {/* Em dash when the name join misses, never a wrong number. */}
                       <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
-                        {bal ? fmtMoney(bal.balance, a.currency || currency) : '—'}
+                        {bal ? fmtMoney(bal.balance, balCur) : '—'}
                       </td>
                       <td style={{ padding: '9px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: bal?.cashIn ? 'var(--success)' : 'var(--text-muted)' }}>
-                        {bal?.cashIn ? fmtMoney(bal.cashIn, a.currency || currency) : '—'}
+                        {bal?.cashIn ? fmtMoney(bal.cashIn, balCur) : '—'}
                       </td>
                       <td style={{ padding: '9px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: bal?.cashOut ? 'var(--danger)' : 'var(--text-muted)' }}>
-                        {bal?.cashOut ? fmtMoney(bal.cashOut, a.currency || currency) : '—'}
+                        {bal?.cashOut ? fmtMoney(bal.cashOut, balCur) : '—'}
                       </td>
                       <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{a.accountNumber || '—'}</td>
                       <td style={{ padding: '9px 10px' }}>{a.currency || '—'}</td>
@@ -188,7 +222,9 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                             : <span className="badge badge-yellow" style={{ fontSize: 11 }}>not matched</span>}
                         </td>
                         <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: t.type === 'Money In' ? 'var(--success)' : 'var(--danger)' }}>
-                          {t.type === 'Money In' ? '+' : '−'}{fmtMoney(t.total, currency)}
+                          {/* In the account's own currency, which is what a
+                              bank transaction or payment on it is recorded in. */}
+                          {t.type === 'Money In' ? '+' : '−'}{fmtMoney(t.total, selectedBankAccount.currency || currency)}
                         </td>
                       </tr>
                     ))}</tbody>

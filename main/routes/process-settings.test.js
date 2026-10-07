@@ -7,6 +7,9 @@ const jwt     = require('jsonwebtoken');
 // ever being loaded for real.
 jest.mock('imap', () => jest.fn());
 
+// No revenue account marked recurring or not recurring.
+const NO_MARKS = { recurringAccounts: [], notRecurringAccounts: [] };
+
 // GET/PATCH /api/process/settings. defaultTenantId is the Xero company new
 // documents go to when more than one is connected; with several connected and
 // none chosen, nothing is sent (queue/processor.js).
@@ -38,12 +41,12 @@ describe('routes/process settings', () => {
 
   test('GET returns autoProcess and defaultTenantId, both unset for a new account', async () => {
     const res = await get().expect(200);
-    expect(res.body).toEqual({ autoProcess: false, defaultTenantId: null });
+    expect(res.body).toEqual({ autoProcess: false, defaultTenantId: null, ...NO_MARKS });
   });
 
   test('PATCH accepts a connected company and GET returns it', async () => {
     const res = await patch({ defaultTenantId: 'tenant-b' }).expect(200);
-    expect(res.body).toEqual({ autoProcess: false, defaultTenantId: 'tenant-b' });
+    expect(res.body).toEqual({ autoProcess: false, defaultTenantId: 'tenant-b', ...NO_MARKS });
     expect((await get().expect(200)).body.defaultTenantId).toBe('tenant-b');
   });
 
@@ -71,6 +74,39 @@ describe('routes/process settings', () => {
   test('autoProcess still works on its own and leaves the default alone', async () => {
     await patch({ defaultTenantId: 'tenant-a' }).expect(200);
     const res = await patch({ autoProcess: true }).expect(200);
-    expect(res.body).toEqual({ autoProcess: true, defaultTenantId: 'tenant-a' });
+    expect(res.body).toEqual({ autoProcess: true, defaultTenantId: 'tenant-a', ...NO_MARKS });
+  });
+
+  // The Revenue tab's recurring marks.
+  test('recurring marks are saved each way, returned by GET, and cleared by null', async () => {
+    const res = await patch({ recurringAccounts: ['Hosting'], notRecurringAccounts: ['Project Management Fees'] }).expect(200);
+    expect(res.body).toMatchObject({ recurringAccounts: ['Hosting'], notRecurringAccounts: ['Project Management Fees'] });
+    expect((await get().expect(200)).body).toMatchObject({ recurringAccounts: ['Hosting'], notRecurringAccounts: ['Project Management Fees'] });
+    expect((await patch({ recurringAccounts: null }).expect(200)).body)
+      .toMatchObject({ recurringAccounts: [], notRecurringAccounts: ['Project Management Fees'] });
+  });
+
+  test('a list that is not an array of at most 200 names is refused, and nothing is saved', async () => {
+    await patch({ recurringAccounts: 'Hosting' }).expect(400);
+    await patch({ recurringAccounts: [42] }).expect(400);
+    await patch({ notRecurringAccounts: { a: 1 } }).expect(400);
+    await patch({ recurringAccounts: Array.from({ length: 201 }, (_, i) => `Account ${i}`) }).expect(400);
+    await patch({ recurringAccounts: ['x'.repeat(201)] }).expect(400);
+    // Refused whole: the valid part of a bad request is not kept either.
+    await patch({ autoProcess: true, recurringAccounts: [42] }).expect(400);
+    expect((await get().expect(200)).body).toEqual({ autoProcess: false, defaultTenantId: null, ...NO_MARKS });
+    // Exactly 200 is allowed.
+    await patch({ recurringAccounts: Array.from({ length: 200 }, (_, i) => `Account ${i}`) }).expect(200);
+  });
+
+  test('an account cannot be marked both ways in one request', async () => {
+    await patch({ recurringAccounts: ['Hosting'], notRecurringAccounts: ['hosting '] }).expect(400);
+  });
+
+  test('without the column the marks are refused with 503 and nothing in the request is saved', async () => {
+    db.exec('ALTER TABLE user_settings DROP COLUMN recurring_accounts');
+    expect((await get().expect(200)).body).toEqual({ autoProcess: false, defaultTenantId: null, ...NO_MARKS });
+    await patch({ autoProcess: true, recurringAccounts: ['Hosting'] }).expect(503);
+    expect((await get().expect(200)).body.autoProcess).toBe(false);
   });
 });

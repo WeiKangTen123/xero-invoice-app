@@ -100,6 +100,49 @@ function _buildCashMovement({ payments = [], bankTransactions = [], months = [],
   };
 }
 
+// Pure. Which currency each Bank Summary line is in, and totals that only add
+// like to like.
+//
+// The Bank Summary names each account and says nothing of its currency, and
+// the Banking table prints each account's figures in that account's own
+// currency. The totals added every line together and called the sum the
+// organisation's base currency, so a USD account's 10,000 went into an SGD
+// total as 10,000 SGD. Each line is now matched by name to the bank account
+// list, which does carry the currency. Only base-currency accounts are added
+// into the totals; the rest are listed on their own, in their own currency,
+// and `baseOnly` says the totals leave them out so the screen can say so.
+//
+// A line the list does not name, or any line when the list or the base
+// currency is unknown, is taken to be in base currency. That is what every
+// total assumed before, and it is right for the great majority of accounts.
+function _bankByCurrency(bank, bankAccounts = [], baseCurrency = '') {
+  const norm = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const listed = new Map((bankAccounts || []).map(a => [norm(a.name), a]));
+  const base = String(baseCurrency || '').toUpperCase();
+  const lines = (bank?.accounts || []).map(a => {
+    const known = listed.get(norm(a.name));
+    const currency = String(known?.currency || '').toUpperCase() || base;
+    return { ...a, accountId: known?.accountId || null, currency, foreign: !!(base && currency !== base) };
+  });
+  const inBase  = lines.filter(a => !a.foreign);
+  const foreign = lines.filter(a => a.foreign);
+  const sum = field => inBase.reduce((s, a) => s + Number(a[field] || 0), 0);
+  const cashIn = sum('cashReceived'), cashOut = sum('cashSpent');
+  return {
+    currency: base,
+    accounts: inBase,
+    foreignAccounts: foreign,
+    closing: sum('closingBalance'),
+    opening: sum('openingBalance'),
+    cashIn, cashOut, net: cashIn - cashOut,
+    baseOnly: foreign.length > 0,
+  };
+}
+
+// The bank account a payment or bank transaction moved money through: a
+// bank transaction names it as bankAccount, a payment as account.
+const _recordAccountId = r => r?.bankAccount?.accountID || r?.account?.accountID || null;
+
 // Pure. Whether the payment records tie to the Bank Summary, compared like with
 // like.
 //
@@ -630,4 +673,5 @@ function _buildAlerts({ runway = {}, workingCapital = {}, forecast = {}, unrecon
 module.exports = {
   _buildSupplierSpend, _isoDay, ALERT_THRESHOLDS, _buildAlerts, _buildCashForecast, _buildCashMovement, _buildCashWaterfall, _buildRunway, _buildWorkingCapital, _isReceiptPayment, _isTransfer,
   _isLive, _isInvoicePayment, _paymentBucket, _buildUnreconciled, _unreconciledDetail, _raisedByMonth, _buildPaymentDays, _monthOfDoc,
+  _bankByCurrency, _recordAccountId,
 };

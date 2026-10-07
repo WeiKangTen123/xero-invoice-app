@@ -1,11 +1,39 @@
 import { useState } from 'react';
+import { api } from '../../api/client';
 import { fmtMoney, fmtMoneyShort, fmtPct } from '../../utils/format';
 import { BarList, GroupedMonthlyBars, MonthlyBars } from './charts';
 import { CurrencyNote, Empty, Legend, Metric, Rows, Surface, closedAttainment, rangeLabel, slice, sliceSum, sum, useRangeTotals } from './primitives';
 
+// Labels are matched as the server matches them: case and spacing ignored.
+const labelKey = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+// The same period and organisation as `data`, as /performance query params, so
+// a refetch after a recurring mark describes exactly what is on screen.
+function samePeriodParams(data) {
+  const p = new URLSearchParams();
+  if (data.activeTenantId) p.set('tenantId', data.activeTenantId);
+  const period = data.period || {};
+  if (period.key && period.key !== 'custom') p.set('preset', period.key);
+  else {
+    p.set('from', period.fromKey || data.months[0]?.key);
+    p.set('to',   period.toKey   || data.months[data.months.length - 1]?.key);
+  }
+  p.set('customers', 'true');   // what the Revenue tab asks for
+  return p;
+}
+
 // ── Revenue ──────────────────────────────────────────────────────────────────
-export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
+// `onRecurringChange`, when given, is how the page refetches its report after
+// a service line is marked recurring or not. Without it the panel refetches
+// the same period itself and shows that, until the page next hands it a report.
+export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine, onRecurringChange }) {
   const [view, setView] = useState('actual');   // 'actual' | 'budget' — Xero has no forecast
+  const [fresh, setFresh]   = useState(null);   // { base, data }: a refetch made from `base`
+  const [saving, setSaving] = useState(null);   // the label being marked
+  const [markError, setMarkError] = useState('');
+  // A refetch only stands while the page still shows the report it was made
+  // from; a new period or a refresh replaces both.
+  const data = fresh && fresh.base === given ? fresh.data : given;
   const cur = data.organisation?.currency || '';
   const T   = useRangeTotals(data, from, to);
   const months = data.months.slice(from, to + 1);
@@ -45,6 +73,33 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
       .map(l => ({ label: l.label, value: sliceSum(l.actual, from, to), tag: 'other income' })),
   ].filter(i => i.value !== 0);
 
+  // How many lines are classified by the person rather than by their name.
+  const markedCount = lines.filter(l => l.recurringSource === 'set').length;
+
+  // Marks one service line recurring ('recurring'), not recurring ('project'),
+  // or back to the guess from its name ('auto'), then refetches so every
+  // figure built on the split is the server's. The stored lists are read
+  // first so a mark made elsewhere since this page loaded is kept.
+  async function markLine(label, choice) {
+    setSaving(label);
+    setMarkError('');
+    const base = given;
+    try {
+      const s = await api.get('/process/settings');
+      const without = list => (list || []).filter(l => labelKey(l) !== labelKey(label));
+      await api.patch('/process/settings', {
+        recurringAccounts:    choice === 'recurring' ? [...without(s.recurringAccounts), label]    : without(s.recurringAccounts),
+        notRecurringAccounts: choice === 'project'   ? [...without(s.notRecurringAccounts), label] : without(s.notRecurringAccounts),
+      });
+      if (onRecurringChange) onRecurringChange();
+      else setFresh({ base, data: await api.get(`/xero-reports/performance?${samePeriodParams(base).toString()}`) });
+    } catch (err) {
+      setMarkError(err.message || 'The change could not be saved.');
+    } finally {
+      setSaving(null);
+    }
+  }
+
   return (
     <>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
@@ -67,7 +122,8 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
         <Metric label="Recurring revenue" value={fmtMoney(T.recurring, cur)}
                 meter={T.recurringMix === null ? null : T.recurringMix * 100}
                 footLeft={T.recurringMix === null ? 'No revenue yet' : `${fmtPct(T.recurringMix, 0)} of revenue`}
-                footRight="Name-inferred" />
+                footRight={markedCount === 0 ? 'Name-inferred'
+                         : markedCount === lines.length ? 'Set by you' : 'Partly set by you'} />
         <Metric label="Recurring run-rate" value={runRate === null ? '—' : fmtMoney(runRate, cur)}
                 meter={null}
                 footLeft={runRate === null ? 'No recurring revenue' : `${fmtMoney(T.recurring, cur)} over ${monthsInPeriod}mo`}
@@ -132,6 +188,11 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
           <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 12, lineHeight: 1.5 }}>
             Work quoted in Xero that has not become an invoice, so it appears in no revenue or cash figure
             on this dashboard. Quotes already marked INVOICED are excluded — they would double-count.
+            {' '}Sent quotes past their expiry date are left out
+            {data.quotePipeline.expired?.count > 0
+              ? ` (${data.quotePipeline.expired.count}, ${fmtMoney(data.quotePipeline.expired.total, cur)})`
+              : ''}.
+            {data.quotePipeline.fromISO && ` Only quotes dated from ${data.quotePipeline.fromISO} onwards are read.`}
           </div>
         </Surface>
       )}
@@ -194,7 +255,22 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
                 return (
                   <tr key={l.label} style={{ borderTop: '1px solid var(--border)' }}>
                     <td style={{ padding: '8px 10px' }}>{l.label}</td>
-                    <td style={{ padding: '8px 10px', color: 'var(--text-muted)', fontSize: 11.5 }}>{l.recurring ? 'Recurring' : 'Project'}</td>
+                    <td style={{ padding: '8px 10px', color: 'var(--text-muted)', fontSize: 11.5 }}>
+                      {/* The guess from the name is a default, not a finding:
+                          the person can say which this line is, and that
+                          answer is kept for every period and every visit. */}
+                      <select
+                        aria-label={`Recurring or project: ${l.label}`}
+                        value={l.recurringSource === 'set' ? (l.recurring ? 'recurring' : 'project') : 'auto'}
+                        disabled={saving !== null}
+                        onChange={e => markLine(l.label, e.target.value)}
+                        style={{ fontSize: 11.5, padding: '2px 4px', borderRadius: 5, border: '1px solid var(--border)',
+                                 background: 'transparent', color: 'inherit', cursor: saving !== null ? 'wait' : 'pointer' }}>
+                        <option value="auto">{(l.recurringByName ?? l.recurring) ? 'Recurring' : 'Project'} (from name)</option>
+                        <option value="recurring">Recurring</option>
+                        <option value="project">Project</option>
+                      </select>
+                    </td>
                     <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: a < 0 ? 'var(--danger)' : undefined }}>{fmtMoney(a, cur)}</td>
                     <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-muted)' }}>{fmtMoney(b, cur)}</td>
                     <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: v === 0 ? undefined : v > 0 ? 'var(--success)' : 'var(--danger)' }}>
@@ -208,6 +284,11 @@ export function RevenuePanel({ data, from, to, selectedLine, onSelectLine }) {
               })}
             </tbody>
           </table>
+        </div>
+        <div style={{ fontSize: 10.5, color: markError ? 'var(--danger)' : 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
+          {markError
+            || (saving ? `Saving ${saving}…`
+                       : 'Type is guessed from each account\'s name unless you set it. Your choice applies to every period.')}
         </div>
       </Surface>
     </>

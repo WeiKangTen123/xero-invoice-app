@@ -188,21 +188,57 @@ router.post('/stop', requireAuth, (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /api/process/settings → { autoProcess, defaultTenantId }
+// The settings this route reads and writes, and nothing else the store holds.
+function _settingsView(s) {
+  const { autoProcess, defaultTenantId, recurringAccounts, notRecurringAccounts } = s;
+  return { autoProcess, defaultTenantId, recurringAccounts, notRecurringAccounts };
+}
+
+// Revenue account labels marked recurring or not recurring (see
+// settings-store). Bounded so one request cannot store an unbounded row; 200
+// is far more revenue accounts than any organisation reports, and 200
+// characters is longer than Xero allows an account name.
+const MAX_MARKED_ACCOUNTS = 200;
+const MAX_LABEL_LENGTH    = 200;
+function _labelList(value) {
+  if (value === null) return [];   // null clears, as it does for defaultTenantId
+  if (!Array.isArray(value) || value.length > MAX_MARKED_ACCOUNTS) return undefined;
+  if (value.some(v => typeof v !== 'string' || v.length > MAX_LABEL_LENGTH)) return undefined;
+  return value;
+}
+
+// GET /api/process/settings → { autoProcess, defaultTenantId, recurringAccounts, notRecurringAccounts }
 // defaultTenantId is the Xero company a new document is sent to when more than
 // one is connected (queue/processor.js); null when none has been chosen.
+// The two lists are the Revenue tab's recurring marks; empty when none.
 router.get('/settings', requireAuth, (req, res) => {
-  const { autoProcess, defaultTenantId } = settingsStore.forUser(req.user.id).get();
-  res.json({ autoProcess, defaultTenantId });
+  res.json(_settingsView(settingsStore.forUser(req.user.id).get()));
 });
 
-// PATCH /api/process/settings  { autoProcess?, defaultTenantId? }
+// PATCH /api/process/settings  { autoProcess?, defaultTenantId?, recurringAccounts?, notRecurringAccounts? }
 // defaultTenantId must be one of this account's connected companies, or null
 // or '' to clear it. Anything else is refused rather than stored: an unknown
 // id would quietly fall through to "choose a company" on every send.
+// recurringAccounts and notRecurringAccounts are each an array of at most 200
+// account labels, or null to clear; a label may not be in both.
 router.patch('/settings', requireAuth, (req, res) => {
   const body  = req.body || {};
   const patch = {};
+  for (const field of ['recurringAccounts', 'notRecurringAccounts']) {
+    if (!(field in body)) continue;
+    const list = _labelList(body[field]);
+    if (list === undefined) {
+      return res.status(400).json({ error: `${field} must be a list of at most ${MAX_MARKED_ACCOUNTS} account names` });
+    }
+    patch[field] = list;
+  }
+  if (patch.recurringAccounts && patch.notRecurringAccounts) {
+    const key = s => s.trim().replace(/\s+/g, ' ').toLowerCase();
+    const rec = new Set(patch.recurringAccounts.map(key));
+    if (patch.notRecurringAccounts.some(l => rec.has(key(l)))) {
+      return res.status(400).json({ error: 'An account cannot be marked both recurring and not recurring' });
+    }
+  }
   if ('autoProcess' in body) patch.autoProcess = Boolean(body.autoProcess);
   if ('defaultTenantId' in body) {
     const value = body.defaultTenantId;
@@ -216,9 +252,21 @@ router.patch('/settings', requireAuth, (req, res) => {
       patch.defaultTenantId = value;
     }
   }
-  const { autoProcess, defaultTenantId } = settingsStore.forUser(req.user.id).set(patch);
+  let saved;
+  try {
+    saved = settingsStore.forUser(req.user.id).set(patch);
+  } catch (err) {
+    // The marks' column is added by a migration; until it has run they cannot
+    // be kept, and nothing in the request was saved (the store writes it all
+    // or none of it).
+    if (err instanceof settingsStore.RecurringUnavailableError) {
+      logger.warn('Settings not saved: recurring marks column missing', { by: req.user.email });
+      return res.status(503).json({ error: 'Recurring account marks are not available yet. Try again after the next update.' });
+    }
+    throw err;
+  }
   logger.info('Settings updated', { patch, by: req.user.email });
-  res.json({ autoProcess, defaultTenantId });
+  res.json(_settingsView(saved));
 });
 
 // POST /api/process/rescan — trigger immediate IMAP scan for unread emails
