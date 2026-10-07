@@ -10,8 +10,8 @@ const { _monthKeyOfDate, _dateFromParts, _fmtISODate, _addDays, _closedCount, _l
 // money in the bank, which for an organisation that has collected none of its
 // invoices is the exact opposite of the truth.
 //
-// Every function is pure — getCashFlow does the fetching and stays in
-// reports.js, which re-exports these unchanged.
+// Every function is pure — getCashFlow does the fetching, in
+// cash-flow-report.js; reports.js re-exports these unchanged.
 
 // A bank transfer moves money between the org's OWN accounts. It appears as a
 // bank transaction, but counting it would inflate both sides of the statement.

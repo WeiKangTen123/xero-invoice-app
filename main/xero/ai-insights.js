@@ -6,9 +6,9 @@
 //
 // Every function here is PURE except the two request helpers at the end
 // (requestVarianceInsights, requestNarrative), which make the model call over
-// figures already computed. The fetching stays in reports.js, because it
-// needs getPerformance and getCashFlow and requiring those back would be
-// circular. That split is the point: the fetching is orchestration, and the
+// figures already computed. The fetching lives in ai-commentary.js, because
+// it needs getPerformance and getCashFlow and requiring those from here would
+// be circular. That split is the point: the fetching is orchestration, and the
 // safety argument lives here where it can be tested without a Xero token. The
 // helpers take callGemini as an argument for the same reason.
 
