@@ -6,12 +6,19 @@ const watcherRegistry  = require('../email/watcher-registry');
 const emailWorker      = require('../queue/email-worker');
 const emailQueue       = require('../queue/email-queue');
 const { createHandler } = require('../utils/invoice-handler');
-const { getUserConfig, getSetupStatus } = require('../utils/users');
+const users            = require('../utils/users');
+const { getUserConfig, getSetupStatus } = users;
 const invoiceStore     = require('../utils/invoice-store');
 const settingsStore    = require('../utils/settings-store');
 const tokenCache       = require('../utils/token-cache');
 const processState     = require('../utils/process-state');
+const idleSweeper      = require('../email/idle-sweeper');
 const logger           = require('../utils/logger');
+
+// Gap between watchers resumed at boot. Every mailbox reconnecting in the same
+// instant is a burst of TLS handshakes and logins from one address, which is
+// what providers throttle, and every first scan then hits the queue together.
+const RESUME_STAGGER_MS = 2000;
 
 // Track which users have had their in-memory invoice count synced from disk.
 // We sync once per server lifetime per user so the dashboard shows the real count
@@ -43,12 +50,14 @@ router.get('/status', requireAuth, (req, res, next) => {
     const running  = watcherRegistry.isRunning(userId);
     const setup    = getSetupStatus(userId);
     const queue    = emailQueue.getStats(userId);
-    const allInv   = invoiceStore.forUser(userId).getAll();
+    // One GROUP BY. This poll runs every few seconds per open dashboard, and
+    // it used to load every invoice with its line items and reports to count.
+    const byStatus = invoiceStore.forUser(userId).countByStatus();
     const xero     = {
-      pending:    allInv.filter(i => i.status === 'pending').length,
-      submitting: allInv.filter(i => i.status === 'submitting').length,
-      posted:     allInv.filter(i => i.status === 'posted').length,
-      error:      allInv.filter(i => i.status === 'error').length,
+      pending:    byStatus.pending    || 0,
+      submitting: byStatus.submitting || 0,
+      posted:     byStatus.posted     || 0,
+      error:      byStatus.error      || 0,
     };
     res.json({
       ...state.getStatus(running),
@@ -56,41 +65,119 @@ router.get('/status', requireAuth, (req, res, next) => {
       missingConfig: setup.missingConfig,
       queue,
       xero,
+      // Why the watcher is or is not watching (see watcher-registry getStatus):
+      // `running` alone cannot tell a refused password from a backoff or Stop.
+      watcher: watcherRegistry.getStatus(userId),
     });
   } catch (err) { next(err); }
 });
+
+// The parts of setup a watcher cannot run without. The LLM key is optional.
+function _missingForWatcher(userId) {
+  const setup = getSetupStatus(userId);
+  return setup.ready ? [] : setup.missingConfig.filter(s => s !== 'llm');
+}
+
+// Starts this account's watcher and the worker behind it. Shared by Start and
+// by resumeWatchers, so a resumed watcher is built exactly like a clicked one.
+function _startWatcher(userId, loginEmail) {
+  const config  = getUserConfig(userId);
+  const handler = createHandler(userId);
+  // Whatever the user left blank is worked out from their address.
+  watcherRegistry.start(userId, config, handler.onInvoiceEmail, { loginEmail });
+  emailWorker.startWorker(userId, handler.onInvoiceEmail);
+  processState.forUser(userId).notifyStarted();
+}
+
+// Saved so a restart can put the watcher back (resumeWatchers). A failure to
+// save does not undo a start that worked; it only means a restart leaves this
+// mailbox off, as every restart used to.
+function _rememberStarted(userId) {
+  try { settingsStore.forUser(userId).setWatcherEnabled(true); } catch (err) {
+    logger.warn('Could not record that the watcher was started', { userId, error: err.message });
+  }
+}
+
+// Why this account's watcher should not be resumed now, or null if it should.
+function _resumeBlocker(userId, now) {
+  const user = users.findById(userId);
+  if (!user || !users.isActive(userId)) return 'account disabled or deleted';
+  if (!settingsStore.forUser(userId).watcherEnabled()) return 'switched off';
+  if (watcherRegistry.isRunning(userId)) return 'already running';
+  const missing = _missingForWatcher(userId);
+  if (missing.length) return `setup incomplete (${missing.join(', ')})`;
+  // An account the idle sweeper would stop is left stopped. The sweep pauses
+  // a watcher whose owner has been away past the cutoff and leaves it switched
+  // on; resuming it here would undo the sweep on every deploy, only for the
+  // next sweep to stop it again. Once its owner is seen again, the next boot
+  // resumes it, or they press Start.
+  if (idleSweeper._idleUserIds([userId], { [userId]: user.last_seen_at }, now).length) return 'owner idle';
+  return null;
+}
+
+// Restarts, at boot, every mailbox watcher whose owner left it on: an active
+// account with watcher_enabled set and the setup a watcher needs. Before this
+// a watcher only ever started from the Start button, so every deploy or crash
+// restart switched off every mailbox until each user came back and pressed it.
+//
+// Staggered by `staggerMs` so they do not all connect at once. Each account is
+// checked when its turn comes, not up front, so one stopped, disabled or
+// started by hand during the stagger is respected. Never rejects; resolves to
+// the ids it started. Called once at boot, by main/index.js through
+// watcher-registry.resumeWatchers(), after the server is up.
+async function resumeWatchers({ staggerMs = RESUME_STAGGER_MS } = {}) {
+  let candidates;
+  try { candidates = settingsStore.watcherEnabledUserIds(); } catch (err) {
+    logger.error('Watcher resume: could not read which mailboxes were switched on', { error: err.message });
+    return [];
+  }
+  const started = [];
+  for (const userId of candidates) {
+    if (started.length && staggerMs > 0) await new Promise(r => setTimeout(r, staggerMs));
+    try {
+      const blocker = _resumeBlocker(userId, Date.now());
+      if (blocker) {
+        logger.info('Watcher resume: skipped', { userId, why: blocker });
+        continue;
+      }
+      _startWatcher(userId, users.findById(userId).email);
+      started.push(userId);
+      logger.info('Watcher resumed after restart', { userId });
+    } catch (err) {
+      logger.error('Watcher resume: could not start', { userId, error: err.message });
+    }
+  }
+  if (candidates.length) logger.info(`Watcher resume: ${started.length} of ${candidates.length} switched-on mailbox(es) started`);
+  return started;
+}
 
 // POST /api/process/start
 router.post('/start', requireAuth, (req, res, next) => {
   try {
     const userId = req.user.id;
     if (watcherRegistry.isRunning(userId)) {
+      _rememberStarted(userId);
       return res.json({ success: true, message: 'Already running' });
     }
 
-    const setup = getSetupStatus(userId);
-    if (!setup.ready) {
-      const sections = setup.missingConfig.filter(s => s !== 'llm'); // llm is optional
-      if (sections.length > 0) {
-        return res.status(400).json({
-          error: `Setup incomplete — configure ${sections.join(' and ')} before starting`,
-          missingConfig: sections,
-        });
-      }
+    const sections = _missingForWatcher(userId);
+    if (sections.length > 0) {
+      return res.status(400).json({
+        error: `Setup incomplete — configure ${sections.join(' and ')} before starting`,
+        missingConfig: sections,
+      });
     }
 
-    const config  = getUserConfig(userId);
-    const handler = createHandler(userId);
-    // Whatever the user left blank is worked out from their address.
-    watcherRegistry.start(userId, config, handler.onInvoiceEmail, { loginEmail: req.user.email });
-    emailWorker.startWorker(userId, handler.onInvoiceEmail);
-    processState.forUser(userId).notifyStarted();
+    _startWatcher(userId, req.user.email);
+    _rememberStarted(userId);
     logger.info('Email watcher started', { by: req.user.email, userId });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
 
 // POST /api/process/stop
+// A plain stop() is a person's choice, so it also clears the saved setting and
+// a restart leaves this mailbox off (watcher-registry STOP_REASONS).
 router.post('/stop', requireAuth, (req, res, next) => {
   try {
     const userId = req.user.id;
@@ -147,3 +234,5 @@ router.post('/rescan', requireAuth, rescanLimiter, (req, res) => {
 });
 
 module.exports = router;
+module.exports.resumeWatchers = resumeWatchers;
+module.exports.RESUME_STAGGER_MS = RESUME_STAGGER_MS;

@@ -489,6 +489,24 @@ describe('invoice-store — reads that fetch only what is needed', () => {
     });
   });
 
+  // What the dashboard's status poll needs, every few seconds.
+  describe('countByStatus', () => {
+    test('one number per status, matching what getAll would count, for this user only', async () => {
+      add('a'); add('b');
+      add('c', { status: 'posted', xeroInvoiceId: 'x-c' });
+      add('d', { status: 'error' });
+      const other = await require('./users').createUser(`nr3${Date.now()}@test.com`, 'password123', 'user');
+      store.forUser(other.id).add({ id: 'o', status: 'posted', processedAt: new Date().toISOString() });
+
+      const counts = s.countByStatus();
+      expect(counts).toEqual({ pending: 2, posted: 1, error: 1 });
+      for (const [status, n] of Object.entries(counts)) {
+        expect(s.getAll().filter(i => i.status === status)).toHaveLength(n);
+      }
+      expect(store.forUser(`nobody-${Date.now()}`).countByStatus()).toEqual({});
+    });
+  });
+
   describe('getRecent', () => {
     test('returns newest first, matching getAll order', () => {
       add('a'); add('b'); add('c');

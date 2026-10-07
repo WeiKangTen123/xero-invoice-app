@@ -51,4 +51,26 @@ describe('settings-store (SQLite)', () => {
     expect(s.get('defaultTenantId')).toBeNull();
     expect(s.get('autoProcess')).toBe(true);
   });
+
+  // The Start/Stop state a restart puts back (routes/process.js resumeWatchers).
+  test('watcherEnabled is off for a new account, set and cleared, and listed while on', async () => {
+    const a = await users.createUser('w1@test.com', 'password123', 'user');
+    const b = await users.createUser('w2@test.com', 'password123', 'user');
+    expect(settingsStore.forUser(a.id).watcherEnabled()).toBe(false);
+    settingsStore.forUser(a.id).setWatcherEnabled(true);
+    settingsStore.forUser(b.id).setWatcherEnabled(true);
+    expect(settingsStore.forUser(a.id).watcherEnabled()).toBe(true);
+    expect(settingsStore.watcherEnabledUserIds()).toEqual([a.id, b.id]);
+    settingsStore.forUser(a.id).setWatcherEnabled(false);
+    expect(settingsStore.forUser(a.id).watcherEnabled()).toBe(false);
+    expect(settingsStore.watcherEnabledUserIds()).toEqual([b.id]);
+    // Not part of the settings object the settings page reads and writes.
+    expect(settingsStore.forUser(b.id).get()).toEqual({ autoProcess: false, defaultTenantId: null });
+  });
+
+  test('clearing it never creates a row (a stop during an account delete)', () => {
+    settingsStore.forUser('no-such-user').setWatcherEnabled(false);
+    const db = require('../db');
+    expect(db.prepare('SELECT COUNT(*) AS n FROM user_settings WHERE user_id = ?').get('no-such-user').n).toBe(0);
+  });
 });

@@ -50,7 +50,12 @@ function sweepOnce(now = Date.now()) {
   const stopped = [];
   for (const id of _idleUserIds(runningIds, _lastSeenMap(), now)) {
     try {
-      registry.stop(id);
+      // Stopped as IDLE, which leaves the account's "watcher on" setting in
+      // place: nobody chose to switch it off. Boot does not resume it while
+      // its owner is still away (routes/process.js resumeWatchers applies this
+      // same cutoff), so a deploy does not undo the sweep; once the owner is
+      // back, a restart or their Start puts it back.
+      registry.stop(id, { reason: registry.STOP_REASONS.IDLE });
       stopped.push(id);
       logger.info('Idle sweep: stopped mailbox watcher — account inactive', {
         userId: id, idleHours: IDLE_MS / 3600000,

@@ -8,6 +8,22 @@ const POLL_MS = 5000; // idle poll interval — catches jobs that land while wor
 // Per-user worker state
 const _workers = new Map();
 
+// Jobs this process is running right now, as `${userId}:${jobId}`. A job keeps
+// status 'processing' on disk while it runs, which getPending also returns so
+// that a job abandoned by a crash is picked up again. The per-worker busy flag
+// does not cover a worker stopped and started while a job was mid-run (a
+// watcher restart builds a new one), and that worker would claim the same job
+// again: run it twice and spend an attempt doing so.
+const _inFlight = new Set();
+const _key = (userId, jobId) => `${userId}:${jobId}`;
+
+// The next job to run: oldest first, past any retry delay, not already running
+// here. A job waiting out its delay no longer holds up the ones behind it.
+function _nextDue(userId, jobs) {
+  const now = Date.now();
+  return jobs.find(j => emailQueue.isDue(j, now) && !_inFlight.has(_key(userId, j.id))) || null;
+}
+
 function _getWorker(userId) {
   if (!_workers.has(userId)) {
     _workers.set(userId, { onInvoice: null, pollId: null, running: false, busy: false });
@@ -38,12 +54,27 @@ async function _processNext(userId) {
   const jobs = emailQueue.getPending(userId);
   if (!jobs.length) return;
   if (!_accountActive(userId)) return _holdForInactiveAccount(userId, jobs.length);
+  const next = _nextDue(userId, jobs);
+  if (!next) return;   // everything left is waiting out a retry delay; the poll comes back
 
   w.busy = true;
-  const job = jobs[0];
+  let job   = null;
+  let chain = true;
   try {
-    logger.info(`[email-worker:${userId}] Processing job ${job.id} (attempt ${job.attempts + 1})`, { subject: job.email?.subject });
-    emailQueue.markProcessing(userId, job.id);
+    // The attempt is on disk before the work starts, so a job that takes the
+    // process down with it has used one (see email-queue markProcessing).
+    try {
+      job = emailQueue.markProcessing(userId, next.id);
+    } catch (err) {
+      // Not run uncounted. Not chained either: the job is still due, and an
+      // immediate retry against a disk that refuses writes would spin.
+      logger.error(`[email-worker:${userId}] Could not record the attempt for job ${next.id}; not running it`, { error: err.message });
+      chain = false;
+      return;
+    }
+    if (!job) return;   // gone, or out of attempts and now kept as dead
+    _inFlight.add(_key(userId, job.id));
+    logger.info(`[email-worker:${userId}] Processing job ${job.id} (attempt ${job.attempts}/${emailQueue.MAX_ATTEMPTS})`, { subject: job.email?.subject });
 
     const email    = emailQueue.reconstructEmail(userId, job);
     const invoices = await parseInvoice(email, userId);
@@ -68,10 +99,12 @@ async function _processNext(userId) {
     logger.error(`[email-worker:${userId}] Job ${job.id} failed`, { error: err.message });
     emailQueue.markFailed(userId, job.id, err.message);
   } finally {
+    if (job) _inFlight.delete(_key(userId, job.id));
     w.busy = false;
-    // Chain into the next pending job immediately instead of waiting for the poll interval.
-    const remaining = emailQueue.getPending(userId);
-    if (remaining.length > 0) setImmediate(() => _safeProcessNext(userId));
+    // Chain into the next due job immediately instead of waiting for the poll
+    // interval. Only a due one: a job waiting out its retry delay would
+    // otherwise be chained to over and over until the delay ran out.
+    if (chain && _nextDue(userId, emailQueue.getPending(userId))) setImmediate(() => _safeProcessNext(userId));
   }
 }
 

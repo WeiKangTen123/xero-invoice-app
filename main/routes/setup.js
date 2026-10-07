@@ -233,7 +233,10 @@ router.post('/test/imap', requireAuth, asyncHandler(async (req, res) => {
       host:       settings.host,
       port:       settings.port,
       tls:        true,
-      tlsOptions: { rejectUnauthorized: false },
+      // The same certificate rule as the watcher itself: verified for any real
+      // mail server, skipped only for a loopback bridge. The test used to skip
+      // it always, so it could pass for a connection the watcher then refused.
+      tlsOptions: require('../email/watcher-registry').imapTlsOptions(settings.host),
       authTimeout: 10000,
     });
     await new Promise((resolve, reject) => {

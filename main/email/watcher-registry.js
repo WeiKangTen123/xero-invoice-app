@@ -1,8 +1,10 @@
+const net               = require('net');
 const Imap              = require('imap');
 const { simpleParser } = require('mailparser');
 const emailQueue        = require('../queue/email-queue');
 const emailWorker       = require('../queue/email-worker');
 const processState      = require('../utils/process-state');
+const settingsStore     = require('../utils/settings-store');
 const logger            = require('../utils/logger');
 const { resolveImapSettings } = require('./imap-settings');
 
@@ -10,6 +12,19 @@ const RECONNECT_BASE_MS   = 10000;
 const RECONNECT_MAX_MS    = 300000; // 5 min cap
 const RECONNECT_MAX_TRIES = 20;
 const UPDATE_DEBOUNCE_MS  = 3000;
+
+// Why a watcher is not watching, as the status endpoint reports it. Only MANUAL
+// is somebody's decision (the Stop button, logging out, an admin), so only
+// MANUAL clears the saved "keep my mailbox watched" setting. The others happen
+// to a watcher, not by choice: a restart resumes it (routes/process.js
+// resumeWatchers) once whatever stopped it may have gone away.
+const STOP_REASONS = Object.freeze({
+  MANUAL:   'manual',
+  IDLE:     'idle',          // email/idle-sweeper.js, owner away past the cutoff
+  AUTH:     'auth-failed',   // the mail server refused the password
+  RETRIES:  'max-retries',   // the server stayed unreachable through every retry
+  SHUTDOWN: 'shutdown',      // the server process is stopping
+});
 
 // registry: userId → WatcherState object
 const _registry = new Map();
@@ -27,6 +42,12 @@ function _newState(userId) {
     debounceTimer:    null,
     pollId:           null,
     reconnectTimer:   null,
+    // What getStatus() reports: why it stopped, when, the error behind it, and
+    // during a backoff when the next attempt is due.
+    stopReason:       null,
+    stoppedAt:        null,
+    lastError:        null,
+    nextRetryAt:      null,
     // s.imap is set as soon as `new Imap()` is constructed — well before the
     // connection handshake finishes and the inbox is actually selected. A
     // manual rescan that lands in that window calls .search() on a mailbox
@@ -40,6 +61,47 @@ function _newState(userId) {
 function _getState(userId) {
   if (!_registry.has(userId)) _registry.set(userId, _newState(userId));
   return _registry.get(userId);
+}
+
+// Loopback is the one place an unverifiable certificate is expected: Proton
+// Bridge serves IMAP on 127.0.0.1 with its own self-signed certificate, and
+// traffic that never leaves the machine cannot be intercepted on the way.
+function _isLoopback(host) {
+  const h = String(host || '').trim().toLowerCase();
+  return h === 'localhost' || h === '::1' || /^127(\.\d{1,3}){3}$/.test(h);
+}
+
+// TLS settings for an IMAP connection to `host`. The certificate is checked
+// for every remote server: unchecked, anyone on the network path can present
+// their own and collect the app password at login.
+//
+// servername is set because node-imap hands tls.connect a socket it opened
+// itself, and Node then sends no SNI unless told. Gmail answers a client
+// without SNI with a placeholder certificate that fails the check, so turning
+// verification on without it would break every Gmail mailbox. An IP address is
+// not a valid SNI name, so none is sent for one. A company server signed by a
+// private CA is trusted by adding that CA through NODE_EXTRA_CA_CERTS, not by
+// switching the check off.
+function imapTlsOptions(host) {
+  const options = { rejectUnauthorized: !_isLoopback(host) };
+  if (host && !net.isIP(String(host))) options.servername = String(host);
+  return options;
+}
+
+// Cancels everything scheduled for a watcher: a pending reconnect, the poll,
+// the rescan debounce.
+function _clearTimers(s) {
+  if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
+  if (s.debounceTimer)  { clearTimeout(s.debounceTimer);  s.debounceTimer  = null; }
+  if (s.pollId)         { clearInterval(s.pollId);        s.pollId         = null; }
+  s.nextRetryAt = null;
+}
+
+function _markStopped(s, reason, error = null) {
+  s.stopReason  = reason;
+  s.stoppedAt   = new Date().toISOString();
+  s.lastError   = error;
+  s.nextRetryAt = null;
 }
 
 // ── Fetch ─────────────────────────────────────────────────────────────────────
@@ -93,7 +155,12 @@ function _fetchUnseen(s) {
         // and converting each chunk independently corrupts those characters.
         stream.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
         stream.once('end', () => {
-          const rawBuffer = Buffer.concat(chunks).toString('utf8');
+          // The raw bytes go to the parser as they are. Decoding them as UTF-8
+          // first turned every Latin-1 byte in a body into U+FFFD and mangled
+          // any attachment sent with Content-Transfer-Encoding: binary (a PDF
+          // full of high bytes) before mailparser ever saw it. mailparser reads
+          // each part's own charset and encoding from the Buffer.
+          const rawBuffer = Buffer.concat(chunks);
           pending.push(
             simpleParser(rawBuffer)
               .then(parsed => {
@@ -160,12 +227,14 @@ function _scheduleReconnect(s, imap, reason, err) {
 
   s.mailboxReady = false;
   if (s.pollId) { clearInterval(s.pollId); s.pollId = null; }
+  s.lastError = err ? err.message : `Connection ${reason}`;
 
   s.reconnectAttempt++;
   if (s.reconnectAttempt > RECONNECT_MAX_TRIES) {
     logger.error(`[user:${userId}] IMAP: max reconnect attempts reached — stop and reconfigure`);
     _teardown(s.imap);
     s.imap = null;
+    _markStopped(s, STOP_REASONS.RETRIES, s.lastError);
     return;
   }
 
@@ -181,11 +250,17 @@ function _scheduleReconnect(s, imap, reason, err) {
   _teardown(s.imap);
   s.imap = null;
 
+  s.nextRetryAt    = new Date(Date.now() + delay).toISOString();
   s.reconnectTimer = setTimeout(() => {
     s.reconnectTimer = null;
+    s.nextRetryAt    = null;
     if (s.intentionalStop) return;
     try { _connect(s); } catch (e) {
+      // Counted and retried like any other failed attempt. Returning here
+      // left a watcher with no connection and nothing scheduled: off for good,
+      // with nothing to say so.
       logger.error(`[user:${userId}] Reconnect failed`, { error: e.message });
+      _scheduleReconnect(s, s.imap, 'reconnect failed', e);
     }
   }, delay);
 }
@@ -206,13 +281,11 @@ function _teardown(imap) {
   try { imap.end(); } catch (_) {}
 }
 
+// The retry budget is enforced in _scheduleReconnect alone. A second check
+// here gave up one attempt early and without recording why, so the 20th
+// scheduled retry silently did nothing.
 function _connect(s) {
   const { userId, settings, onInvoice } = s;
-
-  if (s.reconnectAttempt >= RECONNECT_MAX_TRIES) {
-    logger.error(`[user:${userId}] IMAP: max reconnect attempts reached — stop and reconfigure`);
-    return;
-  }
 
   s.intentionalStop = false;
   s.fetchInProgress = false;
@@ -228,17 +301,24 @@ function _connect(s) {
     host:        settings.host,
     port:        settings.port,
     tls:         true,
-    tlsOptions:  { rejectUnauthorized: false },
+    tlsOptions:  imapTlsOptions(settings.host),
     keepalive:   true,
     authTimeout: 10000,
   });
   s.imap = imap;
 
   imap.once('ready', () => {
+    if (imap !== s.imap) return;    // replaced or stopped while handshaking
     s.reconnectAttempt = 0;
+    s.lastError        = null;
     logger.info(`[user:${userId}] IMAP connected, opening INBOX`);
 
     imap.openBox('INBOX', false, (err) => {
+      // openBox answers through a callback, which _teardown's
+      // removeAllListeners does not cancel. Without this a superseded
+      // connection could still open its inbox and start a poll on the live
+      // state, and that interval would never be cleared.
+      if (imap !== s.imap) return;
       if (err) {
         // Connected but no mailbox is a zombie: isRunning() true, no poll, no
         // reconnect. Treat it like any other dropped connection.
@@ -266,6 +346,7 @@ function _connect(s) {
         }
       });
 
+      if (s.pollId) clearInterval(s.pollId);
       s.pollId = setInterval(() => _fetchUnseen(s), pollMs);
       logger.info(`[user:${userId}] IMAP polling every ${pollMs / 1000}s`);
     });
@@ -278,8 +359,9 @@ function _connect(s) {
     // backoff was ~1.5 hours of bad logins against the mail server; stop, and
     // say why in the log so the user reconfigures.
     if (err && err.source === 'authentication') {
+      if (imap !== s.imap) return;
       logger.error(`[user:${s.userId}] IMAP authentication failed — watcher stopped; check IMAP_USER / IMAP_PASS`, { error: err.message });
-      stop(s.userId);
+      stop(s.userId, { reason: STOP_REASONS.AUTH, error: err.message });
       return;
     }
     _scheduleReconnect(s, imap, 'error', err);
@@ -307,28 +389,54 @@ function start(userId, credentials, onInvoice, { loginEmail = '' } = {}) {
     logger.warn(`[user:${userId}] Watcher already running`);
     return;
   }
-  s.settings        = resolveImapSettings(credentials, loginEmail);
-  s.onInvoice       = onInvoice;
+  // A watcher waiting out a reconnect backoff has no connection, so it looks
+  // stopped and a Start lands here. Its pending retry used to fire anyway and
+  // connect a second time beside the connection made below; the second openBox
+  // overwrote the first poll interval, so after stop() one socket and one
+  // interval stayed alive. Starting now replaces the retry instead.
+  _clearTimers(s);
+  s.settings         = resolveImapSettings(credentials, loginEmail);
+  s.onInvoice        = onInvoice;
   s.reconnectAttempt = 0;
+  s.stopReason       = null;
+  s.stoppedAt        = null;
+  s.lastError        = null;
   _connect(s);
 }
 
-function stop(userId) {
+// `reason` is one of STOP_REASONS. Callers that pass none (the Stop button,
+// logout in routes/auth.js, the admin routes) are a person choosing to stop
+// it, so the saved setting is cleared and a restart leaves it off. Everything
+// automatic passes its own reason and leaves the setting alone.
+function stop(userId, { reason = STOP_REASONS.MANUAL, error = null } = {}) {
+  if (reason === STOP_REASONS.MANUAL) {
+    // Before the registry lookup: after a restart a mailbox can be switched on
+    // in the database with no watcher in memory yet (resume skipped it), and
+    // stopping it must still stick.
+    try { settingsStore.forUser(userId).setWatcherEnabled(false); } catch (err) {
+      logger.warn(`[user:${userId}] Could not record that the watcher was stopped`, { error: err.message });
+    }
+  }
   const s = _registry.get(userId);
   if (!s) return;
+  const wasActive = !!(s.imap || s.reconnectTimer);
   s.intentionalStop  = true;
   s.reconnectAttempt = 0;
   // A retry scheduled before the stop would otherwise reconnect a watcher the
   // user just switched off.
-  if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
-  if (s.debounceTimer) { clearTimeout(s.debounceTimer); s.debounceTimer = null; }
-  if (s.pollId)        { clearInterval(s.pollId);       s.pollId        = null; }
+  _clearTimers(s);
   if (s.imap) {
-    try { s.imap.end(); } catch (_) {}
+    // Torn down, not just ended: a late 'error' or 'end' from the closing
+    // socket must not reach state a later start() is about to reuse.
+    _teardown(s.imap);
     s.imap         = null;
     s.mailboxReady = false;
     s.onInvoice    = null;
   }
+  // A stop of a watcher that had already stopped keeps the reason it stopped
+  // for, so the shutdown sweep does not paper over "authentication failed";
+  // a person pressing Stop is always recorded.
+  if (wasActive || reason === STOP_REASONS.MANUAL) _markStopped(s, reason, error);
 }
 
 function rescan(userId) {
@@ -348,15 +456,52 @@ function isRunning(userId) {
   return !!_registry.get(userId)?.imap;
 }
 
+// What the watcher is doing and, when it is not watching, why. `running` in
+// the status response is isRunning(), which is false during a backoff and
+// after every kind of stop alike; this tells them apart.
+//   state:       'watching' | 'connecting' | 'reconnecting' | 'stopped'
+//   reason:      a STOP_REASONS value while stopped, null if never started
+//   error:       the error behind a failed login, exhausted retries or a backoff
+//   stoppedAt:   when it stopped
+//   nextRetryAt: when the next connection attempt is due, during a backoff
+//   attempt:     which retry that will be, during a backoff
+function getStatus(userId) {
+  const s = _registry.get(userId);
+  let state = 'stopped';
+  if (s?.imap) state = s.mailboxReady ? 'watching' : 'connecting';
+  else if (s?.reconnectTimer) state = 'reconnecting';
+  const stopped = state === 'stopped';
+  return {
+    state,
+    reason:      stopped ? s?.stopReason || null : null,
+    error:       (stopped || state === 'reconnecting') ? s?.lastError || null : null,
+    stoppedAt:   stopped ? s?.stoppedAt || null : null,
+    nextRetryAt: state === 'reconnecting' ? s.nextRetryAt : null,
+    attempt:     state === 'reconnecting' ? s.reconnectAttempt : 0,
+  };
+}
+
 // Stops every live watcher. Needed in two places that both lacked it: server
 // shutdown left IMAP sockets and their reconnect timers open on SIGTERM, and
 // tests that started watchers left them running into later test files.
+//
+// A shutdown is not anyone switching their mailbox off, so the saved setting
+// is left on and the next boot resumes it.
 function stopAll() {
   const ids = [..._registry.keys()];
   for (const userId of ids) {
-    try { stop(userId); } catch (err) { logger.warn('Failed to stop watcher', { userId, error: err.message }); }
+    try { stop(userId, { reason: STOP_REASONS.SHUTDOWN }); } catch (err) { logger.warn('Failed to stop watcher', { userId, error: err.message }); }
   }
   return ids.length;
 }
 
-module.exports = { start, stop, stopAll, rescan, isRunning };
+// Starts again, at boot, every watcher its owner left on. The work is done by
+// resumeWatchers in routes/process.js, which builds a watcher exactly as the
+// Start button does (invoice handler and worker included); main/index.js
+// reaches for it here, with the rest of the watcher lifecycle. Required at
+// call time because that module requires this one.
+function resumeWatchers(options) {
+  return require('../routes/process').resumeWatchers(options);
+}
+
+module.exports = { start, stop, stopAll, rescan, isRunning, getStatus, resumeWatchers, imapTlsOptions, STOP_REASONS };

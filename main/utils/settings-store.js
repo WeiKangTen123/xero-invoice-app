@@ -33,7 +33,30 @@ function forUser(userId) {
     return read();
   }
 
-  return { get, set };
+  // Whether this account wants its mailbox watched. Kept apart from get() and
+  // set(): it is not a preference edited on the settings page but the
+  // Start/Stop state, written by routes/process.js and email/watcher-registry.js
+  // and read at boot so a restart puts every mailbox back the way its owner
+  // left it.
+  function watcherEnabled() {
+    const row = db.prepare('SELECT watcher_enabled FROM user_settings WHERE user_id = ?').get(userId);
+    return !!(row && row.watcher_enabled);
+  }
+
+  function setWatcherEnabled(on) {
+    // Clearing never inserts: a stop for an account being deleted must not
+    // recreate its row.
+    if (on) db.prepare('INSERT OR IGNORE INTO user_settings (user_id, auto_process) VALUES (?, 0)').run(userId);
+    db.prepare('UPDATE user_settings SET watcher_enabled = ? WHERE user_id = ?').run(on ? 1 : 0, userId);
+  }
+
+  return { get, set, watcherEnabled, setWatcherEnabled };
 }
 
-module.exports = { forUser };
+// Every account whose owner left the mailbox watcher switched on, oldest row
+// first so a resume at boot goes in a stable order.
+function watcherEnabledUserIds() {
+  return db.prepare('SELECT user_id FROM user_settings WHERE watcher_enabled = 1 ORDER BY rowid').all().map(r => r.user_id);
+}
+
+module.exports = { forUser, watcherEnabledUserIds };

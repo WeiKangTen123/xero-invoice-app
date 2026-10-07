@@ -450,6 +450,17 @@ function forUser(userId) {
     return db.prepare('SELECT COUNT(*) AS n FROM invoices WHERE user_id = ?').get(userId).n;
   }
 
+  // { status: n } for every status this account has at least one invoice in.
+  // The dashboard's status poll (every few seconds) needs only these numbers;
+  // it used to load and hydrate every invoice to count them.
+  function countByStatus() {
+    const out = {};
+    for (const r of db.prepare('SELECT status, COUNT(*) AS n FROM invoices WHERE user_id = ? GROUP BY status').all(userId)) {
+      out[r.status] = r.n;
+    }
+    return out;
+  }
+
   // Newest first, matching getAll's order.
   function getRecent(limit = 50) {
     const rows = db.prepare('SELECT * FROM invoices WHERE user_id = ? ORDER BY rowid DESC LIMIT ?')
@@ -485,7 +496,7 @@ function forUser(userId) {
   }
 
   return { getAll, getById, add, update, addPostingNote, addReport, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
-           releaseInterrupted, count, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash };
+           releaseInterrupted, count, countByStatus, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash };
 }
 
 module.exports = { forUser, FIELD_TO_COLUMN, normalizeInvoiceNumber };

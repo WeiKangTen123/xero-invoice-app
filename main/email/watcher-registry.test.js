@@ -33,6 +33,9 @@ jest.mock('mailparser', () => ({ simpleParser: jest.fn() }));
 jest.mock('../queue/email-queue', () => ({ enqueue: jest.fn(() => ({ id: 'job1' })) }));
 jest.mock('../queue/email-worker', () => ({ kickWorker: jest.fn(), startWorker: jest.fn() }));
 jest.mock('../utils/process-state', () => ({ forUser: () => ({ notifyScan: jest.fn() }) }));
+// stop() records a manual stop in the database; here only the call matters.
+const mockSetWatcherEnabled = jest.fn();
+jest.mock('../utils/settings-store', () => ({ forUser: () => ({ setWatcherEnabled: mockSetWatcherEnabled }) }));
 
 const Imap = require('imap');
 Imap.mockImplementation(opts => new FakeImap(opts));
@@ -242,6 +245,236 @@ describe('watcher-registry — failures that must not leave a zombie', () => {
     jest.advanceTimersByTime(5 * 60 * 1000);
     expect(Imap.mock.results.length).toBe(before);              // no reconnect attempted
     expect(watcherRegistry.isRunning('badpw-1')).toBe(false);
+  });
+});
+
+// The app password is sent at login, so an unchecked certificate hands it to
+// anyone who can sit on the path. Loopback is the only exception: Proton
+// Bridge serves a self-signed certificate on 127.0.0.1.
+describe('watcher-registry — IMAP certificates are verified', () => {
+  afterEach(() => watcherRegistry.stopAll());
+  const tlsFor = host => {
+    watcherRegistry.start('tls-1', { ...CREDS, IMAP_HOST: host }, jest.fn());
+    const opts = lastImapInstance().opts;
+    watcherRegistry.stopAll();
+    return opts;
+  };
+
+  test('a remote server is verified, and is named for SNI', () => {
+    const opts = tlsFor('imap.test.com');
+    expect(opts.tls).toBe(true);
+    expect(opts.tlsOptions).toEqual({ rejectUnauthorized: true, servername: 'imap.test.com' });
+  });
+
+  test('the provider defaults (Gmail and the rest) are verified too', () => {
+    watcherRegistry.start('tls-2', { IMAP_PASS: 'pw' }, jest.fn(), { loginEmail: 'person@gmail.com' });
+    expect(lastImapInstance().opts.tlsOptions).toEqual({ rejectUnauthorized: true, servername: 'imap.gmail.com' });
+  });
+
+  test('only loopback skips the check', () => {
+    for (const host of ['127.0.0.1', '::1', 'localhost', 'LOCALHOST', '127.0.0.2']) {
+      expect(tlsFor(host).tlsOptions.rejectUnauthorized).toBe(false);
+    }
+    for (const host of ['127.0.0.1.evil.example', 'localhost.evil.example', '10.0.0.5', '192.168.1.20', 'mail.example.com']) {
+      expect(tlsFor(host).tlsOptions.rejectUnauthorized).toBe(true);
+    }
+  });
+
+  test('Proton (bridge on 127.0.0.1) still connects, and no IP is sent as an SNI name', () => {
+    watcherRegistry.start('tls-3', { IMAP_PASS: 'pw' }, jest.fn(), { loginEmail: 'me@proton.me' });
+    expect(lastImapInstance().opts.tlsOptions).toEqual({ rejectUnauthorized: false });
+    expect(watcherRegistry.imapTlsOptions('10.0.0.5')).toEqual({ rejectUnauthorized: true });
+  });
+});
+
+// The raw message used to be decoded as UTF-8 before parsing, which turned
+// every Latin-1 byte into U+FFFD and rewrote a binary-encoded PDF's high bytes.
+describe('watcher-registry — the raw message reaches the parser byte for byte', () => {
+  const { simpleParser } = require('mailparser');
+  const emailQueue = require('../queue/email-queue');
+  afterEach(() => { watcherRegistry.stopAll(); simpleParser.mockReset(); });
+
+  // Every byte value, CR and LF included, as a PDF might carry them.
+  const PDF = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.from(Array.from({ length: 256 }, (_, i) => i)), Buffer.from('\n%%EOF\n')]);
+  const RAW = Buffer.concat([
+    Buffer.from([
+      'From: billing@vendor.test', 'To: me@test.example', 'Subject: Facture 42', 'MIME-Version: 1.0',
+      'Content-Type: multipart/mixed; boundary="b1"', '', '--b1',
+      'Content-Type: text/plain; charset=iso-8859-1', 'Content-Transfer-Encoding: 8bit', '',
+      'Café crème, montant dû: 12,50', '--b1',
+      'Content-Type: application/pdf; name="bill.pdf"', 'Content-Disposition: attachment; filename="bill.pdf"',
+      'Content-Transfer-Encoding: binary', '', '',
+    ].join('\r\n'), 'latin1'),
+    PDF,
+    Buffer.from('\r\n--b1--\r\n', 'latin1'),
+  ]);
+
+  // Delivers RAW through the fake fetch in chunks cut at awkward places.
+  async function deliver(userId) {
+    watcherRegistry.start(userId, CREDS, () => {});
+    const fake = lastImapInstance();
+    fake.unseen = [7];
+    fake.emit('ready');
+    fake.resolveOpenBox();
+    const msg = new EventEmitter(); const body = new EventEmitter();
+    fake.lastFetch.emit('message', msg);
+    msg.emit('attributes', { uid: 7 });
+    msg.emit('body', body);
+    for (const cut of [[0, 300], [300, 301], [301, 420], [420, RAW.length]]) body.emit('data', RAW.subarray(...cut));
+    body.emit('end');
+    fake.lastFetch.emit('end');
+    // The real parser's first run loads its charset tables: wait for the
+    // enqueue rather than guess a delay.
+    for (let i = 0; i < 200 && !emailQueue.enqueue.mock.calls.length; i++) await new Promise(r => setTimeout(r, 10));
+  }
+
+  test('the parser is handed the Buffer itself, unchanged', async () => {
+    simpleParser.mockResolvedValue({ subject: 'x', attachments: [] });
+    emailQueue.enqueue.mockClear();
+    await deliver('raw-1');
+    const [input] = simpleParser.mock.calls[0];
+    expect(Buffer.isBuffer(input)).toBe(true);
+    expect(input.equals(RAW)).toBe(true);
+  });
+
+  test('with the real parser, a Latin-1 body and a binary PDF both survive', async () => {
+    const real = jest.requireActual('mailparser').simpleParser;
+    simpleParser.mockImplementation(input => real(input));
+    emailQueue.enqueue.mockClear();
+    await deliver('raw-2');
+    const parsed = emailQueue.enqueue.mock.calls[0][1];
+    expect(parsed.text).toContain('Café crème, montant dû: 12,50');
+    expect(parsed.attachments).toHaveLength(1);
+    expect(parsed.attachments[0].content.equals(PDF)).toBe(true);
+
+    // The control: the old UTF-8 decode loses both, so this test can tell.
+    const old = await real(RAW.toString('utf8'));
+    expect(old.text).not.toContain('Café');
+    expect(old.attachments[0].content.equals(PDF)).toBe(false);
+  });
+});
+
+// A Start pressed during a reconnect backoff (when isRunning() is false) used
+// to connect while the pending retry connected again, and stop() afterwards
+// left one IMAP socket and one poll interval alive.
+describe('watcher-registry — start during a backoff', () => {
+  // Only timeouts and intervals are faked, so getTimerCount() counts the
+  // watcher's retry and poll timers and not the logger's stream ticks.
+  beforeEach(() => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    Imap.mockClear(); Imap.mockImplementation(o => new FakeImap(o));
+  });
+  afterEach(() => { watcherRegistry.stopAll(); jest.clearAllTimers(); jest.useRealTimers(); });
+
+  test('leaves exactly one connection, and stop() leaves nothing behind', () => {
+    watcherRegistry.start('backoff-1', CREDS, jest.fn());
+    const first = lastImapInstance();
+    first.emit('ready'); first.resolveOpenBox();
+    first.emit('end');                                    // dropped: a retry is pending
+    expect(watcherRegistry.isRunning('backoff-1')).toBe(false);
+    expect(watcherRegistry.getStatus('backoff-1').state).toBe('reconnecting');
+
+    watcherRegistry.start('backoff-1', CREDS, jest.fn()); // the user presses Start
+    expect(Imap).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(10 * 60 * 1000);             // past any backoff
+    expect(Imap).toHaveBeenCalledTimes(2);                // the old retry did not fire
+
+    const live = lastImapInstance();
+    live.emit('ready'); live.resolveOpenBox();
+    expect(jest.getTimerCount()).toBe(1);                 // one poll interval
+
+    watcherRegistry.stop('backoff-1');
+    expect(live.ended).toBe(true);
+    expect(jest.getTimerCount()).toBe(0);                 // no interval, no retry
+  });
+
+  test('a superseded connection that opens its inbox late does not start a second poll', () => {
+    watcherRegistry.start('backoff-2', CREDS, jest.fn());
+    const old = lastImapInstance();
+    old.emit('ready');                                    // openBox outstanding
+    watcherRegistry.stop('backoff-2');
+    watcherRegistry.start('backoff-2', CREDS, jest.fn());
+    const live = lastImapInstance();
+    live.emit('ready'); live.resolveOpenBox();
+    old.resolveOpenBox();                                 // the stale callback arrives
+    expect(jest.getTimerCount()).toBe(1);
+    watcherRegistry.stop('backoff-2');
+    expect(jest.getTimerCount()).toBe(0);
+  });
+});
+
+// Why a watcher stopped, for the status endpoint, and which stops clear the
+// saved "keep watching" setting: only a person's.
+describe('watcher-registry — stop reasons', () => {
+  beforeEach(() => { jest.useFakeTimers(); mockSetWatcherEnabled.mockClear(); Imap.mockImplementation(o => new FakeImap(o)); });
+  afterEach(() => { watcherRegistry.stopAll(); jest.clearAllTimers(); jest.useRealTimers(); });
+
+  test('never started: stopped, with no reason', () => {
+    expect(watcherRegistry.getStatus('never-1')).toEqual({
+      state: 'stopped', reason: null, error: null, stoppedAt: null, nextRetryAt: null, attempt: 0,
+    });
+  });
+
+  test('connecting, then watching', () => {
+    watcherRegistry.start('why-0', CREDS, jest.fn());
+    expect(watcherRegistry.getStatus('why-0').state).toBe('connecting');
+    lastImapInstance().emit('ready'); lastImapInstance().resolveOpenBox();
+    expect(watcherRegistry.getStatus('why-0')).toMatchObject({ state: 'watching', reason: null, error: null });
+  });
+
+  test('a manual stop says so and clears the saved setting', () => {
+    watcherRegistry.start('why-1', CREDS, jest.fn());
+    watcherRegistry.stop('why-1');
+    expect(watcherRegistry.getStatus('why-1')).toMatchObject({ state: 'stopped', reason: 'manual', error: null });
+    expect(watcherRegistry.getStatus('why-1').stoppedAt).toEqual(expect.any(String));
+    expect(mockSetWatcherEnabled).toHaveBeenCalledWith(false);
+  });
+
+  test('a refused password: auth-failed, with the server\'s message, setting kept', () => {
+    watcherRegistry.start('why-2', CREDS, jest.fn());
+    lastImapInstance().emit('error', Object.assign(new Error('Invalid credentials (Failure)'), { source: 'authentication' }));
+    expect(watcherRegistry.getStatus('why-2')).toMatchObject({ state: 'stopped', reason: 'auth-failed', error: 'Invalid credentials (Failure)' });
+    expect(mockSetWatcherEnabled).not.toHaveBeenCalled();
+  });
+
+  test('during a backoff: reconnecting, with the next retry time and the error', () => {
+    watcherRegistry.start('why-3', CREDS, jest.fn());
+    const before = Date.now();
+    lastImapInstance().emit('error', new Error('connect ETIMEDOUT'));
+    const st = watcherRegistry.getStatus('why-3');
+    expect(st).toMatchObject({ state: 'reconnecting', reason: null, error: 'connect ETIMEDOUT', attempt: 1 });
+    expect(Date.parse(st.nextRetryAt) - before).toBe(10000);
+  });
+
+  test('every retry used up: max-retries, setting kept', () => {
+    watcherRegistry.start('why-4', CREDS, jest.fn());
+    for (let i = 0; i < 21; i++) {
+      lastImapInstance().emit('end');
+      jest.runOnlyPendingTimers();
+    }
+    expect(watcherRegistry.getStatus('why-4')).toMatchObject({ state: 'stopped', reason: 'max-retries', error: 'Connection ended unexpectedly' });
+    expect(watcherRegistry.isRunning('why-4')).toBe(false);
+    expect(mockSetWatcherEnabled).not.toHaveBeenCalled();
+  });
+
+  test('idle sweep and shutdown keep the setting; shutdown does not overwrite an earlier reason', () => {
+    watcherRegistry.start('why-5', CREDS, jest.fn());
+    watcherRegistry.stop('why-5', { reason: watcherRegistry.STOP_REASONS.IDLE });
+    expect(watcherRegistry.getStatus('why-5')).toMatchObject({ state: 'stopped', reason: 'idle' });
+
+    watcherRegistry.start('why-6', CREDS, jest.fn());
+    lastImapInstance().emit('error', Object.assign(new Error('bad pw'), { source: 'authentication' }));
+    watcherRegistry.stopAll();
+    expect(watcherRegistry.getStatus('why-6').reason).toBe('auth-failed');
+    expect(watcherRegistry.getStatus('why-5').reason).toBe('idle');
+    expect(mockSetWatcherEnabled).not.toHaveBeenCalled();
+  });
+
+  test('a start clears the last reason', () => {
+    watcherRegistry.start('why-7', CREDS, jest.fn());
+    watcherRegistry.stop('why-7');
+    watcherRegistry.start('why-7', CREDS, jest.fn());
+    expect(watcherRegistry.getStatus('why-7')).toMatchObject({ state: 'connecting', reason: null, stoppedAt: null });
   });
 });
 

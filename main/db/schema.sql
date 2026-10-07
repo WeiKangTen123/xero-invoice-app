@@ -76,7 +76,13 @@ CREATE TABLE IF NOT EXISTS user_settings (
   -- connected. Every connected company used to get its own copy of every bill.
   -- NULL = not chosen; with one company connected that one is used, with
   -- several nothing is sent until a person picks.
-  default_tenant_id TEXT
+  default_tenant_id TEXT,
+  -- 1 while the owner wants the mailbox watched: set by Start, cleared by Stop,
+  -- logout or an admin. Automatic stops (idle sweep, a refused password,
+  -- retries exhausted, shutdown) leave it, and boot resumes every account
+  -- that has it (routes/process.js resumeWatchers). The watcher used to stay
+  -- off after every restart until each user pressed Start again.
+  watcher_enabled INTEGER NOT NULL DEFAULT 0
 );
 
 -- 1:many — invoice records (was data/users/<id>/invoices.json array)
