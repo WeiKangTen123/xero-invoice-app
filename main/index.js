@@ -40,8 +40,12 @@ console.log('PORT:', process.env.PORT);
 // this repository, so anyone could forge a session; a missing or malformed
 // ENCRYPTION_KEY was found only when the first credential was read.
 //
-// Missing — or, for ENCRYPTION_KEY, unusable by crypto.js under its own rule,
-// so nothing encrypted could be read either way — stops the boot. A secret
+// Missing — or, for the encryption keys, unusable by crypto.js under its own
+// rule, so nothing encrypted could be read either way — stops the boot. The
+// whole environment goes to keyProblem() because the keys are three variables
+// once a rotation has started (ENCRYPTION_KEYS and ENCRYPTION_KEY_ID beside
+// ENCRYPTION_KEY), and a keyring naming a primary key it does not hold must
+// stop the boot as surely as a missing key. A secret
 // that is present but weak is a loud warning and a Slack alert, never a
 // refusal: it works, and refusing to start over it would turn a hardening gap
 // into an outage. The test suite runs without a .env, so under NODE_ENV=test
@@ -50,7 +54,7 @@ function checkSecrets(env = process.env) {
   const { jwtSecretProblem } = require('./middleware/auth-middleware');
   const { keyProblem }       = require('./utils/crypto');
   const jwt      = jwtSecretProblem(env.JWT_SECRET);
-  const key      = keyProblem(env.ENCRYPTION_KEY);
+  const key      = keyProblem(env);
   const refusals = [jwt.fatal, key].filter(Boolean);
   return { refusals: env.NODE_ENV === 'test' ? [] : refusals, warnings: [jwt.warning].filter(Boolean) };
 }

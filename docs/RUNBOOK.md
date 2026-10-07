@@ -10,11 +10,13 @@ on the `xero-automation` VM, run by pm2 as `xero-invoice-app`.
 |---|---|---|
 | `app.db` | `main/data/app.db` (backups in `main/data/backups/`) | users, credentials (encrypted), invoices, connected orgs |
 | per-user files | `main/data/users/<id>/` | receipts, invoice PDFs, mail and job queues |
-| `.env` | `main/.env` | `ENCRYPTION_KEY` — without it every stored credential in the database is unreadable; `JWT_SECRET` |
+| `.env` | `main/.env` | the encryption keys (`ENCRYPTION_KEY`, and `ENCRYPTION_KEYS`/`ENCRYPTION_KEY_ID` once a key has been rotated) — without them every stored credential in the database is unreadable; `JWT_SECRET` |
 
-Keep `ENCRYPTION_KEY` and `JWT_SECRET` in a password manager as well. Losing
-`ENCRYPTION_KEY` means every user reconnects Xero and re-enters their mailbox
-password; losing `JWT_SECRET` only logs everyone out.
+Keep the encryption keys and `JWT_SECRET` in a password manager as well,
+including a key retired by a rotation for as long as any backup taken before
+that rotation is kept (see *Rotate the encryption key*). Losing the key a
+backup was written with means every user reconnects Xero and re-enters their
+mailbox password; losing `JWT_SECRET` only logs everyone out.
 
 ## Backups
 
@@ -46,7 +48,9 @@ curl -sk https://34-45-253-162.sslip.io/dashboard/health
 ```
 
 The database is migrated on boot (`main/db/migrate.js`), so an older backup
-opens under newer code.
+opens under newer code. A backup from before an encryption key rotation needs
+the key it was written with back in `.env` before its credentials can be
+read — see *Restoring a backup from before a rotation* below.
 
 ## Rollback a deploy
 
@@ -192,6 +196,113 @@ as usual, and `npm run deploy -- --check` reports the drift until then.
 
 - Rotate `JWT_SECRET`: change it in `.env`, `pm2 restart`; everyone logs in
   again.
-- Rotate `ENCRYPTION_KEY`: there is no re-encryption path yet — changing it
-  makes every stored credential unreadable. Do not rotate it without first
-  planning a re-encrypt step; ask before doing this.
+- Rotate the encryption key: never by changing `ENCRYPTION_KEY` in place —
+  that makes every stored credential unreadable. Follow the procedure below.
+
+### Rotate the encryption key
+
+Stored secrets (Xero client secrets and refresh tokens, IMAP passwords, Gemini
+keys) are AES-256-GCM encrypted in `app.db`. Three variables in `main/.env`
+hold the keys:
+
+| Variable | Format | What it does |
+|---|---|---|
+| `ENCRYPTION_KEY` | 64 hex characters | The original key. Reads every value written before the first rotation (stored as `enc:v1:…`, which names no key). With nothing else set, new values are written with it too, exactly as before rotation existed — a server with only this set needs nothing done. |
+| `ENCRYPTION_KEYS` | `id:key,id:key` — each key exactly 64 hex characters, each id 1–32 letters, digits, `.`, `_` or `-` (use the date, e.g. `2026-10`) | The keys added by rotations. Optional until the first one. |
+| `ENCRYPTION_KEY_ID` | one id from `ENCRYPTION_KEYS` | The primary key: new values are written with it, as `enc:v2:<id>:…`. Required whenever `ENCRYPTION_KEYS` is set. |
+
+The server refuses to start (`STARTUP REFUSED` in
+`pm2 logs xero-invoice-app --err` and on Slack) if any configured key is
+malformed, if `ENCRYPTION_KEYS` is set without `ENCRYPTION_KEY_ID` or the
+other way round, or if the primary id is not in `ENCRYPTION_KEYS`. The message
+names the variable and the id, never the key. **Never reuse an id for a
+different key**: the id is written into every value encrypted with it.
+
+Nothing re-encrypts at boot. Configuring a new key only changes what new
+writes use; moving the existing values is the script in step 6, run by hand.
+
+Code from before key rotation existed cannot read `enc:v2` values — it would
+pass them on as if they were the secret itself. From step 3 on, new values
+are written that way, so after it do not roll a deploy back past the commit
+that added rotation (`main/scripts/rotate-encryption-key.js` exists in every
+commit that has it). Before step 3, rollbacks are unaffected.
+
+On the box, as `weika`, in the app directory:
+
+1. **Generate the new key** and put it in the password manager, with its id,
+   before it goes anywhere else:
+   `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+2. **Add it to `main/.env`** and make it the primary. Leave `ENCRYPTION_KEY`
+   and any keys already in `ENCRYPTION_KEYS` exactly as they are — they are
+   still needed to read what was written with them. First rotation:
+
+   ```
+   ENCRYPTION_KEY=<the current key, unchanged>
+   ENCRYPTION_KEYS=2026-10:<new key>
+   ENCRYPTION_KEY_ID=2026-10
+   ```
+
+   A later rotation adds to the list:
+
+   ```
+   ENCRYPTION_KEYS=2026-10:<previous key>,2027-04:<new key>
+   ENCRYPTION_KEY_ID=2027-04
+   ```
+3. **Restart** — `pm2 restart xero-invoice-app` — and check
+   `/dashboard/health` is healthy. This comes before step 6 because the
+   running server must hold the new key before anything is written with it:
+   a server still on the old configuration cannot read what the script
+   writes. If the boot is refused, fix what the message names and restart.
+4. **Take a backup**: `node main/db/backup.js`, then `npm run backup:pull`
+   from your machine. It is the way back if the next steps go wrong; like
+   every backup from before the rotation, it needs the old key.
+5. **Dry run**: `node main/scripts/rotate-encryption-key.js --dry-run`. It
+   decrypts every encrypted value, re-encrypts it in memory with the primary
+   key and reads it back, and prints counts per table and column. It writes
+   nothing. If it refuses, it lists every value it could not decrypt (table,
+   column and row id — never a secret); find the missing key before going on.
+6. **Rotate**: `node main/scripts/rotate-encryption-key.js`. The same checks,
+   then every value not already on the primary key is re-encrypted with it in
+   one transaction, and read back from the database and decrypted before it
+   commits. Any failure rolls the whole run back: the database is either fully
+   on the new key or exactly as it was. It is safe to run again; values
+   already on the primary key are left alone. Plaintext values (saved before
+   encryption existed) are counted and left as they are.
+7. **Check**: run the dry run again — it should end with `Every encrypted
+   value is on "<id>"` — and use the app as a user whose Xero is connected
+   (or run `node main/scripts/smoke-xero.js`, which only reads from Xero).
+8. **Verify a backup taken after the rotation, without the old key.** Keep
+   the old key in `.env` until this passes:
+
+   ```bash
+   node main/db/backup.js                               # prints the backup's path
+   cp main/data/backups/app-<timestamp>.db /tmp/verify.db
+   read -rsp 'new key: ' K; echo                        # keeps the key out of shell history
+   DB_PATH=/tmp/verify.db ENCRYPTION_KEY= ENCRYPTION_KEYS="2026-10:$K" ENCRYPTION_KEY_ID=2026-10 \
+     node main/scripts/rotate-encryption-key.js --dry-run
+   unset K; rm -f /tmp/verify.db*
+   ```
+
+   Variables given on the command line win over `.env` (the empty
+   `ENCRYPTION_KEY=` withholds the old key), and working on a copy leaves the
+   backup file itself untouched. It must end with `Every encrypted value is
+   on "2026-10"` and exit 0; a value that still needs the old key makes it
+   refuse, naming the row. Then `npm run backup:pull` from your machine, so a
+   verified post-rotation copy exists off the box too.
+9. **Remove the old key** from `main/.env` — the `ENCRYPTION_KEY` line after
+   the first rotation, the old `id:key` entry in `ENCRYPTION_KEYS` after a
+   later one — then `pm2 restart xero-invoice-app` and check
+   `/dashboard/health`. Keep the old key in the password manager.
+
+#### Restoring a backup from before a rotation
+
+Backups taken before a rotation hold values written with the old key: the
+daily backups on the box for two weeks, and pulled bundles for as long as
+they are kept (a pulled bundle carries the `.env` of its day, so its own
+keys travel with it). To restore one after the old key has been removed, put
+the old key back first — as `ENCRYPTION_KEY` for `enc:v1` values, or under
+its original id in `ENCRYPTION_KEYS` — beside the current keys, then restore
+as above and restart. A value whose key is missing fails with a message
+naming that key (`encrypted with key "2026-10", which is not in
+ENCRYPTION_KEYS`, or `enc:v1, written under ENCRYPTION_KEY, which is not
+set`). To bring the restored data onto the current key, run steps 4–9 again.
