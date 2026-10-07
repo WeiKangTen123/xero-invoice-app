@@ -157,3 +157,80 @@ describe('queue files are written whole and never lost silently', () => {
     error.mockRestore();
   });
 });
+
+// The status poll runs every few seconds per open dashboard and used to read
+// and parse every job file each time. The summary is now kept in step with
+// every write; these check it says what the files on disk say.
+describe('the status summary', () => {
+  let n = 0;
+  const user = () => `${USER}-stats-${n++}`;
+  const pdf  = { filename: 'bill.pdf', contentType: 'application/pdf', content: Buffer.from('%PDF-1.4 x') };
+  // What a restarted process would say: a fresh module, built from the files.
+  const fromDisk = u => { let m; jest.isolateModules(() => { m = require('./email-queue'); }); return m.getStats(u); };
+  const byId = s => ({ ...s, jobs: [...s.jobs].sort((a, b) => a.id.localeCompare(b.id)) });
+
+  test('follows every write, without reading a file, and agrees with the files', () => {
+    const u = user();
+    expect(q.getStats(u)).toEqual({ pending: 0, processing: 0, dead: 0, jobs: [] });
+
+    const a = q.enqueue(u, parsed({ subject: 'A', attachments: [pdf] }));
+    const b = q.enqueue(u, parsed({ subject: 'B' }));
+    const c = q.enqueue(u, parsed({ subject: 'C' }));
+    const d = q.enqueue(u, parsed({ subject: 'D' }));
+    q.markProcessing(u, a.id);
+    q.markProcessing(u, b.id); q.markFailed(u, b.id, 'rate limited');
+    q.markProcessing(u, c.id); q.markDone(u, c.id);
+    for (let i = 0; i < q.MAX_ATTEMPTS; i++) { q.markProcessing(u, d.id); q.markFailed(u, d.id, 'boom'); }
+
+    const read = jest.spyOn(fs, 'readFileSync');
+    const readdir = jest.spyOn(fs, 'readdirSync');
+    let stats;
+    try {
+      stats = q.getStats(u);
+      expect(read).not.toHaveBeenCalled();
+      expect(readdir).not.toHaveBeenCalled();
+    } finally { read.mockRestore(); readdir.mockRestore(); }
+
+    expect(stats).toMatchObject({ pending: 1, processing: 1, dead: 1 });
+    const summary = Object.fromEntries(stats.jobs.map(j => [j.id, [j.status, j.attempts, j.lastError, j.subject]]));
+    expect(summary).toEqual({
+      [a.id]: ['processing', 1, null, 'A'],
+      [b.id]: ['pending', 1, 'rate limited', 'B'],
+      [d.id]: ['dead', q.MAX_ATTEMPTS, 'boom', 'D'],
+    });
+    expect(stats.jobs.find(j => j.id === a.id).pdfs).toEqual(['bill.pdf']);
+    expect(byId(fromDisk(u))).toEqual(byId(stats));
+  });
+
+  test('a cleared queue is empty, and a job queued after it is counted', () => {
+    const u = user();
+    q.enqueue(u, parsed());
+    expect(q.getStats(u).pending).toBe(1);
+    q.clearAll(u);
+    expect(q.getStats(u)).toEqual({ pending: 0, processing: 0, dead: 0, jobs: [] });
+    const j = q.enqueue(u, parsed());
+    expect(q.getStats(u).jobs.map(x => x.id)).toEqual([j.id]);
+    expect(fromDisk(u).jobs.map(x => x.id)).toEqual([j.id]);
+  });
+
+  test('a job file found damaged and set aside leaves the count', () => {
+    const u = user();
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      const j = q.enqueue(u, parsed());
+      expect(q.getStats(u).pending).toBe(1);
+      fs.writeFileSync(path.join(dirOf(u), `${j.id}.que`), '{ "id": "cut sh');
+      expect(q.markProcessing(u, j.id)).toBeNull();
+      expect(q.getStats(u)).toMatchObject({ pending: 0, jobs: [] });
+    } finally { error.mockRestore(); }
+  });
+
+  test('what a caller does to the result does not change the summary', () => {
+    const u = user();
+    q.enqueue(u, parsed({ attachments: [pdf] }));
+    const first = q.getStats(u);
+    first.jobs[0].status = 'dead';
+    first.jobs[0].pdfs.push('extra.pdf');
+    expect(q.getStats(u).jobs[0]).toMatchObject({ status: 'pending', pdfs: ['bill.pdf'] });
+  });
+});

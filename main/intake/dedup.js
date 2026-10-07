@@ -86,4 +86,34 @@ function findDuplicate({ store, profile = null, hash, contactName, vendorName, n
   return hit ? { match: hit, reason: 'the same vendor, date and amount', certain: false } : null;
 }
 
-module.exports = { hashBuffer, findDuplicate, sameAmount, vendorMatches };
+// An emailed document that already produced a record, checked BEFORE it is
+// read. findDuplicate needs what the model read (number, date, amount), so it
+// can only run after the model has been paid for; and a second reading that
+// differs by a digit is not recognised at all. A mailbox reconnect, or someone
+// marking old mail unread, delivers the same message again, and every
+// attachment on it went back through the model and could come out as a new
+// row. Two signals answer it without reading anything:
+//
+//   1. The same message: its Message-ID with the same attachment (by stored
+//      filename), or, for a mail read from its body, the same Message-ID on a
+//      row made from a body. Certain: it is the very email.
+//   2. The same file: the SHA-256 of the attachment, by the profile's hash
+//      rule. Catches the same PDF forwarded again under a new Message-ID.
+//
+// `filename` is the stored (sanitised) attachment name and is passed only for
+// a PDF; `source` narrows the message match to rows made one way ('email' for
+// a body). Returns { match, reason, certain } or null.
+function findEmailDuplicate({ store, profile = null, messageId = null, filename, source, hash = null }) {
+  if (messageId && typeof store.findByMessage === 'function' && (filename !== undefined || source !== undefined)) {
+    const byMessage = store.findByMessage(messageId, { filename, source });
+    if (byMessage) return { match: byMessage, reason: 'the same email (Message-ID) and attachment', certain: true };
+  }
+  const rules = profile?.dedup || { byHash: true };
+  if (rules.byHash && hash && typeof store.findByReceiptHash === 'function') {
+    const byHash = store.findByReceiptHash(hash);
+    if (byHash) return { match: byHash, reason: 'the same file', certain: true };
+  }
+  return null;
+}
+
+module.exports = { hashBuffer, findDuplicate, findEmailDuplicate, sameAmount, vendorMatches };

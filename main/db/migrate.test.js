@@ -140,4 +140,28 @@ describe('db/migrate', () => {
     expect(db.prepare('SELECT imap_pass FROM user_credentials WHERE user_id = ?').get(u.id).imap_pass).toMatch(/^enc:v1:/);
     expect(users.getUserConfig(u.id).IMAP_PASS).toBe('legacy-plain');
   });
+
+  // Columns other parts of the app depend on: the Message-ID a row was read
+  // from (indexed, as the worker looks it up before reading every email), the
+  // reader's confidence, and the reports' recurring account codes.
+  test('invoices.message_id (indexed) and confidence, and user_settings.recurring_accounts, exist and are added to an older database', () => {
+    const cols    = table => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+    const indexed = () => db.prepare('PRAGMA index_list(invoices)').all().find(i => i.name === 'idx_invoices_message_id');
+    const check = () => {
+      expect(cols('invoices')).toEqual(expect.arrayContaining(['message_id', 'confidence']));
+      expect(cols('user_settings')).toContain('recurring_accounts');
+      expect(db.prepare('PRAGMA index_info(idx_invoices_message_id)').all().map(c => c.name)).toEqual(['user_id', 'message_id']);
+      expect(indexed()).toBeTruthy();
+    };
+    run();
+    check();
+
+    db.exec('DROP INDEX idx_invoices_message_id');
+    db.exec('ALTER TABLE invoices DROP COLUMN message_id');
+    db.exec('ALTER TABLE invoices DROP COLUMN confidence');
+    db.exec('ALTER TABLE user_settings DROP COLUMN recurring_accounts');
+    expect(indexed()).toBeUndefined();
+    run();
+    check();
+  });
 });

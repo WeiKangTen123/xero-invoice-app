@@ -67,13 +67,37 @@ function _userDefaults(userId) {
   return { currency: d.currency, accountCode: d.accountCode.bill, accountCodes: d.accountCode };
 }
 
+// What an attachment is: the mark the queue put on it, or, for a caller that
+// hands over a raw mailparser result, the same rule the queue applies.
+const _kind = a => a.kind || intake.documentKind(a);
+
+// A document forwarded inside the email is read as coming from the inner
+// message's sender, under its subject (see email-queue _forwardedOrigin): the
+// outer sender is a colleague passing it on, and "Fwd: …" says nothing about
+// what was bought. The arrival date and the Message-ID stay the outer email's.
+function _readAs(email, origin) {
+  if (!origin) return email;
+  return {
+    ...email,
+    from:    origin.from?.text ? origin.from : email.from,
+    subject: origin.subject || email.subject,
+  };
+}
+
+// 'high' | 'medium' | 'low', or null when the reader did not say.
+function _confidence(value) {
+  const c = String(value || '').trim().toLowerCase();
+  return ['high', 'medium', 'low'].includes(c) ? c : null;
+}
+
 // ── PDF text extraction ───────────────────────────────────────────────────────
 
+// `email.skipBody` is set by the worker when the body must not be read: the
+// email came with PDFs (its body was never the document), or a row was
+// already made from it. Without it, an email whose PDFs had all been read
+// before would fall through to its body and be read as something else.
 async function extractText(email) {
-  const pdfAtts = (email.attachments || []).filter(a =>
-    a.contentType === 'application/pdf' ||
-    (a.filename || '').toLowerCase().endsWith('.pdf')
-  );
+  const pdfAtts = (email.attachments || []).filter(a => _kind(a) === 'pdf');
 
   if (pdfAtts.length > 0) {
     const results = [];
@@ -96,6 +120,7 @@ async function extractText(email) {
           pdfBuffer:   att.content,
           pdfFilename: safeName,
           noText:      !extractable,
+          origin:      att.forwarded || null,
         });
       } catch (err) {
         // pdf-parse failed entirely (corrupt/encrypted PDF) — still save the raw
@@ -107,12 +132,14 @@ async function extractText(email) {
           pdfBuffer:   att.content,
           pdfFilename: safeName,
           noText:      true,
+          origin:      att.forwarded || null,
         });
       }
     }
     if (results.length > 0) return results;
   }
 
+  if (email.skipBody) return [];
   const body = email.text || email.html?.replace(/<[^>]+>/g, ' ') || '';
   return [{ text: body, source: 'email', pdfBuffer: null, pdfFilename: null }];
 }
@@ -568,13 +595,96 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     accountCode:      defaults.accountCode,
     paymentReference: llm.paymentReference || '',
     projectName:      llm.projectName      || '',
+    // How sure the reader says it is, when it says.
+    confidence:       _confidence(llm.confidence),
   };
+}
+
+// ── Photographed bills ────────────────────────────────────────────────────────
+// A photo of a bill (a phone snap of a paper invoice, a screenshot) has no text
+// for the bill reader, so it goes to the vision reader the receipt upload
+// already uses (utils/receipt-parser.js). That reader is built for receipts:
+// it reads the merchant, the date, the figures and the lines, not an invoice
+// number, a due date or bank details. So a photographed bill is stored for a
+// person to finish against the photo and never reaches Xero on its own: its
+// source is one the bill profile never auto-posts (intake/profiles.js).
+const IMAGE_SOURCE = 'email-image';
+
+async function parseImageBill(att, email, userId, defaults = _userDefaults(userId)) {
+  const src  = _readAs(email, att.forwarded);
+  const mime = intake.imageMime(att) || 'image/jpeg';
+
+  // Required here rather than at the top: most mail carries no photo, and
+  // this file should not need the vision reader to load.
+  let read = null;
+  try {
+    read = await require('../utils/receipt-parser').parseReceiptImage(userId, att.content, mime);
+  } catch (err) {
+    // The reader promises not to throw; if it does, the photo is still kept
+    // as a bill for a person rather than lost with the job.
+    logger.warn('Photographed bill could not be read', { userId, file: att.filename, error: err.message });
+  }
+  const receipts = Array.isArray(read?.receipts) ? read.receipts : [];
+  const r = receipts[0] || null;
+
+  const reasons = ['this bill came in as a photo, and the image reader does not read invoice numbers, due dates or bank details; check it against the photo'];
+  if (!r) reasons.push('the photo could not be read; nothing below was read from it');
+  else if (r.confidence !== 'high') reasons.push('the image reader was not confident of what it read');
+  if (receipts.length > 1) reasons.push(`the photo seems to hold ${receipts.length} documents, and only the first was read`);
+
+  const emailDate   = email.date ? intake.localDateStr(new Date(email.date)) : intake.today();
+  const invoiceDate = r?.date || emailDate;
+  const vendor      = String(r?.merchant || src.from?.value?.[0]?.name || 'Unknown Vendor').slice(0, 255);
+  const totalAmount = r?.total ?? 0;
+  // The receipt reader writes "[Category] what @ where"; a bill has no category.
+  const described   = _oneLine(String(r?.description || '').replace(/^\s*\[[^\]]*\]\s*/, ''));
+  const description = (described || cleanSubject(src.subject) || `Bill from ${vendor}`).slice(0, 500);
+  const lineItems   = (r?.lineItems || []).map(li => ({ description: li.description, unitAmount: li.unitAmount, discountRate: li.discountRate || 0 }));
+  if (!lineItems.length) lineItems.push({ description, unitAmount: totalAmount, discountRate: 0 });
+
+  const parsed = {
+    receivedAt:       email.date ? new Date(email.date).toISOString() : null,
+    contactName:      vendor,
+    contactEmail:     src.from?.value?.[0]?.address || '',
+    contactAddress:   '',
+    vendorName:       vendor,
+    invoiceDate,
+    dueDate:          intake.addDays(invoiceDate, 30),
+    currency:         r?.currency || defaults.currency,
+    brandingThemeName:'Standard',
+    lineAmountTypes:  'Exclusive',
+    lineItems,
+    totalAmount,
+    subTotal:         r?.subTotal ?? null,
+    taxAmount:        r?.tax ?? null,
+    documentType:     'invoice',
+    description,
+    sourceEmail:      email.from?.text || '',
+    accountCode:      defaults.accountCode,
+    paymentReference: '',
+    invoiceType:      'ACCPAY',
+    source:           IMAGE_SOURCE,
+    reviewReason:     reasons.join('; '),
+    pdfBuffer:        null,
+    pdfFilename:      null,
+    // The photo itself, stored with the row by invoice-handler so the person
+    // reviewing sees it and it goes to Xero as the attachment.
+    imageBuffer:      att.content,
+    imageMime:        mime,
+    imageFilename:    att.filename || null,
+    messageId:        email.messageId || null,
+    confidence:       _confidence(r?.confidence),
+  };
+  _ensureSubtotalTax(parsed);
+  logger.info('Photographed bill read', { userId, file: att.filename, vendor, total: totalAmount, read: !!r });
+  return parsed;
 }
 
 // ── Per-extract parser ────────────────────────────────────────────────────────
 
-async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email, userId, defaults) {
+async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText, origin }, outer, userId, defaults) {
   if (!text || text.length < 3) return null;
+  const email = _readAs(outer, origin);
 
   const isTemplate = /Client\s*\/\s*Customer[^:\n]*:/i.test(text) &&
                      /(?:\d+\.\s*)?Description\s*\/\s*Details\s*:/i.test(text);
@@ -620,6 +730,10 @@ async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email
     reviewReason: reviewReason || parsed.reviewReason || null,
     pdfBuffer:     pdfBuffer   || null,
     pdfFilename:   pdfFilename || null,
+    // The email in the mailbox, which for a forwarded bill is the forward.
+    sourceEmail:   outer.from?.text || '',
+    // What recognises this email if it is delivered again (intake/dedup.js).
+    messageId:     outer.messageId || null,
   };
 
   logger.info('Invoice parsed', {
@@ -641,22 +755,27 @@ async function _parseOne({ text, source, pdfBuffer, pdfFilename, noText }, email
 //  - LLM calls use that user's API keys and rate limiter
 //  - Currency/account defaults come from user config
 //  - PDFs within one email are processed in batches of MAX_PDF_CONCURRENCY
+//  - Photos go to the vision reader (parseImageBill), PDFs and the body to the
+//    text readers; the queue marked which is which
 
 async function parseInvoice(email, userId) {
   const extracts = await extractText(email);
+  const images   = (email.attachments || []).filter(a => _kind(a) === 'image');
   const defaults = _userDefaults(userId);
   const invoices = [];
+  const tasks    = [
+    ...extracts.map(extract => () => _parseOne(extract, email, userId, defaults)),
+    ...images.map(att => () => parseImageBill(att, email, userId, defaults)),
+  ];
 
-  if (extracts.length > 1) {
-    logger.info(`Batch processing ${extracts.length} PDF(s) — up to ${MAX_PDF_CONCURRENCY} concurrent`, { userId });
+  if (tasks.length > 1) {
+    logger.info(`Batch processing ${tasks.length} document(s) — up to ${MAX_PDF_CONCURRENCY} concurrent`, { userId });
   }
 
   // Process in chunks of MAX_PDF_CONCURRENCY to balance speed and API pressure
-  for (let i = 0; i < extracts.length; i += MAX_PDF_CONCURRENCY) {
-    const chunk   = extracts.slice(i, i + MAX_PDF_CONCURRENCY);
-    const settled = await Promise.allSettled(
-      chunk.map(extract => _parseOne(extract, email, userId, defaults))
-    );
+  for (let i = 0; i < tasks.length; i += MAX_PDF_CONCURRENCY) {
+    const chunk   = tasks.slice(i, i + MAX_PDF_CONCURRENCY);
+    const settled = await Promise.allSettled(chunk.map(run => run()));
     for (const r of settled) {
       if (r.status === 'fulfilled' && r.value) invoices.push(r.value);
       else if (r.status === 'rejected') logger.error('PDF parse error in batch', { error: r.reason?.message, userId });
@@ -666,4 +785,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, parseTemplateFormat, parsePDFWithLLM, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _isPaymentSchedule, _describeItems, _vendorAddress, _moneyMismatch, _documentType }; // helpers exposed for tests
+module.exports = { parseInvoice, parseImageBill, sanitizeFilename, IMAGE_SOURCE, parseTemplateFormat, parsePDFWithLLM, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _isPaymentSchedule, _describeItems, _vendorAddress, _moneyMismatch, _documentType }; // helpers exposed for tests

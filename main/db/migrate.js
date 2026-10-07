@@ -128,6 +128,15 @@ function run() {
   // Whether the account's mailbox watcher should be running, so a restart can
   // bring back the watchers that were on (email/watcher-registry).
   _ensureColumn('user_settings', 'watcher_enabled', 'watcher_enabled INTEGER NOT NULL DEFAULT 0');
+  // Revenue accounts the user marked recurring or project (JSON [{label, recurring}]).
+  _ensureColumn('user_settings', 'recurring_accounts', 'recurring_accounts TEXT');
+  // The email a row came from, so a re-delivered message is recognised before
+  // it is read again, and how sure the reader was of what it read.
+  _ensureColumn('invoices', 'message_id', 'message_id TEXT');
+  _ensureColumn('invoices', 'confidence', 'confidence TEXT');
+  // Here rather than in schema.sql: the schema runs first, and on a database
+  // without the column an index naming it would stop the boot.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_invoices_message_id ON invoices(user_id, message_id)');
 }
 
 module.exports = { run };

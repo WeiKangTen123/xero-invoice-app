@@ -507,3 +507,77 @@ describe('watcher-registry — a mail is marked read only once its job is on dis
     expect(fake.flagged).toEqual([{ uid: 41, flags: ['\\Seen'] }]);
   });
 });
+
+// A bill forwarded "as attachment" is a whole email inside the email
+// (message/rfc822), which mailparser hands over as one opaque attachment: the
+// PDF inside it was never queued. The watcher now parses it, one level down.
+describe('watcher-registry — an email forwarded as an attachment', () => {
+  const { simpleParser } = require('mailparser');
+  const emailQueue = require('../queue/email-queue');
+  afterEach(() => { watcherRegistry.stopAll(); simpleParser.mockReset(); });
+
+  const PDF = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.from(Array.from({ length: 64 }, (_, i) => i * 3)), Buffer.from('\n%%EOF\n')]);
+  const INNER = [
+    'From: Acme Billing <billing@acme.test>', 'To: me@us.test', 'Subject: Invoice A-1',
+    'Message-ID: <inner-1@acme.test>', 'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary="in"', '',
+    '--in', 'Content-Type: text/plain', '', 'Our invoice is attached.',
+    '--in', 'Content-Type: application/pdf; name="A-1.pdf"', 'Content-Disposition: attachment; filename="A-1.pdf"',
+    'Content-Transfer-Encoding: base64', '', PDF.toString('base64'), '--in--', '',
+  ].join('\r\n');
+  const RAW = Buffer.from([
+    'From: Colleague <me@us.test>', 'To: ap@us.test', 'Subject: Fwd: Invoice A-1',
+    'Message-ID: <outer-1@us.test>', 'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary="out"', '',
+    '--out', 'Content-Type: text/plain', '', 'Forwarding this one.',
+    '--out', 'Content-Type: message/rfc822; name="Invoice A-1.eml"', 'Content-Disposition: attachment; filename="Invoice A-1.eml"', '',
+    INNER, '--out--', '',
+  ].join('\r\n'));
+
+  async function deliver(userId, raw) {
+    watcherRegistry.start(userId, CREDS, () => {});
+    const fake = lastImapInstance();
+    fake.unseen = [9];
+    fake.emit('ready');
+    fake.resolveOpenBox();
+    const msg = new EventEmitter(); const body = new EventEmitter();
+    fake.lastFetch.emit('message', msg);
+    msg.emit('attributes', { uid: 9 });
+    msg.emit('body', body);
+    body.emit('data', raw);
+    body.emit('end');
+    fake.lastFetch.emit('end');
+    for (let i = 0; i < 200 && !emailQueue.enqueue.mock.calls.length; i++) await new Promise(r => setTimeout(r, 10));
+  }
+
+  test('the inner email is parsed and handed to the queue with its PDF, byte for byte', async () => {
+    const real = jest.requireActual('mailparser').simpleParser;
+    simpleParser.mockImplementation(input => real(input));
+    emailQueue.enqueue.mockClear();
+    await deliver('fwd-1', RAW);
+    const parsed = emailQueue.enqueue.mock.calls[0][1];
+    expect(parsed.messageId).toBe('<outer-1@us.test>');
+    expect(parsed.forwarded).toHaveLength(1);
+    const inner = parsed.forwarded[0];
+    expect(inner).toMatchObject({ subject: 'Invoice A-1', messageId: '<inner-1@acme.test>' });
+    expect(inner.from.value[0].address).toBe('billing@acme.test');
+    expect(inner.attachments.map(a => a.filename)).toEqual(['A-1.pdf']);
+    expect(inner.attachments[0].content.equals(PDF)).toBe(true);
+  });
+
+  test('an attached email that cannot be read does not stop the outer one queuing', async () => {
+    simpleParser
+      .mockResolvedValueOnce({ subject: 'Fwd', attachments: [{ contentType: 'message/rfc822', filename: 'x.eml', content: Buffer.from('junk') }] })
+      .mockRejectedValueOnce(new Error('unparseable'));
+    emailQueue.enqueue.mockClear();
+    await deliver('fwd-2', Buffer.from('raw'));
+    expect(emailQueue.enqueue).toHaveBeenCalledTimes(1);
+    expect(emailQueue.enqueue.mock.calls[0][1].forwarded).toBeUndefined();
+  });
+
+  test('the inbox is opened when the settings name no other folder', () => {
+    watcherRegistry.start('fwd-3', CREDS, () => {});
+    const fake = lastImapInstance();
+    const open = jest.spyOn(fake, 'openBox');
+    fake.emit('ready');
+    expect(open).toHaveBeenCalledWith('INBOX', false, expect.any(Function));
+  });
+});

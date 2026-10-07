@@ -145,6 +145,82 @@ function ensureSubtotalTax(doc) {
   return doc;
 }
 
+// ── Attachments ─────────────────────────────────────────────────────────────
+
+// What an emailed attachment is to the intake: a PDF bill, a photographed
+// one, or nothing to read. Decided in one place so the mail queue (what it
+// keeps) and the parser (which reader gets it) cannot disagree.
+//
+// A picture counts only when someone attached it. A logo in a signature, a
+// social icon or a tracking pixel is either embedded in the HTML body
+// (multipart/related, shown through cid:) or a few KB, and treating those as
+// documents would turn every email that carries one into a junk bill.
+const IMAGE_TYPES = {
+  'image/jpeg': 'image/jpeg', 'image/jpg': 'image/jpeg', 'image/pjpeg': 'image/jpeg',
+  'image/png':  'image/png',  'image/heic': 'image/heic', 'image/heif': 'image/heif',
+};
+const IMAGE_EXTENSIONS = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', heic: 'image/heic', heif: 'image/heif' };
+const MIN_IMAGE_BYTES  = 30 * 1024;
+
+function _extension(name) {
+  const m = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  return m ? m[1] : '';
+}
+
+function _attachmentBytes(att) {
+  if (Buffer.isBuffer(att.content)) return att.content.length;
+  if (typeof att.content === 'string') return Buffer.byteLength(att.content);
+  return Number(att.size) || 0;
+}
+
+// The image type of an attachment, from its declared type or, when a mail
+// client sent it as application/octet-stream, from its name. Null when it is
+// not a photo format the vision reader is given.
+function imageMime(att) {
+  const type = String(att?.contentType || '').toLowerCase().split(';')[0].trim();
+  return IMAGE_TYPES[type] || IMAGE_EXTENSIONS[_extension(att?.filename)] || null;
+}
+
+function documentKind(att) {
+  if (!att) return null;
+  const type = String(att.contentType || '').toLowerCase().split(';')[0].trim();
+  if (type === 'application/pdf' || _extension(att.filename) === 'pdf') return 'pdf';
+  if (!imageMime(att) || att.related) return null;
+  return _attachmentBytes(att) >= MIN_IMAGE_BYTES ? 'image' : null;
+}
+
+// ── Bank details ────────────────────────────────────────────────────────────
+
+// The account identifiers in a bill's payment details, as bare digits (or an
+// IBAN as one token), so "601-493935-001" and "601 493935 001" are the same
+// account. Changed bank details on a supplier's bill are the classic invoice
+// fraud, and the payment details are free text the model assembles, so the
+// comparison is made on the numbers rather than the wording around them.
+//
+// Labelled parts ("Acct: …", "PayNow: …", "IBAN …") are read first. Without
+// them every run of six or more digits counts, which is wider (a quoted
+// reference number would count too) but only ever errs towards a person
+// looking at the bill.
+const ACCOUNT_LABEL = /\b(?:acc(?:oun)?t|a\/c|acct|iban|pay\s*now|uen|bsb|sort\s*code|routing)\b/i;
+
+function bankAccountIds(text) {
+  const parts = String(text || '').split(/[|\n;]+/).map(p => p.trim()).filter(Boolean);
+  if (!parts.length) return [];
+  const labelled = parts.filter(p => ACCOUNT_LABEL.test(p));
+  const ids = new Set();
+  for (const part of (labelled.length ? labelled : parts)) {
+    const upper = part.toUpperCase();
+    for (const m of upper.matchAll(/\b[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7}(?:\s?[A-Z0-9]{1,4})?\b/g)) {
+      ids.add(m[0].replace(/\s+/g, ''));
+    }
+    for (const m of upper.matchAll(/\d[\d\s.-]*\d/g)) {
+      const digits = m[0].replace(/\D/g, '');
+      if (digits.length >= 6 && ![...ids].some(id => id.includes(digits))) ids.add(digits);
+    }
+  }
+  return [...ids];
+}
+
 // ── The Document ────────────────────────────────────────────────────────────
 
 const str = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
@@ -214,4 +290,5 @@ module.exports = {
   num, money, isoDate, parseDate, addDays, today, localDateStr,
   currencyCode, detectCurrency, parseTaxPercent, ensureSubtotalTax,
   normaliseLineItem, normaliseDocument,
+  documentKind, imageMime, MIN_IMAGE_BYTES, bankAccountIds,
 };

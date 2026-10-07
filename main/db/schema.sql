@@ -82,7 +82,26 @@ CREATE TABLE IF NOT EXISTS user_settings (
   -- retries exhausted, shutdown) leave it, and boot resumes every account
   -- that has it (routes/process.js resumeWatchers). The watcher used to stay
   -- off after every restart until each user pressed Start again.
-  watcher_enabled INTEGER NOT NULL DEFAULT 0
+  watcher_enabled INTEGER NOT NULL DEFAULT 0,
+  -- JSON array of revenue account names the user has marked, each
+  -- {label, recurring}: recurring or project, overriding the guess from the
+  -- name (settings-store; Dashboard -> Revenue). NULL = none marked.
+  recurring_accounts TEXT
+);
+
+-- 1:1 with users — whether the Xero connection still works, so the app stops
+-- retrying credentials Xero has refused and the banner can say why. Also
+-- created on first use by utils/token-cache.js with this same definition, for
+-- a database migrated before this table was declared here.
+CREATE TABLE IF NOT EXISTS xero_connection_health (
+  user_id            TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  method             TEXT,
+  needs_reconnect    INTEGER NOT NULL DEFAULT 0,
+  reason             TEXT,
+  fingerprint        TEXT,
+  granted_scopes     TEXT,
+  last_refreshed_at  TEXT,
+  updated_at         TEXT NOT NULL
 );
 
 -- 1:many — invoice records (was data/users/<id>/invoices.json array)
@@ -157,7 +176,15 @@ CREATE TABLE IF NOT EXISTS invoices (
   -- A note from the send in progress (an attachment Xero refused, a total that
   -- came back different). invoice-store.js moves it into error_msg when the
   -- send's closing update would otherwise clear that.
-  post_note           TEXT
+  post_note           TEXT,
+  -- The Message-ID of the email a row was read from. A mailbox reconnect or a
+  -- mail marked unread delivers the same message again; with this the
+  -- attachment is recognised before the model reads it a second time.
+  -- Indexed on (user_id, message_id) by migrate.js, after the column is
+  -- ensured: an index here would fail on a database that predates it.
+  message_id          TEXT,
+  -- How sure the reader was of what it read: 'high', 'medium' or 'low'.
+  confidence          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(user_id, status);

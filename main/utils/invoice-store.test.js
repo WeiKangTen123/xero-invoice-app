@@ -647,3 +647,51 @@ describe('invoice-store — what posting needs survives the store', () => {
     expect(store.addPostingNote(r.id, 'Check the total.').errorMsg).toBe('Check the total.');
   });
 });
+
+// The email a row came from and how sure its reader was. Both are columns
+// other parts of the app read: the worker recognises a re-delivered email by
+// the first, the AI reader writes the second through update().
+describe('invoice-store — message_id and confidence', () => {
+  let store;
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    const u = await require('./users').createUser('msg@test.com', 'password123', 'user');
+    store = require('./invoice-store').forUser(u.id);
+  });
+  const row = (over = {}) => ({
+    id: `${Date.now()}${Math.random().toString(36).slice(2, 7)}`, status: 'pending', vendorName: 'Acme Pte Ltd',
+    invoiceNumber: 'A-1', invoiceDate: '2026-09-01', totalAmount: 109, invoiceType: 'ACCPAY',
+    processedAt: new Date().toISOString(), ...over,
+  });
+
+  test('both are written by add and update and read back', () => {
+    const r = store.add(row({ messageId: '<m1@acme.test>', confidence: 'medium' }));
+    expect(r).toMatchObject({ messageId: '<m1@acme.test>', confidence: 'medium' });
+    expect(store.update(r.id, { confidence: 'low' }).confidence).toBe('low');
+    expect(store.add(row()).messageId).toBeNull();
+  });
+
+  test('findByMessage matches the attachment by name, a body row by source, and every status', () => {
+    const pdf  = store.add(row({ messageId: '<m1@acme.test>', pdfFilename: 'A-1.pdf', source: 'pdf', status: 'error' }));
+    const body = store.add(row({ messageId: '<m2@us.test>', source: 'email', invoiceType: 'ACCREC' }));
+    expect(store.findByMessage('<m1@acme.test>', { filename: 'A-1.pdf' }).id).toBe(pdf.id);
+    expect(store.findByMessage('<m1@acme.test>', { filename: 'A-2.pdf' })).toBeNull();
+    expect(store.findByMessage('<m1@acme.test>', { source: 'email' })).toBeNull();
+    expect(store.findByMessage('<m2@us.test>', { source: 'email' }).id).toBe(body.id);
+    expect(store.findByMessage('<other@x>', { source: 'email' })).toBeNull();
+    expect(store.findByMessage(null, { source: 'email' })).toBeNull();
+  });
+
+  test('lastBillFrom is the newest bill from that supplier with payment details, never a duplicate or another supplier', () => {
+    store.add(row({ id: 'old', paymentReference: 'Acct: 111111' }));
+    store.add(row({ id: 'new', vendorName: 'ACME PTE. LTD.', paymentReference: 'Acct: 222222' }));
+    store.add(row({ id: 'blank', paymentReference: '' }));
+    store.add(row({ id: 'dup', status: 'duplicate', paymentReference: 'Acct: 333333' }));
+    store.add(row({ id: 'other', vendorName: 'Other Co', paymentReference: 'Acct: 444444' }));
+    store.add(row({ id: 'claim', invoiceType: 'EXPENSE', paymentReference: 'Acct: 555555' }));
+    expect(store.lastBillFrom('Acme Pte Ltd').id).toBe('new');
+    expect(store.lastBillFrom('Acme Pte Ltd', 'new').id).toBe('old');
+    expect(store.lastBillFrom('Nobody Ltd')).toBeNull();
+  });
+});

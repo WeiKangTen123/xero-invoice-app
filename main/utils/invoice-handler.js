@@ -6,7 +6,8 @@ const { xeroErrMsg }      = require('../xero/xero-utils');
 const { notifyError }     = require('./notify');
 const { buildRecord } = require('../intake/record');
 const { profileFor } = require('../intake/profiles');
-const { normaliseDocument } = require('../intake/document');
+const { normaliseDocument, bankAccountIds } = require('../intake/document');
+const { hashBuffer } = require('../intake/dedup');
 const logger              = require('./logger');
 const invoiceStore        = require('./invoice-store');
 const pdfStore            = require('./pdf-store');
@@ -24,11 +25,54 @@ const XERO_SUBMIT_DELAY_MS = 1500;
 // the old guard only held "no number AND no amount", so a misread PDF whose
 // number came from its filename could post a blank draft.
 function holdReason(record) {
+  const from  = record.source === 'email-image' ? 'the photo' : 'the PDF';
   const total = Number(record.totalAmount) || 0;
-  if (total <= 0) return 'Could not read an amount from the PDF';
+  if (total <= 0) return `Could not read an amount from ${from}`;
   const auto = !record.invoiceNumber || record.invoiceNumber === '—' || /^INV-\d{12,}$/.test(record.invoiceNumber);
-  if (auto) return 'Could not read an invoice number from the PDF';
+  if (auto) return `Could not read an invoice number from ${from}`;
   return null;
+}
+
+// A supplier's bill whose bank account is not one on the last bill stored
+// from that supplier. This is the commonest invoice fraud: a lookalike
+// address, or the supplier's own hacked mailbox, sends a genuine-looking bill
+// with the account changed, and the reader copies whatever account is printed
+// into the draft. Such a bill is held for a person with both sets of details
+// side by side, never posted. Null when nothing differs or there is nothing to
+// compare: a first bill, or either bill without an account number on it.
+function bankDetailsChange(invStore, record) {
+  if (record.invoiceType !== 'ACCPAY') return null;
+  const current = bankAccountIds(record.paymentReference);
+  if (!current.length) return null;
+  const last = invStore.lastBillFrom(record.vendorName || record.contactName, record.id);
+  if (!last) return null;
+  const previous = bankAccountIds(last.paymentReference);
+  if (!previous.length || current.every(id => previous.includes(id))) return null;
+  const which = [last.invoiceNumber && last.invoiceNumber !== '—' ? last.invoiceNumber : null, last.invoiceDate].filter(Boolean).join(', ');
+  return `Bank details differ from this supplier's last bill: this one says "${record.paymentReference}", ` +
+    `the last one${which ? ` (${which})` : ''} said "${last.paymentReference}". ` +
+    'Confirm the change with the supplier, on a number you already have, before paying';
+}
+
+// A photographed bill's image is kept the way a claim's receipt is, so the
+// review page shows it beside the figures and Xero gets it as the attachment.
+// Returns { file, mime }, or { note } saying why it was not kept: the bill is
+// stored either way, because losing the bill over its attachment would be
+// worse than a person attaching it by hand. Required here because it is only
+// needed when a photo arrives.
+async function _keepPhoto(userId, id, buffer, mime) {
+  const receiptStore = require('./receipt-store');
+  try {
+    if (!receiptStore.isAcceptedMime(mime)) {
+      const label = String(mime || 'this format').split('/').pop().toUpperCase();
+      return { note: `the photo is ${label}, which Xero does not take as an attachment, so it was not kept; attach a JPEG or PNG copy by hand` };
+    }
+    const fit = await receiptStore.fitToLimit(buffer, mime);
+    if (fit.reason) return { note: `the photo was not kept: ${fit.reason}` };
+    return { file: receiptStore.forUser(userId).save(id, fit.buffer, fit.mime), mime: fit.mime };
+  } catch (err) {
+    return { note: `the photo could not be kept with the bill (${err.message})` };
+  }
 }
 
 // Whether an invoice already waiting in this account's Xero chain may still go.
@@ -147,6 +191,12 @@ function createHandler(userId, { submitDelayMs = XERO_SUBMIT_DELAY_MS } = {}) {
         logger.warn('Failed to save PDF', { error: err.message, userId });
       }
     }
+    const photo = invoiceData.imageBuffer ? await _keepPhoto(userId, id, invoiceData.imageBuffer, invoiceData.imageMime) : null;
+    if (photo?.note) logger.warn('Photographed bill stored without its photo', { id, userId, note: photo.note });
+
+    // The file as it arrived, hashed, so the same PDF or photo sent again under
+    // another email is recognised before it is read (queue/email-worker.js).
+    const fileHash = hashBuffer(invoiceData.pdfBuffer || invoiceData.imageBuffer);
 
     // The row is built by the shared intake builder; what this path adds is the
     // PDF it stored and the email it came from. Fields the parser already
@@ -181,8 +231,18 @@ function createHandler(userId, { submitDelayMs = XERO_SUBMIT_DELAY_MS } = {}) {
         paymentReference: invoiceData.paymentReference || '',
         // The email's own date when we have it; otherwise arrival is now.
         receivedAt:    invoiceData.receivedAt || new Date().toISOString(),
+        // Left undefined when unknown, which the store skips rather than
+        // writing an empty value over nothing.
+        messageId:     invoiceData.messageId  || undefined,
+        confidence:    invoiceData.confidence || undefined,
+        receiptHash:   fileHash || undefined,
+        receiptFile:   photo?.file || undefined,
+        receiptMime:   photo?.file ? photo.mime : undefined,
       },
     });
+
+    // Before the row is added, so the supplier's last bill is not this one.
+    const bank = bankDetailsChange(invStore, record);
 
     await invStore.add(record);
     procState.addInvoice();
@@ -195,11 +255,13 @@ function createHandler(userId, { submitDelayMs = XERO_SUBMIT_DELAY_MS } = {}) {
     // read. The figures are kept as read; a person decides before anything
     // reaches Xero. A hold used to return before the review reason was looked
     // at, so a row held for its number never said its lines did not add up.
+    // Changed bank details come first: of everything here, that is the one
+    // that costs money if it is missed.
     const hold   = holdReason(record);
-    const review = invoiceData.reviewReason || null;
-    if (hold || review) {
-      const errorMsg = [hold, review && `Please check: ${review}`].filter(Boolean).join('. ');
-      logger.warn('Invoice held for review — skipping Xero submit', { id, vendor: record.vendorName, userId, hold, review });
+    const review = [invoiceData.reviewReason, photo?.note].filter(Boolean).join('; ') || null;
+    if (bank || hold || review) {
+      const errorMsg = [bank, hold, review && `Please check: ${review}`].filter(Boolean).join('. ');
+      logger.warn('Invoice held for review — skipping Xero submit', { id, vendor: record.vendorName, userId, hold, review, bankDetailsChanged: !!bank });
       await invStore.update(id, { status: 'review-needed', errorMsg });
       return { id, status: 'review-needed' };
     }
@@ -302,4 +364,4 @@ async function submitInvoiceToXero(userId, invoiceId, { allowDuplicate = false }
   }
 }
 
-module.exports = { createHandler, submitInvoiceToXero, postedDuplicateOf, holdReason, accountMayPost };
+module.exports = { createHandler, submitInvoiceToXero, postedDuplicateOf, holdReason, bankDetailsChange, accountMayPost };

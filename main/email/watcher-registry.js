@@ -106,6 +106,31 @@ function _markStopped(s, reason, error = null) {
 
 // ── Fetch ─────────────────────────────────────────────────────────────────────
 
+// A bill forwarded "as attachment" arrives as a whole email inside this one
+// (message/rfc822). mailparser hands that over as one opaque attachment, so
+// the PDF inside it was never seen. Each such email is parsed here, one level
+// down, and passed on as `forwarded` for the queue to take its documents from
+// (queue/email-queue.js). One level is what forwarding produces; an email
+// forwarded inside a forwarded one is left unopened.
+const _isAttachedEmail = a =>
+  String(a?.contentType || '').toLowerCase() === 'message/rfc822' || /\.eml$/i.test(a?.filename || '');
+
+async function _parseMail(raw) {
+  const parsed = await simpleParser(raw);
+  const forwarded = [];
+  for (const a of parsed?.attachments || []) {
+    if (!_isAttachedEmail(a) || !a.content) continue;
+    try {
+      forwarded.push(await simpleParser(a.content));
+    } catch (err) {
+      // The outer email still queues: its own attachments and body are intact.
+      logger.warn('An email attached to a message could not be read', { file: a.filename, error: err.message });
+    }
+  }
+  if (forwarded.length) parsed.forwarded = forwarded;
+  return parsed;
+}
+
 function _fetchUnseen(s) {
   if (!s.mailboxReady) { logger.warn(`[user:${s.userId}] Fetch skipped — mailbox not open yet`); return; }
   if (s.fetchInProgress) { s.fetchPending = true; return; }
@@ -162,7 +187,7 @@ function _fetchUnseen(s) {
           // each part's own charset and encoding from the Buffer.
           const rawBuffer = Buffer.concat(chunks);
           pending.push(
-            simpleParser(rawBuffer)
+            _parseMail(rawBuffer)
               .then(parsed => {
                 // Persist the email to the file-based queue before processing.
                 // This guarantees that even a mid-LLM server restart (nodemon, crash)
@@ -307,13 +332,18 @@ function _connect(s) {
   });
   s.imap = imap;
 
+  // The folder watched. The resolved settings carry none today (see
+  // email/imap-settings.js), so this is the inbox; a `folder` there, from a
+  // setting the user fills in, is all it takes to watch another one.
+  const mailbox = settings.folder || 'INBOX';
+
   imap.once('ready', () => {
     if (imap !== s.imap) return;    // replaced or stopped while handshaking
     s.reconnectAttempt = 0;
     s.lastError        = null;
-    logger.info(`[user:${userId}] IMAP connected, opening INBOX`);
+    logger.info(`[user:${userId}] IMAP connected, opening ${mailbox}`);
 
-    imap.openBox('INBOX', false, (err) => {
+    imap.openBox(mailbox, false, (err) => {
       // openBox answers through a callback, which _teardown's
       // removeAllListeners does not cancel. Without this a superseded
       // connection could still open its inbox and start a poll on the live

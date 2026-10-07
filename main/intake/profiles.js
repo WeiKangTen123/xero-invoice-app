@@ -14,7 +14,9 @@ const PROFILES = {
     contactRole: 'supplier',
     // Emailed bills are the automated path and may post straight to Xero if
     // the user has turned that on. A bill someone uploaded by hand is in front
-    // of them: it waits for their review and never auto-posts.
+    // of them: it waits for their review and never auto-posts. Nor does a bill
+    // emailed as a photo ('email-image'): the vision reader that reads it does
+    // not read an invoice number, a due date or bank details.
     initialStatus: source => (source === 'email' || source === 'pdf' ? 'pending' : 'review-needed'),
     autoPost:      source => source === 'email' || source === 'pdf',
     dedup:         { byHash: true, byNumber: true, byFields: true },

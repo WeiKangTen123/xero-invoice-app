@@ -1,6 +1,9 @@
 const emailQueue       = require('./email-queue');
-const { parseInvoice } = require('../email/parser');
+const { parseInvoice, sanitizeFilename } = require('../email/parser');
 const users            = require('../utils/users');
+const invoiceStore     = require('../utils/invoice-store');
+const { hashBuffer, findEmailDuplicate } = require('../intake/dedup');
+const { profileFor }   = require('../intake/profiles');
 const logger           = require('../utils/logger');
 
 const POLL_MS = 5000; // idle poll interval — catches jobs that land while worker is between ticks
@@ -41,6 +44,59 @@ function _accountActive(userId) {
   try { return users.isActive(userId); } catch (_) { return true; }
 }
 
+// What of this email has not produced a record yet. A mailbox reconnect, or
+// someone marking old mail unread, delivers a message again, and every
+// attachment on it used to go back through the model: paid for twice, and a
+// reading that differed by a digit slipped past the duplicate check and became
+// a second row. Each attachment is checked here, before anything is read, by
+// the email's Message-ID with its filename and by the file's hash
+// (intake/dedup.js findEmailDuplicate); the body, which is read only when no
+// PDF came with the mail, by the Message-ID alone.
+//
+// A lookup that throws keeps the attachment: the handler's own duplicate check
+// still stands behind it, and skipping on an error would lose a bill.
+//
+// Returns the email to parse (null when nothing is left) and what was skipped.
+function _unrecorded(userId, email) {
+  const all = email.attachments || [];
+  const messageId = email.messageId || null;
+  if (!all.length && !messageId) return { email, skipped: [] };
+
+  const store   = invoiceStore.forUser(userId);
+  const profile = profileFor('ACCPAY');
+  const check   = query => {
+    try { return findEmailDuplicate({ store, profile, messageId, ...query }); } catch (err) {
+      logger.warn(`[email-worker:${userId}] Duplicate check failed; reading anyway`, { error: err.message });
+      return null;
+    }
+  };
+
+  const kept = [];
+  const skipped = [];
+  for (const a of all) {
+    const dup = check({
+      filename: a.kind === 'pdf' ? sanitizeFilename(a.filename) : undefined,
+      hash:     hashBuffer(a.content),
+    });
+    if (dup) skipped.push({ part: a.filename, existingId: dup.match.id, reason: dup.reason });
+    else kept.push(a);
+  }
+
+  // The body is read only when no PDF came with the mail (parser extractText),
+  // so with PDFs it is never read, even when every PDF was skipped here.
+  let skipBody = all.some(a => a.kind === 'pdf');
+  if (!skipBody && messageId) {
+    const dup = check({ source: 'email' });
+    if (dup) {
+      skipBody = true;
+      skipped.push({ part: 'the email body', existingId: dup.match.id, reason: dup.reason });
+    }
+  }
+
+  const nothingLeft = skipped.length > 0 && !kept.length && skipBody;
+  return { email: nothingLeft ? null : { ...email, attachments: kept, skipBody }, skipped };
+}
+
 // Leaves the account's jobs on disk, untouched, for if it is enabled again.
 function _holdForInactiveAccount(userId, queued) {
   logger.info(`[email-worker:${userId}] Account is disabled or deleted — worker stopped, ${queued} job(s) left queued`);
@@ -76,8 +132,17 @@ async function _processNext(userId) {
     _inFlight.add(_key(userId, job.id));
     logger.info(`[email-worker:${userId}] Processing job ${job.id} (attempt ${job.attempts}/${emailQueue.MAX_ATTEMPTS})`, { subject: job.email?.subject });
 
-    const email    = emailQueue.reconstructEmail(userId, job);
-    const invoices = await parseInvoice(email, userId);
+    const fresh = _unrecorded(userId, emailQueue.reconstructEmail(userId, job));
+    if (fresh.skipped.length) {
+      logger.info(`[email-worker:${userId}] Already recorded — skipped before reading`, {
+        jobId: job.id, subject: job.email?.subject, messageId: job.email?.messageId, skipped: fresh.skipped,
+      });
+    }
+    if (!fresh.email) {
+      emailQueue.markDone(userId, job.id);
+      return;
+    }
+    const invoices = await parseInvoice(fresh.email, userId);
 
     // Parsing is seconds of LLM calls, the likeliest moment for a disable to
     // land, and everything after it stores and submits. The job is left as

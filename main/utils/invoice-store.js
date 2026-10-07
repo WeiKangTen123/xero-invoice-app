@@ -66,6 +66,11 @@ const FIELD_TO_COLUMN = {
   // currency per one unit of the org's base currency (claim-form.js turns the
   // form's own rate round). Null means Xero uses its daily rate.
   currencyRate: 'currency_rate',
+  // The Message-ID of the email the row was read from, so the same message
+  // delivered again is recognised before it is read again (intake/dedup.js).
+  messageId: 'message_id',
+  // How sure the reader was: 'high', 'medium' or 'low'.
+  confidence: 'confidence',
 };
 
 // total_amount/tax_amount/sub_total are persisted as integer cents (see schema.sql)
@@ -124,6 +129,8 @@ function _rowToRecord(row, reports, lineItems) {
     lineAmountTypes:   row.line_amount_types,
     brandingThemeName: row.branding_theme_name,
     currencyRate:      row.currency_rate,
+    messageId:         row.message_id,
+    confidence:        row.confidence,
     receiptFile:       row.receipt_file,
     receiptMime:       row.receipt_mime,
     // Which part of the shared file this record owns. Null on an ordinary
@@ -476,8 +483,6 @@ function forUser(userId) {
     return _hydrateMany(rows);
   }
 
-  // Split siblings share one stored file, so it may only be deleted once nothing
-  // references it. A count answers that without loading anything.
   // The same image, byte for byte. Duplicates and errors are excluded so a
   // rejected earlier attempt does not block a genuine re-import, unless the
   // row is in Xero, which no status takes back.
@@ -489,6 +494,40 @@ function forUser(userId) {
     return _hydrate(row);
   }
 
+  // A row read from this email. With `filename`, only the row made from that
+  // attachment (null: a row with no attachment name, i.e. read from the body
+  // or a photo); with `source`, only rows made that way. Every status counts:
+  // the question is whether this message was already read, and an error or
+  // duplicate row is the answer to that as much as a posted one.
+  function findByMessage(messageId, { filename, source } = {}) {
+    if (!messageId) return null;
+    const where = ['user_id = ?', 'message_id = ?'];
+    const args  = [userId, messageId];
+    if (filename !== undefined) { where.push('pdf_filename IS ?'); args.push(filename); }
+    if (source   !== undefined) { where.push('source = ?');        args.push(source); }
+    const row = db.prepare(`SELECT * FROM invoices WHERE ${where.join(' AND ')} ORDER BY rowid ASC LIMIT 1`).get(...args);
+    return _hydrate(row);
+  }
+
+  // The newest bill from this supplier that carries payment details, to hold
+  // a new one whose bank account differs (invoice-handler). Vendors are
+  // compared normalised, as the duplicate checks do. A row marked duplicate is
+  // a copy of another and says nothing new.
+  function lastBillFrom(vendorName, excludeId = null) {
+    const normV = _normalizeVendor(vendorName);
+    if (!normV) return null;
+    const rows = db.prepare(`
+      SELECT * FROM invoices
+      WHERE user_id = ? AND invoice_type = 'ACCPAY' AND status != 'duplicate'
+        AND payment_reference IS NOT NULL AND TRIM(payment_reference) != '' AND id IS NOT ?
+      ORDER BY rowid DESC
+    `).all(userId, excludeId);
+    const hit = rows.find(r => _normalizeVendor(r.vendor_name) === normV);
+    return hit ? _hydrate(hit) : null;
+  }
+
+  // Split siblings share one stored file, so it may only be deleted once nothing
+  // references it. A count answers that without loading anything.
   function countByReceiptFile(filename) {
     if (!filename) return 0;
     return db.prepare('SELECT COUNT(*) AS n FROM invoices WHERE user_id = ? AND receipt_file = ?')
@@ -496,7 +535,8 @@ function forUser(userId) {
   }
 
   return { getAll, getById, add, update, addPostingNote, addReport, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
-           releaseInterrupted, count, countByStatus, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash };
+           releaseInterrupted, count, countByStatus, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash,
+           findByMessage, lastBillFrom };
 }
 
 module.exports = { forUser, FIELD_TO_COLUMN, normalizeInvoiceNumber };

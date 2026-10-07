@@ -301,3 +301,80 @@ describe('dedup — failed rows that are already in Xero', () => {
       contactName: 'Isetan', date: '2026-08-10', amount: 45.5 })).toBeNull();
   });
 });
+
+// What an emailed attachment is to the intake. The queue keeps what this says
+// is a document and the parser routes by it, so the two cannot disagree.
+describe('intake/document — documentKind', () => {
+  const big = Buffer.alloc(doc.MIN_IMAGE_BYTES, 1);
+  test('a PDF by type or by name; a photo by type or by name', () => {
+    expect(doc.documentKind({ contentType: 'application/pdf', filename: 'x' })).toBe('pdf');
+    expect(doc.documentKind({ contentType: 'application/octet-stream', filename: 'Bill.PDF' })).toBe('pdf');
+    expect(doc.documentKind({ contentType: 'image/jpeg', content: big })).toBe('image');
+    expect(doc.documentKind({ contentType: 'application/octet-stream', filename: 'IMG_1.HEIC', content: big })).toBe('image');
+    expect(doc.imageMime({ contentType: 'application/octet-stream', filename: 'IMG_1.HEIC' })).toBe('image/heic');
+  });
+  test('a signature logo, an icon or another file type is not a document', () => {
+    expect(doc.documentKind({ contentType: 'image/png', content: Buffer.alloc(2048) })).toBeNull();
+    expect(doc.documentKind({ contentType: 'image/png', content: big, related: true })).toBeNull();
+    expect(doc.documentKind({ contentType: 'image/gif', content: big })).toBeNull();
+    expect(doc.documentKind({ contentType: 'message/rfc822', filename: 'fwd.eml', content: big })).toBeNull();
+    expect(doc.documentKind(null)).toBeNull();
+  });
+});
+
+// Changed bank details are compared on the account numbers, not the wording
+// the model wraps them in.
+describe('intake/document — bankAccountIds', () => {
+  test('the same account however it is written', () => {
+    const a = doc.bankAccountIds('Bank: OCBC | Acct: 601-493935-001 | Swift: OCBCSGSG | Beneficiary: Denise Teo');
+    expect(a).toEqual(['601493935001']);
+    expect(doc.bankAccountIds('OCBC Bank; A/C No. 601 493935 001; SWIFT OCBCSGSG')).toEqual(a);
+  });
+  test('an IBAN is one identifier, and PayNow / UEN count', () => {
+    expect(doc.bankAccountIds('IBAN: GB29 NWBK 6016 1331 9268 19 | BIC NWBKGB2L')).toEqual(['GB29NWBK60161331926819']);
+    expect(doc.bankAccountIds('PayNow UEN: 201912345K | Acct: 072-123456-7')).toEqual(['201912345', '0721234567']);
+  });
+  test('labelled parts are read first, so a quoted reference number does not count', () => {
+    expect(doc.bankAccountIds('Acct: 601-493935-001 | Please quote invoice 100234')).toEqual(['601493935001']);
+  });
+  test('short codes and empty text give nothing', () => {
+    expect(doc.bankAccountIds('Bank code 7339, branch 501')).toEqual([]);
+    expect(doc.bankAccountIds('')).toEqual([]);
+    expect(doc.bankAccountIds(null)).toEqual([]);
+  });
+});
+
+// Recognising an emailed document before it is read.
+describe('intake/dedup — findEmailDuplicate', () => {
+  const rows = { msg: { id: 'by-msg' }, hash: { id: 'by-hash' } };
+  const store = {
+    findByMessage: jest.fn((id, { filename, source }) =>
+      (id === '<m1>' && (filename === 'A-1.pdf' || source === 'email') ? rows.msg : null)),
+    findByReceiptHash: jest.fn(h => (h === 'abc' ? rows.hash : null)),
+  };
+  beforeEach(() => { store.findByMessage.mockClear(); store.findByReceiptHash.mockClear(); });
+
+  test('the same email and attachment, or the same body, by Message-ID', () => {
+    expect(dedup.findEmailDuplicate({ store, messageId: '<m1>', filename: 'A-1.pdf' })).toMatchObject({ match: rows.msg, certain: true });
+    expect(dedup.findEmailDuplicate({ store, messageId: '<m1>', source: 'email' }).match).toBe(rows.msg);
+    expect(dedup.findEmailDuplicate({ store, messageId: '<m1>', filename: 'A-2.pdf' })).toBeNull();
+  });
+  test('the same file under any Message-ID, by hash, as the profile allows', () => {
+    expect(dedup.findEmailDuplicate({ store, profile: PROFILES.ACCPAY, messageId: '<other>', filename: 'x.pdf', hash: 'abc' }).match).toBe(rows.hash);
+    expect(dedup.findEmailDuplicate({ store, profile: PROFILES.ACCREC, hash: 'abc' })).toBeNull();
+  });
+  test('a photo (no filename, no source) is matched by its hash alone', () => {
+    expect(dedup.findEmailDuplicate({ store, messageId: '<m1>', hash: 'zzz' })).toBeNull();
+    expect(store.findByMessage).not.toHaveBeenCalled();
+  });
+  test('nothing to go on is no match', () => {
+    expect(dedup.findEmailDuplicate({ store })).toBeNull();
+  });
+});
+
+describe('intake/profiles — a photographed bill never auto-posts', () => {
+  test('it starts in review and is never sent on its own', () => {
+    expect(profileFor('ACCPAY').initialStatus('email-image')).toBe('review-needed');
+    expect(profileFor('ACCPAY').autoPost('email-image')).toBe(false);
+  });
+});
