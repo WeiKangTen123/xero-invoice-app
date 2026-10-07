@@ -1,5 +1,5 @@
 const zlib = require('zlib');
-const { readArchive, mimeFor, isJunk } = require('./claim-archive');
+const { readArchive, openArchive, mimeFor, isJunk, MAX_TOTAL_BYTES } = require('./claim-archive');
 
 // Builds a real .zip in memory, STORED (uncompressed), so these tests need no
 // zip-writing dependency. The format is simple enough to emit by hand and it
@@ -96,6 +96,38 @@ describe('claims/claim-archive', () => {
       { name: 'claims/r.png', data: JPEG },
     ]));
     expect(r.entries).toHaveLength(1);
+  });
+
+  // A zip that deflates to a few MB can unpack to a hundred 15MB files.
+  describe('size and memory', () => {
+    test('openArchive lists entries without extracting them, and each reads on demand', async () => {
+      const zip = makeZip([{ name: 'c/a.jpg', data: JPEG }, { name: 'c/b.pdf', data: Buffer.from('%PDF-1.4') }]);
+      const r = await openArchive(zip);
+      expect(r.entries.map(e => [e.name, e.size])).toEqual([['c/a.jpg', JPEG.length], ['c/b.pdf', 8]]);
+      expect(r.entries[0].buffer).toBeUndefined();
+      // After listing has finished, and more than once.
+      expect(await r.entries[1].read()).toEqual(Buffer.from('%PDF-1.4'));
+      expect(await r.entries[0].read()).toEqual(JPEG);
+      expect(r.totalBytes).toBe(JPEG.length + 8);
+    });
+
+    test('the total unpacked size is capped, and going over it is an error rather than a quiet cut', async () => {
+      const zip = makeZip([{ name: 'c/a.jpg', data: JPEG }, { name: 'c/b.jpg', data: JPEG }, { name: 'c/c.jpg', data: JPEG }]);
+      const r = await openArchive(zip, { maxTotalBytes: JPEG.length * 2 });
+      expect(r.entries).toHaveLength(2);
+      expect(r.skipped).toEqual([{ name: 'c/c.jpg', reason: 'archive size limit reached' }]);
+      expect(r.error).toMatch(/split it/);
+    });
+
+    test('readArchive reports the cap the same way, so bill intake stops on it too', async () => {
+      const zip = makeZip([{ name: 'c/a.pdf', data: JPEG }, { name: 'c/b.pdf', data: JPEG }]);
+      const r = await readArchive(zip, { maxTotalBytes: JPEG.length });
+      expect(r.error).toMatch(/split it/);
+    });
+
+    test('the default cap is 200MB', () => {
+      expect(MAX_TOTAL_BYTES).toBe(200 * 1024 * 1024);
+    });
   });
 
   describe('helpers', () => {

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const logger = require('../utils/logger');
-const { readArchive }    = require('./claim-archive');
+const { openArchive, SIZE_LIMIT_REASON, MAX_TOTAL_BYTES } = require('./claim-archive');
+const { fitToLimit }     = require('../utils/receipt-store');
 const { parseClaimForm } = require('./claim-form');
 const { matchClaims }    = require('./claim-matcher');
 const { suggestCategories } = require('./claim-categories');
@@ -86,6 +87,55 @@ function _stage(job, stage, detail = {}) {
   logger.info('Claim import stage', { jobId: job.id, userId: job.userId, stage, ...detail });
 }
 
+// One archive entry's bytes, ready to read and store: shrunk under Xero's
+// attachment limit where that is possible, with the reason when it is not.
+// Called once to read the receipt and again to store it, so no entry's bytes
+// have to be held between the two (see step 3).
+async function _load(entry, fit) {
+  const raw = entry.buffer || await entry.read();
+  const fitted = await fit(raw, entry.mime);
+  return { buffer: fitted.buffer, mime: fitted.mime || entry.mime, shrunk: !!fitted.shrunk, fileProblem: fitted.reason || null };
+}
+
+const _fileName = file => (file ? String(file).split('/').pop() : 'a receipt');
+
+// Why a claim needs a person's eye beyond the duplicate and discrepancy notes
+// claim-record already writes. These were worked out and then thrown away:
+// the matcher's `weak` flag and a category the model chose were never stored,
+// so a receipt paired on a near date alone looked exactly as settled as one
+// that agreed on everything. Returned as one sentence for the record, and
+// listed in the job result so the import summary can say it too.
+//
+// A file that cannot be attached is said here only when there are no bytes to
+// hand over; otherwise _storeFor below says it, through the store error that
+// claim-record already writes onto the row.
+function _reviewReason({ match, category, categorySuggested, receipt }) {
+  const parts = [];
+  if (match && match.weak) {
+    parts.push(`this receipt was paired with claim line ${match.row.no} on ${match.reasons.join(' and ') || 'little evidence'} only — check it is the right receipt`);
+  }
+  if (categorySuggested && category) {
+    parts.push(`the category "${category}" was suggested, not chosen by the claimant — confirm it`);
+  }
+  if (receipt && receipt.fileProblem && !receipt.buffer) {
+    parts.push(`${_fileName(receipt.file)} was not attached: ${receipt.fileProblem}`);
+  }
+  // The reader's own doubts, e.g. a second receipt it found in the same photo
+  // (utils/receipt-parser.js) — dropped silently before.
+  if (receipt && receipt.reviewReason) parts.push(receipt.reviewReason);
+  return parts.length ? parts.join('; ') : null;
+}
+
+// The store a record is created with. A receipt already known not to fit is
+// refused up front, in words a person can act on: receipt-store would refuse
+// it anyway, as "Receipt is 6291456 bytes; the limit is 3145728", and
+// claim-record puts the store's error on the row. The claim is created either
+// way; only the attachment is missing, and the row says why.
+function _storeFor(receipt, store) {
+  if (!receipt || !receipt.fileProblem) return store;
+  return async () => { throw new Error(receipt.fileProblem); };
+}
+
 // Starts an import and returns immediately with the job id.
 //
 // `deps` is injected so the whole flow can be tested without a model or a
@@ -130,22 +180,33 @@ function startImport({ userId, archives = [], forms = [], label = 'Expense claim
 
 async function _run(job, { archives, forms }, deps) {
   const { parseReceipts, storeReceipt, createRecord, suggest,
-          waitMs = READ_INTERVAL_MS, batch = BATCH_SIZE } = deps;
+          waitMs = READ_INTERVAL_MS, batch = BATCH_SIZE,
+          fitReceipt = fitToLimit, maxArchiveBytes } = deps;
 
   // ── 1. Unpack ────────────────────────────────────────────────────────────
+  // Listed, not extracted: each entry carries a reader, and its bytes are
+  // pulled only for the batch being read and again for the moment it is
+  // stored. A hundred 15MB photos used to sit in memory together for the
+  // whole job.
   _stage(job, 'unpacking');
   const entries = [];
   const skipped = [];
   for (const archive of archives) {
-    const r = await readArchive(archive.buffer);
+    const r = await openArchive(archive.buffer, maxArchiveBytes ? { maxTotalBytes: maxArchiveBytes } : undefined);
     for (const e of r.entries) entries.push({ ...e, archive: archive.name });
     for (const s of r.skipped) skipped.push({ ...s, archive: archive.name });
     if (r.error) skipped.push({ name: archive.name, reason: r.error });
   }
-  // readArchive stops extracting at its own limit and records the rest as
-  // skipped, so entries.length can never exceed it. Checking that alone meant a
-  // 150-receipt archive would import 100 and drop 50 silently — which is the
-  // worst outcome available. Refuse the whole import instead.
+  // The archive reader stops at its own limits and records the rest as
+  // skipped, so entries alone never show that anything was left behind.
+  // Importing the part that fitted and dropping the remainder silently is the
+  // worst outcome available, so either limit refuses the whole import.
+  if (skipped.some(s => s.reason === SIZE_LIMIT_REASON)) {
+    return _update(job, {
+      stage: 'failed',
+      error: `This archive unpacks to more than ${Math.round((maxArchiveBytes || MAX_TOTAL_BYTES) / 1048576)}MB of files, which is more than one claim should hold. Split it and import each part.`,
+    });
+  }
   const truncated = skipped.filter(s => /limit reached/i.test(s.reason || ''));
   if (truncated.length) {
     return _update(job, {
@@ -183,21 +244,42 @@ async function _run(job, { archives, forms }, deps) {
     if (job.cancelled) return _update(job, { stage: 'cancelled' });
     const slice = entries.slice(start, start + batchSize);
 
-    let parsed;
-    try {
-      parsed = await parseReceipts(job.userId, slice.map(e => ({ buffer: e.buffer, mime: e.mime })));
-    } catch (err) {
-      // A whole batch failing must not lose the receipts in it.
-      logger.warn('Claim receipt batch unreadable', { jobId: job.id, size: slice.length, error: err.message });
-      parsed = new Array(slice.length).fill(null);
+    // One at a time, so at most one photo is being decoded and re-encoded at
+    // once. An entry that cannot be extracted is reported as skipped, as it
+    // was when the archive was unpacked whole.
+    const loaded = [];
+    for (const e of slice) {
+      try { loaded.push(await _load(e, fitReceipt)); }
+      catch (err) {
+        logger.warn('Claim archive entry could not be read', { jobId: job.id, name: e.name, error: err.message });
+        skipped.push({ name: e.name, archive: e.archive, reason: 'could not be read' });
+        loaded.push(null);
+      }
+    }
+    const readable = slice.map((e, i) => ({ e, l: loaded[i] })).filter(x => x.l);
+
+    let parsed = [];
+    if (readable.length) {
+      try {
+        parsed = await parseReceipts(job.userId, readable.map(x => ({ buffer: x.l.buffer, mime: x.l.mime })));
+      } catch (err) {
+        // A whole batch failing must not lose the receipts in it.
+        logger.warn('Claim receipt batch unreadable', { jobId: job.id, size: readable.length, error: err.message });
+        parsed = new Array(readable.length).fill(null);
+      }
     }
 
-    slice.forEach((e, i) => {
+    readable.forEach(({ e, l }, i) => {
       const r = parsed && parsed[i];
       // A receipt that cannot be read still takes part: it is stored, and it is
       // reported as unreadable rather than silently dropped.
+      //
+      // No buffer is kept here, only the way back to it. Matching needs the
+      // figures, not the pixels, and the bytes are fetched again when the
+      // record is created.
       reads.push({ ...(r || { merchant: null, date: null, time: null, category: null, total: null, currency: null, description: null }),
-                   file: e.name, mime: e.mime, buffer: e.buffer, readable: !!r });
+                   file: e.name, mime: l.mime, readable: !!r, shrunk: l.shrunk, fileProblem: l.fileProblem,
+                   load: () => _load(e, fitReceipt) });
     });
     _update(job, { receiptsRead: Math.min(start + slice.length, entries.length) });
 
@@ -227,23 +309,47 @@ async function _run(job, { archives, forms }, deps) {
   // createRecord is the only place that knows what the store said.
   const duplicates = [];
   const suspected = [];
-  const note = rec => {
+  const needsReview = [];
+  const note = (rec, { reviewReason = null, rowNo = null, file = null } = {}) => {
     if (!rec) return;
     created.push(rec.id);
     if (rec.status === 'duplicate') duplicates.push({ id: rec.id, of: rec.duplicateOf, why: rec.errorMsg });
     else if (rec.errorMsg && /^Possible duplicate/.test(rec.errorMsg)) suspected.push({ id: rec.id, why: rec.errorMsg });
+    if (reviewReason) needsReview.push({ id: rec.id, rowNo, file, reason: reviewReason });
+  };
+
+  // The receipt with its bytes, for the moment it is stored and then let go.
+  // Fetched again rather than kept from the read, so only one receipt's bytes
+  // are held while records are written. A failure here cannot lose the claim
+  // line: it is created without the file, and says so.
+  const withBytes = async receipt => {
+    if (!receipt) return null;
+    const { load, ...rest } = receipt;
+    if (!load) return rest;
+    try {
+      const l = await load();
+      return { ...rest, buffer: l.buffer, mime: l.mime };
+    } catch (err) {
+      logger.warn('Claim receipt could not be re-read for storing', { jobId: job.id, file: receipt.file, error: err.message });
+      return { ...rest, fileProblem: rest.fileProblem || 'it could not be extracted from the archive a second time' };
+    }
   };
 
   for (const m of matched.matches) {
     const suggestion = suggestions.find(s => s.rowNo === m.row.no) || null;
+    const category = m.row.category || (suggestion && suggestion.category) || null;
+    const categorySuggested = !m.row.category && !!suggestion;
+    const receipt = await withBytes(m.receipt);
+    // Passed to createRecord for claim-record to store on the row (the review
+    // screen shows it as "Please check: ..."), and kept in the result below.
+    const reviewReason = _reviewReason({ match: m, category, categorySuggested, receipt });
     const rec = await createRecord({
       userId: job.userId, groupId,
-      row: m.row, receipt: m.receipt, match: m,
-      category: m.row.category || (suggestion && suggestion.category) || null,
-      categorySuggested: !m.row.category && !!suggestion,
-      store: storeReceipt,
+      row: m.row, receipt, match: m,
+      category, categorySuggested, reviewReason,
+      store: _storeFor(receipt, storeReceipt),
     });
-    note(rec);
+    note(rec, { reviewReason, rowNo: m.row.no, file: m.receipt.file });
   }
   // Claim lines with no receipt still become records — they are part of the
   // claim and somebody has to resolve them.
@@ -257,7 +363,9 @@ async function _run(job, { archives, forms }, deps) {
   // with no spreadsheet matched nothing, so nothing was created, and the import
   // reported success having imported zero claims. A claim form is a convenience,
   // not a requirement — the receipts are the claim.
-  for (const receipt of matched.unmatchedReceipts) {
+  for (const read of matched.unmatchedReceipts) {
+    const receipt = await withBytes(read);
+    const reviewReason = _reviewReason({ receipt });
     const rec = await createRecord({
       userId: job.userId, groupId,
       // Synthesised from what the model read, so the record carries the figures
@@ -270,11 +378,12 @@ async function _run(job, { archives, forms }, deps) {
         amount: receipt.total ?? null,
         category: receipt.category || null,
       },
-      receipt, match: null, category: receipt.category || null, store: storeReceipt,
+      receipt, match: null, category: receipt.category || null, reviewReason, store: _storeFor(receipt, storeReceipt),
     });
-    note(rec);
+    note(rec, { reviewReason, file: read.file });
   }
 
+  const notStored = reads.filter(r => r.fileProblem).map(r => ({ file: r.file, reason: r.fileProblem }));
   return _update(job, {
     stage: 'done',
     result: {
@@ -289,6 +398,9 @@ async function _run(job, { archives, forms }, deps) {
         // `suspected` are the ones a person still has to settle.
         duplicates: duplicates.length,
         suspectedDuplicates: suspected.length,
+        needsReview: needsReview.length,
+        shrunk: reads.filter(r => r.shrunk).length,
+        notStored: notStored.length,
       },
       discrepancies: matched.matches.filter(m => m.discrepancy).map(m => ({
         rowNo: m.row.no, date: m.row.date, description: m.row.description, ...m.discrepancy,
@@ -298,6 +410,12 @@ async function _run(job, { archives, forms }, deps) {
       unreadable: reads.filter(r => !r.readable).map(r => ({ file: r.file })),
       duplicates,
       suspectedDuplicates: suspected,
+      // Claims created with a reason to look again: a weak pairing, a
+      // suggested category, a receipt too large to attach.
+      needsReview,
+      // Receipts that could not be brought under Xero's 3MB limit. Their
+      // claims exist; the file is what is missing.
+      notStored,
       skipped,
       formErrors,
       categoriesSuggested: suggestions.length,

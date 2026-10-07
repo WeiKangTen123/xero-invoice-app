@@ -1,5 +1,6 @@
-const fs   = require('fs');
-const path = require('path');
+const fs     = require('fs');
+const path   = require('path');
+const logger = require('./logger');
 
 // Per-user receipt files for expense claims, on disk beside the PDF store.
 //
@@ -24,6 +25,87 @@ const MIME_EXT = {
 // Xero rejects attachments above 3MB. Enforced here as well as at the route so
 // nothing can write an unattachable file to disk by taking another path in.
 const MAX_BYTES = 3 * 1024 * 1024;
+
+// sharp is loaded lazily, as in thumbnailer.js: requiring this module happens at
+// boot, and a missing image library must cost the ability to shrink a large
+// photo, never the ability to store an ordinary one.
+let _sharp;
+let _sharpFailed = false;
+function _imageLib() {
+  if (_sharpFailed) return null;
+  if (!_sharp) {
+    try {
+      _sharp = require('sharp');
+      // One thread: shrinking a receipt is not worth taking the box's second
+      // core away from the requests it is also serving.
+      if (typeof _sharp.concurrency === 'function') _sharp.concurrency(1);
+    } catch (err) {
+      _sharpFailed = true;
+      logger.warn('sharp unavailable — oversized receipt photos cannot be shrunk', { error: err.message });
+      return null;
+    }
+  }
+  return _sharp;
+}
+
+// Tried in order, gentlest first. A phone photo of a receipt is legible long
+// before 1800px on its longer edge, so the last step still reads; anything a
+// step this small cannot bring under the limit is not a receipt photo worth
+// degrading further.
+const SHRINK_STEPS = [
+  { edge: 4000, quality: 85 },
+  { edge: 3000, quality: 80 },
+  { edge: 2400, quality: 75 },
+  { edge: 1800, quality: 70 },
+];
+
+const _mb = n => `${(n / 1024 / 1024).toFixed(1)}MB`;
+
+// Brings a receipt under Xero's attachment limit where that can be done, and
+// says plainly why when it cannot.
+//
+// The upload route never needs this: the browser compresses before sending.
+// A zip or folder import does, because the files in it are whatever the
+// camera wrote, and save() refusing a 6MB photo used to lose the receipt with
+// only a log line to show for it. Returns { buffer, mime, shrunk, reason }:
+// `reason` is null when the result fits, and a sentence for a person when it
+// does not, in which case the original buffer comes back untouched.
+async function fitToLimit(buffer, mime, { maxBytes = MAX_BYTES } = {}) {
+  const type = String(mime || '').toLowerCase();
+  if (!Buffer.isBuffer(buffer) || buffer.length <= maxBytes) return { buffer, mime, shrunk: false, reason: null };
+
+  const over = `is ${_mb(buffer.length)}, over Xero's ${_mb(maxBytes)} attachment limit`;
+  // A PDF cannot be re-encoded without a renderer, and quietly dropping its
+  // pages to make it fit would be worse than not attaching it.
+  if (type === 'application/pdf') return { buffer, mime, shrunk: false, reason: `the PDF ${over}, and a PDF cannot be made smaller here` };
+  if (type !== 'image/jpeg' && type !== 'image/png') return { buffer, mime, shrunk: false, reason: `the file ${over}` };
+
+  const lib = _imageLib();
+  if (!lib) return { buffer, mime, shrunk: false, reason: `the photo ${over}, and no image library is available to shrink it` };
+
+  for (const step of SHRINK_STEPS) {
+    let out;
+    try {
+      out = await lib(buffer)
+        .rotate()                                  // honour the EXIF orientation a phone camera writes
+        .resize({ width: step.edge, height: step.edge, fit: 'inside', withoutEnlargement: true })
+        // JPEG has no transparency; without this a transparent PNG
+        // screenshot comes out on black, which hides black text.
+        .flatten({ background: '#ffffff' })
+        .jpeg({ quality: step.quality, mozjpeg: true })
+        .toBuffer();
+    } catch (err) {
+      logger.warn('Receipt photo could not be shrunk', { bytes: buffer.length, mime: type, error: err.message });
+      return { buffer, mime, shrunk: false, reason: `the photo ${over}, and it could not be decoded to shrink it` };
+    }
+    // Always JPEG once re-encoded: a photographed receipt as PNG is several
+    // times the size for nothing anyone can see.
+    if (Buffer.isBuffer(out) && out.length > 0 && out.length <= maxBytes) {
+      return { buffer: out, mime: 'image/jpeg', shrunk: true, reason: null };
+    }
+  }
+  return { buffer, mime, shrunk: false, reason: `the photo ${over}, and could not be shrunk below it without becoming unreadable` };
+}
 
 function extensionFor(mime) { return MIME_EXT[String(mime || '').toLowerCase()] || null; }
 function isAcceptedMime(mime) { return extensionFor(mime) !== null; }
@@ -101,4 +183,4 @@ function forUser(userId) {
   return store;
 }
 
-module.exports = { forUser, extensionFor, isAcceptedMime, acceptedMimes, MAX_BYTES, MIME_EXT };
+module.exports = { forUser, extensionFor, isAcceptedMime, acceptedMimes, fitToLimit, MAX_BYTES, MIME_EXT, SHRINK_STEPS };

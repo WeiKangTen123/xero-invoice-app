@@ -798,8 +798,21 @@ describe('routes/receipts — one upload, several records', () => {
   });
 
   describe('a PDF with a receipt on each page', () => {
+    // Whether pages are separate receipts is decided by what is printed on
+    // them, so these are real-shaped pages: each of the three receipts has a
+    // total and a date of its own; the folio's halves share a folio number and
+    // say which page they are.
+    const GRAB_PAGE  = 'Grab receipt 2026-08-24 Orchard Rd to Changi Airport Fare 16.00 Booking fee 2.40 Total SGD 18.40 Paid by Visa';
+    const GOJEK_PAGE = 'Gojek trip 26 Aug 2026 Raffles Place to Novena Fare 10.00 Platform fee 2.50 Total 12.50 Thank you for riding';
+    const CDG_PAGE   = 'ComfortDelGro taxi receipt 2026-08-27 Metered fare 19.80 ERP 2.00 Total payable 21.80 Thank you';
+    const FOLIO_1 = 'GRAND HOTEL SINGAPORE Guest Folio Folio No: 884213 Arrival 12/08/2026 Departure 14/08/2026 Room charge 320.00 Breakfast 45.00 Page 1 of 2';
+    const FOLIO_2 = 'GRAND HOTEL SINGAPORE Guest Folio Folio No: 884213 Arrival 12/08/2026 Departure 14/08/2026 Room charge 320.00 Total 685.00 Amount paid 685.00 Page 2 of 2';
+    const pdfWith = (pages, more = {}) => jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({
+      pages, numPages: pages.length, hasText: pages.some(p => p.length >= 40), textPageCount: pages.filter(p => p.length >= 40).length, truncated: false, ...more,
+    });
+
     test('becomes one record per page, sharing the file', async () => {
-      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['a'.repeat(80), 'b'.repeat(80), 'c'.repeat(80)], numPages: 3, hasText: true, textPageCount: 3 });
+      pdfWith([GRAB_PAGE, GOJEK_PAGE, CDG_PAGE]);
       await upload(PDF_B64, 'application/pdf').expect(201);
       await settle();
 
@@ -848,7 +861,7 @@ describe('routes/receipts — one upload, several records', () => {
     });
 
     test('each page of a split PDF is read on its own', async () => {
-      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['GRAB '.repeat(20), 'GOJEK '.repeat(20)], numPages: 2, hasText: true, textPageCount: 2 });
+      pdfWith([GRAB_PAGE, GOJEK_PAGE]);
       parser.parseReceiptText
         .mockResolvedValueOnce({ receipts: [{ merchant: 'Grab',  total: 10, confidence: 'high', lineItems: [] }], split: false })
         .mockResolvedValueOnce({ receipts: [{ merchant: 'Gojek', total: 20, confidence: 'high', lineItems: [] }], split: false });
@@ -865,6 +878,98 @@ describe('routes/receipts — one upload, several records', () => {
       await settle();
       expect(parser.parseReceiptText).not.toHaveBeenCalled();
       expect(parser.parseReceiptImage).not.toHaveBeenCalled();
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('a scanned PDF says on the record why nothing was read', async () => {
+      jest.spyOn(pdfPages, 'extractPages').mockResolvedValue({ pages: ['', ''], numPages: 2, hasText: false, textPageCount: 0 });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      expect(rows()[0].errorMsg).toMatch(/^Please check: .*no text layer/);
+      pdfPages.extractPages.mockRestore();
+    });
+
+    // Two pages with text used to be two claims, whatever was on them.
+    test('a two-page hotel folio stays one claim, read once', async () => {
+      pdfWith([FOLIO_1, FOLIO_2]);
+      parser.parseReceiptText.mockResolvedValueOnce({ receipts: [{ merchant: 'Grand Hotel', total: 685, confidence: 'high', lineItems: [] }], split: false });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      const all = rows();
+      expect(all).toHaveLength(1);
+      expect(all[0]).toMatchObject({ vendorName: 'Grand Hotel', totalAmount: 685 });
+      expect(all[0].receiptPage).toBeFalsy();
+      expect(parser.parseReceiptText).toHaveBeenCalledTimes(1);
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('a scanned page between separate receipts becomes a flagged row of its own', async () => {
+      // It used to vanish: no row, no note.
+      pdfWith([GRAB_PAGE, '', GOJEK_PAGE]);
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      const all = rows();
+      expect(all.map(r => r.receiptPage).sort()).toEqual([1, 2, 3]);
+      const scanned = all.find(r => r.receiptPage === 2);
+      expect(scanned.errorMsg).toMatch(/page 2 of this PDF has no readable text/);
+      expect(scanned.status).toBe('review-needed');
+      // Only the pages with text cost a read.
+      expect(parser.parseReceiptText).toHaveBeenCalledTimes(2);
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('a scanned page inside one document is a note on the claim, not lost', async () => {
+      pdfWith([FOLIO_1, '', FOLIO_2]);
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      const all = rows();
+      expect(all).toHaveLength(1);
+      expect(all[0].errorMsg).toMatch(/page 2 of this PDF has no readable text/);
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('a PDF past the page cap says which pages were not read', async () => {
+      pdfWith(Array.from({ length: 30 }, () => GRAB_PAGE), { numPages: 45, truncated: true });
+      parser.parseReceiptText.mockResolvedValueOnce({ receipts: [{ merchant: 'Grab', total: 18.4, confidence: 'high', lineItems: [] }], split: false });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      const all = rows();
+      expect(all).toHaveLength(1);
+      expect(all[0].errorMsg).toMatch(/only the first 30 of 45 pages were read/);
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test("the reader's own grouping splits pages the text alone could not decide, with no further call", async () => {
+      // No dates on either page, so the text cannot settle it. The whole-PDF
+      // read finds two receipts, each total printed on one page only.
+      const A = 'Starbucks Orchard Caffe Latte 6.50 Croissant 4.20 Total 10.70 Thank you for visiting';
+      const B = 'Toast Box Raffles Kaya toast set 5.40 Teh 1.60 Total 7.00 See you again soon';
+      pdfWith([A, B]);
+      parser.parseReceiptText.mockResolvedValueOnce({ split: false, receipts: [
+        { merchant: 'Toast Box', total: 7, confidence: 'high', lineItems: [] },
+        { merchant: 'Starbucks', total: 10.7, confidence: 'high', lineItems: [] },
+      ] });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      const byPage = Object.fromEntries(rows().map(r => [r.receiptPage, r.vendorName]));
+      expect(byPage).toEqual({ 1: 'Starbucks', 2: 'Toast Box' });
+      expect(parser.parseReceiptText).toHaveBeenCalledTimes(1);
+      pdfPages.extractPages.mockRestore();
+    });
+
+    test('several receipts the reader cannot place by page stay one claim, with a note', async () => {
+      const A = 'Starbucks Orchard Caffe Latte 6.50 Croissant 4.20 Total 10.70 Thank you for visiting';
+      const B = 'Toast Box Raffles Kaya toast set 5.40 Teh 1.60 Total 7.00 See you again soon';
+      pdfWith([A, B]);
+      parser.parseReceiptText.mockResolvedValueOnce({ split: false, receipts: [
+        { merchant: 'Toast Box', total: 99, confidence: 'high', lineItems: [] },
+        { merchant: 'Starbucks', total: 10.7, confidence: 'high', lineItems: [] },
+      ] });
+      await upload(PDF_B64, 'application/pdf').expect(201);
+      await settle();
+      const all = rows();
+      expect(all).toHaveLength(1);
+      expect(all[0].errorMsg).toMatch(/the reader saw 2 receipts/);
       pdfPages.extractPages.mockRestore();
     });
   });

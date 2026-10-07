@@ -291,6 +291,13 @@ const server = app.listen(PORT, HOST, () => {
   claimWorker.recoverPendingJobs();
   logger.info('Claim queue recovery check complete');
 
+  // Receipt reads run in memory, so a restart mid-read left the row unread and
+  // the phone saying "Reading…" forever. Re-read what never finished. Best
+  // effort: a failure here must not stop the server.
+  Promise.resolve()
+    .then(() => require('./routes/receipts').resumeUnreadReceipts())
+    .catch(err => logger.warn('Unread receipt recovery failed', { error: err.message }));
+
   // Both recoveries above skip disabled accounts themselves. Email recovery
   // gets a 3s head-start so it can dedup before stuck invoices are resubmitted.
   setTimeout(retryStuckSubmissions, 3000);

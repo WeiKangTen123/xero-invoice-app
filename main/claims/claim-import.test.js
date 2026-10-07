@@ -1,3 +1,18 @@
+// sharp is mocked so an oversized photo can be shrunk on any machine (this
+// checkout's build is for a Mac). Receipts under 3MB never reach it, so every
+// other test here is unaffected. Each toBuffer() returns the next queued size.
+jest.mock('sharp', () => {
+  const sharp = jest.fn(() => {
+    const chain = {};
+    ['rotate', 'resize', 'flatten', 'jpeg'].forEach(m => { chain[m] = jest.fn(() => chain); });
+    chain.toBuffer = jest.fn(async () => Buffer.alloc(sharp.outputs.length ? sharp.outputs.shift() : 1000));
+    return chain;
+  });
+  sharp.concurrency = jest.fn();
+  sharp.outputs = [];
+  return sharp;
+});
+
 const zlib = require('zlib');
 const ExcelJS = require('exceljs');
 const claimImport = require('./claim-import');
@@ -295,5 +310,161 @@ describe('pacing', () => {
     // Two throttles on one call chain hide each other; the client's sliding
     // window is the one that knows the quota, so the import adds none.
     expect(claimImport.READ_INTERVAL_MS).toBe(0);
+  });
+});
+
+// ── Receipts too large for Xero ─────────────────────────────────────────────
+// An archive entry may be up to 15MB, but Xero attaches at most 3MB and
+// receipt-store refuses anything larger. The photo used to be lost with only a
+// log line to say so.
+describe('claims/claim-import — receipts over the 3MB attachment limit', () => {
+  beforeEach(() => { claimImport._reset(); require('sharp').outputs.length = 0; });
+  const MB = 1024 * 1024;
+
+  test('an oversized photo is shrunk before it is read and before it is stored', async () => {
+    require('sharp').outputs.push(600 * 1024, 600 * 1024);   // once to read, once to store
+    const zip = makeZip([{ name: 'c/IMG_0001.png', data: Buffer.alloc(Math.round(3.5 * MB)) }]);
+    let captured = null;
+    const parseReceipts = jest.fn(async (u, imgs) => imgs.map(() => ({ merchant: 'Grab', date: '2026-02-23', total: 15.8 })));
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] },
+      { ...deps(), parseReceipts, createRecord: jest.fn(async args => { captured = args; return { id: 'r1' }; }) });
+    await settle(job);
+
+    expect(job.stage).toBe('done');
+    // The model was sent the small copy, as a JPEG.
+    expect(parseReceipts.mock.calls[0][1][0].buffer.length).toBe(600 * 1024);
+    expect(parseReceipts.mock.calls[0][1][0].mime).toBe('image/jpeg');
+    // And the record is stored with it, under the limit.
+    expect(captured.receipt.buffer.length).toBeLessThanOrEqual(3 * MB);
+    expect(captured.receipt.mime).toBe('image/jpeg');
+    expect(job.result.summary.shrunk).toBe(1);
+    expect(job.result.notStored).toEqual([]);
+  });
+
+  test('a file that cannot be brought under 3MB still becomes a claim, and the reason reaches the row', async () => {
+    // A PDF cannot be re-encoded here. The claim is created anyway; only the
+    // attachment is missing, and the store error claim-record writes onto the
+    // row says why in words a person can act on.
+    const zip = makeZip([{ name: 'c/hotel.pdf', data: Buffer.alloc(Math.round(3.5 * MB)) }]);
+    let storeError = null;
+    const createRecord = jest.fn(async ({ receipt, store }) => {
+      try { await store('u1', 'id1', receipt.buffer, receipt.mime); } catch (err) { storeError = err.message; }
+      return { id: 'r1' };
+    });
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] },
+      { ...deps(), createRecord, parseReceipts: jest.fn(async (u, imgs) => imgs.map(() => ({ merchant: 'Hotel', date: '2026-02-23', total: 420 }))) });
+    await settle(job);
+
+    expect(job.stage).toBe('done');
+    expect(createRecord).toHaveBeenCalledTimes(1);
+    expect(createRecord.mock.calls[0][0].row).toMatchObject({ amount: 420 });
+    expect(storeError).toMatch(/PDF is 3\.5MB, over Xero's 3\.0MB attachment limit/);
+    expect(job.result.summary.notStored).toBe(1);
+    expect(job.result.notStored[0]).toMatchObject({ file: 'c/hotel.pdf', reason: expect.stringMatching(/3\.0MB/) });
+  });
+
+  test('a receipt within the limit is stored by the ordinary store', async () => {
+    const zip = makeZip([{ name: 'c/a.jpg', data: JPEG }]);
+    const d = deps();
+    let usedStore = null;
+    d.createRecord = jest.fn(async ({ store }) => { usedStore = store; return { id: 'r1' }; });
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] }, d);
+    await settle(job);
+    expect(usedStore).toBe(d.storeReceipt);
+  });
+});
+
+// ── Holding an archive in memory ────────────────────────────────────────────
+describe('claims/claim-import — archive size and memory', () => {
+  beforeEach(() => claimImport._reset());
+
+  test('an archive that unpacks past the size cap is refused whole, not half imported', async () => {
+    const zip = makeZip([{ name: 'c/a.jpg', data: JPEG }, { name: 'c/b.jpg', data: JPEG }]);
+    const d = { ...deps(), maxArchiveBytes: JPEG.length + 1 };   // room for one entry, not two
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] }, d);
+    await settle(job);
+
+    expect(job.stage).toBe('failed');
+    expect(job.error).toMatch(/more than one claim should hold/);
+    expect(d.parseReceipts).not.toHaveBeenCalled();
+    expect(d.createRecord).not.toHaveBeenCalled();
+  });
+
+  test('receipts are extracted a batch at a time, not all up front', async () => {
+    // Each extraction passes through fitReceipt, so its order against the
+    // model calls shows when bytes are pulled: one batch, read, the next.
+    const events = [];
+    const zip = makeZip(Array.from({ length: 4 }, (_, i) => ({ name: `c/${i}.jpg`, data: Buffer.from([0xff, 0xd8, i]) })));
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [] }, {
+      ...deps(), batch: 2,
+      fitReceipt: async (buffer, mime) => { events.push(`load ${buffer[2]}`); return { buffer, mime, shrunk: false, reason: null }; },
+      parseReceipts: jest.fn(async (u, imgs) => { events.push(`read ${imgs.length}`); return imgs.map(() => null); }),
+    });
+    await settle(job);
+
+    expect(job.stage).toBe('done');
+    expect(events.slice(0, 6)).toEqual(['load 0', 'load 1', 'read 2', 'load 2', 'load 3', 'read 2']);
+  });
+});
+
+// ── What a person should look at again ──────────────────────────────────────
+// The matcher's `weak` flag and a suggested category were worked out and then
+// thrown away, so a receipt paired on a near date alone looked as settled as
+// one that agreed on everything.
+describe('claims/claim-import — review reasons', () => {
+  beforeEach(() => claimImport._reset());
+
+  async function run({ formRows, reads, suggestions = [] }) {
+    const zip = makeZip(reads.map((_, i) => ({ name: `c/${i}.png`, data: Buffer.from([0xff, 0xd8, i]) })));
+    const form = await makeForm(formRows);
+    const createRecord = jest.fn(async ({ row, receipt }) => ({ id: `rec-${row.no || (receipt && receipt.file)}` }));
+    const job = claimImport.startImport({ userId: 'u1', archives: [{ name: 'c.zip', buffer: zip }], forms: [{ name: 'f.xlsx', buffer: form }] },
+      { ...deps(), createRecord, parseReceipts: jest.fn(async () => reads), suggest: jest.fn(async () => suggestions) });
+    await settle(job);
+    return { job, createRecord };
+  }
+
+  test('a receipt paired on a near date and the amount is flagged weak, with the evidence named', async () => {
+    const { job, createRecord } = await run({
+      formRows: [{ no: 1, date: '2026-02-23', description: 'Taxi home', amount: 15.8 }],
+      reads: [{ merchant: 'CDG', date: '2026-02-24', total: 15.8 }],
+    });
+    const args = createRecord.mock.calls[0][0];
+    expect(args.reviewReason).toMatch(/claim line 1 on a day apart and same amount only/);
+    expect(job.result.summary.needsReview).toBe(1);
+    expect(job.result.needsReview[0]).toMatchObject({ id: 'rec-1', rowNo: '1', file: 'c/0.png' });
+  });
+
+  test('a receipt that agrees on date and amount needs no second look', async () => {
+    const { job, createRecord } = await run({
+      formRows: [{ no: 1, date: '2026-02-23', description: 'Taxi home', amount: 15.8 }],
+      reads: [{ merchant: 'CDG', date: '2026-02-23', total: 15.8 }],
+    });
+    expect(createRecord.mock.calls[0][0].reviewReason).toBeNull();
+    expect(job.result.needsReview).toEqual([]);
+  });
+
+  test('a date a day apart is not, on its own, a match', async () => {
+    // MIN_SCORE used to equal the near-date score, so any receipt from the day
+    // before was pinned to the claim line.
+    const { job } = await run({
+      formRows: [{ no: 1, date: '2026-02-23', description: 'Taxi home', amount: 15.8 }],
+      reads: [{ merchant: 'Cold Storage', date: '2026-02-24', total: 99.9 }],
+    });
+    expect(job.result.summary.matched).toBe(0);
+    expect(job.result.missingReceipts).toHaveLength(1);
+    expect(job.result.extraReceipts).toHaveLength(1);
+  });
+
+  test('a category the model suggested is passed on to be confirmed', async () => {
+    const { job, createRecord } = await run({
+      formRows: [{ no: 1, date: '2026-02-23', description: 'Taxi home', amount: 15.8 }],
+      reads: [{ merchant: 'CDG', date: '2026-02-23', total: 15.8 }],
+      suggestions: [{ rowNo: '1', category: 'LOCAL TRAVEL COST (SGD)' }],
+    });
+    const args = createRecord.mock.calls[0][0];
+    expect(args.categorySuggested).toBe(true);
+    expect(args.reviewReason).toMatch(/"LOCAL TRAVEL COST \(SGD\)" was suggested, not chosen by the claimant/);
+    expect(job.result.needsReview).toHaveLength(1);
   });
 });

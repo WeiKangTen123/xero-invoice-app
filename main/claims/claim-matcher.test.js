@@ -1,4 +1,4 @@
-const { matchClaims, sameAmount, daysApart, textOverlap } = require('./claim-matcher');
+const { matchClaims, sameAmount, daysApart, textOverlap, MIN_SCORE, DATE_NEAR } = require('./claim-matcher');
 
 // The design constraint these pin: matching must NOT lead on amount. If a
 // receipt is paired with whichever row equals its total, an amount mismatch is
@@ -67,6 +67,45 @@ describe('claims/claim-matcher', () => {
     const r = matchClaims([row(1, '2026-02-23', 15.8)], [rcpt('2026-02-24', 15.8)]);
     expect(r.summary.matched).toBe(1);
     expect(r.matches[0].reasons).toContain('a day apart');
+  });
+
+  // MIN_SCORE used to equal DATE_NEAR, so a receipt from the day before was a
+  // match on that alone and could be pinned to an unrelated claim line.
+  describe('a near date needs something else to agree', () => {
+    test('a day apart, and nothing else, is not a match', () => {
+      const r = matchClaims([row(1, '2026-02-23', 15.8, 'Taxi home')], [rcpt('2026-02-24', 99.9, 'Cold Storage')]);
+      expect(r.summary.matched).toBe(0);
+      expect(r.unmatchedRows).toHaveLength(1);
+      expect(r.unmatchedReceipts).toHaveLength(1);
+    });
+
+    test('a day apart with the merchant named in the description matches, and is weak', () => {
+      const r = matchClaims([row(1, '2026-02-23', 15.8, 'Grab to the office')], [rcpt('2026-02-24', 99.9, 'Grab')]);
+      expect(r.summary.matched).toBe(1);
+      expect(r.matches[0].weak).toBe(true);
+    });
+
+    test('a day apart with the amount agreeing matches, and is still weak', () => {
+      const r = matchClaims([row(1, '2026-02-23', 15.8)], [rcpt('2026-02-24', 15.8)]);
+      expect(r.matches[0].weak).toBe(true);
+      expect(r.matches[0].reasons).toEqual(['a day apart', 'same amount']);
+    });
+
+    test('the same date alone still matches, so an amount mismatch can be reported', () => {
+      const r = matchClaims([row(1, '2026-02-23', 15.8)], [rcpt('2026-02-23', 30.6, 'CDG')]);
+      expect(r.matches).toHaveLength(1);
+      expect(r.matches[0].weak).toBe(true);
+      expect(r.matches[0].discrepancy).not.toBeNull();
+    });
+
+    test('date and amount agreeing is the only match that is not weak', () => {
+      const r = matchClaims([row(1, '2026-02-23', 15.8)], [rcpt('2026-02-23', 15.8)]);
+      expect(r.matches[0].weak).toBe(false);
+    });
+
+    test('the threshold sits above a near date on its own', () => {
+      expect(MIN_SCORE).toBeGreaterThan(DATE_NEAR);
+    });
   });
 
   test('a match on one weak signal is flagged for a human', () => {

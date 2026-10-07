@@ -4,6 +4,7 @@ const { getUserDefaults }           = require('../utils/users');
 const { newId }                     = require('../utils/ids');
 const { today }                     = require('../intake/document');
 const { resolveAccountCode }        = require('./category-account');
+const { normaliseCurrency }         = require('./claim-form');
 const invoiceStore                  = require('../utils/invoice-store');
 const logger                        = require('../utils/logger');
 
@@ -54,7 +55,12 @@ function newClaimRow({ userId, id = newId(), source, groupId = null, receipt = n
     invoiceNumber: claimNumber({ id, groupId, row }),
     invoiceDate:   date,
     dueDate:       date,
-    currency:      (row && row.currency) || (receipt && receipt.currency) || defaults.currency,
+    // Cleaned here as well as on the form, so a symbol from any reader ("S$")
+    // never reaches Xero as the currency.
+    currency:      normaliseCurrency(row && row.currency) || normaliseCurrency(receipt && receipt.currency) || defaults.currency,
+    // The form's exchange rate in Xero's terms (claim-form.js). Xero is given
+    // it only when the claim's currency is not the org's own.
+    currencyRate:  (row && row.currencyRate > 0) ? row.currencyRate : null,
     accountCode:   defaults.accountCode.claim,
     // The claimant's own figures are what is recorded. The receipt read is
     // evidence, and a disagreement is reported rather than silently preferred.
@@ -93,11 +99,15 @@ function claimPatch(r, extras = {}) {
 // chart (category-account). The form's heading leads the description, but
 // the chart may only know the reader's wording, so both are tried. No match,
 // or no connected org, and null — the caller keeps whatever it had.
-async function accountFor(userId, category, receipt) {
+//
+// `tenantId` is the company a claim already in Xero lives in; without it the
+// chart is read from the company a new claim will be sent to.
+async function accountFor(userId, category, receipt, { tenantId } = {}) {
   const cat = category || (receipt && receipt.category) || null;
   if (!cat) return null;                       // nothing to look up — the chart is never asked
   const alt = receipt && receipt.category && receipt.category !== cat ? receipt.category : null;
-  return (await resolveAccountCode(userId, cat)) || (alt ? await resolveAccountCode(userId, alt) : null) || null;
+  const ask = c => (tenantId ? resolveAccountCode(userId, c, { tenantId }) : resolveAccountCode(userId, c));
+  return (await ask(cat)) || (alt ? await ask(alt) : null) || null;
 }
 
 // Turns one matched claim line into a local record. Injected into the import
@@ -107,7 +117,7 @@ async function accountFor(userId, category, receipt) {
 // the claimant's amount and date, not the model's guess — and because doing it
 // one record at a time means a repeat inside a single archive is caught too: the
 // first row is committed before the second is checked.
-async function createClaimRecord({ userId, groupId, row, receipt, match, category, store }) {
+async function createClaimRecord({ userId, groupId, row, receipt, match, category, store, reviewReason = null }) {
   const id       = newId();
   const invStore = invoiceStore.forUser(userId);
 
@@ -123,6 +133,7 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
 
   let storedName = null;
   let mime = null;
+  let storeFailure = null;
   if (dup && dup.certain) {
     // Byte-identical to something already held, so writing the file again would
     // put a second identical copy on disk for no gain. Point at the original's
@@ -135,8 +146,13 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
       mime = receipt.mime;
       storedName = await store(userId, id, receipt.buffer, receipt.mime);
     } catch (err) {
-      // A receipt that will not store is not a reason to lose the claim line.
+      // A receipt that will not store is not a reason to lose the claim line,
+      // but it is a reason to say so: the claim would otherwise go to Xero
+      // with no receipt attached and nothing on the row to explain why.
       logger.warn('Claim receipt could not be stored', { userId, id, error: err.message });
+      storedName = null;
+      mime = null;
+      storeFailure = `The receipt image could not be saved (${err.message}), so it will not be attached in Xero. Add the receipt to this claim again.`;
     }
   }
 
@@ -144,7 +160,7 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
   // suspected duplicate is recorded the same way, and takes precedence: it is
   // the more urgent of the two things to look at.
   const matchRef = dup ? (dup.match.invoiceNumber || dup.match.id) : null;
-  const note =
+  const mainNote =
     dup && !dup.certain
       ? `Possible duplicate of ${matchRef} — ${dup.reason}. Check before approving.`
     : dup
@@ -155,22 +171,34 @@ async function createClaimRecord({ userId, groupId, row, receipt, match, categor
       // arrived without a form. Only a line MISSING its receipt is a problem.
       : (!receipt && row.no ? 'No receipt found for this claim line' : null);
 
+  const claimRow = newClaimRow({ userId, id, source: 'claim', groupId, receipt, row, category });
+  // A currency the form gave but no code could be read from: the claim takes
+  // the receipt's or the default, and says which.
+  const currencyNote = row && row.currencyUnread && !normaliseCurrency(row.currency)
+    ? `The claim form gives the currency as "${row.currencyUnread}", which is not a currency code; ${claimRow.currency} was used. Check it before approving.`
+    : null;
+  // The duplicate note stays first: the import reads "Possible duplicate" from
+  // the start of it.
+  // What the import was unsure of — a weak receipt match, a suggested category,
+  // a second receipt in one photo — used to reach only the import summary,
+  // which is gone once the dialog closes. It goes on the claim itself.
+  const reviewNote = reviewReason ? `Please check: ${String(reviewReason).replace(/\.\s*$/, '')}.` : null;
+  const note = [mainNote, reviewNote, currencyNote, storeFailure].filter(Boolean).join(' ') || null;
+
   const accountCode = await accountFor(userId, category, receipt);
 
-  return invStore.add(newClaimRow({
-    userId, id, source: 'claim', groupId, receipt, row, category,
-    extras: {
-      // Exact image match is auto-marked 'duplicate'. Field match stays
-      // 'review-needed' with duplicateOf linked so the reviewer can settle it.
-      status:      dup && dup.certain ? 'duplicate' : 'review-needed',
-      duplicateOf: dup ? dup.match.id : null,
-      ...(accountCode ? { accountCode } : {}),
-      receiptFile: storedName,
-      receiptMime: mime,
-      receiptHash: hash,
-      errorMsg:    note,
-    },
-  }));
+  return invStore.add({
+    ...claimRow,
+    // Exact image match is auto-marked 'duplicate'. Field match stays
+    // 'review-needed' with duplicateOf linked so the reviewer can settle it.
+    status:      dup && dup.certain ? 'duplicate' : 'review-needed',
+    duplicateOf: dup ? dup.match.id : null,
+    ...(accountCode ? { accountCode } : {}),
+    receiptFile: storedName,
+    receiptMime: mime,
+    receiptHash: hash,
+    errorMsg:    note,
+  });
 }
 
 module.exports = { newClaimRow, claimPatch, claimNumber, claimDescription, accountFor, createClaimRecord };

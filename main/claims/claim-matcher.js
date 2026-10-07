@@ -56,7 +56,18 @@ function scorePair(row, receipt) {
 
 // Below this a pair is not a match at all — better to report a claim line as
 // having no receipt than to attach the wrong one to it.
-const MIN_SCORE = 45;
+//
+// It used to equal DATE_NEAR, so two things dated a day apart were a match on
+// that alone, and any receipt from the day before could be pinned to a claim
+// line it had nothing to do with. A near date now needs something else to
+// agree with it. What still clears the bar, and why:
+//   same date alone        — 100. Kept on purpose: it is how a claim whose
+//                            amount disagrees with its receipt gets found at all
+//   a day apart + anything — 60 or more: the merchant named, or the amount
+//   same amount alone      — 60: the receipt's date was unreadable or misread
+// Everything short of same date AND same amount is still marked weak below,
+// and the import passes that on for a person to confirm.
+const MIN_SCORE = DATE_NEAR + TEXT_HINT;
 
 function matchClaims(rows = [], receipts = []) {
   const pairs = [];
@@ -111,4 +122,4 @@ function matchClaims(rows = [], receipts = []) {
   };
 }
 
-module.exports = { matchClaims, scorePair, sameAmount, daysApart, textOverlap, MIN_SCORE };
+module.exports = { matchClaims, scorePair, sameAmount, daysApart, textOverlap, MIN_SCORE, DATE_EXACT, DATE_NEAR, AMOUNT_EXACT };

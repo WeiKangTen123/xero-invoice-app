@@ -8,6 +8,7 @@ const asyncHandler = require('../middleware/async-handler');
 const invoiceStore = require('../utils/invoice-store');
 const receiptStore = require('../utils/receipt-store');
 const pairing      = require('../utils/pairing');
+const users        = require('../utils/users');
 const { parseReceiptImage, parseReceiptText } = require('../utils/receipt-parser');
 // Required as a module rather than destructured so the functions are looked up
 // at call time — a destructured import captures the original reference and can
@@ -55,6 +56,50 @@ function verifyImageToken(token, invoiceId) {
 // point is that an upload returns before the read finishes — but tests must,
 // or they read the row before it has been filled in.
 const _inflight = new Set();
+// Receipt ids being read right now, so the catch-up after a restart and a
+// fresh upload can never read the same receipt twice at once.
+const _reading = new Set();
+
+// Marks the read over on every row it produced (the upload and any page or
+// region siblings), so the phone can tell "still reading" from "read, and
+// nothing was found". Looked up by id and by group: this used to load every
+// record the user had to find the one or two it wanted, once per upload.
+function _stampParsed(userId, id, at = new Date().toISOString()) {
+  const s = invoiceStore.forUser(userId);
+  const seen = new Set();
+  for (const r of [s.getById(id), ...s.getReceiptGroup(id)]) {
+    if (!r || seen.has(r.id)) continue;
+    seen.add(r.id);
+    s.update(r.id, { parsedAt: at });
+  }
+}
+
+// Reads a stored receipt off the response path. Returns a promise that
+// settles when the read has ended, however it ended. An upload never waits on
+// it; the restart catch-up below does, to read one receipt at a time.
+//
+// Tracked so a test can wait for it. Guessing at how many event-loop ticks
+// the read takes (the old settle() helper) was wrong often enough that one
+// describe block had grown to three nested setImmediates, and still flaked.
+function _readInBackground(userId, id, buffer, mime, storedName, hash) {
+  _reading.add(id);
+  const done = new Promise(resolve => setImmediate(() => {
+    readAndMaybeSplit(userId, id, buffer, mime, storedName, hash)
+      .catch(err => logger.warn('Receipt read failed', { userId, id, error: err.message }))
+      .finally(() => {
+        // However it ended, the read is over. Guarded, because a throw here
+        // would leave this promise unsettled and the receipt marked as being
+        // read for the life of the process.
+        try { _stampParsed(userId, id); }
+        catch (err) { logger.warn('Receipt read could not be marked finished', { userId, id, error: err.message }); }
+        _reading.delete(id);
+        resolve();
+      });
+  }));
+  _inflight.add(done);
+  done.finally(() => _inflight.delete(done));
+  return done;
+}
 
 function storeReceipt(userId, { mime, data, filename, source }) {
   if (!receiptStore.isAcceptedMime(mime)) {
@@ -120,25 +165,9 @@ function storeReceipt(userId, { mime, data, filename, source }) {
   // exists and is already visible; parsing only fills it in.
   //
   // Parsing is an enhancement, never a gate: if it fails the receipt stays
-  // exactly where it is, at review-needed, for the user to type by hand.
-  // Tracked so a test can wait for it. Guessing at how many event-loop ticks
-  // the read takes (the old settle() helper) was wrong often enough that one
-  // describe block had grown to three nested setImmediates, and still flaked.
-  const done = new Promise(resolve => setImmediate(() => {
-    readAndMaybeSplit(userId, id, buffer, mime, storedName, hash)
-      .catch(err => logger.warn('Receipt read failed', { userId, id, error: err.message }))
-      .finally(() => {
-        // However it ended, the read is over. Every row from this upload (the
-        // parent and any page or region siblings) is stamped, so the phone can
-        // tell "still reading" from "read, and nothing was found".
-        const at = new Date().toISOString();
-        const s  = invoiceStore.forUser(userId);
-        for (const r of s.getAll()) if (r.id === id || r.receiptGroup === id) s.update(r.id, { parsedAt: at });
-        resolve();
-      });
-  }));
-  _inflight.add(done);
-  done.finally(() => _inflight.delete(done));
+  // exactly where it is, at review-needed, for the user to type by hand. A
+  // restart before it finishes is caught up on boot (resumeUnreadReceipts).
+  _readInBackground(userId, id, buffer, mime, storedName, hash);
 
   return { status: 201, body: { receipt: record, imageToken: issueImageToken(userId, id) } };
 }
@@ -163,9 +192,12 @@ function _flagIfSuspected(userId, id) {
   if (!dup) return;
 
   logger.info('Possible duplicate receipt', { userId, id, of: dup.match.id });
+  // A note the read already left (a page with no text, a page cap) is kept
+  // after this one. Overwriting it would drop the only mention of a page.
+  const prior = rec.errorMsg && !/duplicate/i.test(rec.errorMsg) ? rec.errorMsg.replace(/^Please check:\s*/i, '') : null;
   store.update(id, {
     duplicateOf: dup.match.id,
-    errorMsg: `Possible duplicate of ${dup.match.id}${dup.match.invoiceNumber ? ` (${dup.match.invoiceNumber})` : ''} — ${dup.reason}. Check before approving.`,
+    errorMsg: `Possible duplicate of ${dup.match.id}${dup.match.invoiceNumber ? ` (${dup.match.invoiceNumber})` : ''} — ${dup.reason}. Check before approving.${prior ? ` Also: ${prior}` : ''}`,
   });
 }
 
@@ -180,6 +212,102 @@ async function _applyFields(userId, id, r, extra = {}) {
   invoiceStore.forUser(userId).update(id, claimPatch(r, { accountCode, ...extra }));
 }
 
+// "Please check: ..." is the prefix the review screen strips before showing a
+// note under "Attention Needed", the same convention the bill parser uses.
+function _note(userId, id, notes) {
+  if (!notes.length) return;
+  invoiceStore.forUser(userId).update(id, { errorMsg: `Please check: ${notes.join('; ')}.` });
+}
+
+const _pageList = pages => (pages.length === 1
+  ? `page ${pages[0]}`
+  : `pages ${pages.slice(0, -1).join(', ')} and ${pages[pages.length - 1]}`);
+
+// A PDF becomes one record unless its pages are plainly separate receipts.
+//
+// Splitting used to follow the page count: any two pages with text became two
+// claims, so a two-page hotel folio was two half-stays; a scanned page between
+// two text pages vanished without a row or a word; and every page of a long
+// PDF was a model call of its own, with no limit on pages. Now:
+//   * pdf-pages decides from what is printed (a total and a date of their own
+//     on each page, no page numbering or shared folio number) and caps the
+//     read at 30 pages
+//   * when the text cannot decide, the single whole-document read that a
+//     one-record PDF needs anyway is also asked how many receipts it saw; one
+//     per page, each traceable by its total, splits with no further call
+//   * a page with no text is a flagged row among separate receipts, and a
+//     note on the record otherwise
+async function _readPdf(userId, id, buffer, mime, storedName, hash) {
+  const store = invoiceStore.forUser(userId);
+  const extracted = await pdfPages.extractPages(buffer);
+  const notes = [];
+  // Pages past the cap were never read. Saying so is the difference between a
+  // long PDF and a claim quietly missing its second half.
+  if (extracted.truncated) notes.push(`only the first ${extracted.pages.length} of ${extracted.numPages} pages were read; check the rest of the PDF by hand`);
+
+  if (!extracted.hasText) {
+    // A scan: every page is an image and there is no renderer to draw one
+    // for the vision reader. The record stays as uploaded, typeable by hand.
+    _note(userId, id, [...notes, 'this PDF has no text layer (it is a scan), so nothing could be read from it; type the figures in']);
+    logger.info('PDF has no text layer; left for the user', { userId, id });
+    return;
+  }
+
+  const decision = pdfPages.splittablePages(extracted);
+  let targets;   // [{ page, receipt? }], once the PDF is known to hold separate receipts
+  if (decision.split) {
+    targets = decision.pageNumbers.map(page => ({ page }));
+  } else {
+    const parsed = await parseReceiptText(userId, extracted.pages.join('\n\n'));
+    const found = (parsed && parsed.receipts) || [];
+    const attributed = decision.oneDocument ? null : pdfPages.attributeToPages(found, extracted.pages, decision.pageNumbers);
+    if (!attributed) {
+      if (found.length) await _applyFields(userId, id, found[0]);
+      const blank = decision.blankPages;
+      if (blank.length) {
+        notes.push(`${_pageList(blank)} of this PDF ${blank.length === 1 ? 'has' : 'have'} no readable text (a scan?); check nothing on ${blank.length === 1 ? 'it' : 'them'} is missing from this claim`);
+      }
+      if (found.length > 1) {
+        notes.push(`the reader saw ${found.length} receipts in this PDF but could not tell which page each is on, so only the first was used; check the figures`);
+      }
+      _note(userId, id, notes);
+      if (found.length) _flagIfSuspected(userId, id);
+      logger.info('PDF read as one receipt', { userId, id, read: !!parsed, found: found.length, reason: decision.reason });
+      return;
+    }
+    targets = attributed;
+  }
+
+  // Separate receipts: one record per page, all pointing at the same file.
+  // A sibling is a complete claim of the same source as the upload, with the
+  // same bytes, so the same hash.
+  const group  = id;
+  const parent = store.getById(id);
+  const sibling = (page, extras = {}) => store.add(newClaimRow({ userId, source: parent.source, groupId: group, extras: {
+    receiptFile: storedName, receiptMime: mime, receiptHash: hash, receiptPage: page, ...extras,
+  } }));
+
+  const [first, ...rest] = targets;
+  store.update(id, { receiptPage: first.page, receiptGroup: group });
+  _note(userId, id, notes);
+  const rows = [{ rowId: id, ...first }];
+  for (const t of rest) rows.push({ rowId: sibling(t.page).id, ...t });
+  // A page with no text among separate receipts is most likely a receipt that
+  // was scanned rather than saved. It gets a row of its own, flagged, so it is
+  // either claimed or deliberately deleted.
+  for (const page of decision.blankPages) {
+    sibling(page, { errorMsg: `Please check: page ${page} of this PDF has no readable text, so it may be a scanned receipt. Type its figures in, or delete this row if the page is blank.` });
+  }
+
+  for (const t of rows) {
+    // Figures the whole-document read already traced to this page are used
+    // as they are; otherwise the page is read from its own text.
+    const r = t.receipt || (((await parseReceiptText(userId, extracted.pages[t.page - 1])) || {}).receipts || [])[0];
+    if (r) { await _applyFields(userId, t.rowId, r); _flagIfSuspected(userId, t.rowId); }
+  }
+  logger.info('PDF split by page', { userId, id, receipts: rows.length, blankPages: decision.blankPages.length, byReader: !decision.split });
+}
+
 // Reads an upload and, when the evidence is unambiguous, turns one upload into
 // several records.
 //
@@ -191,49 +319,13 @@ async function _applyFields(userId, id, r, extra = {}) {
 //   * a bad split costs one click to undo and loses nothing
 //
 // Splitting only happens when receipt-parser's splittable() or pdf-pages'
-// splittablePages() says the evidence is clean. Anything doubtful stays as one
-// record holding the whole upload, because inventing a second receipt is worse
-// than failing to split a real one.
+// splittablePages() (or, for a PDF, attributeToPages()) says the evidence is
+// clean. Anything doubtful stays as one record holding the whole upload,
+// because inventing a second receipt is worse than failing to split a real one.
 async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = null) {
   const store = invoiceStore.forUser(userId);
 
-  // ── PDF: one record per page, each read from its own text ────────────────
-  if (mime === 'application/pdf') {
-    const extracted = await pdfPages.extractPages(buffer);
-    if (!extracted.hasText) {
-      // A scan: every page is an image and there is no renderer to draw one
-      // for the vision reader. The record stays as uploaded, typeable by hand.
-      logger.info('PDF has no text layer; left for the user', { userId, id });
-      return;
-    }
-    const decision = pdfPages.splittablePages(extracted);
-    if (!decision.split) {
-      const parsed = await parseReceiptText(userId, extracted.pages.join('\n\n'));
-      if (parsed) { await _applyFields(userId, id, parsed.receipts[0]); _flagIfSuspected(userId, id); }
-      logger.info('PDF read as one receipt', { userId, id, read: !!parsed, reason: decision.reason });
-      return;
-    }
-
-    const group  = id;
-    const parent = store.getById(id);
-    const [first, ...rest] = decision.pageNumbers;
-    store.update(id, { receiptPage: first, receiptGroup: group });
-    const targets = [[id, first]];
-    for (const page of rest) {
-      // A sibling is a complete claim of the same source as the upload,
-      // pointing at the SAME file — the same bytes, so the same hash.
-      const sib = store.add(newClaimRow({ userId, source: parent.source, groupId: group, extras: {
-        receiptFile: storedName, receiptMime: mime, receiptHash: hash, receiptPage: page,
-      } }));
-      targets.push([sib.id, page]);
-    }
-    for (const [rowId, page] of targets) {
-      const parsed = await parseReceiptText(userId, extracted.pages[page - 1]);
-      if (parsed) { await _applyFields(userId, rowId, parsed.receipts[0]); _flagIfSuspected(userId, rowId); }
-    }
-    logger.info('PDF split by page', { userId, id, pages: decision.pageNumbers.length });
-    return;
-  }
+  if (mime === 'application/pdf') return _readPdf(userId, id, buffer, mime, storedName, hash);
 
   // ── Image: one record per detected receipt ────────────────────────────────
   const parsed = await parseReceiptImage(userId, buffer, mime);
@@ -526,7 +618,10 @@ router.post('/:id/reread', requireAuth, asyncHandler(async (req, res) => {
 
     // The same patch a first read applies — including the account, which a
     // re-read that finally makes out a category used to leave unchanged.
-    const accountCode = (await accountFor(req.user.id, null, chosen)) || undefined;
+    // From the chart of the company this claim goes to (or went to): a claim
+    // already sent keeps its company, others follow the default.
+    const accountCode = (await accountFor(req.user.id, null, chosen,
+      record.xeroTenantId ? { tenantId: record.xeroTenantId } : {})) || undefined;
     const updated = store.update(req.params.id, claimPatch(chosen, { accountCode }));
 
     logger.info('Receipt re-read', { userId: req.user.id, id: req.params.id, confidence: chosen.confidence, found: parsed.receipts.length });
@@ -607,8 +702,82 @@ router.post('/:id/merge', requireAuth, (req, res) => {
   res.json({ receipt: merged, removed: siblings.length });
 });
 
+// ── Reads cut off by a restart ───────────────────────────────────────────────
+// A background read lives only in this process. A restart in the seconds
+// between an upload and the end of its read (and every deploy is a restart)
+// left the row unread for good: parsedAt never set, the phone showing
+// "Reading..." forever, the fields blank until somebody typed them.
+//
+// So on boot, every uploaded receipt that was never marked read is read again,
+// or, where reading it now would do harm, only marked finished:
+//   * someone has typed figures into it, and a late read would overwrite them
+//   * it already has split siblings: the read got that far, and reading again
+//     would split it a second time
+//   * it is older than RESUME_MAX_AGE_MS: nobody is waiting on it, and a
+//     backlog of old rows must not become a burst of model calls at boot
+//   * its file is gone
+// Each of those still has "Read again", which never splits.
+//
+// main/index.js calls this once the server is listening. Accounts run side by
+// side; within one, reads go one at a time, and gemini-client keeps them
+// inside the quota.
+const RESUME_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function _resumeAccount(userId, now, out) {
+  const store = invoiceStore.forUser(userId);
+  // getFlagged rather than getAll: an unread receipt is always still waiting
+  // for review, so only rows that could qualify are loaded.
+  const unread = store.getFlagged().filter(r =>
+    r.status === 'review-needed' && r.invoiceType === 'EXPENSE' &&
+    (r.source === 'upload' || r.source === 'phone') && r.receiptFile && !r.parsedAt);
+
+  for (const r of unread.filter(x => !x.receiptGroup || x.receiptGroup === x.id)) {
+    if (_reading.has(r.id)) continue;
+    const fresh = now - Date.parse(r.receivedAt || r.processedAt || '') <= RESUME_MAX_AGE_MS;
+    // "Nothing on it yet" the way the phone status reads it: the store hands an
+    // empty amount back as 0, not null.
+    const untouched = !r.vendorName && !r.totalAmount
+      && store.getReceiptGroup(r.id).every(x => x.id === r.id);
+    const buffer = fresh && untouched ? receiptStore.forUser(userId).read(r.receiptFile) : null;
+    if (!buffer) { _stampParsed(userId, r.id); out.closed++; continue; }
+    out.queued++;
+    await _readInBackground(userId, r.id, buffer, r.receiptMime, r.receiptFile, r.receiptHash || null);
+  }
+
+  // A sibling whose upload was marked finished without it: the restart came
+  // between the two stamps.
+  for (const r of unread.filter(x => x.receiptGroup && x.receiptGroup !== x.id)) {
+    if (_reading.has(r.receiptGroup)) continue;
+    const current = store.getById(r.id);
+    if (current && !current.parsedAt) { store.update(r.id, { parsedAt: new Date().toISOString() }); out.closed++; }
+  }
+}
+
+async function resumeUnreadReceipts({ now = Date.now() } = {}) {
+  const out = { queued: 0, closed: 0 };
+  let accounts;
+  try { accounts = users.getAllUsers(); }
+  catch (err) { logger.error('Unread receipt recovery could not list accounts', { error: err.message }); return out; }
+
+  await Promise.all(accounts.map(async user => {
+    const userId = String(user.id);
+    // Nothing is read for a disabled account, since a read spends its model
+    // quota. Its rows wait, unread, for if it is enabled again.
+    let active = true;
+    try { active = users.isActive(userId); } catch (_) { active = true; }
+    if (!active) return;
+    try { await _resumeAccount(userId, now, out); }
+    catch (err) { logger.warn('Unread receipt recovery failed for an account', { userId, error: err.message }); }
+  }));
+
+  if (out.queued || out.closed) logger.info('Unread receipts recovered after a restart', out);
+  return out;
+}
+
 module.exports = router;
 module.exports._decodeBase64 = decodeBase64;
+module.exports.resumeUnreadReceipts = resumeUnreadReceipts;
+module.exports.RESUME_MAX_AGE_MS = RESUME_MAX_AGE_MS;
 // Resolves once every background read started so far has finished, however it
 // finished. Reads started while draining are waited for too.
 module.exports._drain = async function _drain() {
