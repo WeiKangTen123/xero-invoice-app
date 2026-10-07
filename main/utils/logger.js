@@ -20,7 +20,15 @@ const logger = winston.createLogger({
   // write tens of thousands of fixture lines into logs/ — on the deployment
   // box too, where the admin log viewer then showed them.
   transports: process.env.NODE_ENV === 'test' ? [new winston.transports.Console({ silent: true })] : [
-    new winston.transports.Console(),
+    // In production the console is pm2's log (~/.pm2/logs), a second copy of
+    // what the files below hold, and it grew without limit: every request
+    // line went there too. Only warnings and errors go to it now — what
+    // someone running `pm2 logs` after a crash needs — and errors go to
+    // stderr, so `pm2 logs xero-invoice-app --err` (the runbook's first step)
+    // shows them beside the crash itself. deploy.sh rotates those files.
+    new winston.transports.Console(process.env.NODE_ENV === 'production'
+      ? { level: process.env.LOG_CONSOLE_LEVEL || 'warn', stderrLevels: ['error'] }
+      : {}),
     // maxsize/maxFiles cap total disk usage at ~50MB per log (5x 10MB rotated files)
     // instead of growing unbounded — these had reached 500MB+ uncapped.
     new winston.transports.File({

@@ -67,9 +67,11 @@ describe('index — error handler', () => {
     const post = jest.spyOn(require('axios'), 'post').mockResolvedValue({});
     process.env.SLACK_WEBHOOK_URL = 'http://slack.test/hook';
     try {
-      const big = JSON.stringify({ email: 'a@test.com', blob: 'x'.repeat(11 * 1024 * 1024) });
+      // Sign-in takes 100KB: only the upload routes accept 10MB, so a large body
+      // is refused before anyone is authenticated (see index-http.test.js).
+      const big = JSON.stringify({ email: 'a@test.com', blob: 'x'.repeat(200 * 1024) });
       const res = await request(server).post('/api/auth/login').set('Content-Type', 'application/json').send(big).expect(413);
-      expect(res.body).toEqual({ error: 'That is too large to send; the limit is 10MB.' });
+      expect(res.body).toEqual({ error: 'That is too large to send; the limit is 100KB.' });
       expect(error.mock.calls.map(c => c[0])).not.toContain('Unhandled error');
       expect(post).not.toHaveBeenCalled();
     } finally { process.env.SLACK_WEBHOOK_URL = ''; post.mockRestore(); }

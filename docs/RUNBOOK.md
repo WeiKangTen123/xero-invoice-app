@@ -88,7 +88,14 @@ master is moved back too.
 7. checks `/dashboard/health` (a few tries, 10 s each) reports
    `status: healthy` and the shipped commit from the running process, then
    that pm2 still has it online, with no new restarts, 15 s later;
-8. installs the backup cron and pushes the `deploy/<timestamp>` tag.
+8. smoke-checks the site through the same public address: `/` must be the
+   app's HTML, the `/assets/index-*.js` it names must answer 200, and
+   `/api/auth/status` must answer JSON. Healthy only says the process runs;
+   this says users get the app (a UI build missing from `ui/dist` passes the
+   health check and serves a blank page);
+9. installs the backup cron and pm2's log rotation, and pushes the
+   `deploy/<timestamp>` tag. These are best effort: a failure is a `!`
+   line and a note in the final summary, never a failed deploy.
 
 Every call to the box has a time limit (300 s; 1200 s for `npm ci`, the tests
 and the UI build — `DEPLOY_SSH_TIMEOUT` and `DEPLOY_LONG_TIMEOUT` change them),
@@ -107,7 +114,8 @@ was on before and the exact rollback commands.
 | server checks: modified tracked files that could not be discarded, untracked files in the way, `DEPLOY DID NOT APPLY` | unchanged | old | resolve what it lists on the box and run again |
 | `npm ci`, tests, UI build, backup | **new commit** | old, still serving | see below — the dangerous one |
 | restart, health check, "not staying up" | **new commit** | new and failing, crash-looping, down, or still old | `pm2 list`, `pm2 logs xero-invoice-app --err --lines 100`; roll back now if users are affected |
-| backup cron or tag push (`!` warnings, deploy still reported) | new | new, confirmed | nothing urgent: rerun to install the cron, or push the tag by hand |
+| smoke check | **new commit** | **new, already serving users**, healthy and stable — but the page, its script or the API did not come through the site | open the site in a browser; on the box `ls ui/dist/assets` and the nginx config; roll back now if users are affected |
+| backup cron, pm2 log rotation or tag push (`!` warnings, deploy still reported) | new | new, confirmed | nothing urgent: rerun to install the cron or the rotation, or push the tag by hand |
 
 The dangerous state is the third row. The old process keeps serving, but the
 files on disk, and `node_modules` if `npm ci` got that far, belong to the new
@@ -154,6 +162,31 @@ as usual, and `npm run deploy -- --check` reports the drift until then.
   then `pm2 restart xero-invoice-app`.
 - Nothing external watches the health URL yet. A free uptime checker pointed
   at it is the cheapest next step.
+
+## Logs
+
+- **The app's own logs** are `logs/combined.log` and `logs/error.log` in the
+  app directory, 10MB each and five rotated files kept (`main/utils/logger.js`).
+  Admins read them in the app (`GET /api/admin/logs`). Requests are logged there in
+  morgan's combined format, except the ones that succeed and say nothing: the
+  pipeline status poll, the Invoices page's claim-import poll, health checks
+  and static assets. A failure of any of those is still logged.
+- **Tokens never reach the log as sent.** Pairing links carry their token in
+  the path (`/capture/<token>`, `/api/receipts/capture/<token>/…`,
+  `/api/receipts/pair/<token>`) and image, PDF and export links carry
+  `?token=`; the Xero sign-in comes back with `?code=` and `?state=`. All of
+  these are written as `[redacted]`, in the access log and in the error
+  handler's log lines and Slack alerts.
+- **pm2's logs** (`~/.pm2/logs/xero-invoice-app-out.log` and `-error.log`)
+  hold what the process prints. In production that is only warnings and
+  errors (errors on the error log, so `pm2 logs xero-invoice-app --err`
+  shows them next to a crash) plus the startup lines (`LOG_CONSOLE_LEVEL=info`
+  in `main/.env` puts every line back for a while). deploy.sh installs
+  `pm2-logrotate` and sets it on every deploy: rotate at 10M, keep 10,
+  compressed (`DEPLOY_PM2_LOG_MAX_SIZE`, `DEPLOY_PM2_LOG_RETAIN` change it).
+  To check on the box: `pm2 ls` lists the module, `pm2 conf pm2-logrotate`
+  shows its settings. To install it by hand:
+  `pm2 install pm2-logrotate && pm2 set pm2-logrotate:max_size 10M && pm2 set pm2-logrotate:retain 10 && pm2 set pm2-logrotate:compress true`.
 
 ## Keys
 

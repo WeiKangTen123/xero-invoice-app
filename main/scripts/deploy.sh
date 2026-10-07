@@ -20,8 +20,10 @@
 # installs from the lockfile (npm ci — npm install rewrote package-lock.json
 # on the box and blocked the next pull), takes a verified DB backup before
 # restarting, reloads through ecosystem.config.js (restart backoff), checks
-# the RUNNING process reports the shipped commit, installs the daily backup
-# cron, and tags the commit deploy/<timestamp> so a rollback has a name.
+# the RUNNING process reports the shipped commit, checks the site itself
+# serves the app (the page, a script it names, an API route), installs the
+# daily backup cron and pm2's log rotation, and tags the commit
+# deploy/<timestamp> so a rollback has a name.
 #
 # It also refuses to hang, and to fail quietly. When the Google login expired,
 # gcloud sat on a reauth prompt nobody could see (its stderr went to
@@ -40,6 +42,11 @@ HEALTH="${DEPLOY_HEALTH:-https://34-45-253-162.sslip.io/dashboard/health}"
 SSH_TIMEOUT="${DEPLOY_SSH_TIMEOUT:-300}"     # seconds, for an ordinary call to the box
 LONG_TIMEOUT="${DEPLOY_LONG_TIMEOUT:-1200}"  # npm ci, npm test and the UI build
 STABLE_SECS="${DEPLOY_STABLE_SECS:-15}"      # how long the new process must stay up
+# The site's public address, for the smoke check after the restart: the
+# scheme and host of the health URL, so the two can never point apart.
+SITE=$(printf '%s' "$HEALTH" | sed -E 's|^([A-Za-z][A-Za-z0-9+.-]*://[^/?#]+).*|\1|')
+PM2_LOG_MAX_SIZE="${DEPLOY_PM2_LOG_MAX_SIZE:-10M}"   # pm2-logrotate: rotate a log at this size
+PM2_LOG_RETAIN="${DEPLOY_PM2_LOG_RETAIN:-10}"        # and keep this many rotated files of each
 
 red()  { printf '\033[31m%s\033[0m\n' "$*"; }
 grn()  { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -77,6 +84,13 @@ partial_deploy_help() {
       info "pm2 was told to reload onto the new code and the new process was not confirmed:"
       info "it may be down, crash-looping, or still the old process. On the box: pm2 list;"
       info "pm2 logs xero-invoice-app --err --lines 100" ;;
+    smoke)
+      info "The process has ALREADY RESTARTED onto the new code: it reports the new commit,"
+      info "healthy and stable, so users are on it now. But the site failed the smoke check"
+      info "above, so they may be getting a blank page or a broken app. Open $SITE in a"
+      info "browser. On the box: ls ui/dist/assets (was the UI built?), pm2 logs"
+      info "xero-invoice-app --lines 100, and the nginx site config. Roll back now if users"
+      info "are affected." ;;
     *)
       info "Nothing was restarted, so the running process is still the one from before this"
       info "deploy — but the files on disk, and node_modules if npm ci got that far, are the"
@@ -180,6 +194,21 @@ unreachable() {
   } >&2 || true
   kill -TERM "$$"
   exit 1
+}
+
+# For the steps after the new process is confirmed, where a failure is a
+# warning and never a failed deploy: the deploy has happened by then, and
+# saying otherwise would send someone to roll back good code. remote() ends
+# the whole deploy when ssh itself fails, by signalling this shell; here the
+# step runs in a subshell with that signal ignored, so it only fails the step.
+# The step's function must return non-zero on failure itself: set -e does not
+# reach inside it here.
+best_effort() {
+  local rc=0
+  trap '' TERM
+  ( "$@" ) || rc=$?
+  trap 'exit 143' TERM
+  return "$rc"
 }
 
 # ── 0. Logins, before anything can hang on them ─────────────────────────────
@@ -448,17 +477,18 @@ grn "  ✓ running process is on $RUNNING"
 # own restart counter, read twice, says whether it stayed up. The JSON is read
 # with node here rather than on the box, where the script would need quoting
 # through three shells.
-pm2_state() {  # prints "<status> <restarts>" for xero-invoice-app
+pm2_state() {  # $1 = pm2 process name (default xero-invoice-app); prints "<status> <restarts>"
   remote 'pm2 jlist' | tr -d '\r' | node -e '
+    const name = process.argv[1];
     let s = "";
     process.stdin.on("data", d => { s += d; }).on("end", () => {
       let app;
       for (const line of s.split("\n").reverse()) {
         if (!line.trim().startsWith("[")) continue;
-        try { app = JSON.parse(line).find(p => p.name === "xero-invoice-app"); break; } catch (e) { /* not the list */ }
+        try { app = JSON.parse(line).find(p => p.name === name); break; } catch (e) { /* not the list */ }
       }
       console.log(app ? `${app.pm2_env.status} ${app.pm2_env.restart_time}` : "missing -");
-    });'
+    });' "${1:-xero-invoice-app}"
 }
 read -r STATE_A RESTARTS_A <<<"$(pm2_state || echo 'unknown -')"
 sleep "$STABLE_SECS"
@@ -467,21 +497,95 @@ if [ "$STATE_B" != "online" ] || [ "$RESTARTS_A" = "-" ] || [ "$RESTARTS_B" != "
   die "pm2 reports xero-invoice-app '$STATE_B', restarts ${RESTARTS_A} → ${RESTARTS_B} over ${STABLE_SECS}s — it is not staying up (on the box: pm2 logs xero-invoice-app --err --lines 100)"
 fi
 grn "  ✓ still online ${STABLE_SECS}s later, no restarts"
+
+# ── 5c. What a user gets, not only what the process says ────────────────────
+# Healthy means the process answers and its database opens. It does not mean
+# the site works: a UI build missing from ui/dist, or nginx serving something
+# else, leaves a healthy process behind a blank page. So the page is fetched
+# through the same public address as the health check, then one script it
+# names, then one API route. The process has already restarted by now, so a
+# failure here says that, with the rollback (on_exit, STAGE=smoke).
+STAGE=smoke
+smoke_check() {  # sets SMOKE_ERR (empty on success) and SMOKE_ASSET; returns non-zero on failure
+  local code type
+  SMOKE_ERR=""; SMOKE_ASSET=""
+  read -r code type <<<"$(curl -sk --max-time 10 -o "$TMP/smoke-page" -w '%{http_code} %{content_type}' "$SITE/" 2>/dev/null || true)"
+  if [ "$code" != "200" ] || ! grep -qi 'text/html' <<<"$type"; then
+    SMOKE_ERR="$SITE/ answered ${code:-nothing} (${type:-no content type}), not the app's page"; return 1
+  fi
+  if ! grep -q 'id="root"' "$TMP/smoke-page"; then
+    SMOKE_ERR="$SITE/ is HTML, but not the app's page (it has no root element)"; return 1
+  fi
+  SMOKE_ASSET=$(grep -o '/assets/index-[A-Za-z0-9_-]*\.js' "$TMP/smoke-page" | head -n 1 || true)
+  if [ -z "$SMOKE_ASSET" ]; then
+    SMOKE_ERR="$SITE/ names no /assets/index-*.js script — was the UI built?"; return 1
+  fi
+  read -r code type <<<"$(curl -sk --max-time 10 -o /dev/null -w '%{http_code} %{content_type}' "$SITE$SMOKE_ASSET" 2>/dev/null || true)"
+  if [ "$code" != "200" ] || ! grep -qi 'javascript' <<<"$type"; then
+    SMOKE_ERR="$SITE$SMOKE_ASSET, named by the page, answered ${code:-nothing} (${type:-no content type}) — the page would load blank"; return 1
+  fi
+  read -r code type <<<"$(curl -sk --max-time 10 -o "$TMP/smoke-api" -w '%{http_code} %{content_type}' "$SITE/api/auth/status" 2>/dev/null || true)"
+  if [ "$code" != "200" ] || ! grep -qi 'application/json' <<<"$type" || ! node -e '
+      let s = "";
+      process.stdin.on("data", d => { s += d; }).on("end", () => {
+        const body = JSON.parse(s);
+        process.exit(body && typeof body === "object" ? 0 : 1);
+      });' <"$TMP/smoke-api" >/dev/null 2>&1; then
+    SMOKE_ERR="$SITE/api/auth/status answered ${code:-nothing} (${type:-no content type}), not a JSON object — the API is not reachable through the site"; return 1
+  fi
+}
+for try in 1 2 3; do
+  if smoke_check; then break; fi
+  if [ "$try" -lt 3 ]; then sleep 5; fi
+done
+[ -z "$SMOKE_ERR" ] || die "smoke check failed: $SMOKE_ERR"
+grn "  ✓ the site serves the app: /, $SMOKE_ASSET and /api/auth/status"
 STAGE=""   # the new process is confirmed; nothing below can leave a half-deploy
 
-# ── 6. Daily backup cron (idempotent) and a name for this deploy ────────────
+# ── 6. Daily backup cron, pm2's log rotation, and a name for this deploy ────
+# Each is best effort: the new process is confirmed, and none of these is a
+# reason to report the deploy as failed. A failure is a "!" line and a note
+# in the final summary.
+NOTES=""
+
 # node by absolute path: cron's PATH need not include node. Resolved in its
 # own remote call and pasted in as a literal — a `$N` inside the command was
 # expanded by the ssh login shell (empty) before the inner bash ever ran.
-NOTES=""
-NODE_BIN=$(remote 'command -v node' | tr -d '[:space:]' || true)
-[ -n "$NODE_BIN" ] || NODE_BIN=node
-remote "(crontab -l 2>/dev/null | grep -v 'main/db/backup.js'; printf '0 19 * * * cd %s && %s main/db/backup.js >> logs/backup.log 2>&1\n' $APP $NODE_BIN) | crontab -" >/dev/null 2>&1 \
-  && info "daily backup cron installed (03:00 Singapore, $NODE_BIN)" \
+install_backup_cron() {
+  local node_bin
+  node_bin=$(remote 'command -v node' | tr -d '[:space:]' || true)
+  [ -n "$node_bin" ] || node_bin=node
+  remote "(crontab -l 2>/dev/null | grep -v 'main/db/backup.js'; printf '0 19 * * * cd %s && %s main/db/backup.js >> logs/backup.log 2>&1\n' $APP $node_bin) | crontab -" >/dev/null 2>&1 \
+    || return 1
+  info "daily backup cron installed (03:00 Singapore, $node_bin)"
+}
+best_effort install_backup_cron \
   || { red "  ! could not install the backup cron"; NOTES="$NOTES; backup cron NOT installed"; }
+
+# pm2 keeps everything the process prints in ~/.pm2/logs and never trims it,
+# and those files grew without limit. pm2-logrotate is pm2's own module for
+# that. It is installed once (pm2 keeps a module across restarts and reboots)
+# and its settings are written on every deploy, so a box that lost them, or
+# a change to them here, takes effect. Reinstalled only when pm2 does not list
+# it as online, so a normal deploy does not fetch it from npm again.
+setup_pm2_logrotate() {
+  local state
+  read -r state _ <<<"$(pm2_state pm2-logrotate || echo 'unknown -')"
+  if [ "$state" != "online" ]; then
+    remote 'mkdir -p logs && pm2 install pm2-logrotate >logs/deploy-pm2-logrotate.log 2>&1' >/dev/null || return 1
+  fi
+  remote "pm2 set pm2-logrotate:max_size $PM2_LOG_MAX_SIZE >/dev/null && pm2 set pm2-logrotate:retain $PM2_LOG_RETAIN >/dev/null && pm2 set pm2-logrotate:compress true >/dev/null" >/dev/null \
+    || return 1
+  read -r state _ <<<"$(pm2_state pm2-logrotate || echo 'unknown -')"
+  [ "$state" = "online" ] || return 1
+  info "pm2 logs rotate at $PM2_LOG_MAX_SIZE, $PM2_LOG_RETAIN kept, compressed (pm2-logrotate)"
+}
+best_effort setup_pm2_logrotate \
+  || { red "  ! could not set up pm2-logrotate — pm2's logs are not rotated (on the box: $APP/logs/deploy-pm2-logrotate.log)"; NOTES="$NOTES; pm2 log rotation NOT set up"; }
+
 TAG="deploy/$(date -u +%Y%m%d-%H%M%S)"
 { git tag -f "$TAG" "$LOCAL_SHA" >/dev/null 2>&1 && git push -q origin "$TAG" 2>/dev/null && info "tagged $TAG"; } \
   || { red "  ! could not push tag $TAG"; NOTES="$NOTES; tag NOT pushed"; }
 
 echo
-grn "✓ deployed $LOCAL_SHA — $CI_NOTE, server commit verified, tests passed ($TEST_SUMMARY), backed up, running process confirmed, healthy and stable for ${STABLE_SECS}s$NOTES"
+grn "✓ deployed $LOCAL_SHA — $CI_NOTE, server commit verified, tests passed ($TEST_SUMMARY), backed up, running process confirmed, healthy and stable for ${STABLE_SECS}s, site smoke-checked$NOTES"

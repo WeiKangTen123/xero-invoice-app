@@ -145,7 +145,45 @@ app.use(helmet({
 }));
 app.use(compression());
 app.set('trust proxy', 1);
-app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
+
+// ── Access log ───────────────────────────────────────────────────────────────
+// Some links carry their own credential. A phone's pairing link has its token
+// in the path (/capture/<token>, /api/receipts/capture/<token>/status), the
+// desktop polls its pairing by the same token (/api/receipts/pair/<token>),
+// receipt images, invoice PDFs and budget exports take a short-lived ?token=,
+// and the Xero sign-in comes back with ?code= and ?state=. Admins read this
+// log from inside the app (GET /api/admin/logs), so a token written here is a
+// token handed to whoever reads it: a live pairing token is an upload into
+// someone's account. The URL and the referrer are logged with those parts
+// replaced, never as sent.
+const SECRET_IN_PATH  = /(\/(?:capture|pair)\/)[^/?#]+/gi;
+const SECRET_IN_QUERY = /([?&](?:token|code|state|access_token|refresh_token|id_token)=)[^&#]*/gi;
+function redactUrl(url) {
+  if (typeof url !== 'string' || !url) return url;
+  return url.replace(SECRET_IN_PATH, '$1[redacted]').replace(SECRET_IN_QUERY, '$1[redacted]');
+}
+
+// Requests that say nothing when they succeed. Every open tab asks for the
+// pipeline status every 3 to 15 seconds (and the Invoices page for an active
+// claim import every 3.5), an uptime monitor asks for health, and each page
+// load pulls fingerprinted assets. Logged, they were most of combined.log, and
+// its 50MB cap rotated the lines worth keeping — sign-ins, admin actions,
+// errors — out within days. A failure of any of them is still logged.
+const QUIET_PATHS = new Set(['/api/process/status', '/api/claims/active', '/dashboard/health', '/api/dashboard/health']);
+const STATIC_FILE = /\.(?:js|mjs|css|map|ico|png|jpe?g|gif|svg|webp|avif|woff2?|ttf|otf|webmanifest|txt)$/i;
+function quietRequest(req, res) {
+  if (res.statusCode >= 400) return false;
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  const p = String(req.originalUrl || req.url || '').split('?')[0];
+  if (QUIET_PATHS.has(p)) return true;
+  return !p.startsWith('/api/') && (p.startsWith('/assets/') || STATIC_FILE.test(p));
+}
+
+// morgan's 'combined' format, with the URL and referrer redacted.
+morgan.token('safe-url', req => redactUrl(req.originalUrl || req.url));
+morgan.token('safe-referrer', req => redactUrl(req.headers.referer || req.headers.referrer));
+const ACCESS_LOG_FORMAT = ':remote-addr - :remote-user [:date[clf]] ":method :safe-url HTTP/:http-version" :status :res[content-length] ":safe-referrer" ":user-agent"';
+app.use(morgan(ACCESS_LOG_FORMAT, { skip: quietRequest, stream: { write: msg => logger.info(msg.trim()) } }));
 // Global rate limit — keyed by authenticated user ID when available, falling
 // back to IP. This prevents one shared office IP from exhausting the pool for
 // all 10 users at once.
@@ -157,8 +195,30 @@ app.use(rateLimit({
   standardHeaders: true,
   legacyHeaders:   false,
 }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+// ── Request bodies ───────────────────────────────────────────────────────────
+// A body is read into memory and parsed before any route runs, and before
+// requireAuth: a 10MB limit for every route let anyone, signed in or not, make
+// the server hold and parse 10MB per request at the sign-in form. The default
+// is 100kb — far more than a sign-in, a settings form or an invoice edit sends.
+//
+// 10MB only where a file arrives inside the JSON as base64 (which inflates it
+// by 4/3, so 10MB carries about 7.5MB of file; claims.js explains how this
+// pairs with nginx's client_max_body_size). These run first, and the default
+// parser below leaves a body that is already parsed alone. A new upload route
+// must be added here, or its uploads are refused at 100kb.
+const UPLOAD_ROUTES = [
+  '/api/receipts',                 // a receipt from the desktop
+  '/api/receipts/capture/:token',  // a receipt from a paired phone
+  '/api/claims/import',            // claim archives and claim forms
+  '/api/invoices',                 // one bill PDF
+  '/api/invoices/import',          // bill PDFs and zips, or an invoice spreadsheet
+];
+app.post(UPLOAD_ROUTES, express.json({ limit: '10mb' }));
+// The chat sends the whole conversation each turn (the server keeps the last
+// twelve messages), so a long session outgrows 100kb with no file in it.
+app.post('/api/chat', express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
 // ── API routes ───────────────────────────────────────────────────────────────
 app.use('/api/auth',     authRoutes);
@@ -240,12 +300,16 @@ if (PROD) {
 // minutes, so a route failing on every request is one message, not hundreds.
 function clientErrorMessage(err, status) {
   if (status === 413) {
-    return err.limit ? `That is too large to send; the limit is ${Math.round(err.limit / 1048576)}MB.` : 'That is too large to send.';
+    // In KB under a megabyte: the 100kb default read as "the limit is 0MB".
+    const size = n => (n >= 1048576 ? `${Math.round(n / 1048576)}MB` : `${Math.round(n / 1024)}KB`);
+    return err.limit ? `That is too large to send; the limit is ${size(err.limit)}.` : 'That is too large to send.';
   }
   return (err.expose !== false && err.message) || require('http').STATUS_CODES[status] || 'Request failed';
 }
 app.use((err, req, res, next) => {
-  const where = { method: req.method, path: req.path, userId: req.user?.id };
+  // Redacted like the access log: a phone's failed upload has its pairing
+  // token in the path, and this goes to the log and to Slack.
+  const where = { method: req.method, path: redactUrl(req.path), userId: req.user?.id };
   if (err.type === 'entity.parse.failed') {
     logger.warn('Malformed request body', where);
     if (res.headersSent) return next(err);
@@ -265,7 +329,7 @@ app.use((err, req, res, next) => {
   logger.error('Unhandled error', { error: message, stack: err?.stack, ...where });
   notify.notifyErrorThrottled({
     key:     message,
-    context: `${req.method} ${req.path} answered 500${where.userId ? ` (user ${where.userId})` : ''}`,
+    context: `${req.method} ${where.path} answered 500${where.userId ? ` (user ${where.userId})` : ''}`,
     error:   message.slice(0, 1500),
   }).catch(() => {});
   if (res.headersSent) return next(err);
@@ -364,6 +428,19 @@ function resumeMailboxWatchers() {
     .catch(err => { logger.warn('Mailbox watcher resume failed', { error: err?.message || String(err) }); });
 }
 
+// The Xero keep-alive (jobs/xero-keepalive.js) keeps each connected org's
+// sign-in in use, so an account nobody sends from for a while is still
+// connected when someone does. Required when it starts, not at the top of the
+// file, so a module that is missing or fails to load costs the keep-alive and
+// never the boot; a start() that throws or rejects is a warning too. Deferred
+// like the watcher resume, so it starts after the recoveries the listen
+// callback began before it. Always resolves.
+function startXeroKeepalive() {
+  return Promise.resolve()
+    .then(() => require('./jobs/xero-keepalive').start())
+    .catch(err => { logger.warn('Xero keep-alive start failed', { error: err?.message || String(err) }); });
+}
+
 // ── Start ────────────────────────────────────────────────────────────────────
 // Backstop for abandoned sessions — logout stops a watcher immediately, this
 // catches the ones nobody ever came back to. See email/idle-sweeper.js.
@@ -404,6 +481,10 @@ const server = app.listen(PORT, HOST, () => {
   // Both recoveries above skip disabled accounts themselves. Email recovery
   // gets a 3s head-start so it can dedup before stuck invoices are resubmitted.
   setTimeout(retryStuckSubmissions, 3000);
+
+  // Last, after every recovery has been started: it only keeps Xero
+  // connected, and nothing above waits on it. Not awaited.
+  startXeroKeepalive();
 });
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────
@@ -437,4 +518,7 @@ module.exports = app;
 module.exports.retryStuckSubmissions = retryStuckSubmissions;
 module.exports.releaseInterruptedSubmissions = releaseInterruptedSubmissions;
 module.exports.resumeMailboxWatchers = resumeMailboxWatchers;
+module.exports.startXeroKeepalive = startXeroKeepalive;
 module.exports.checkSecrets = checkSecrets;
+module.exports.redactUrl = redactUrl;
+module.exports.quietRequest = quietRequest;
