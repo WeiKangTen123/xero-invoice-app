@@ -14,6 +14,8 @@ const { submitInvoiceToXero, postedDuplicateOf, bankDetailsChange } = require('.
 const { xeroErrMsg, getRateLimitBudget } = require('../xero/xero-utils');
 const statusSync   = require('../xero/status-sync');
 const logger       = require('../utils/logger');
+const auditLog     = require('../utils/audit-log');
+const { withMarker } = require('../utils/audit-context');
 
 // PDF access tokens are short-lived and scoped to one invoice + one user.
 // They exist only because browsers cannot send Authorization headers on direct
@@ -273,6 +275,31 @@ router.get('/:id', requireAuth, (req, res) => {
   const { pdfBuffer, ...safe } = inv;
   void pdfBuffer;
   res.json({ invoice: safe });
+});
+
+// ── GET /api/invoices/:id/events ─────────────────────────────────────────────
+// The record's history, newest first: { events: [{ id, at, actorType,
+// actorId, actorEmail, action, summary, details }], nextBefore }. At most
+// ?limit= (1-200, default 200) a page; ?before=<nextBefore> asks for the page
+// after. The owner sees their own record's; an admin sees any record's. A
+// deleted record keeps its history, so it is still answered once the record
+// is gone; only a record with neither is a 404. Another account's record is a
+// 404 too, the same answer as a record that never existed.
+router.get('/:id/events', requireAuth, (req, res) => {
+  const { before, limit } = req.query;
+  if (before !== undefined && !/^\d+$/.test(String(before))) return res.status(400).json({ error: 'before must be an event id' });
+  if (limit !== undefined && !/^\d+$/.test(String(limit))) return res.status(400).json({ error: 'limit must be a whole number' });
+  const isAdmin = req.user.role === 'admin';
+  const page = auditLog.listInvoiceEvents({
+    invoiceId: req.params.id, userId: isAdmin ? null : req.user.id, before: before || null, limit: limit || auditLog.PAGE_MAX,
+  });
+  if (!page.events.length && !before) {
+    const exists = isAdmin
+      ? !!require('../db').prepare('SELECT 1 FROM invoices WHERE id = ?').get(req.params.id)
+      : !!invoiceStore.forUser(req.user.id).getById(req.params.id);
+    if (!exists) return res.status(404).json({ error: 'Invoice not found' });
+  }
+  res.json(page);
 });
 
 // ── GET /api/invoices/:id/pdf-url ─────────────────────────────────────────────
@@ -568,13 +595,15 @@ router.post('/batch-status', requireAuth, asyncHandler(async (req, res, next) =>
     const store = invoiceStore.forUser(req.user.id);
     const LOCKED = new Set(['posted', 'duplicate']);
     let updatedCount = 0;
-    for (const id of ids) {
-      const inv = store.getById(id);
-      if (inv && !LOCKED.has(inv.status) && !inv.xeroInvoiceId) {
-        await store.update(id, { status });
-        updatedCount++;
+    await withMarker({ bulk: 'status' }, async () => {
+      for (const id of ids) {
+        const inv = store.getById(id);
+        if (inv && !LOCKED.has(inv.status) && !inv.xeroInvoiceId) {
+          await store.update(id, { status });
+          updatedCount++;
+        }
       }
-    }
+    });
     res.json({ success: true, count: updatedCount });
   } catch (err) { next(err); }
 }));
@@ -685,10 +714,14 @@ router.post('/submit-all', requireAuth, asyncHandler(async (req, res) => {
   // and the row may have been sent, edited or deleted meanwhile.
   // claimForSubmit would take a posted row (that is how a correction goes),
   // so only pending goes.
+  // Queued inside the marker, so each send's history says it was part of
+  // Submit all when its turn comes.
   const count = pending.length;
-  for (const id of pending) {
-    queueSend(userId, id, () => (store.getById(id)?.status === 'pending' ? null : 'no longer pending'));
-  }
+  withMarker({ bulk: 'submit-all' }, () => {
+    for (const id of pending) {
+      queueSend(userId, id, () => (store.getById(id)?.status === 'pending' ? null : 'no longer pending'));
+    }
+  });
 
   logger.info('Bulk Xero submission started', { count, skipped, userId });
   res.json({ submitted: count, skipped });
@@ -823,15 +856,17 @@ router.post('/bulk/review', requireAuth, asyncHandler(async (req, res) => {
   if (error) return res.status(400).json({ error });
   const store   = invoiceStore.forUser(req.user.id);
   const results = [];
-  for (const id of ids) {
-    await _breathe();
-    const refused = _reviewCheck(store, store.getById(id), id);
-    if (refused) { results.push(refused); continue; }
-    // No await between the checks above and this write, so the row cannot
-    // have started a send in between.
-    await store.update(id, { status: 'reviewed' });
-    results.push(_done(id, 'Marked reviewed'));
-  }
+  await withMarker({ bulk: 'review' }, async () => {
+    for (const id of ids) {
+      await _breathe();
+      const refused = _reviewCheck(store, store.getById(id), id);
+      if (refused) { results.push(refused); continue; }
+      // No await between the checks above and this write, so the row cannot
+      // have started a send in between.
+      await store.update(id, { status: 'reviewed' });
+      results.push(_done(id, 'Marked reviewed'));
+    }
+  });
   _bulkReply(res, 'review', results, req.user.id);
 }));
 
@@ -872,15 +907,19 @@ router.post('/bulk/send', requireAuth, asyncHandler(async (req, res) => {
   const store   = invoiceStore.forUser(userId);
   const waiting = _sendQueue(userId).waiting;
   const results = [];
-  for (const id of ids) {
-    await _breathe();
-    const refused = _sendCheck(store, store.getById(id), id, { queued: waiting.has(id) });
-    if (refused) { results.push(refused); continue; }
-    // Asked again when its turn comes: by then it may have been edited back
-    // to review, sent from its own page, approved in Xero or deleted.
-    queueSend(userId, id, () => _sendCheck(store, store.getById(id), id, { atTurn: true })?.outcome || null);
-    results.push(_done(id, 'Queued for Xero', 'Sent one at a time; the list updates as each one lands.'));
-  }
+  // Queued inside the marker, so each send's history says it was one of a
+  // selection when its turn comes.
+  await withMarker({ bulk: 'send' }, async () => {
+    for (const id of ids) {
+      await _breathe();
+      const refused = _sendCheck(store, store.getById(id), id, { queued: waiting.has(id) });
+      if (refused) { results.push(refused); continue; }
+      // Asked again when its turn comes: by then it may have been edited back
+      // to review, sent from its own page, approved in Xero or deleted.
+      queueSend(userId, id, () => _sendCheck(store, store.getById(id), id, { atTurn: true })?.outcome || null);
+      results.push(_done(id, 'Queued for Xero', 'Sent one at a time; the list updates as each one lands.'));
+    }
+  });
   _bulkReply(res, 'send', results, userId);
 }));
 
@@ -892,14 +931,16 @@ router.post('/bulk/delete', requireAuth, asyncHandler(async (req, res) => {
   const userId  = req.user.id;
   const store   = invoiceStore.forUser(userId);
   const results = [];
-  for (const id of ids) {
-    const record = store.getById(id);
-    if (!record) { results.push(_skipped(id, 'Already deleted')); continue; }
-    const refusal = deleteRefusal(record);
-    if (refusal) { results.push(_failed(id, refusal.outcome, refusal.message)); continue; }
-    const removed = await removeWithFiles(userId, store, record);
-    results.push(removed ? _done(id, 'Deleted') : _skipped(id, 'Already deleted'));
-  }
+  await withMarker({ bulk: 'delete' }, async () => {
+    for (const id of ids) {
+      const record = store.getById(id);
+      if (!record) { results.push(_skipped(id, 'Already deleted')); continue; }
+      const refusal = deleteRefusal(record);
+      if (refusal) { results.push(_failed(id, refusal.outcome, refusal.message)); continue; }
+      const removed = await removeWithFiles(userId, store, record);
+      results.push(removed ? _done(id, 'Deleted') : _skipped(id, 'Already deleted'));
+    }
+  });
   _bulkReply(res, 'delete', results, userId);
 }));
 

@@ -19,6 +19,9 @@ const { hashBuffer, findDuplicate } = require('../claims/claim-dedup');
 const { newClaimRow, claimPatch, accountFor } = require('../claims/claim-record');
 const QRCode       = require('qrcode');
 const logger       = require('../utils/logger');
+const auditContext = require('../utils/audit-context');
+const invoiceEvents = require('../utils/invoice-events');
+const auditLog     = require('../utils/audit-log');
 
 // Expense claims. A receipt arrives as a file rather than an email attachment,
 // so this is the only intake path the user drives by hand.
@@ -117,9 +120,12 @@ function _stampParsed(userId, id, at = new Date().toISOString()) {
 // Tracked so a test can wait for it. Guessing at how many event-loop ticks
 // the read takes (the old settle() helper) was wrong often enough that one
 // describe block had grown to three nested setImmediates, and still flaked.
+//
+// As the system: what the reader fills in is the reader's doing, not the
+// uploader's edit, and its history says so ("Receipt read: ...").
 function _readInBackground(userId, id, buffer, mime, storedName, hash) {
   _reading.add(id);
-  const done = new Promise(resolve => setImmediate(() => {
+  const done = new Promise(resolve => auditContext.runAsSystem(() => setImmediate(() => {
     readAndMaybeSplit(userId, id, buffer, mime, storedName, hash)
       .catch(err => logger.warn('Receipt read failed', { userId, id, error: err.message }))
       .finally(() => {
@@ -131,7 +137,7 @@ function _readInBackground(userId, id, buffer, mime, storedName, hash) {
         _reading.delete(id);
         resolve();
       });
-  }));
+  }), { via: 'Receipt read' }));
   _inflight.add(done);
   done.finally(() => _inflight.delete(done));
   return done;
@@ -336,7 +342,7 @@ async function _readPdf(userId, id, buffer, mime, storedName, hash) {
   const parent = store.getById(id);
   const sibling = (page, extras = {}) => store.add(newClaimRow({ userId, source: parent.source, groupId: group, extras: {
     receiptFile: storedName, receiptMime: mime, receiptHash: hash, receiptPage: page, ...extras,
-  } }));
+  } }), { how: 'split' });
 
   const [first, ...rest] = targets;
   store.update(id, { receiptPage: first.page, receiptGroup: group });
@@ -403,7 +409,7 @@ async function readAndMaybeSplit(userId, id, buffer, mime, storedName, hash = nu
     // pointing at the SAME file — the same bytes, so the same hash.
     const sib = store.add(newClaimRow({ userId, source: parent.source, groupId: group, extras: {
       receiptFile: storedName, receiptMime: mime, receiptHash: hash, receiptBox: JSON.stringify(r.box),
-    } }));
+    } }), { how: 'split' });
     await _applyFields(userId, sib.id, r);
     _flagIfSuspected(userId, sib.id);
   }
@@ -551,7 +557,11 @@ router.post('/capture/:token', (req, res) => {
   if (!state) return res.status(401).json({ error: 'This link has expired. Show a new QR code on your computer.' });
 
   try {
-    const { status, body } = storeReceipt(state.userId, { ...(req.body || {}), source: 'phone' });
+    // The link has no session, but it was made by the account's owner and
+    // only uploads into that account: the upload is theirs.
+    const owner = users.findById(state.userId);
+    const { status, body } = auditContext.runAs({ id: state.userId, email: owner?.email || null, role: 'user' },
+      () => storeReceipt(state.userId, { ...(req.body || {}), source: 'phone' }));
     // Only a stored receipt spends an upload — a rejected file must not burn
     // one of the user's twenty.
     if (status === 201) pairing.consume(req.params.token, body.receipt?.id);
@@ -676,7 +686,8 @@ router.post('/:id/reread', requireAuth, asyncHandler(async (req, res) => {
     // already sent keeps its company, others follow the default.
     const accountCode = (await accountFor(req.user.id, null, chosen,
       record.xeroTenantId ? { tenantId: record.xeroTenantId } : {})) || undefined;
-    const updated = store.update(req.params.id, claimPatch(chosen, { accountCode }));
+    const updated = auditContext.withMarker({ via: 'Receipt read again' },
+      () => store.update(req.params.id, claimPatch(chosen, { accountCode })));
 
     logger.info('Receipt re-read', { userId: req.user.id, id: req.params.id, confidence: chosen.confidence, found: parsed.receipts.length });
     res.json({ ok: true, receipt: updated, confidence: chosen.confidence, found: parsed.receipts.length });
@@ -749,9 +760,10 @@ router.post('/:id/merge', requireAuth, (req, res) => {
   if (siblings.some(r => r.xeroInvoiceId || r.status === 'submitting')) {
     return res.status(409).json({ error: 'Part of this receipt was already sent to Xero, so it cannot be merged back.' });
   }
-  for (const sib of siblings) store.remove(sib.id);
+  for (const sib of siblings) store.remove(sib.id, { via: 'merge' });
 
   const merged = store.update(req.params.id, { receiptBox: null, receiptPage: null, receiptGroup: null });
+  auditLog.safely(() => invoiceEvents.merged(req.user.id, req.params.id, siblings.length));
   logger.info('Split merged back', { userId: req.user.id, id: req.params.id, removed: siblings.length });
   res.json({ receipt: merged, removed: siblings.length });
 });

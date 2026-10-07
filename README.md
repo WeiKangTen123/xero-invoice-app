@@ -410,6 +410,7 @@ xero-invoice-app/
 | DELETE | `/api/invoices/import/:jobId` | JWT | Cancel / remove an import job |
 | GET | `/api/invoices/:id` | JWT | Invoice detail |
 | PATCH | `/api/invoices/:id` | JWT | Edit invoice fields |
+| GET | `/api/invoices/:id/events` | JWT | The record's history, newest first (owner, or any admin); `?before=` pages, `?limit=` up to 200 |
 | GET | `/api/invoices/:id/pdf` | JWT | Download PDF (token-authenticated) |
 | GET | `/api/invoices/:id/pdf-url` | JWT | Get short-lived signed URL for PDF (for iframe embed) |
 | POST | `/api/invoices/:id/submit` | JWT | Submit single invoice to Xero |
@@ -491,6 +492,7 @@ xero-invoice-app/
 | GET | `/api/admin/monitoring` | Admin | Per-user activity + backend health |
 | GET | `/api/admin/stats/daily` | Admin | Daily invoice counts |
 | GET | `/api/admin/logs` | Admin | Recent log entries |
+| GET | `/api/admin/events` | Admin | Admin activity (account changes, password changes); filters `userId`, `action`, `from`, `to`, paged by `before` |
 
 ### Health
 | Method | Path | Auth | Description |

@@ -5,6 +5,7 @@ const { parseReceiptBatch } = require('../utils/receipt-parser');
 const { suggestCategories } = require('./claim-categories');
 const users           = require('../utils/users');
 const logger          = require('../utils/logger');
+const { runAsSystem } = require('../utils/audit-context');
 
 const POLL_MS = 5000;
 
@@ -148,8 +149,14 @@ function _safeProcessNext(userId) {
   });
 }
 
-// Start worker for a user
+// Start worker for a user. As the system: an import started from a request
+// would otherwise carry that request's person into every record the worker
+// writes from then on, the next person's jobs included (utils/audit-context.js).
 function startWorker(userId, customDeps = null) {
+  return runAsSystem(() => _startWorker(userId, customDeps));
+}
+
+function _startWorker(userId, customDeps) {
   const w = _getWorker(userId);
   if (customDeps) w.deps = customDeps;
   if (w.running) return;
@@ -176,7 +183,7 @@ function stopWorker(userId) {
 
 // Trigger immediate check
 function kickWorker(userId) {
-  setImmediate(() => _safeProcessNext(userId));
+  runAsSystem(() => setImmediate(() => _safeProcessNext(userId)));
 }
 
 // Recover pending jobs across all users on server boot

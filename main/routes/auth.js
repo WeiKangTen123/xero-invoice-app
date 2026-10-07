@@ -157,6 +157,12 @@ router.post('/change-password', requireAuth, changePasswordLimiter, asyncHandler
     if (!(await setPassword(req.user.id, newPassword, { ifCurrentHash: verifiedHash }))) {
       return res.status(409).json({ error: 'Your password was changed elsewhere (for example, reset by an administrator) while this was being saved, so this change was not applied. Sign in with the current password and try again.' });
     }
+    // In the admin trail beside resets, so a password's history is in one
+    // place: that it changed and who changed it. Never the password itself.
+    require('../utils/audit-log').recordAdminEvent({
+      actor: { id: req.user.id, email: req.user.email }, target: { id: req.user.id, email: req.user.email },
+      action: 'password.change',
+    });
     const token = signSession(req.user);
     // requireAuth may have renewed the token this request arrived with. That
     // renewal predates the cutoff setPassword has just moved, so it is already

@@ -156,7 +156,9 @@ function requireAuth(req, res, next) {
   // users.js#touchLastSeen. Failure here must never turn into a 401 — it's
   // presence tracking, not auth.
   try { require('../utils/users').touchLastSeen(req.user.id); } catch {}
-  next();
+  // Everything this request goes on to do runs as this person, so a record
+  // it changes says who changed it (utils/audit-context.js).
+  require('../utils/audit-context').runForRequest(req, next);
 }
 
 function requireAdmin(req, res, next) {

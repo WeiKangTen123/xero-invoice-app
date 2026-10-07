@@ -8,12 +8,14 @@ import { useConfirm } from '../context/ConfirmContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney } from '../utils/format';
 import { staggerIn } from '../utils/stagger';
+import ActivityPanel from './admin/ActivityPanel';
 
 const ADMIN_TABS = [
   { key: 'users',      label: '👥 Users' },
   { key: 'reports',    label: '⚠ Reports' },
   { key: 'monitoring', label: '📊 Monitoring' },
   { key: 'logs',       label: '📄 Logs' },
+  { key: 'activity',   label: '🕑 Activity' },
 ];
 
 function Avatar({ email }) {
@@ -244,6 +246,7 @@ export default function Admin() {
       {tab === 'reports'    && <ReportsPanel navigate={navigate} timezone={me?.timezone} />}
       {tab === 'monitoring' && <MonitoringPanel timezone={me?.timezone} onViewLogs={viewUserLogs} />}
       {tab === 'logs'       && <LogsPanel timezone={me?.timezone} initialUserId={logsUserId} initialUserEmail={logsUserEmail} />}
+      {tab === 'activity'   && <ActivityPanel timezone={me?.timezone} />}
 
       {/* The 320px side panel is a fixed track, so on a phone it took almost the
           whole viewport and left the users list with the remainder. Collapses to

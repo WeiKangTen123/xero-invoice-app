@@ -5,6 +5,7 @@ const invoiceStore     = require('../utils/invoice-store');
 const { hashBuffer, findEmailDuplicate } = require('../intake/dedup');
 const { profileFor }   = require('../intake/profiles');
 const logger           = require('../utils/logger');
+const { runAsSystem }  = require('../utils/audit-context');
 
 const POLL_MS = 5000; // idle poll interval — catches jobs that land while worker is between ticks
 
@@ -181,7 +182,15 @@ function _safeProcessNext(userId) {
 
 // Start the worker for a user (idempotent — safe to call multiple times).
 // `onInvoice` is the invoice-handler callback that saves + optionally Xero-submits.
+//
+// As the system: a worker started from the Start button would otherwise carry
+// the person who pressed it, through its timers, into every record it writes
+// for as long as it runs (utils/audit-context.js).
 function startWorker(userId, onInvoice) {
+  return runAsSystem(() => _startWorker(userId, onInvoice));
+}
+
+function _startWorker(userId, onInvoice) {
   const w = _getWorker(userId);
   w.onInvoice = onInvoice; // always refresh callback (e.g. watcher restart)
   if (w.running) return;
@@ -208,7 +217,7 @@ function stopWorker(userId) {
 // Notify the worker that a new job was just enqueued — triggers immediate processing.
 // Called by the IMAP watcher after enqueue() so jobs don't wait for the next poll tick.
 function kickWorker(userId) {
-  setImmediate(() => _safeProcessNext(userId));
+  runAsSystem(() => setImmediate(() => _safeProcessNext(userId)));
 }
 
 // Recover pending jobs across all users on server startup.

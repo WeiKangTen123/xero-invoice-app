@@ -84,6 +84,9 @@ const logger      = require('./utils/logger');
 const notify      = require('./utils/notify');
 
 require('./db/migrate').run();
+// History older than two years goes at boot, before anything adds to it: a
+// ranged DELETE on the indexed time column, cheap however large the tables.
+require('./utils/audit-log').pruneOldEvents();
 const { ensureUserDirectories, getAllUsers, isActive } = require('./utils/users');
 const emailWorker               = require('./queue/email-worker');
 const claimWorker               = require('./claims/claim-worker');

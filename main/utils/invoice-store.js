@@ -1,4 +1,10 @@
 const db  = require('../db');
+// The audit trail. Recorded here, after each write, because every route, the
+// chat assistant and the background readers already meet in this file: one
+// place, and no way in that skips it. Each call goes through safely(), so a
+// failure to record is a warning and never the write's failure.
+const events   = require('./invoice-events');
+const auditLog = require('./audit-log');
 
 // A row holding a Xero invoice ID is in Xero whatever its status says. The
 // duplicate checks used to trust the status alone, and a report, an admin
@@ -314,7 +320,10 @@ function forUser(userId) {
     }
   }
 
-  function add(invoice) {
+  // `how` is what the caller alone knows about where the record came from
+  // ('split': a receipt split off another in the same upload); the source,
+  // the claim kind and supplier memory's prefill say the rest.
+  function add(invoice, { how = null } = {}) {
     const existing = db.prepare('SELECT 1 FROM invoices WHERE id = ? AND user_id = ?').get(invoice.id, userId);
     if (existing) return null;
 
@@ -338,10 +347,27 @@ function forUser(userId) {
     // whatever their status — including posted ones, whose xero_invoice_id is
     // the only guard against posting an invoice twice — and left their files
     // on disk. SQLite is fine at a hundred times that.
+    auditLog.safely(() => events.created(userId, invoice, { how }));
     return getById(invoice.id);
   }
 
   function update(id, patch) {
+    return _update(id, patch);
+  }
+
+  // The line count and total before a patch replaces them, for the history.
+  // Null when it cannot be read, which costs the "lines" entry, not the edit.
+  function _lineStats(id) {
+    try {
+      return db.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(unit_amount), 0) AS cents FROM invoice_line_items WHERE invoice_id = ?').get(id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // `withStatus` false leaves the status events to the caller: addReport
+  // records the report with its note instead of a bare "marked as reported".
+  function _update(id, patch, { withStatus = true } = {}) {
     // Every column, so the provenance check can compare any remembered field
     // with what is stored without this list having to grow alongside it.
     const existing = db.prepare('SELECT * FROM invoices WHERE id = ? AND user_id = ?').get(id, userId);
@@ -381,8 +407,10 @@ function forUser(userId) {
     if (patch.currency !== undefined && patch.currencyRate === undefined && patch.currency !== existing.currency) {
       sets.push('currency_rate = NULL');
     }
+    const lines = Array.isArray(patch.lineItems) ? _lineStats(id) : null;
     db.prepare(`UPDATE invoices SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`).run(...args, id, userId);
     if ('lineItems' in patch) _replaceLineItems(id, patch.lineItems);
+    auditLog.safely(() => events.updated(userId, id, existing, patch, { lines, withStatus }));
     return getById(id);
   }
 
@@ -418,7 +446,9 @@ function forUser(userId) {
       INSERT INTO invoice_reports (invoice_id, user_email, note, reported_at)
       VALUES (?, ?, ?, ?)
     `).run(id, report.userEmail, report.note, new Date().toISOString());
-    return update(id, existing.xeroInvoiceId ? {} : { status: 'reported' });
+    const updated = _update(id, existing.xeroInvoiceId ? {} : { status: 'reported' }, { withStatus: false });
+    auditLog.safely(() => events.reported(userId, id, report.note));
+    return updated;
   }
 
   // Returns all invoices that need human attention: user-flagged reports and
@@ -438,8 +468,16 @@ function forUser(userId) {
     return _hydrateMany(rows);
   }
 
-  function remove(id) {
+  // The columns a deleted record is remembered by in its history.
+  const GONE_COLUMNS = 'id, status, vendor_name, contact_name, invoice_number, total_amount, currency, invoice_type, claim_kind';
+
+  // `via` 'merge': deleted because a split was merged back (routes/receipts.js).
+  function remove(id, { via = null } = {}) {
+    // Read first: once the row is gone, so is what it was.
+    let gone = null;
+    try { gone = db.prepare(`SELECT ${GONE_COLUMNS} FROM invoices WHERE id = ? AND user_id = ?`).get(id, userId) || null; } catch (_) {}
     const info = db.prepare('DELETE FROM invoices WHERE id = ? AND user_id = ?').run(id, userId);
+    if (info.changes > 0) auditLog.safely(() => events.deleted(userId, id, gone, { via }));
     return info.changes > 0;
   }
 
@@ -523,7 +561,9 @@ function forUser(userId) {
   // process has started a send of its own. Returns how many rows it moved.
   function releaseInterrupted(message) {
     const now = new Date().toISOString();
+    let caught = [];
     const release = db.transaction(() => {
+      caught = db.prepare(`SELECT id, ${IN_XERO} AS inXero FROM invoices WHERE user_id = ? AND status = 'submitting'`).all(userId);
       const held = db.prepare(`
         UPDATE invoices SET status = 'review-needed', error_msg = ?, updated_at = ?, post_note = NULL
         WHERE user_id = ? AND status = 'submitting' AND xero_invoice_id IS NULL
@@ -534,7 +574,10 @@ function forUser(userId) {
       `).run(message, now, userId).changes;
       return held + kept;
     });
-    return release();
+    const moved = release();
+    // After the transaction, so a failed history write cannot roll it back.
+    for (const r of caught) auditLog.safely(() => events.interrupted(userId, r.id, { inXero: !!r.inXero }));
+    return moved;
   }
 
   // "Clear all" removes what exists only here. A row with a Xero ID is the only
@@ -545,12 +588,15 @@ function forUser(userId) {
   function clear() {
     const run = db.transaction(() => {
       const where = "user_id = ? AND xero_invoice_id IS NULL AND status != 'submitting'";
-      const removed = db.prepare(`SELECT id, receipt_file AS receiptFile FROM invoices WHERE ${where}`).all(userId);
+      const rows = db.prepare(`SELECT ${GONE_COLUMNS}, receipt_file AS receiptFile FROM invoices WHERE ${where}`).all(userId);
       db.prepare(`DELETE FROM invoices WHERE ${where}`).run(userId);
       const kept = db.prepare('SELECT COUNT(*) AS n FROM invoices WHERE user_id = ?').get(userId).n;
-      return { removed, kept };
+      return { rows, kept };
     });
-    return run();
+    const { rows, kept } = run();
+    // One event per record, after the transaction: Clear all is a bulk delete.
+    for (const r of rows) auditLog.safely(() => events.deleted(userId, r.id, r, { bulk: 'clear-all' }));
+    return { removed: rows.map(r => ({ id: r.id, receiptFile: r.receiptFile })), kept };
   }
 
   // ── Narrow reads ───────────────────────────────────────────────────────────
@@ -702,7 +748,7 @@ function forUser(userId) {
   // knowing which keeps a later correction from going to a guess.
   function recordXeroStatus(id, xeroInvoiceId, { status, amountDue, amountPaid, paidOn, tenantId } = {}, syncedAt = new Date().toISOString()) {
     const row = db.prepare(`
-      SELECT xero_status, xero_amount_due, xero_amount_paid, xero_paid_on
+      SELECT xero_status, xero_amount_due, xero_amount_paid, xero_paid_on, currency
       FROM invoices WHERE id = ? AND user_id = ? AND xero_invoice_id = ?
     `).get(id, userId, xeroInvoiceId);
     if (!row) return null;
@@ -719,6 +765,8 @@ function forUser(userId) {
       WHERE id = ? AND user_id = ? AND xero_invoice_id = ?
     `).run(next.xero_status, next.xero_amount_due, next.xero_amount_paid, next.xero_paid_on,
            syncedAt, tenantId || null, id, userId, xeroInvoiceId);
+    // Only a change is history; a check that found the same is not.
+    if (changed) auditLog.safely(() => events.xeroStatus(userId, id, row, next, row.currency));
     return changed;
   }
 

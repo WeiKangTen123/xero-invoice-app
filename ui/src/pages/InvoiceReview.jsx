@@ -15,6 +15,7 @@ import AllowanceCard from './invoice-review/AllowanceCard';
 import DiscrepancyBanner from './invoice-review/DiscrepancyBanner';
 import DuplicateBanner from './invoice-review/DuplicateBanner';
 import EmailBodyCard from './invoice-review/EmailBodyCard';
+import HistoryCard from './invoice-review/HistoryCard';
 import LineItemsCard from './invoice-review/LineItemsCard';
 import PdfViewer from './invoice-review/PdfViewer';
 import ReceiptViewer from './invoice-review/ReceiptViewer';
@@ -799,6 +800,11 @@ function InvoiceReviewPage() {
                 ))}
               </div>
             )}
+
+            {/* What happened to this record and who did it. Refetched when the
+                record changes on this page, so a save or a send shows up. */}
+            <HistoryCard id={id} user={user} isMobile={isMobile}
+              refreshKey={`${inv.status}|${inv.updatedAt || ''}|${inv.xeroStatus || ''}|${inv.xeroAmountPaid ?? ''}|${inv.reports?.length || 0}`} />
 
             {/* Meta — collapsed by default; rarely needed, not something you cross-check
                 against the PDF, so it shouldn't take up permanent scroll space */}

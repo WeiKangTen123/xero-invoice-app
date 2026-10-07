@@ -15,6 +15,8 @@ const pdfStore            = require('./pdf-store');
 const settingsStore       = require('./settings-store');
 const tokenCache          = require('./token-cache');
 const processState        = require('./process-state');
+const invoiceEvents       = require('./invoice-events');
+const auditLog            = require('./audit-log');
 
 const XERO_SUBMIT_DELAY_MS = 1500;
 
@@ -345,13 +347,16 @@ async function submitInvoiceToXero(userId, invoiceId, { allowDuplicate = false }
   const inXero = !!record.xeroInvoiceId;
   // Pass _invoiceStoreId so createDraftInvoice can read the PDF from disk
   const invoiceData = { ...record, _invoiceStoreId: invoiceId };
+  // The companies connected when the send started, kept to name the one it
+  // went to in the record's history.
+  let tenants = [];
 
   try {
     // Reconnect Xero if the token cache was cleared (e.g. server restart).
     // Inside the try: a failed reconnect used to leave the row claimed, in
     // 'submitting', with nothing left to finish it.
     const cache   = tokenCache.forUser(userId);
-    const tenants = await cache.getAllTenants();
+    tenants = await cache.getAllTenants();
     if (!tenants.length) {
       logger.info('No cached Xero tenants — reconnecting before submit', { userId });
       await reconnectXero(userId);
@@ -372,12 +377,37 @@ async function submitInvoiceToXero(userId, invoiceId, { allowDuplicate = false }
     }
 
     await invStore.update(invoiceId, patch);
+    // Said here, not by the store: only this knows whether it was a new
+    // draft or a correction, and which company took it.
+    auditLog.safely(() => {
+      if (sent) {
+        invoiceEvents.xeroSent(userId, invoiceId, {
+          mode: inXero ? 'update' : 'create', xeroInvoiceId: sent.xeroInvoiceId, tenantId: sent.tenantId,
+          tenantName: _tenantName(tenants, sent.tenantId),
+        });
+      } else {
+        invoiceEvents.xeroNotSent(userId, invoiceId, { inXero });
+      }
+    });
     logger.info('Invoice submitted to Xero', { invoiceId, xeroInvoiceId: sent?.xeroInvoiceId || 'queued', userId });
     return sent ? sent.xeroInvoiceId : null;
   } catch (err) {
     const errMsg = xeroErrMsg(err);
     await invStore.update(invoiceId, { status: inXero ? 'posted' : 'error', errorMsg: errMsg });
+    auditLog.safely(() => invoiceEvents.xeroFailed(userId, invoiceId, { reason: errMsg, inXero }));
     throw err;
+  }
+}
+
+// The name of the company a send went to, from the list the send chose it
+// from. Null when it is not there (a reconnect in between); the history then
+// names it from the companies on file.
+function _tenantName(tenants, tenantId) {
+  try {
+    const t = (tenants || []).find(x => String(x.tenant_id ?? x.tenantId) === String(tenantId));
+    return (t && (t.tenant_name ?? t.tenantName)) || null;
+  } catch (_) {
+    return null;
   }
 }
 

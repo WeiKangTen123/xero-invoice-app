@@ -14,6 +14,7 @@ const users        = require('../utils/users');
 const { newId }    = require('../utils/ids');
 const { profileFor } = require('../intake/profiles');
 const logger       = require('../utils/logger');
+const { withMarker } = require('../utils/audit-context');
 
 // Importing a batch expense claim: a zip of receipts plus the claim form.
 //
@@ -195,13 +196,16 @@ router.delete('/group/:groupId', requireAuth, (req, res) => {
   const drop   = members.filter(r => !inXero(r));
 
   let files = 0;
-  for (const rec of drop) {
-    store.remove(rec.id);
-    // Siblings can share a file; it goes only when nothing references it.
-    if (rec.receiptFile && store.countByReceiptFile(rec.receiptFile) === 0) {
-      if (receiptStore.forUser(req.user.id).remove(rec.receiptFile)) files++;
+  // Each claim's history says it went with the rest of its import.
+  withMarker({ bulk: 'undo-import' }, () => {
+    for (const rec of drop) {
+      store.remove(rec.id);
+      // Siblings can share a file; it goes only when nothing references it.
+      if (rec.receiptFile && store.countByReceiptFile(rec.receiptFile) === 0) {
+        if (receiptStore.forUser(req.user.id).remove(rec.receiptFile)) files++;
+      }
     }
-  }
+  });
   logger.info('Claim import undone', { userId: req.user.id, groupId: req.params.groupId, removed: drop.length, kept: keep.length, files });
   res.json({
     removed: drop.length,

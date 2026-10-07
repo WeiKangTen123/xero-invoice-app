@@ -18,6 +18,18 @@ const watcherRegistry  = require('../email/watcher-registry');
 const tokenCache       = require('../utils/token-cache');
 const db               = require('../db');
 const logger       = require('../utils/logger');
+const auditLog     = require('../utils/audit-log');
+
+// Every change made here goes in admin_events (utils/audit-log.js): who did
+// it, to which account, and the facts, never a password. Written after the
+// change succeeds; a failure to write it is a warning, not a failed request.
+function recordAdmin(req, target, action, details = null) {
+  auditLog.recordAdminEvent({
+    actor:  { id: req.user.id, email: req.user.email },
+    target: target ? { id: target.id, email: target.email } : null,
+    action, details,
+  });
+}
 
 // LOGS_DIR override lets tests point at a throwaway directory instead of the
 // real logs/ folder a dev server may be actively writing to (see db/index.js
@@ -43,6 +55,7 @@ router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
     const problem = passwordProblem(password);
     if (problem) return res.status(400).json({ error: problem });
     const user = await createUser(email, password, role === 'admin' ? 'admin' : 'user');
+    recordAdmin(req, user, 'user.create', { role: user.role });
     logger.info('Admin created user', { email, role: user.role, by: req.user.email });
     res.status(201).json({ success: true, user });
   } catch (err) {
@@ -74,6 +87,8 @@ router.delete('/users/:id', requireAdmin, (req, res) => {
     } catch (err) {
       logger.warn("Could not remove the deleted user's files", { id, error: err.message });
     }
+    // The email is copied into the event: the account it names is gone.
+    recordAdmin(req, target, 'user.delete', { role: target.role, watcherStopped });
     logger.info('Admin deleted user', { id, watcherStopped, by: req.user.email });
     res.json({ success: true });
   } catch (err) {
@@ -149,6 +164,7 @@ router.patch('/users/:id/role', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'Cannot demote the last admin account' });
   }
   const user = updateUserRole(target.id, role);
+  recordAdmin(req, target, 'user.role', { from: target.role, to: role });
   logger.info('Admin changed user role', { email: target.email, role, by: req.user.email });
   res.json({ success: true, user });
 });
@@ -162,6 +178,8 @@ router.patch('/users/:id/password', requireAdmin, asyncHandler(async (req, res) 
     const target = findTarget(req, res, 'Change your own password from Setup');
     if (!target) return;
     await setPassword(target.id, req.body.password);
+    // That it was reset, and by whom. Never the password.
+    recordAdmin(req, target, 'user.password_reset');
     logger.info('Admin reset user password', { email: target.email, by: req.user.email });
     res.json({ success: true });
   } catch (err) {
@@ -176,6 +194,7 @@ router.post('/users/:id/sign-out', requireAdmin, (req, res) => {
   const target = findTarget(req, res, 'Use Sign out for your own session');
   if (!target) return;
   invalidateSessions(target.id);
+  recordAdmin(req, target, 'user.sign_out');
   logger.info('Admin signed user out everywhere', { email: target.email, by: req.user.email });
   res.json({ success: true });
 });
@@ -197,6 +216,7 @@ router.patch('/users/:id/disabled', requireAdmin, (req, res) => {
   }
   const user = setDisabled(target.id, disabled);
   const watcherStopped = disabled ? stopAutomation(target.id) : false;
+  recordAdmin(req, target, disabled ? 'user.disable' : 'user.enable', disabled ? { watcherStopped } : null);
   logger.info(disabled ? 'Admin disabled user' : 'Admin enabled user', { email: target.email, watcherStopped, by: req.user.email });
   res.json({ success: true, user });
 });
@@ -211,6 +231,7 @@ router.patch('/users/:id/auto-process', requireAdmin, (req, res) => {
   const target = findById(req.params.id);
   if (!target) return res.status(404).json({ error: 'User not found' });
   settingsStore.forUser(target.id).set({ autoProcess: false });
+  recordAdmin(req, target, 'user.auto_process_off');
   logger.info('Admin turned auto-submit off', { email: target.email, by: req.user.email });
   res.json({ success: true, autoProcess: false });
 });
@@ -222,6 +243,7 @@ router.post('/users/:id/watcher/stop', requireAdmin, (req, res) => {
   const target = findById(req.params.id);
   if (!target) return res.status(404).json({ error: 'User not found' });
   const wasRunning = stopWatcher(target.id);
+  recordAdmin(req, target, 'user.watcher_stop', { wasRunning });
   logger.info('Admin stopped mailbox watcher', { email: target.email, wasRunning, by: req.user.email });
   res.json({ success: true, wasRunning });
 });
@@ -257,11 +279,55 @@ router.patch('/reports/:userId/:invoiceId/resolve', requireAdmin, asyncHandler(a
     if (!inv) return res.status(404).json({ error: 'Invoice not found' });
     const patch = { resolvedBy: req.user.email, resolvedAt: new Date().toISOString() };
     if (inv.status !== 'submitting') patch.status = inv.xeroInvoiceId ? 'posted' : 'reviewed';
+    // The record's own history gets "Report resolved" from the store, as the
+    // admin; this is the admin's side of it.
     await store.update(invoiceId, patch);
+    const owner = findById(userId);
+    recordAdmin(req, owner ? owner : { id: userId, email: null }, 'report.resolve', {
+      invoiceId, vendorName: inv.vendorName || null,
+      invoiceNumber: inv.invoiceNumber && inv.invoiceNumber !== '—' ? inv.invoiceNumber : null,
+      status: patch.status || inv.status,
+    });
     logger.info('Report resolved', { invoiceId, userId, status: patch.status || inv.status, by: req.user.email });
     res.json({ success: true });
   } catch (err) { next(err); }
 }));
+
+// GET /api/admin/events — what admins have done, newest first, for the
+// Activity tab. Filters, all optional: userId (the account acted on), action
+// (one of the keys in `actions`), from and to (a day, YYYY-MM-DD, read as UTC,
+// or an ISO instant; from inclusive, to inclusive of its whole day when a
+// day), before (the nextBefore of the last page) and limit (1-200).
+// Responds { events: [{ id, at, actorId, actorEmail, targetUserId,
+// targetEmail, action, summary, details }], nextBefore, actions: { key: label } }.
+function _instant(value, { endOfDay = false } = {}) {
+  if (value === undefined || value === '') return { value: null };
+  const s = String(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const t = Date.parse(`${s}T00:00:00.000Z`);
+    if (!Number.isFinite(t)) return { error: true };
+    return { value: new Date(endOfDay ? t + 24 * 60 * 60 * 1000 : t).toISOString() };
+  }
+  const t = Date.parse(s);
+  return Number.isFinite(t) && /^\d{4}-\d{2}-\d{2}T/.test(s) ? { value: new Date(t).toISOString() } : { error: true };
+}
+
+router.get('/events', requireAdmin, (req, res) => {
+  const { userId, action, before, limit } = req.query;
+  const from = _instant(req.query.from);
+  const to   = _instant(req.query.to, { endOfDay: true });
+  if (from.error || to.error) return res.status(400).json({ error: 'from and to must be dates (YYYY-MM-DD) or ISO times' });
+  if (action && !Object.prototype.hasOwnProperty.call(auditLog.ADMIN_ACTIONS, action)) {
+    return res.status(400).json({ error: 'Unknown action' });
+  }
+  if (before !== undefined && !/^\d+$/.test(String(before))) return res.status(400).json({ error: 'before must be an event id' });
+  if (limit !== undefined && !/^\d+$/.test(String(limit))) return res.status(400).json({ error: 'limit must be a whole number' });
+  const page = auditLog.listAdminEvents({
+    targetUserId: userId ? String(userId) : null, action: action || null,
+    from: from.value, to: to.value, before: before || null, limit: limit || auditLog.PAGE_MAX,
+  });
+  res.json({ ...page, actions: auditLog.ADMIN_ACTIONS });
+});
 
 // GET /api/admin/monitoring — per-user activity + backend health, for the Admin Monitoring tab.
 router.get('/monitoring', requireAdmin, (_req, res) => {

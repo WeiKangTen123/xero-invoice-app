@@ -292,3 +292,51 @@ CREATE TABLE IF NOT EXISTS user_gemini_keys (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_gemini_keys_user_id ON user_gemini_keys(user_id);
+
+-- ── Audit trail ──────────────────────────────────────────────────────────────
+-- What happened to each record and what admins did to accounts
+-- (utils/audit-log.js). The exception to the cascade rule at the top of this
+-- file, on purpose: no foreign keys at all. A history that vanished with the
+-- record or the account it describes could not answer "who deleted this", or
+-- "what did that account do before it was removed". Ids and emails are kept
+-- as plain text for the same reason. Rows older than two years are pruned at
+-- boot, by the index on `at`.
+
+-- One event on one record. user_id is the account that owns the record, which
+-- is not always who acted: actor_type says whether it was that owner ('user'),
+-- an admin acting on someone else's account ('admin') or background work
+-- ('system'). summary is the sentence the review page shows; details the
+-- facts behind it as JSON (for an edit, each changed field before and after).
+CREATE TABLE IF NOT EXISTS invoice_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id     TEXT NOT NULL,
+  invoice_id  TEXT NOT NULL,
+  at          TEXT NOT NULL,
+  actor_type  TEXT NOT NULL CHECK (actor_type IN ('user', 'admin', 'system')),
+  actor_id    TEXT,
+  actor_email TEXT,
+  action      TEXT NOT NULL,
+  summary     TEXT NOT NULL,
+  details     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_invoice_events_record ON invoice_events(user_id, invoice_id, at);
+CREATE INDEX IF NOT EXISTS idx_invoice_events_at     ON invoice_events(at);
+-- An admin reads a record's history by its id alone, without its owner (who
+-- may be deleted); without this that read was a scan of every event.
+CREATE INDEX IF NOT EXISTS idx_invoice_events_invoice ON invoice_events(invoice_id);
+
+-- One admin action on an account (or a person changing their own password).
+-- No summary column: the sentence is made from action and details when read,
+-- so its wording can improve without rewriting history. Never a password.
+CREATE TABLE IF NOT EXISTS admin_events (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  at             TEXT NOT NULL,
+  actor_id       TEXT,
+  actor_email    TEXT,
+  target_user_id TEXT,
+  target_email   TEXT,
+  action         TEXT NOT NULL,
+  details        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_admin_events_at     ON admin_events(at);
+CREATE INDEX IF NOT EXISTS idx_admin_events_target ON admin_events(target_user_id, at);

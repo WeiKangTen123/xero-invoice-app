@@ -7,6 +7,7 @@ const processState      = require('../utils/process-state');
 const settingsStore     = require('../utils/settings-store');
 const logger            = require('../utils/logger');
 const { resolveImapSettings } = require('./imap-settings');
+const { runAsSystem }   = require('../utils/audit-context');
 
 const RECONNECT_BASE_MS   = 10000;
 const RECONNECT_MAX_MS    = 300000; // 5 min cap
@@ -431,7 +432,9 @@ function start(userId, credentials, onInvoice, { loginEmail = '' } = {}) {
   s.stopReason       = null;
   s.stoppedAt        = null;
   s.lastError        = null;
-  _connect(s);
+  // As the system: the connection and every timer and event it makes outlive
+  // the Start request by days, and mail it brings in is nobody's edit.
+  runAsSystem(() => _connect(s));
 }
 
 // `reason` is one of STOP_REASONS. Callers that pass none (the Stop button,
@@ -478,7 +481,7 @@ function rescan(userId) {
   // throws synchronously for.
   if (!s?.imap || !s.mailboxReady) return false;
   logger.info(`[user:${userId}] Manual rescan triggered`);
-  _fetchUnseen(s);
+  runAsSystem(() => _fetchUnseen(s));
   return true;
 }
 
