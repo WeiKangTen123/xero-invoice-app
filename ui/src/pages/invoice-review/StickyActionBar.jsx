@@ -1,4 +1,4 @@
-export default function StickyActionBar({ inv, marking, submitting, editing, saving, markReviewed, submitToXero, startEdit, cancelEdit, saveEdit, canSubmit, canReview, canEdit }) {
+export default function StickyActionBar({ inv, marking, submitting, editing, saving, markReviewed, submitToXero, startEdit, cancelEdit, saveEdit, canSubmit, canReview, canEdit, repostLocked }) {
   return (
           <div style={{
             position: 'sticky',
@@ -22,7 +22,8 @@ export default function StickyActionBar({ inv, marking, submitting, editing, sav
                 className="btn btn-primary btn-sm"
                 style={{ flex: 1, padding: '8px 10px', fontSize: 12 }}
                 onClick={submitToXero}
-                disabled={submitting}
+                disabled={submitting || !!repostLocked}
+                title={repostLocked || undefined}
               >
                 {submitting ? 'Posting...' : inv.status === 'posted' ? '↻ Re-post' : '→ Post to Xero'}
               </button>

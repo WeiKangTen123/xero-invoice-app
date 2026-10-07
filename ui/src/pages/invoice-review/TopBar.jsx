@@ -1,9 +1,12 @@
-import { ConfidenceBadge } from '../../components/Badges';
+import { ConfidenceBadge, XeroStatusBadge } from '../../components/Badges';
 import { Spinner, StatusPill } from './bits';
 
 // `onBack` is the page's own Back (see goBack in InvoiceReview.jsx), which
 // returns to the list as it was left rather than to a fresh one.
-export default function TopBar({ isMobile, onBack, inv, setReporting, marking, submitting, editing, saving, setShowDeleteModal, deleting, markReviewed, submitToXero, startEdit, cancelEdit, saveEdit, isExpense, canSubmit, canReview, canEdit }) {
+// `repostLocked` is why a correction can no longer be sent (the record has
+// left DRAFT in Xero), or null; the button stays in view, disabled, so its
+// absence is not mistaken for a missing feature.
+export default function TopBar({ isMobile, onBack, inv, setReporting, marking, submitting, editing, saving, setShowDeleteModal, deleting, markReviewed, submitToXero, startEdit, cancelEdit, saveEdit, isExpense, canSubmit, canReview, canEdit, repostLocked }) {
   return (
         <div style={{
           display: 'flex',
@@ -27,6 +30,7 @@ export default function TopBar({ isMobile, onBack, inv, setReporting, marking, s
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', width: isMobile ? '100%' : 'auto' }}>
             <StatusPill status={inv.status} />
+            <XeroStatusBadge invoice={inv} />
             <ConfidenceBadge confidence={inv.confidence} />
 
             {/* Post to Xero — creates a new draft, or (for an already-posted invoice)
@@ -35,9 +39,9 @@ export default function TopBar({ isMobile, onBack, inv, setReporting, marking, s
               <button
                 className="btn btn-primary btn-sm"
                 onClick={submitToXero}
-                disabled={submitting}
+                disabled={submitting || !!repostLocked}
                 style={{ gap: 6 }}
-                title={inv.status === 'posted' ? 'Updates the existing Xero bill — does not create a duplicate' : undefined}
+                title={repostLocked || (inv.status === 'posted' ? 'Updates the existing Xero bill — does not create a duplicate' : undefined)}
               >
                 {submitting
                   ? <><Spinner /> {inv.status === 'posted' ? 'Updating...' : 'Posting...'}</>

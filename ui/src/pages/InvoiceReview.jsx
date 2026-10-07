@@ -23,6 +23,7 @@ import SummaryCard from './invoice-review/SummaryCard';
 import TopBar from './invoice-review/TopBar';
 import { InfoRow } from './invoice-review/bits';
 import { MARKABLE, SUBMITTABLE, listPathFor, sendProblem } from './invoice-review/helpers';
+import { repostBlockedReason } from './invoices/xero-status';
 
 // After "Post to Xero" the server sends in the background and this page asks
 // how it went every two seconds. It used to ask forever, and said nothing when
@@ -508,6 +509,10 @@ function InvoiceReviewPage() {
   const canSubmit  = SUBMITTABLE.has(inv.status) && !submitOk && !editing;
   const canReview  = MARKABLE.has(inv.status) && !editing;
   const canEdit    = SUBMITTABLE.has(inv.status); // same set the backend allows PATCH /:id for
+  // Set once Xero says the record has left DRAFT (approved, paid, voided...):
+  // an update would be refused there, so Re-post is disabled with this reason.
+  // Null while its Xero status is unknown, which keeps Re-post as it was.
+  const repostLocked = repostBlockedReason(inv);
   // A company disconnected since still names the record's home, just not by
   // name; saying so beats showing nothing and implying it never went anywhere.
   const xeroCompany = !inv.xeroTenantId || tenants === null ? null
@@ -532,7 +537,7 @@ function InvoiceReviewPage() {
       <div style={{ animation: 'fadeUp 0.3s ease' }}>
 
         {/* Top bar */}
-        <TopBar isMobile={isMobile} onBack={goBack} inv={inv} setReporting={setReporting} marking={marking} submitting={submitting} editing={editing} saving={saving} setShowDeleteModal={setShowDeleteModal} deleting={deleting} markReviewed={markReviewed} submitToXero={submitToXero} startEdit={startEdit} cancelEdit={cancelEdit} saveEdit={saveEdit} isExpense={isExpense} canSubmit={canSubmit} canReview={canReview} canEdit={canEdit} />
+        <TopBar isMobile={isMobile} onBack={goBack} inv={inv} setReporting={setReporting} marking={marking} submitting={submitting} editing={editing} saving={saving} setShowDeleteModal={setShowDeleteModal} deleting={deleting} markReviewed={markReviewed} submitToXero={submitToXero} startEdit={startEdit} cancelEdit={cancelEdit} saveEdit={saveEdit} isExpense={isExpense} canSubmit={canSubmit} canReview={canReview} canEdit={canEdit} repostLocked={repostLocked} />
 
         {deleteErr && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
@@ -628,6 +633,13 @@ function InvoiceReviewPage() {
             <span>
               Posted to Xero{xeroCompany && <> — <strong>{xeroCompany}</strong></>} — Invoice ID:{' '}
               <span style={{ fontFamily: 'monospace' }}>{inv.xeroInvoiceId}</span>
+              {/* Said here as well as on the disabled button: a disabled
+                  button's tooltip does not show on a phone. */}
+              {repostLocked && (
+                <span style={{ display: 'block', marginTop: 4, fontSize: 12, opacity: 0.85 }}>
+                  {repostLocked}. Make any correction in Xero itself.
+                </span>
+              )}
             </span>
           </div>
         )}
@@ -782,6 +794,7 @@ function InvoiceReviewPage() {
                   {inv.xeroInvoiceId && (
                     <InfoRow label="Xero ID"   value={inv.xeroInvoiceId} mono />
                   )}
+                  <InfoRow label="Paid in Xero" value={inv.xeroPaidOn} />
                   <InfoRow label="Xero company" value={xeroCompany} />
                   <InfoRow label="Project"   value={inv.projectName} />
                 </div>
@@ -792,7 +805,7 @@ function InvoiceReviewPage() {
         {isMobile && <div style={{ height: 24 }} />}
 
         {/* Sticky action bar on mobile */}
-        {isMobile && <StickyActionBar inv={inv} marking={marking} submitting={submitting} editing={editing} saving={saving} markReviewed={markReviewed} submitToXero={submitToXero} startEdit={startEdit} cancelEdit={cancelEdit} saveEdit={saveEdit} canSubmit={canSubmit} canReview={canReview} canEdit={canEdit} />}
+        {isMobile && <StickyActionBar inv={inv} marking={marking} submitting={submitting} editing={editing} saving={saving} markReviewed={markReviewed} submitToXero={submitToXero} startEdit={startEdit} cancelEdit={cancelEdit} saveEdit={saveEdit} canSubmit={canSubmit} canReview={canReview} canEdit={canEdit} repostLocked={repostLocked} />}
       </div>
 
       <DeleteConfirmModal

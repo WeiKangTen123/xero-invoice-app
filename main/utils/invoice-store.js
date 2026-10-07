@@ -79,6 +79,13 @@ const FIELD_TO_COLUMN = {
 const MONEY_FIELDS = new Set(['totalAmount', 'taxAmount', 'subTotal']);
 function _dollarsToCents(value) { return Math.round((Number(value) || 0) * 100); }
 function _centsToDollars(value) { return Math.round(value || 0) / 100; }
+// The Xero amounts are unknown until the first status check, and unknown must
+// stay null: 0 would read as "nothing owed".
+function _centsOrNull(value) { return value === null || value === undefined ? null : _centsToDollars(value); }
+function _dollarsOrNull(value) {
+  const n = Number(value);
+  return value === null || value === undefined || !Number.isFinite(n) ? null : _dollarsToCents(n);
+}
 
 // better-sqlite3 can only bind numbers/strings/bigints/buffers/null — booleans and
 // undefined (both of which show up on invoice records, e.g. hasPdf) need coercing.
@@ -131,6 +138,14 @@ function _rowToRecord(row, reports, lineItems) {
     currencyRate:      row.currency_rate,
     messageId:         row.message_id,
     confidence:        row.confidence,
+    // What Xero says about it now (xero/status-sync.js). Not in
+    // FIELD_TO_COLUMN on purpose: only the status check writes them, so no
+    // edit, copy or split of a record can carry another record's Xero state.
+    xeroStatus:        row.xero_status ?? null,
+    xeroAmountDue:     _centsOrNull(row.xero_amount_due),
+    xeroAmountPaid:    _centsOrNull(row.xero_amount_paid),
+    xeroPaidOn:        row.xero_paid_on ?? null,
+    xeroSyncedAt:      row.xero_synced_at ?? null,
     receiptFile:       row.receipt_file,
     receiptMime:       row.receipt_mime,
     // Which part of the shared file this record owns. Null on an ordinary
@@ -534,9 +549,64 @@ function forUser(userId) {
       .get(userId, filename).n;
   }
 
+  // ── Status read back from Xero ─────────────────────────────────────────────
+  // Written only by xero/status-sync.js, and only to the xero_* columns (and a
+  // missing tenant, below). updated_at is left alone: it records a person's
+  // edit, and a check against Xero is not one. Neither is status: 'posted'
+  // says the document reached Xero, which stays true whatever Xero did next.
+
+  // Every row in Xero, with just what the status check needs, oldest first.
+  function listInXero() {
+    return db.prepare(`
+      SELECT id, xero_invoice_id AS xeroInvoiceId, xero_tenant_id AS xeroTenantId,
+             xero_status AS xeroStatus, xero_synced_at AS xeroSyncedAt
+      FROM invoices WHERE user_id = ? AND ${IN_XERO} ORDER BY rowid
+    `).all(userId);
+  }
+
+  // What Xero answered for one document. Returns true when the status, either
+  // amount or the paid-on day differ from what was stored (the "updated"
+  // count), false when only the check time moved, or null when the row no
+  // longer holds that Xero ID. A row with no tenant recorded is given the one
+  // Xero just found it in: an invoice ID belongs to exactly one company, and
+  // knowing which keeps a later correction from going to a guess.
+  function recordXeroStatus(id, xeroInvoiceId, { status, amountDue, amountPaid, paidOn, tenantId } = {}, syncedAt = new Date().toISOString()) {
+    const row = db.prepare(`
+      SELECT xero_status, xero_amount_due, xero_amount_paid, xero_paid_on
+      FROM invoices WHERE id = ? AND user_id = ? AND xero_invoice_id = ?
+    `).get(id, userId, xeroInvoiceId);
+    if (!row) return null;
+    const next = {
+      xero_status:      status || null,
+      xero_amount_due:  _dollarsOrNull(amountDue),
+      xero_amount_paid: _dollarsOrNull(amountPaid),
+      xero_paid_on:     paidOn || null,
+    };
+    const changed = Object.keys(next).some(k => (row[k] ?? null) !== next[k]);
+    db.prepare(`
+      UPDATE invoices SET xero_status = ?, xero_amount_due = ?, xero_amount_paid = ?, xero_paid_on = ?,
+             xero_synced_at = ?, xero_tenant_id = COALESCE(xero_tenant_id, ?)
+      WHERE id = ? AND user_id = ? AND xero_invoice_id = ?
+    `).run(next.xero_status, next.xero_amount_due, next.xero_amount_paid, next.xero_paid_on,
+           syncedAt, tenantId || null, id, userId, xeroInvoiceId);
+    return changed;
+  }
+
+  // Rows Xero left out of an If-Modified-Since answer: unchanged since the
+  // last full read, so what is stored is still what Xero says, as of now.
+  // Only rows that have a status — a row never read has nothing to confirm.
+  function markXeroChecked(ids, syncedAt = new Date().toISOString()) {
+    if (!ids || !ids.length) return 0;
+    const placeholders = ids.map(() => '?').join(',');
+    return db.prepare(`
+      UPDATE invoices SET xero_synced_at = ?
+      WHERE user_id = ? AND xero_status IS NOT NULL AND ${IN_XERO} AND id IN (${placeholders})
+    `).run(syncedAt, userId, ...ids).changes;
+  }
+
   return { getAll, getById, add, update, addPostingNote, addReport, getFlagged, remove, clear, findPosted, findStored, claimForSubmit,
            releaseInterrupted, count, countByStatus, getRecent, getReceiptGroup, countByReceiptFile, findByReceiptHash,
-           findByMessage, lastBillFrom };
+           findByMessage, lastBillFrom, listInXero, recordXeroStatus, markXeroChecked };
 }
 
 module.exports = { forUser, FIELD_TO_COLUMN, normalizeInvoiceNumber };

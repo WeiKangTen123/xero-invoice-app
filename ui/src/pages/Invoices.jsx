@@ -21,6 +21,7 @@ import { FilterPill } from './invoices/FilterPill';
 import MobileList from './invoices/MobileList';
 import MobileSelectionBar from './invoices/MobileSelectionBar';
 import { DEFAULT_TAB, TABS, countOf, currencyTotals, receivedBucket, receivedCutoff, scannedNote, tabByKey } from './invoices/helpers';
+import { syncSummary } from './invoices/xero-status';
 
 // What "Clear all" did, in the server's words. The server decides what is kept
 // (anything in Xero or mid-send) and replies { removed, kept, message }, so its
@@ -63,6 +64,7 @@ export default function Invoices() {
   const [loadError,    setLoadError]    = useState('');
   const [clearing,      setClearing]      = useState(false);
   const [submittingAll, setSubmittingAll] = useState(false);
+  const [syncingXero,   setSyncingXero]   = useState(false);
   const [submitMsg,     setSubmitMsg]     = useState('');
   const [selected,      setSelected]      = useState(new Set());
   const [deleteTarget,  setDeleteTarget]  = useState(null); // { type: 'single', invoice } | { type: 'bulk', count, ids } | { type: 'clear' }
@@ -232,6 +234,24 @@ export default function Invoices() {
       setTimeout(() => setSubmitMsg(''), 4000);
     } finally {
       setSubmittingAll(false);
+    }
+  }
+
+  // Asks Xero now what became of everything posted (approved, paid, voided…)
+  // rather than waiting for the server's 3-hourly check, then shows it. The
+  // server allows one of these a minute per account and says so in its 429,
+  // which is what the error toast shows.
+  async function handleRefreshFromXero() {
+    setSyncingXero(true);
+    try {
+      const r = await api.post('/invoices/sync-xero-status', {});
+      if (Number(r.failedTenants) > 0) toast.error(syncSummary(r));
+      else toast.success(syncSummary(r));
+      fetchInvoices();
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setSyncingXero(false);
     }
   }
 
@@ -704,6 +724,14 @@ export default function Invoices() {
                   aria-label="Refresh the list" title="Refresh the list">
             {refreshing ? <span className="btn-spinner" style={{ borderColor: 'rgba(0,0,0,0.15)', borderTopColor: 'var(--accent)' }} /> : '↻'}
           </button>
+          {/* Only once something is in Xero; before that there is nothing to ask about. */}
+          {invoices.some(i => i.xeroInvoiceId) && (
+            <button className="btn btn-outline btn-sm" onClick={handleRefreshFromXero} disabled={syncingXero}
+                    title="Ask Xero now whether posted records were approved, paid, voided or deleted there"
+                    style={{ whiteSpace: 'nowrap' }}>
+              {syncingXero ? 'Checking Xero…' : 'Refresh from Xero'}
+            </button>
+          )}
 
           {selected.size > 0 && (
             <button

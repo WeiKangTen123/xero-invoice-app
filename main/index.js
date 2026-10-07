@@ -489,6 +489,8 @@ const server = app.listen(PORT, HOST, () => {
   // Last, after every recovery has been started: it only keeps Xero
   // connected, and nothing above waits on it. Not awaited.
   startXeroKeepalive();
+  // Reads Xero's status for posted documents every 3 hours; like the keep-alive, a missing module or a throw only warns.
+  Promise.resolve().then(() => require('./jobs/xero-status-sync').start()).catch(err => logger.warn('Xero status sync start failed', { error: err?.message || String(err) }));
 });
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────

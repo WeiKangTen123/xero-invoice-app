@@ -184,7 +184,16 @@ CREATE TABLE IF NOT EXISTS invoices (
   -- ensured: an index here would fail on a database that predates it.
   message_id          TEXT,
   -- How sure the reader was of what it read: 'high', 'medium' or 'low'.
-  confidence          TEXT
+  confidence          TEXT,
+  -- What Xero says about the document now, read back by xero/status-sync.js.
+  -- Nothing else learns that a bill was approved, paid, voided or deleted
+  -- there, and a correction cannot be sent once it has left DRAFT. All NULL
+  -- until the first check: unknown, not "still a draft".
+  xero_status         TEXT,     -- DRAFT | SUBMITTED | AUTHORISED | PAID | VOIDED | DELETED
+  xero_amount_due     INTEGER,  -- cents, as Xero reports it
+  xero_amount_paid    INTEGER,  -- cents
+  xero_paid_on        TEXT,     -- YYYY-MM-DD, Xero's FullyPaidOnDate
+  xero_synced_at      TEXT      -- when Xero last confirmed the four above
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(user_id, status);
@@ -194,6 +203,18 @@ CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(user_id, status);
 -- the partial WHERE clause makes that explicit rather than incidental.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_user_xero_invoice
   ON invoices(user_id, xero_invoice_id) WHERE xero_invoice_id IS NOT NULL;
+
+-- When each connected company's statuses were last read back in full
+-- (xero/status-sync.js). The next read sends it as If-Modified-Since, so Xero
+-- answers with only the documents that changed since. Only a read that
+-- finished is recorded: one cut short by a limit or an error must not let the
+-- next read skip what it never saw.
+CREATE TABLE IF NOT EXISTS xero_status_sync (
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tenant_id       TEXT NOT NULL,
+  last_success_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, tenant_id)
+);
 
 -- 1:many — invoice reports (was invoices[i].reports[])
 CREATE TABLE IF NOT EXISTS invoice_reports (

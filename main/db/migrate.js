@@ -134,6 +134,15 @@ function run() {
   // it is read again, and how sure the reader was of what it read.
   _ensureColumn('invoices', 'message_id', 'message_id TEXT');
   _ensureColumn('invoices', 'confidence', 'confidence TEXT');
+  // What Xero says about a posted document now: its status, what is still owed
+  // and what was paid (cents), the day it was paid in full, and when Xero last
+  // confirmed them (xero/status-sync.js). NULL on every existing row: unknown
+  // until the first check, which is not the same as a draft.
+  for (const [col, ddl] of [
+    ['xero_status', 'xero_status TEXT'], ['xero_amount_due', 'xero_amount_due INTEGER'],
+    ['xero_amount_paid', 'xero_amount_paid INTEGER'], ['xero_paid_on', 'xero_paid_on TEXT'],
+    ['xero_synced_at', 'xero_synced_at TEXT'],
+  ]) _ensureColumn('invoices', col, ddl);
   // Here rather than in schema.sql: the schema runs first, and on a database
   // without the column an index naming it would stop the boot.
   db.exec('CREATE INDEX IF NOT EXISTS idx_invoices_message_id ON invoices(user_id, message_id)');

@@ -1,6 +1,6 @@
 import { fmtMoney } from '../../utils/format';
 import { formatDateTime } from '../../utils/formatDate';
-import { TypeBadge, ConfidenceBadge } from '../../components/Badges';
+import { TypeBadge, ConfidenceBadge, XeroStatusBadge } from '../../components/Badges';
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { staggerIn } from '../../utils/stagger';
 import { receivedLabel, totalsLabel } from './helpers';
@@ -168,6 +168,8 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                         ) : (
                           <span className={`badge ${cls}`}>{label}</span>
                         )}
+                        {/* What became of it in Xero, under the app's own status. */}
+                        <XeroStatusBadge invoice={inv} style={{ display: 'flex', marginTop: 4 }} />
                       </td>
                       <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
                         <div style={{ display: 'flex', gap: 6 }}>

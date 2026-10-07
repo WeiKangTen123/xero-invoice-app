@@ -12,6 +12,7 @@ const emailQueue   = require('../queue/email-queue');
 const emailWorker  = require('../queue/email-worker');
 const { submitInvoiceToXero, postedDuplicateOf } = require('../utils/invoice-handler');
 const { xeroErrMsg }  = require('../xero/xero-utils');
+const statusSync   = require('../xero/status-sync');
 const logger       = require('../utils/logger');
 
 // PDF access tokens are short-lived and scoped to one invoice + one user.
@@ -164,6 +165,36 @@ router.delete('/import/:jobId', requireAuth, (req, res) => {
   res.json({ stage: job.stage });
 });
 
+// ── POST /api/invoices/sync-xero-status ──────────────────────────────────────
+// "Refresh from Xero": reads back now, for the signed-in account, what became
+// of everything it posted (approved, paid, voided...) instead of waiting for
+// the 3-hourly job. Responds { checked, updated, failedTenants }. Read-only on
+// the Xero side.
+//
+// At most one run a minute per account. Each run spends Xero calls from the
+// same daily allowance posting needs, and a button pressed repeatedly would
+// spend them on answers that cannot have changed. Counted from when a run
+// starts, so pressing again while one is running is refused too.
+const STATUS_SYNC_COOLDOWN_MS = 60_000;
+const _statusSyncStartedAt = new Map(); // userId -> ms
+router.post('/sync-xero-status', requireAuth, asyncHandler(async (req, res) => {
+  const userId = String(req.user.id);
+  const now    = Date.now();
+  const last   = _statusSyncStartedAt.get(userId);
+  if (last !== undefined && now - last < STATUS_SYNC_COOLDOWN_MS) {
+    const wait = Math.max(1, Math.ceil((STATUS_SYNC_COOLDOWN_MS - (now - last)) / 1000));
+    res.set('Retry-After', String(wait));
+    return res.status(429).json({
+      error: `Statuses were refreshed from Xero less than a minute ago. Try again in ${wait} second${wait === 1 ? '' : 's'}.`,
+      retryAfter: wait,
+    });
+  }
+  _statusSyncStartedAt.set(userId, now);
+  const { checked, updated, failedTenants } = await statusSync.syncUser(userId);
+  logger.info('Xero statuses refreshed by hand', { userId, checked, updated, failedTenants });
+  res.json({ checked, updated, failedTenants });
+}));
+
 // One row of the list. The same fields whichever form of the list is asked for,
 // so the Invoices page and the Automation page's recent table render alike.
 const _listRow = inv => ({
@@ -196,6 +227,14 @@ const _listRow = inv => ({
   duplicateOf:   inv.duplicateOf,
   description:   inv.description,
   reportCount:   (inv.reports || []).length,
+  // What Xero says about it now, as last read back (xero/status-sync.js):
+  // status, amounts in dollars, the day it was paid in full, and when Xero
+  // last confirmed them. All null until the first check.
+  xeroStatus:     inv.xeroStatus,
+  xeroAmountDue:  inv.xeroAmountDue,
+  xeroAmountPaid: inv.xeroAmountPaid,
+  xeroPaidOn:     inv.xeroPaidOn,
+  xeroSyncedAt:   inv.xeroSyncedAt,
 });
 
 // GET /api/invoices            → { invoices }         every invoice, newest first
@@ -376,6 +415,15 @@ router.post('/:id/submit', requireAuth, asyncHandler(async (req, res) => {
     return res.status(422).json({
       error: 'Invoice has no amount — edit the invoice fields before submitting',
     });
+  }
+
+  // A correction goes to Xero as an update, which Xero refuses once the bill
+  // has left DRAFT there. Refused here, with the reason, rather than sent to
+  // fail and leave Xero's error on the row. Only a status already read back
+  // counts: one not known yet is sent as before.
+  const locked = statusSync.repostRefusal(inv);
+  if (locked) {
+    return res.status(409).json({ error: `${locked}. If that has changed, refresh from Xero first.`, xeroStatus: inv.xeroStatus });
   }
 
   const force = req.body?.force === true;

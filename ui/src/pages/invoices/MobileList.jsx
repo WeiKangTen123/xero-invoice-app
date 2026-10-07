@@ -1,5 +1,5 @@
 import { fmtMoney } from '../../utils/format';
-import { TypeBadge, ConfidenceBadge } from '../../components/Badges';
+import { TypeBadge, ConfidenceBadge, XeroStatusBadge } from '../../components/Badges';
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { totalsLabel } from './helpers';
 
@@ -153,6 +153,7 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                           ) : (
                             <span className={`badge ${cls}`}>{label}</span>
                           )}
+                          <XeroStatusBadge invoice={inv} />
                         </div>
 
                         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }} onClick={e => e.stopPropagation()}>
