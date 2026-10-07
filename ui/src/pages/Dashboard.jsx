@@ -239,20 +239,30 @@ function PipelinePanel({ queue, xero }) {
   );
 }
 
+const RECENT_ROWS = 10;
+
 export default function Dashboard() {
   const { user } = useAuth();
   // Status comes from the shared PipelineContext — no need for a separate polling loop here.
   const { status, refresh: refreshStatus } = usePipeline();
 
   const [invoices,    setInvoices]    = useState([]);
+  const [invoiceTotal, setInvoiceTotal] = useState(0);
   const [settings,    setSettings]    = useState({ autoProcess: true });
   const [loading,     setLoading]     = useState(true);
   const [rescanning,  setRescanning]  = useState(false);
   const [rescanMsg,   setRescanMsg]   = useState('');
   const [togglingAP,  setTogglingAP]  = useState(false);
 
+  // Only the ten rows the table shows, and the count for its subtitle. This
+  // polls every 15 s, and the full list (every invoice, hydrated) grew with
+  // each bill received — fetched just to keep ten.
   const fetchInvoices = useCallback(async () => {
-    try { const d = await api.get('/invoices'); setInvoices(d.invoices || []); } catch (_) {}
+    try {
+      const d = await api.get(`/invoices?recent=${RECENT_ROWS}`);
+      setInvoices(d.invoices || []);
+      setInvoiceTotal(d.total ?? (d.invoices || []).length);
+    } catch (_) {}
   }, []);
 
   const fetchSettings = useCallback(async () => {
@@ -470,7 +480,7 @@ export default function Dashboard() {
           <div>
             <div className="card-title">Recent Invoices</div>
             <div className="card-subtitle" style={{ marginBottom: 0 }}>
-              Showing last {Math.min(invoices.length, 10)} of {invoices.length} — up to 100 kept in memory
+              Showing the latest {invoices.length} of {invoiceTotal}
             </div>
           </div>
           <button
@@ -480,7 +490,7 @@ export default function Dashboard() {
             ↻ Refresh
           </button>
         </div>
-        <InvoiceTable invoices={invoices.slice(0, 10)} timezone={user?.timezone} />
+        <InvoiceTable invoices={invoices} timezone={user?.timezone} />
       </div>
     </div>
   );

@@ -35,6 +35,52 @@ describe('routes/invoices workflow & batching', () => {
       expect(row).toMatchObject({ receiptFile: 'x.jpg', receiptGroup: 'g1', receiptPage: 2, description: '[Local Travel] ride', receivedAt: '2026-09-10T00:00:00.000Z' });
       expect(row).toHaveProperty('duplicateOf');
     });
+
+    // The Automation page polls this every 15 s for the ten rows it shows.
+    describe('?recent=N', () => {
+      const addMany = n => {
+        const store = invoiceStore.forUser(testUser.id);
+        for (let i = 0; i < n; i++) store.add({ id: `r${i}_${Date.now()}`, status: 'posted', vendorName: `V${i}`, totalAmount: i });
+      };
+      const get = q => request(serverFor(app)).get(`/api/invoices${q}`).set('Authorization', auth());
+
+      test('returns the newest N with the same rows as the full list, and the total', async () => {
+        addMany(12);
+        const all    = (await get('').expect(200)).body;
+        const recent = (await get('?recent=10').expect(200)).body;
+        expect(all).toEqual({ invoices: expect.any(Array) });    // the default shape is unchanged
+        expect(all.invoices).toHaveLength(12);
+        expect(recent.total).toBe(12);
+        expect(recent.invoices).toEqual(all.invoices.slice(0, 10));
+        expect(recent.invoices[0].vendorName).toBe('V11');
+        // Fewer than asked for is all of them.
+        expect((await get('?recent=20').expect(200)).body.invoices).toEqual(all.invoices);
+      });
+
+      test('is capped at 100', async () => {
+        addMany(101);
+        const { body } = await get('?recent=5000').expect(200);
+        expect(body.invoices).toHaveLength(100);
+        expect(body.total).toBe(101);
+      });
+
+      // One test, not one per value: each test here pays for a fresh user.
+      test('rejects anything but a whole number of at least 1', async () => {
+        for (const q of ['0', '-1', '2.5', 'ten', '']) {
+          const { body } = await get(`?recent=${q}`).expect(400);
+          expect(body.error).toMatch(/recent/);
+        }
+      });
+
+      test('only the caller\'s own invoices', async () => {
+        addMany(2);
+        const other = await users.createUser(`other${Date.now()}@test.com`, 'password123', 'user');
+        invoiceStore.forUser(other.id).add({ id: `o_${Date.now()}`, status: 'posted', vendorName: 'Theirs', totalAmount: 1 });
+        const { body } = await get('?recent=10').expect(200);
+        expect(body.invoices.map(r => r.vendorName)).not.toContain('Theirs');
+        expect(body.total).toBe(2);
+      });
+    });
   });
 
   describe('POST /api/invoices/batch-status', () => {

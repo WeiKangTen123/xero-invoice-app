@@ -164,39 +164,56 @@ router.delete('/import/:jobId', requireAuth, (req, res) => {
   res.json({ stage: job.stage });
 });
 
+// One row of the list. The same fields whichever form of the list is asked for,
+// so the Invoices page and the Automation page's recent table render alike.
+const _listRow = inv => ({
+  id:            inv.id,
+  status:        inv.status,
+  hasPdf:        inv.hasPdf,
+  pdfFilename:   inv.pdfFilename,
+  vendorName:    inv.vendorName,
+  invoiceNumber: inv.invoiceNumber,
+  invoiceDate:   inv.invoiceDate,
+  dueDate:       inv.dueDate,
+  totalAmount:   inv.totalAmount,
+  currency:      inv.currency,
+  invoiceType:   inv.invoiceType,
+  source:        inv.source,
+  sourceEmail:   inv.sourceEmail,
+  processedAt:   inv.processedAt,
+  submittedAt:   inv.submittedAt,
+  xeroInvoiceId: inv.xeroInvoiceId,
+  // The connected Xero company that xeroInvoiceId is in.
+  xeroTenantId:  inv.xeroTenantId,
+  errorMsg:      inv.errorMsg,
+  // The Invoices page reads these to tell a claim from a bill, to group a
+  // split photo or an import, and to show a suspected duplicate; they were
+  // left out of the list and the page showed every claim as "PDF/Email".
+  receivedAt:    inv.receivedAt,
+  receiptFile:   inv.receiptFile,
+  receiptGroup:  inv.receiptGroup,
+  receiptPage:   inv.receiptPage,
+  duplicateOf:   inv.duplicateOf,
+  description:   inv.description,
+  reportCount:   (inv.reports || []).length,
+});
+
+// GET /api/invoices            → { invoices }         every invoice, newest first
+// GET /api/invoices?recent=N   → { invoices, total }  the newest N (1–100), and
+//                                                     how many there are in all
+// The Automation page shows ten rows and polls every 15 seconds. Loading every
+// invoice with its line items and reports to throw all but ten away was the
+// heaviest request the page made, and it grew with every bill received; the
+// recent form reads only the rows it returns, plus a COUNT for the subtitle.
+const RECENT_MAX = 100;
 router.get('/', requireAuth, (req, res) => {
-  const invoices = invoiceStore.forUser(req.user.id).getAll().map(inv => ({
-    id:            inv.id,
-    status:        inv.status,
-    hasPdf:        inv.hasPdf,
-    pdfFilename:   inv.pdfFilename,
-    vendorName:    inv.vendorName,
-    invoiceNumber: inv.invoiceNumber,
-    invoiceDate:   inv.invoiceDate,
-    dueDate:       inv.dueDate,
-    totalAmount:   inv.totalAmount,
-    currency:      inv.currency,
-    invoiceType:   inv.invoiceType,
-    source:        inv.source,
-    sourceEmail:   inv.sourceEmail,
-    processedAt:   inv.processedAt,
-    submittedAt:   inv.submittedAt,
-    xeroInvoiceId: inv.xeroInvoiceId,
-    // The connected Xero company that xeroInvoiceId is in.
-    xeroTenantId:  inv.xeroTenantId,
-    errorMsg:      inv.errorMsg,
-    // The Invoices page reads these to tell a claim from a bill, to group a
-    // split photo or an import, and to show a suspected duplicate; they were
-    // left out of the list and the page showed every claim as "PDF/Email".
-    receivedAt:    inv.receivedAt,
-    receiptFile:   inv.receiptFile,
-    receiptGroup:  inv.receiptGroup,
-    receiptPage:   inv.receiptPage,
-    duplicateOf:   inv.duplicateOf,
-    description:   inv.description,
-    reportCount:   (inv.reports || []).length,
-  }));
-  res.json({ invoices });
+  const store = invoiceStore.forUser(req.user.id);
+  if (req.query.recent !== undefined) {
+    const n = Number(req.query.recent);
+    if (!Number.isInteger(n) || n < 1) return res.status(400).json({ error: 'recent must be a whole number of at least 1' });
+    return res.json({ invoices: store.getRecent(Math.min(n, RECENT_MAX)).map(_listRow), total: store.count() });
+  }
+  res.json({ invoices: store.getAll().map(_listRow) });
 });
 
 // ── GET /api/invoices/:id ─────────────────────────────────────────────────────

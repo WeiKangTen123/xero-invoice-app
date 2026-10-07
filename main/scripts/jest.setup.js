@@ -36,6 +36,13 @@
 //
 // So: a red route test on a Mac that is green on Linux and green on re-run is
 // this, and the fix is not in the repository.
+//
+// (Removing maxWorkers: 1 missed the --runInBand in package.json's "test"
+// script, so npm test — CI and every deploy — stayed serial: 371 s against
+// 75 s in parallel on a 12-core machine. The worker count is now
+// "maxWorkers": "50%" in the jest config rather than all cores, because
+// deploy.sh runs npm test on the production VM beside the live app and the app
+// keeps the other half; on two vCPUs that is one worker, as before.)
 const http  = require('http');
 const https = require('https');
 http.globalAgent  = new http.Agent({ keepAlive: false });
