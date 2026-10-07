@@ -1,7 +1,10 @@
-// A dropped connection during any Xero call used to crash the server: the
-// SDK's ApiError read error.response.status on an error that has no response,
-// so the SDK's own catch block threw, the awaited promise never settled, and
-// the throw reached index.js as an unhandled rejection — which exits.
+// Under xero-node 7.0.0 a dropped connection during any Xero call crashed the
+// server: the SDK's ApiError read error.response.status on an error that had
+// no response, so the SDK's own catch block threw, the awaited promise never
+// settled, and the throw reached index.js as an unhandled rejection, which
+// exits. The SDK has handled that itself since 19.0.0. What the guard still
+// adds is the timeout and the error code behind a readable message, and these
+// check both, as well as that the crash stays gone.
 //
 // These make REAL xero-node calls, but only ever to a local server on
 // 127.0.0.1 that drops, refuses, ignores or answers the request. Nothing here
@@ -85,7 +88,11 @@ const CHILD = `
       await api.getOrganisations('tenant');
       console.log(JSON.stringify({ resolved: true }));
     } catch (err) {
-      console.log(JSON.stringify({ rejected: true, message: guarded ? utils.xeroErrMsg(err) : null }));
+      // Without the guard, xero-utils is loaded only now, once the SDK has
+      // already built its error, so the message is what the user would have
+      // seen from the bare SDK.
+      const { xeroErrMsg } = utils || require(${JSON.stringify(XERO_UTILS)});
+      console.log(JSON.stringify({ rejected: true, message: xeroErrMsg(err) }));
     }
     process.exit(0);
   });
@@ -106,12 +113,17 @@ function runChild(withGuard) {
 }
 
 describe('xero/sdk-guard — a dropped connection in a real process', () => {
-  // Proves the check can see the bug at all: without the guard, the same call
-  // is exactly the production crash.
-  test('control: without the guard the rejection is unhandled and the process exits', () => {
-    const { status, result } = runChild(false);
-    expect(status).toBe(3);
-    expect(result.unhandled).toMatch(/reading 'status'/);
+  // Without the guard this was the production crash on 7.0.0 (exit 3, "reading
+  // 'status'"). From 19.0.0 the bare SDK rejects normally, so the guard is no
+  // longer what keeps the process up; it is still what turns the rejection
+  // into words. If this starts exiting 3 again, the SDK has regressed and the
+  // guard is what stands between it and a crash.
+  test('control: without the guard the SDK no longer crashes, but the user would see raw JSON', () => {
+    const { status, result, stderr } = runChild(false);
+    expect({ status, stderr }).toEqual({ status: 0, stderr: '' });
+    expect(result.rejected).toBe(true);
+    expect(result.message).not.toMatch(/^Could not reach Xero/);
+    expect(() => JSON.parse(result.message)).not.toThrow();
   });
 
   test('with the guard the call rejects normally and the process carries on', () => {
@@ -198,8 +210,11 @@ describe('xero/sdk-guard — the SDK on a dropped connection', () => {
       expect(outcome).not.toBe(PENDING);
       expect(_parseXeroErr(outcome.error).status).toBe(400);
       expect(xeroErrMsg(outcome.error)).toBe('Ordering by DueDate is unavailable');
+      // 20.0.0 leaves the Authorization header out of the error altogether
+      // (older versions copied it in, and the guard blanked it). Either way
+      // neither the token nor its scheme may reach a log or the user.
       expect(String(outcome.error)).not.toContain(TOKEN);
-      expect(String(outcome.error)).toContain('[redacted]');
+      expect(String(outcome.error)).not.toMatch(/Bearer/i);
     } finally {
       await new Promise(r => server.close(r));
     }
@@ -231,7 +246,7 @@ describe('xero/sdk-guard — the timeout applies to Xero requests only', () => {
   });
 
   test('a call carrying the SDK\'s user-agent gets it wherever it points', async () => {
-    expect(await timeoutFor('http://127.0.0.1:1/x', { headers: { 'user-agent': 'xero-node-7.0.0' } })).toBe(60_000);
+    expect(await timeoutFor('http://127.0.0.1:1/x', { headers: { 'user-agent': 'xero-node-20.0.0' } })).toBe(60_000);
   });
 
   test('a Xero call that already sets its own timeout keeps it', async () => {

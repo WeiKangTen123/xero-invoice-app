@@ -89,7 +89,9 @@ describe('a claim\'s receipt', () => {
     expect(body.equals(JPEG)).toBe(true);                 // the file itself, not a JSON rendering of it
     expect(opts.headers['Content-Type']).toBe('image/jpeg');
     expect(opts.headers['xero-tenant-id']).toBe('tenant-1');
-    // The SDK's upload sends the bytes as JSON, so it is not used.
+    // Not the SDK's upload: 7.0.0 sent the bytes as JSON, and even 20.0.0
+    // labels them application/x-www-form-urlencoded unless given headers
+    // (sdk-attachment-body.test.js). The direct PUT sends the file's own type.
     expect(mockApi.createInvoiceAttachmentByFileName).not.toHaveBeenCalled();
     expect(mockAddNote).not.toHaveBeenCalled();
   });

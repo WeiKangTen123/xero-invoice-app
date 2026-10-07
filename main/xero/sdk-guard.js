@@ -1,20 +1,31 @@
 const axios  = require('axios');
 const logger = require('../utils/logger');
 
-// Two defects in xero-node 7.0.0 that together let one dropped connection
-// take the whole server down. Loaded by xero-utils.js, which every Xero module
-// requires, so both are in place before the first call is made.
+// Two things xero-node still needs from the app as of 20.0.0. Loaded by
+// xero-utils.js, which every Xero module requires, so both are in place before
+// the first call is made.
 //
-// 1. Every SDK method catches the axios failure and builds an ApiError from it,
-//    and ApiError reads error.response.status with no check that a response
-//    exists. On a network failure (ECONNRESET, ECONNREFUSED, DNS, timeout)
-//    there is none, so the constructor throws inside the SDK's catch block.
-//    That catch runs in an async function wrapped in `new Promise(...)`, so the
-//    promise the app is awaiting never settles, and the throw escapes as an
-//    unhandled rejection — which index.js treats as fatal and exits on.
+// 1. A network error the app can name. Every SDK method catches the axios
+//    failure, builds an ApiError from it and rejects with that serialised as
+//    JSON. When there is no HTTP response (ECONNRESET, ECONNREFUSED, DNS,
+//    timeout), what gets serialised is a status of 0 and the socket error's
+//    message, but not its `code`, and xeroErrMsg needs the code to tell the
+//    user "Could not reach Xero (ECONNRESET)" or "Xero did not respond in
+//    time". Without it the user is shown the JSON. The replacement ApiError
+//    below carries the code and message inside what the SDK serialises.
 //
-// 2. The SDK sets no request timeout, so a Xero call that connects but never
-//    answers holds the request (and any queue job behind it) forever.
+//    It is also the defence should a later SDK go back on two fixes this
+//    guard used to supply. Before 19.0.0, ApiError read error.response.status
+//    without checking that a response existed, so on a network failure the
+//    constructor threw inside the SDK's catch block; that catch runs in an
+//    async function wrapped in `new Promise(...)`, so the promise the app was
+//    awaiting never settled and the throw escaped as an unhandled rejection,
+//    which index.js treats as fatal and exits on. And before 20.0.0 the error
+//    carried the outgoing headers, bearer token included.
+//
+// 2. A timeout on Xero requests. The SDK still sets none on its API calls, so
+//    a Xero call that connects but never answers would hold the request (and
+//    any queue job behind it) forever.
 
 const TIMEOUT_MS = 60_000;
 
@@ -24,7 +35,7 @@ const settings = { timeoutMs: TIMEOUT_MS };
 
 const GUARDED = Symbol.for('xero-invoice-app.sdk-guard');
 
-// ── 1. ApiError that tolerates a missing response ───────────────────────────
+// ── 1. ApiError that keeps a network error's code ───────────────────────────
 //
 // Replacing the export works because the generated API classes never hold a
 // reference to the class itself: each one keeps the module object
@@ -69,9 +80,11 @@ function installApiErrorGuard() {
         this.code    = err.code || null;
       }
 
-      // The SDK copies the outgoing headers, bearer token included, into the
-      // error it serialises — and that string is what gets logged, and what
-      // xeroErrMsg falls back to showing when Xero sends no message of its own.
+      // Before 20.0.0 the SDK copied the outgoing headers, bearer token
+      // included, into the error it serialises, and that string is what gets
+      // logged and what xeroErrMsg falls back to showing when Xero sends no
+      // message of its own. 20.0.0 keeps only a list of harmless headers, so
+      // this finds nothing to do unless a later version stops filtering.
       const headers = this.request && this.request.headers;
       if (headers && typeof headers === 'object') {
         for (const key of Object.keys(headers)) {
@@ -82,7 +95,9 @@ function installApiErrorGuard() {
 
     generateError() {
       const out = super.generateError();
-      if (this.statusCode === undefined) {
+      // No response means no status. 7.0.0 left it undefined; from 19.0.0 the
+      // SDK sets 0, so this checks for either rather than for one of them.
+      if (!this.statusCode) {
         // The SDK JSON-stringifies this object as the rejection, so the
         // message and code have to travel inside it for xeroErrMsg to find.
         out.message = this.message;

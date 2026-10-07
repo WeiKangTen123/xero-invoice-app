@@ -414,12 +414,12 @@ function createIdempotencyKey(localId, tenantId, invoiceBody) {
 
 // ── Attachments ─────────────────────────────────────────────────────────────
 //
-// Uploaded with axios, not the SDK. xero-node 7.0.0's
-// createInvoiceAttachmentByFileName gathers the file into an array of chunks
-// and hands that array to axios as the request body, and axios serialises an
-// array as JSON: Xero is sent `[{"type":"Buffer","data":[...]}]`, not the file
-// (see invoices-attach.test.js). The endpoint takes the raw bytes with their
-// own Content-Type.
+// Uploaded with axios, not the SDK. The endpoint takes the raw bytes with
+// their own Content-Type. xero-node 7.0.0's createInvoiceAttachmentByFileName
+// sent neither: it handed axios the file as an array of chunks, which went out
+// as JSON (`[{"type":"Buffer","data":[...]}]`). Since 9.0.0 it sends the
+// bytes, but labelled application/x-www-form-urlencoded unless the caller
+// passes headers, so the direct PUT stays (see sdk-attachment-body.test.js).
 
 const EXT_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', pdf: 'application/pdf' };
 
@@ -616,7 +616,9 @@ async function createDraftInvoice(userId, tenantId, invoiceData) {
   const { invoiceBody, currencyCode, payee } = await _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi);
   const idempotencyKey = createIdempotencyKey(invoiceData._invoiceStoreId || invoiceData.id, tenantId, invoiceBody);
 
-  // createInvoices(xeroTenantId, invoices, summarizeErrors?, unitdp?, idempotencyKey?)
+  // createInvoices(xeroTenantId, invoices, summarizeErrors?, unitdp?, idempotencyKey?, allowBackorders?)
+  // Positional, so a reordering in an SDK upgrade would send the key as
+  // something else without any error; sdk-contract.test.js pins it.
   const result = await _submitWithCurrencyRetry(
     body => accountingApi.createInvoices(tenantId, body, undefined, undefined, idempotencyKey || undefined),
     accountingApi, tenantId, invoiceBody, currencyCode, userId, invoiceData
