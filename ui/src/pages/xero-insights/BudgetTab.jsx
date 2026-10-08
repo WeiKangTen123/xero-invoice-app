@@ -1,7 +1,11 @@
-import { fmtMoney } from '../../utils/format';
+import { fmtCell, isNilAmount } from '../../utils/format';
 import { BudgetExport } from './BudgetExport';
 import { BudgetGrid } from './BudgetGrid';
-import { BudgetMissingNote, SourceNote, closedRange, dayLabel, isFullYear, lastLoaded } from './bits';
+import { BudgetMissingNote, SourceNote, closedRange, isFullYear, lastLoaded, soFarCaption, soFarRead } from './bits';
+
+// A tile's figure is coloured by its sign, as the grid colours a cell; nil
+// prints as a dash and takes no colour.
+const signTone = v => (isNilAmount(v) ? undefined : v < 0 ? 'var(--danger)' : 'var(--success)');
 
 export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }) {
   return (
@@ -47,27 +51,35 @@ export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }
             return (
               <>
                 {d.budgetMissing && <BudgetMissingNote />}
-                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', margin: '18px 0 4px' }}>
+                {/* Printed as the grid below prints its cells — brackets for a
+                    negative, a dash for nil, the same locale — with the
+                    currency named once above rather than on every figure. They
+                    used to read "SGD -1,234.50" over a grid of "(1,234.50)". */}
+                <div style={{ margin: '18px 0 4px' }}>
+                {cur && <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginBottom: 6 }}>Figures in {cur}</div>}
+                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
                   {tiles.map(t => (
                     <div key={t.label} className="card figure-tile" style={{ flex: 1, minWidth: 180, background: 'var(--bg-secondary)' }}>
                       <div className="figure-label" style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>{t.label}</div>
-                      <div className="figure-value" style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: t.value < 0 ? 'var(--danger)' : 'var(--success)' }}>
-                        {fmtMoney(t.value, cur)}
+                      <div className="figure-value" style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: signTone(t.value) }}>
+                        {fmtCell(t.value)}
                       </div>
                       <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>{t.hint}</div>
                     </div>
                   ))}
-                  {/* The month in progress, live: what is booked so far against
-                      its whole-month budget. Matches the amber column in the grid
+                  {/* The month in progress, live: everything dated in it as
+                      Xero holds it on the day it was read, against its
+                      whole-month budget. Matches the amber column in the grid
                       and, like it, is not part of the forecast. */}
                   {cm && (
-                    <div className="card figure-tile" style={{ flex: 1, minWidth: 180, background: 'var(--warning-subtle)', borderColor: 'var(--warning)' }}>
+                    <div className="card figure-tile" title={soFarCaption(cm)}
+                         style={{ flex: 1, minWidth: 180, background: 'var(--warning-subtle)', borderColor: 'var(--warning)' }}>
                       <div className="figure-label" style={{ fontSize: 11.5, color: 'var(--warning)', fontWeight: 700, marginBottom: 4 }}>{cm.label} so far</div>
-                      <div className="figure-value" style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: cm.actualNet < 0 ? 'var(--danger)' : 'var(--success)' }}>
-                        {fmtMoney(cm.actualNet, cur)}
+                      <div className="figure-value" style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: signTone(cm.actualNet) }}>
+                        {fmtCell(cm.actualNet)}
                       </div>
                       <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3 }}>
-                        Net profit booked, of {fmtMoney(cm.budgetNet, cur)} budgeted · as of {dayLabel(cm.asOf)}
+                        Net profit, of {fmtCell(cm.budgetNet)} budgeted · {soFarRead(cm)}
                       </div>
                     </div>
                   )}
@@ -79,14 +91,17 @@ export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }
                     </div>
                   </div>
                 </div>
+                </div>
 
-                <BudgetGrid months={d.months} rows={d.rows} currency={cur} />
+                <BudgetGrid months={d.months} rows={d.rows} currency={cur} soFarNote={soFarCaption(cm)} />
 
                 <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 14, lineHeight: 1.6 }}>
                   A month shows actuals only once it has fully closed — the current month reads as budget, since its
-                  income may be invoiced before its costs are entered. What has been booked against it so far is in
-                  the amber &ldquo;so far&rdquo; column; it is not added into Total or the forecast. Section names come from Xero&apos;s standard
-                  Profit &amp; Loss layout; a custom report layout in Xero may label them differently.
+                  income may be invoiced before its costs are entered. The amber &ldquo;so far&rdquo; column is
+                  everything dated in the current month as Xero held it on the day it was read &mdash; including entries
+                  dated later in the month, not just the days elapsed; it is not added into Total or the forecast.
+                  Section names come from Xero&apos;s standard Profit &amp; Loss layout; a custom report layout in Xero
+                  may label them differently.
                 </div>
               </>
             );

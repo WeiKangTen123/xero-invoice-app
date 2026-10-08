@@ -325,13 +325,24 @@ describe('reports/budget-doc — what the variance figures cover', () => {
     kpis: { currentMonth: { key: '2026-10', label: 'Oct 2026', asOf: '2026-10-06' } },
   };
 
-  test('a month in progress says so, with the day it was read', () => {
-    expect(doc.varianceLabel(payload, '2026-10')).toBe('Oct 2026 so far, as of 6 Oct 2026');
+  // The figure is the whole month's P&L as Xero held it on the day it was
+  // read, entries dated later in the month included. "So far, as of 6 Oct"
+  // read as the 1st to the 6th, which it never was.
+  test('a month in progress says what its figure is, and the day it was read', () => {
+    expect(doc.varianceLabel(payload, '2026-10')).toBe('Oct 2026 so far — everything dated in October as Xero holds it, read on 6 Oct 2026');
+    expect(doc.soFarCaption(payload.kpis.currentMonth)).toBe('Oct 2026 so far — everything dated in October as Xero holds it, read on 6 Oct 2026');
   });
 
-  test('a month in progress with no read date still says so far', () => {
+  test('a month in progress with no read date still says so far, and what it holds', () => {
     const noDate = { ...payload, kpis: { currentMonth: { ...payload.kpis.currentMonth, asOf: null } } };
-    expect(doc.varianceLabel(noDate, '2026-10')).toBe('Oct 2026 so far');
+    expect(doc.varianceLabel(noDate, '2026-10')).toBe('Oct 2026 so far — everything dated in October as Xero holds it');
+  });
+
+  test('the month is written out from its key, or from its label on a payload without one', () => {
+    expect(doc.soFarCaption({ key: '2027-01', label: 'Jan 2027', asOf: '2027-01-03' }))
+      .toBe('Jan 2027 so far — everything dated in January as Xero holds it, read on 3 Jan 2027');
+    expect(doc.soFarCaption({ key: 'm5', label: 'Oct 2026' })).toBe('Oct 2026 so far — everything dated in October as Xero holds it');
+    expect(doc.soFarCaption(null)).toBe('');
   });
 
   test('a closed month is just its name', () => {
@@ -349,7 +360,7 @@ describe('reports/budget-doc — what the variance figures cover', () => {
 
   test('the PDF header carries the label', () => {
     const def = doc.budgetVarianceDoc({ ...payload, rows: [], organisation: { name: 'Org' } }, { month: '2026-10', generatedAt: 0 });
-    expect(JSON.stringify(def.header)).toContain('Oct 2026 so far, as of 6 Oct 2026');
+    expect(JSON.stringify(def.header)).toContain('Oct 2026 so far — everything dated in October as Xero holds it, read on 6 Oct 2026');
   });
 
   test('dayLabel reads the date as written, and refuses anything else', () => {
@@ -447,17 +458,28 @@ describe('reports/budget-doc — a month beside its running total', () => {
     expect(doc.budgetVarianceDoc(fy, { month: 'ytd' }).pageOrientation).toBe('portrait');
   });
 
-  test('the month in progress keeps its "so far, as of" wording, and its running total says so far', () => {
+  test('the month in progress is headed "so far", its running total too, and the subtitle says what that is', () => {
     const d = doc.budgetVarianceDoc(fy, { month: '2026-10', ...SGT });
+    // The heading spans four narrow columns, so it stays short; the caption
+    // is in the page header, on every page.
     expect(tableOf(d).body[0].filter(c => c.colSpan === 4).map(c => c.text))
-      .toEqual(['Oct 2026 so far, as of 7 Oct 2026', 'YTD to Oct 2026 so far']);
+      .toEqual(['Oct 2026 so far', 'YTD to Oct 2026 so far']);
     expect(rowOf(d, 'Sales').slice(5).map(c => c.text)).toEqual(['3,252.00', '1,200.00', '2,052.00', '171.00%']);
-    expect(JSON.stringify(d.header)).toContain('Oct 2026 so far, as of 7 Oct 2026');
+    expect(d.header.columns[0].stack[1].text).toBe('Oct 2026 so far — everything dated in October as Xero holds it, read on 7 Oct 2026 · SGD');
+    const wb = render.budgetVarianceWorkbook(fy, { month: '2026-10', ...SGT });
+    expect(String(wb.getWorksheet('Budget Variance').getCell(2, 1).value)).toMatch(/^Oct 2026 so far — everything dated in October as Xero holds it, read on 7 Oct 2026 · SGD · Generated /);
   });
 
   test('over a period that is not a year the running total names its months, not "YTD"', () => {
     const q = fyPayload({ period: { ...fy.period, toDateLabel: 'Period to date' } });
-    expect(doc.cumulativeLabel(q, 5)).toBe('Apr 2026 – Sep 2026');
+    expect(doc.cumulativeLabel(q, 5)).toBe('To date (Apr 2026 – Sep 2026)');
+    expect(doc.cumulativeLabel(q, 6)).toBe('To date (Apr 2026 – Oct 2026 so far)');
+    // Nothing in the file assumes a year: not the headings, not the subtitle, not the name.
+    const d = doc.budgetVarianceDoc(q, { month: '2026-09', ...SGT });
+    expect(JSON.stringify([d.header, tableOf(d).body[0]])).not.toMatch(/YTD|[Yy]ear/);
+    expect(doc.exportFilename('variance', q, { month: '2026-09' })).toBe('Budget-Variance_Flovon-Pte-Ltd_Sep-2026_to-date-from-Apr-2026');
+    // And without the server's word at all, the wording stays neutral.
+    expect(doc.cumulativeLabel(fyPayload({ period: { ...fy.period, toDateLabel: undefined } }), 5)).toBe('To date (Apr 2026 – Sep 2026)');
   });
 
   test('the workbook has the same two groups, as numbers', () => {
@@ -483,6 +505,64 @@ describe('reports/budget-doc — a month beside its running total', () => {
   });
 });
 
+// A month after the one in progress has nothing in it, so its export was a
+// page of "-100.00%" lines headed as if the month had ended. The screen no
+// longer offers such a month, and an export asked for one is refused.
+describe('reports/budget-doc — a month that has not started is refused', () => {
+  const fy = fyPayload();
+
+  test('a closed month, the month in progress and a budget month after it are told apart', () => {
+    expect(doc.monthStarted(fy.months[5])).toBe(true);     // Sep, closed
+    expect(doc.monthStarted(fy.months[6])).toBe(true);     // Oct, in progress
+    expect(doc.monthStarted(fy.months[7])).toBe(false);    // Nov
+    expect(doc.monthStarted(undefined)).toBe(false);
+    // A payload from before months said which they were is not refused.
+    expect(doc.monthStarted({ key: '2026-11', label: 'Nov 2026' })).toBe(true);
+  });
+
+  test('the PDF, the workbook and the filename all refuse it, with an error the routes can tell apart', () => {
+    for (const build of [
+      () => doc.budgetVarianceDoc(fy, { month: '2026-11', ...SGT }),
+      () => render.budgetVarianceWorkbook(fy, { month: '2026-11', ...SGT }),
+      () => doc.exportFilename('variance', fy, { month: '2026-11' }),
+    ]) {
+      expect(build).toThrow(doc.MonthNotStartedError);
+      expect(build).toThrow('Nov 2026 has not started yet');
+    }
+    expect(() => doc.resolveMonth(fy, '2027-03')).toThrow('Mar 2027 has not started yet');
+    let caught;
+    try { doc.resolveMonth(fy, '2026-11'); } catch (err) { caught = err; }
+    expect(doc.isMonthNotStarted(caught)).toBe(true);
+    expect(caught.month).toBe('Nov 2026');
+    expect(doc.isMonthNotStarted(new Error('Nov 2026 has not started yet'))).toBe(false);
+  });
+
+  test('the month in progress still exports, as "so far"', () => {
+    const d = doc.budgetVarianceDoc(fy, { month: '2026-10', ...SGT });
+    expect(tableOf(d).body[0].filter(c => c.colSpan === 4).map(c => c.text)[0]).toBe('Oct 2026 so far');
+    expect(rowOf(d, 'Sales').slice(1, 5).map(c => c.text)).toEqual(['300.00', '200.00', '100.00', '50.00%']);
+    expect(render.budgetVarianceWorkbook(fy, { month: '2026-10', ...SGT }).getWorksheet('Budget Variance')).toBeTruthy();
+    expect(doc.exportFilename('variance', fy, { month: '2026-10' })).toBe('Budget-Variance_Flovon-Pte-Ltd_Oct-2026_ytd-from-Apr-2026');
+  });
+
+  test('a closed month, the rollup and a key that is not in the report are untouched', () => {
+    expect(doc.resolveMonth(fy, '2026-09')).toBe('2026-09');
+    expect(doc.resolveMonth(fy, 'ytd')).toBe('ytd');
+    expect(doc.resolveMonth(fy, '2031-01')).toBe('ytd');
+    expect(doc.resolveMonth(fy, undefined)).toBe('ytd');
+  });
+
+  test('a period entirely ahead refuses every month, and its rollup still says nothing has closed', () => {
+    const next = fyPayload({
+      months: fy.months.map(m => ({ ...m, source: 'budget', current: false })),
+      kpis: { ...fy.kpis, monthsElapsed: 0, currentMonth: null },
+      period: { ...fy.period, key: 'next-fy', closedFromLabel: null, closedToLabel: null, closedThroughISO: null },
+    });
+    for (const m of next.months) expect(() => doc.resolveMonth(next, m.key)).toThrow(doc.MonthNotStartedError);
+    expect(doc.varianceSubtitle(next, 'ytd')).toMatch(/^Year to date · no completed months yet/);
+  });
+});
+
 // Over budget is good on income and bad on a cost. The export coloured by sign
 // alone, so every overspend on a cost was green.
 describe('reports/budget-doc — favourable is green, as in Xero', () => {
@@ -499,11 +579,13 @@ describe('reports/budget-doc — favourable is green, as in Xero', () => {
   });
 
   test('a cost over budget and income under budget are red', () => {
-    const d = doc.budgetVarianceDoc(fy, { month: '2026-11' });   // nothing booked yet: every actual under budget
-    expect(tones(d, 'Rent')).toEqual([GREEN, GREEN]);
-    expect(tones(d, 'Sales')).toEqual([RED, RED]);
     const over = fyPayload({ rows: [line('Rent', 'account', SALES_A, RENT_B, { expense: true })] });
     expect(tones(doc.budgetVarianceDoc(over, { month: 'ytd' }), 'Rent')).toEqual([RED, RED]);
+    const under = fyPayload({ rows: [line('Sales', 'account', RENT_A, SALES_B, { section: 'Income' })] });
+    expect(tones(doc.budgetVarianceDoc(under, { month: 'ytd' }), 'Sales')).toEqual([RED, RED]);
+    // A cost with nothing booked against it yet is under budget, and green.
+    const d = doc.budgetVarianceDoc(fyPayload({ rows: [line('Rent', 'account', ZERO, RENT_B, { expense: true })] }), { month: '2026-10' });
+    expect(tones(d, 'Rent')).toEqual([GREEN, GREEN]);
   });
 
   test('a payload that does not mark costs is read from the section title, as the screen does', () => {
@@ -625,7 +707,7 @@ describe('reports/budget-doc — the month in progress, in the grid export', () 
     ...payload,
     kpis: { currentMonth: { key: 'm5', label: 'Oct 2026', asOf: '2026-10-06', actualNet: 12345, budgetNet: 17615 } },
   };
-  const NOTE = 'Oct 2026 so far, as of 6 Oct 2026: net profit 12,345.00 booked against 17,615.00 budgeted. Not included in the figures above.';
+  const NOTE = 'Oct 2026 so far — everything dated in October as Xero holds it, read on 6 Oct 2026: net profit 12,345.00 against 17,615.00 budgeted. Not included in the figures above.';
 
   test('the note is written from the payload, with the figures formatted as money', () => {
     expect(doc.soFarNote(withCurrent)).toBe(NOTE);
@@ -646,7 +728,7 @@ describe('reports/budget-doc — the month in progress, in the grid export', () 
 
   test('without a read date it still says so far, just not when', () => {
     const noDate = { ...withCurrent, kpis: { currentMonth: { ...withCurrent.kpis.currentMonth, asOf: null } } };
-    expect(doc.soFarNote(noDate)).toMatch(/^Oct 2026 so far: net profit 12,345.00/);
+    expect(doc.soFarNote(noDate)).toMatch(/^Oct 2026 so far — everything dated in October as Xero holds it: net profit 12,345.00/);
   });
 });
 
@@ -679,7 +761,7 @@ describe('reports/budget-doc — the "so far" column in the grid export', () => 
     expect(vLineWidth(8)).toBe(0);
     expect(vLineWidth(14)).toBeGreaterThan(0);         // before Total
     // The sentence below the grid stays.
-    expect(d.content.filter(c => c.style === 'note').map(c => c.text)[0]).toMatch(/^Oct 2026 so far, as of 7 Oct 2026/);
+    expect(d.content.filter(c => c.style === 'note').map(c => c.text)[0]).toMatch(/^Oct 2026 so far — everything dated in October as Xero holds it, read on 7 Oct 2026/);
   });
 
   test('the workbook has the same column, band and seam, and the band says Overall Budget', () => {
@@ -699,7 +781,7 @@ describe('reports/budget-doc — the "so far" column in the grid export', () => 
     expect(sales.getCell(15).value).toBe(fy.rows[1].total);
     expect(ws.getCell(headNo, 8).border?.left?.style).toBe('medium');
     expect(ws.views[0]).toMatchObject({ state: 'frozen', xSplit: 1, ySplit: headNo });
-    expect(sheetText(wb, 'Budget vs Actual')).toMatch(/Oct 2026 so far, as of 7 Oct 2026: net profit/);
+    expect(sheetText(wb, 'Budget vs Actual')).toMatch(/Oct 2026 so far — everything dated in October as Xero holds it, read on 7 Oct 2026: net profit/);
   });
 
   // pdfmake cuts a table wider than its page off at the right-hand edge, Total
@@ -812,10 +894,10 @@ describe('reports/budget-doc — the running-total heading', () => {
     months: [{ key: '2026-07', label: 'Jul 2026' }, { key: '2026-08', label: 'Aug 2026' }],
   };
   test('the first month of a non-year period is just that month', () => {
-    expect(doc.cumulativeLabel(quarter, 0)).toBe('Jul 2026');
+    expect(doc.cumulativeLabel(quarter, 0)).toBe('To date (Jul 2026)');
   });
   test('a later month names the range from the first', () => {
-    expect(doc.cumulativeLabel(quarter, 1)).toBe('Jul 2026 – Aug 2026');
+    expect(doc.cumulativeLabel(quarter, 1)).toBe('To date (Jul 2026 – Aug 2026)');
   });
   test('over a year it is the year to date', () => {
     expect(doc.cumulativeLabel({ ...quarter, period: { key: 'fy', toDateLabel: 'Year to date' } }, 0)).toBe('YTD to Jul 2026');

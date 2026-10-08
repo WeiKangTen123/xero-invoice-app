@@ -232,9 +232,31 @@ const STYLES = {
 // '2026-10-06' -> '6 Oct 2026'. Read from the string, not through Date, so no
 // timezone can move it a day.
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 function dayLabel(iso) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
   return m ? `${Number(m[3])} ${MONTH_ABBR[Number(m[2]) - 1]} ${m[1]}` : '';
+}
+
+// The month in progress written out, 'October', from its key '2026-10' — or
+// from its label 'Oct 2026' on a payload whose key is not a month.
+function monthName(cm) {
+  const k = /^\d{4}-(\d{2})$/.exec(String(cm?.key || ''));
+  if (k) return MONTH_FULL[Number(k[1]) - 1] || '';
+  const i = MONTH_ABBR.indexOf(String(cm?.label || '').slice(0, 3));
+  return i >= 0 ? MONTH_FULL[i] : '';
+}
+
+// What the month in progress's figure is. It is the whole month's Profit and
+// Loss as Xero held it on the day it was read — an invoice dated the 25th is
+// in it on the 8th — so "as of 8 Oct" read as the 1st to the 8th, which it
+// never was. Word for word the screen's caption (bits.jsx#soFarCaption), so a
+// file and the page it came from describe the figure the same way.
+function soFarCaption(cm) {
+  if (!cm) return '';
+  const abbr = String(cm.label || '').split(' ')[0];
+  const read = dayLabel(cm.asOf);
+  return `${cm.label} so far — everything dated in ${monthName(cm) || abbr} as Xero holds it${read ? `, read on ${read}` : ''}`;
 }
 
 // The period's first and last month, which is what tells this year's file from
@@ -292,8 +314,7 @@ function toDateText(payload) {
 function soFarNote(payload) {
   const cur = payload?.kpis?.currentMonth;
   if (!cur) return '';
-  const asOf = cur.asOf ? `, as of ${dayLabel(cur.asOf)}` : '';
-  return `${cur.label} so far${asOf}: net profit ${money(cur.actualNet)} booked against ${money(cur.budgetNet)} budgeted. `
+  return `${soFarCaption(cur)}: net profit ${money(cur.actualNet)} against ${money(cur.budgetNet)} budgeted. `
     + 'Not included in the figures above.';
 }
 
@@ -478,27 +499,59 @@ function budgetVsActualDoc(payload, opts = {}) {
 // report someone is more likely to read on a phone. A month comes with its
 // running total beside it — nine columns — which needs the landscape page.
 
+// A month of the report that can be exported on its own: one that has closed,
+// or the one in progress. A budget month after that has nothing in it yet, so
+// its export was a page of "-100.00%" lines under a title naming the month as
+// if it had ended. The same rule decides which months the screen lets the
+// reader choose (bits.jsx#monthSelectable).
+function monthStarted(m) {
+  return !!m && !(m.source === 'budget' && !m.current);
+}
+
+// Thrown for a month that has not started. Its own class so the export routes
+// can answer it with a 400 — the request's fault, like a bad period — rather
+// than the 500 any other failure gets.
+class MonthNotStartedError extends Error {
+  constructor(label) {
+    super(`${label} has not started yet`);
+    this.name  = 'MonthNotStartedError';
+    this.month = label;
+  }
+}
+const isMonthNotStarted = err => err instanceof MonthNotStartedError || err?.name === 'MonthNotStartedError';
+
 // The variance month an export reports, decided once and then used for its
 // figures, its title and its filename alike. A key that is not one of the
 // report's months — a selection left over from another organisation or
 // period — means the to-date rollup. It used to put the first month's figures
 // under a filename naming the month asked for, so the file said one thing and
-// held another.
+// held another. A month in the report that has not started is refused rather
+// than quietly swapped for the rollup, so the link's wording and the file can
+// never disagree.
 function resolveMonth(payload, month) {
-  const months = payload?.months || [];
-  return month && month !== 'ytd' && months.some(m => m.key === month) ? month : 'ytd';
+  const m = month && month !== 'ytd' ? (payload?.months || []).find(x => x.key === month) : null;
+  if (!m) return 'ytd';
+  if (!monthStarted(m)) throw new MonthNotStartedError(m.label);
+  return m.key;
 }
 
-// What the variance figures cover, in words; a month's version titles its
-// column group and the subtitle. A month still in progress says so and when it
-// was read: titling it "Oct 2026" alone reads as a closed month.
+// What the variance figures cover, in words, for the subtitle. A month still
+// in progress says what its figure is and when it was read: titling it
+// "Oct 2026" alone reads as a closed month.
 function varianceLabel(payload, month = 'ytd') {
   const k = resolveMonth(payload, month);
   if (k === 'ytd') return toDateLabel(payload);
   const m   = payload.months.find(x => x.key === k);
   const cur = payload?.kpis?.currentMonth;
-  if (!cur || cur.key !== m.key) return m.label;
-  return `${m.label} so far${cur.asOf ? `, as of ${dayLabel(cur.asOf)}` : ''}`;
+  return cur && cur.key === m.key ? soFarCaption(cur) : m.label;
+}
+
+// The heading over a month's own column group. Short, because it spans four
+// narrow columns in the PDF and a merged cell in the workbook, neither of
+// which has room for the caption; the subtitle carries that. Same heading as
+// the screen's table.
+function monthGroupLabel(m) {
+  return m.current ? `${m.label} so far` : m.label;
 }
 
 // The variance export's subtitle, before the currency. A single month names
@@ -511,16 +564,19 @@ function varianceSubtitle(payload, month = 'ytd') {
 }
 
 // The running-total group beside a month, as Xero's Budget Variance report
-// lays it out: from the period's first month through the chosen one. Over a
-// year that is the year to date; over a quarter or a custom range "YTD" would
-// be wrong, so the months are named instead. Same wording as the screen.
+// lays it out: from the period's first month through the chosen one. Whether
+// that is a year to date is the server's call (period.toDateLabel); over a
+// quarter or a custom range the months are named instead, so "YTD" is never
+// assumed. A month in progress is said to be so far, since the total ends in
+// it. Same wording as the screen (bits.jsx#cumulativeLabel).
 function cumulativeLabel(payload, idx) {
   const months = payload.months;
   const m      = months[idx];
   const tail   = m.current ? ' so far' : '';
   if (toDateLabel(payload) === 'Year to date') return `YTD to ${m.label}${tail}`;
   // Matches the screen: the period's first month alone is not a range.
-  return months[0].key === m.key ? `${m.label}${tail}` : `${months[0].label} – ${m.label}${tail}`;
+  const range = months[0].key === m.key ? m.label : `${months[0].label} – ${m.label}`;
+  return `To date (${range}${tail})`;
 }
 
 const NIL = { actual: 0, budget: 0, variance: 0, variancePct: null };
@@ -539,7 +595,7 @@ function variancePeriods(payload, month = 'ytd') {
     }];
   }
   const idx = payload.months.findIndex(m => m.key === k);
-  const out = [{ label: varianceLabel(payload, k), of: r => r.monthly?.[idx] }];
+  const out = [{ label: monthGroupLabel(payload.months[idx]), of: r => r.monthly?.[idx] }];
   if ((payload.rows || []).some(r => Array.isArray(r.cumulative))) {
     out.push({ label: cumulativeLabel(payload, idx), of: r => r.cumulative?.[idx] });
   }
@@ -682,9 +738,13 @@ module.exports = {
   cumulativeLabel,
   figures,
   resolveMonth,
+  monthStarted,
+  MonthNotStartedError,
+  isMonthNotStarted,
   periodText,
   closedRange,
   toDateText,
+  soFarCaption,
   soFarNote,
   fetchedNote,
   currentColumn,

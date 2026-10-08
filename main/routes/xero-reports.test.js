@@ -347,6 +347,68 @@ describe('routes/xero-reports', () => {
     });
   });
 
+  // A variance export of a month after the one in progress was a page of
+  // -100% lines. The screen no longer offers one; a link that asks anyway is
+  // refused before it is signed, and a signed link that asks is refused too.
+  describe('budget export of a month that has not started', () => {
+    const auth = req => req.set('Authorization', `Bearer ${tokenFor(testUser)}`);
+    const REFUSED = 'That month has not started yet';
+    const report = {
+      organisation: { name: 'Org', currency: 'SGD' }, rows: [], fetchedAt: Date.UTC(2026, 9, 6, 17, 25),
+      period: { key: 'fy', toDateLabel: 'Year to date', closedFromLabel: 'Sep 2026', closedToLabel: 'Sep 2026' },
+      kpis: { monthsElapsed: 1, currentMonth: { key: '2026-10', label: 'Oct 2026', asOf: '2026-10-08' } },
+      months: [
+        { key: '2026-09', label: 'Sep 2026', source: 'actual', current: false },
+        { key: '2026-10', label: 'Oct 2026', source: 'budget', current: true },
+        { key: '2026-11', label: 'Nov 2026', source: 'budget', current: false },
+      ],
+    };
+    const signed = spec => jwt.sign({ userId: testUser.id, tenantId: 't1', purpose: 'budget-export', kind: 'variance', format: 'pdf', ...spec },
+      jwtSecret(), { expiresIn: '5m' });
+    beforeEach(() => {
+      tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1', tenantName: 'Org' }]);
+      reports.getBudgetVariance.mockResolvedValue(report);
+    });
+
+    test('no link is issued for it: a 400 that the export buttons can show', async () => {
+      const res = await auth(request(serverFor(app))
+        .get('/api/xero-reports/budget/export-url?kind=variance&format=pdf&preset=fy&month=2026-11')).expect(400);
+      expect(res.body).toEqual({ error: REFUSED });
+      // Checked against the report for the period on screen, which is cached.
+      expect(reports.getBudgetVariance).toHaveBeenCalledWith(testUser.id, 't1', expect.objectContaining({ period: { preset: 'fy' } }));
+    });
+
+    test('the month in progress and a closed month are still linked to, and the rollup without reading the report', async () => {
+      for (const month of ['2026-10', '2026-09']) {
+        const res = await auth(request(serverFor(app))
+          .get(`/api/xero-reports/budget/export-url?kind=variance&format=xlsx&month=${month}`)).expect(200);
+        expect(jwt.verify(decodeURIComponent(res.body.url.split('token=')[1]), jwtSecret()).month).toBe(month);
+      }
+      reports.getBudgetVariance.mockClear();
+      await auth(request(serverFor(app)).get('/api/xero-reports/budget/export-url?kind=variance&format=pdf&month=ytd')).expect(200);
+      await auth(request(serverFor(app)).get('/api/xero-reports/budget/export-url?kind=grid&format=pdf')).expect(200);
+      expect(reports.getBudgetVariance).not.toHaveBeenCalled();
+    });
+
+    test('a signed link that names it is refused as plainly, not with a file of -100% lines', async () => {
+      const res = await request(serverFor(app))
+        .get(`/api/xero-reports/budget/export?token=${encodeURIComponent(signed({ month: '2026-11' }))}`).expect(400);
+      expect(res.text).toBe(REFUSED);
+      expect(res.headers['content-type']).toMatch(/^text\/plain/);
+    });
+
+    test('a signed link for the month in progress still renders, captioned as "so far"', async () => {
+      const budgetDoc = require('../reports/budget-doc');
+      const spy = jest.spyOn(budgetDoc, 'budgetVarianceDoc');
+      const res = await request(serverFor(app))
+        .get(`/api/xero-reports/budget/export?token=${encodeURIComponent(signed({ month: '2026-10' }))}`).expect(200);
+      expect(res.headers['content-type']).toBe('application/pdf');
+      expect(res.headers['content-disposition']).toContain('Budget-Variance_Org_Oct-2026');
+      expect(spy.mock.results[0].value.header.columns[0].stack[1].text)
+        .toBe('Oct 2026 so far — everything dated in October as Xero holds it, read on 8 Oct 2026 · SGD');
+    });
+  });
+
   // Every 12 months of a period is a pair of Xero calls, and nothing bounded
   // the span: from=1900-01&to=2100-12 cost about 400 calls against a budget of
   // 60 a minute shared with invoice posting. Every route that takes a period

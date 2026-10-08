@@ -33,7 +33,20 @@ function _resolveTenant(req) {
 // a reconnect prompt. Twelve handlers used to repeat these ten lines with small
 // drifts between them.
 const force = req => req.query.force === 'true';
-const tz    = req => getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
+// A stored timezone Intl does not know (saved before Setup checked it, or by
+// hand) is read as the default, said once in the log: left to the report, it
+// threw inside every one, and one bad Setup value was a 500 on every tab.
+const _unknownTimezones = new Set();
+const tz = req => {
+  const stored = getUserConfig(req.user.id).TIMEZONE;
+  if (!stored) return DEFAULT_TIMEZONE;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: stored }); return stored; } catch {}
+  if (!_unknownTimezones.has(stored)) {
+    _unknownTimezones.add(stored);
+    logger.warn('Unknown timezone in Setup; reports use the default', { userId: req.user.id, timeZone: stored, fallback: DEFAULT_TIMEZONE });
+  }
+  return DEFAULT_TIMEZONE;
+};
 // `check` refuses a query the report cannot answer: it returns the reason, and
 // the request is a 400 before any Xero call is made.
 function report(label, fetch, { needs = [], check = null } = {}) {
@@ -158,6 +171,10 @@ router.get('/narrative', requireAuth, asyncHandler(async (req, res) => {
 const EXPORT_TOKEN_TTL = '5m';
 const EXPORT_KINDS   = new Set(['grid', 'variance']);
 const EXPORT_FORMATS = new Set(['pdf', 'xlsx']);
+// The answer to an export of a month that has not started. The screen cannot
+// ask for one (its buttons are disabled), so this is for a link made by hand
+// or signed before the check existed.
+const MONTH_NOT_STARTED = 'That month has not started yet';
 
 function issueExportToken(userId, spec) {
   return jwt.sign({ userId, ...spec, purpose: 'budget-export' }, jwtSecret(), { expiresIn: EXPORT_TOKEN_TTL });
@@ -193,12 +210,20 @@ router.get('/budget/export-url', requireAuth, asyncHandler(async (req, res) => {
     // The period on screen travels in the token, so the file is the report the
     // reader was looking at, not the current financial year.
     const period = _budgetPeriodFromQuery(req);
+    // A month after the one in progress has nothing in it yet, so its export
+    // would be a page of -100% lines. Checked against the report — the one the
+    // screen behind the button has just loaded, so it is cached and costs no
+    // Xero call — before the link is signed, as the period is.
+    if (month && month !== 'ytd') {
+      budgetDoc.resolveMonth(await reports.getBudgetVariance(req.user.id, tenantId, { timezone: tz(req), period }), month);
+    }
     const token  = issueExportToken(req.user.id, { tenantId, kind, format, month, period });
     res.json({ url: `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`, expiresIn: EXPORT_TOKEN_TTL });
   } catch (err) {
-    // Checked before a token is signed, so a link can never carry a period the
-    // report routes would refuse.
+    // Checked before a token is signed, so a link can never carry a period or
+    // a month the report routes would refuse.
     if (_isPeriodError(err)) return _periodRefused(res, 'Budget export URL', req, err);
+    if (budgetDoc.isMonthNotStarted(err)) return res.status(400).json({ error: MONTH_NOT_STARTED });
     logger.error('Budget export URL failed', { error: xeroErrMsg(err), userId: req.user.id });
     res.status(500).json({ error: xeroErrMsg(err) });
   }
@@ -223,6 +248,8 @@ router.get('/budget/export', asyncHandler(async (req, res) => {
     // read from Xero" are stamped in it. They were formatted in the server's own
     // zone, which is UTC on the VM, beside "as of" dates in the organisation's.
     const opts = { month: spec.month, generatedAt: Date.now(), timezone };
+    // The filename resolves the month first, so a month that has not started
+    // is refused here, before any document is built (see the catch below).
     const base = budgetDoc.exportFilename(spec.kind === 'variance' ? 'variance' : 'grid', data, opts);
 
     if (spec.format === 'xlsx') {
@@ -246,6 +273,12 @@ router.get('/budget/export', asyncHandler(async (req, res) => {
     // they refuse; that is a stale link, not a server fault.
     if (_isPeriodError(err)) {
       if (!res.headersSent) res.status(400).type('text/plain').send(`This export link asks for a period that cannot be exported: ${err.message}`);
+      return;
+    }
+    // Likewise a month that has not started: a link made by hand, or one
+    // signed before the check above existed.
+    if (budgetDoc.isMonthNotStarted(err)) {
+      if (!res.headersSent) res.status(400).type('text/plain').send(MONTH_NOT_STARTED);
       return;
     }
     logger.error('Budget export failed', { error: xeroErrMsg(err), userId: spec.userId, kind: spec.kind });

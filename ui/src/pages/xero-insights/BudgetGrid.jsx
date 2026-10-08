@@ -13,7 +13,10 @@ import { NotBudgeted } from './bits';
 //
 // The currency is named once, above the account column, rather than in every
 // cell; the cells print as the exports do (see fmtCell).
-export function BudgetGrid({ months, rows, currency }) {
+//
+// `soFarNote` is the caption for the month in progress (bits.jsx#soFarCaption),
+// which only the caller holds the figures for; it titles the amber column.
+export function BudgetGrid({ months, rows, currency, soFarNote }) {
   const firstBudgetIdx = months.findIndex(m => m.source === 'budget');
   const actualCount    = firstBudgetIdx === -1 ? months.length : firstBudgetIdx;
   // The current month is always the first budget month when the period
@@ -58,7 +61,7 @@ export function BudgetGrid({ months, rows, currency }) {
             {months.map((m, i) => (
               <Fragment key={m.key}>
                 {hasCur && i === curIdx && (
-                  <th title={`Booked in Xero for ${m.label} so far. Not included in Total.`}
+                  <th title={`${soFarNote || `${m.label} so far`}. Not included in Total.`}
                       style={{ padding: '6px 10px', textAlign: 'right', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap', color: 'var(--warning)', ...soFar }}>
                     {curShort} so far
                   </th>

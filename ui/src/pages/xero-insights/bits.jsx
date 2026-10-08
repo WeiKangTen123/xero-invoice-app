@@ -5,12 +5,76 @@ export function SourceNote({ children }) {
 }
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 // '2026-10-06' -> '6 Oct 2026', read from the string so no timezone moves it.
 // Same wording as the exports (main/reports/budget-doc.js#dayLabel).
 export function dayLabel(iso) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
   return m ? `${Number(m[3])} ${MONTH_ABBR[Number(m[2]) - 1]} ${m[1]}` : '';
+}
+
+// The month in progress written out, 'October', from its key '2026-10' — or
+// from its label 'Oct 2026' on a payload whose key is not a month.
+export function monthName(cm) {
+  const k = /^\d{4}-(\d{2})$/.exec(String(cm?.key || ''));
+  if (k) return MONTH_FULL[Number(k[1]) - 1] || '';
+  const i = MONTH_ABBR.indexOf(String(cm?.label || '').slice(0, 3));
+  return i >= 0 ? MONTH_FULL[i] : '';
+}
+
+// What the month in progress's figure is. It is the whole month's Profit and
+// Loss as Xero held it on the day it was read — an invoice dated the 25th is
+// in it on the 8th — so "booked as of 8 Oct" read as the 1st to the 8th, which
+// it never was. The short form is for a tile hint or a button, where the month
+// is already named beside it: "dated in Oct, read 8 Oct". The exports word it
+// the same way (main/reports/budget-doc.js#soFarCaption).
+export function soFarRead(cm) {
+  const abbr = String(cm?.label || '').split(' ')[0];
+  const read = dayLabel(cm?.asOf).replace(/ \d{4}$/, '');
+  return `dated in ${abbr}${read ? `, read ${read}` : ''}`;
+}
+
+export function soFarCaption(cm, { short = false } = {}) {
+  if (!cm) return '';
+  const abbr = String(cm.label || '').split(' ')[0];
+  if (short) return `${abbr} so far · ${soFarRead(cm)}`;
+  const read = dayLabel(cm.asOf);
+  return `${cm.label} so far — everything dated in ${monthName(cm) || abbr} as Xero holds it${read ? `, read on ${read}` : ''}`;
+}
+
+// Whether a month of the Budget Variance report can be chosen: one that has
+// closed, or the one in progress. A budget month after that has nothing in it
+// yet, so every line of it read "-100.00%" under "For the month ended Dec
+// 2026". Same rule as the export (main/reports/budget-doc.js#monthStarted).
+export function monthSelectable(m) {
+  return !!m && !(m.source === 'budget' && !m.current);
+}
+
+// The month the Budget Variance tab shows for a selection: the key when it
+// names a month that can be chosen, otherwise the to-date rollup. The
+// selection outlives the report — the period or the organisation changes
+// under it — and a month that is not in the report, or has not started, must
+// not be shown. The export resolves a stale key the same way
+// (main/reports/budget-doc.js#resolveMonth), so the file and the screen agree.
+export function varianceSelection(d, key) {
+  if (!key || key === 'ytd') return 'ytd';
+  return monthSelectable((d?.months || []).find(m => m.key === key)) ? key : 'ytd';
+}
+
+// The to-date group shown beside a month, as Xero's Budget Variance report
+// shows it: from the period's first month through the chosen one. Whether that
+// is a year to date is the server's call (period.toDateLabel); over a quarter
+// or a custom range the months are named instead, so "YTD" is never assumed.
+// A month in progress is said to be so far, since the total ends in it.
+export function cumulativeLabel(d, idx) {
+  const months = d.months;
+  const m      = months[idx];
+  const tail   = m.current ? ' so far' : '';
+  if (d.period?.toDateLabel === 'Year to date') return `YTD to ${m.label}${tail}`;
+  // The period's first month alone is not a range: "Jul 2026 – Jul 2026".
+  const range = months[0].key === m.key ? m.label : `${months[0].label} – ${m.label}`;
+  return `To date (${range}${tail})`;
 }
 
 // The closed months a to-date figure covers: 'Apr 2026 – Sep 2026', just
