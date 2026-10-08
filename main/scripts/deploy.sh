@@ -36,6 +36,10 @@ set -euo pipefail
 
 INSTANCE="${DEPLOY_INSTANCE:-xero-automation}"
 ZONE="${DEPLOY_ZONE:-us-central1-a}"
+# Named on every gcloud call rather than taken from `gcloud config`: a login
+# on this machine for another Google project reset the default, and the deploy
+# then asked a project with no Compute Engine at all for the VM.
+PROJECT="${DEPLOY_PROJECT:-steady-hallway-504812-d1}"
 APP="${DEPLOY_PATH:-/home/weika/xero-invoice-app}"
 RUNAS="${DEPLOY_USER:-weika}"
 HEALTH="${DEPLOY_HEALTH:-https://34-45-253-162.sslip.io/dashboard/health}"
@@ -101,7 +105,7 @@ partial_deploy_help() {
   info "To finish: fix the cause and run npm run deploy again — it carries on from here."
   if [ -n "$BEFORE" ] && [ "$BEFORE" != "$LOCAL_SHA" ]; then
     info "To roll back to $BEFORE, on the box"
-    info "(gcloud compute ssh $INSTANCE --zone=$ZONE, then as $RUNAS in $APP):"
+    info "(gcloud compute ssh $INSTANCE --zone=$ZONE --project=$PROJECT, then as $RUNAS in $APP):"
     info "    git checkout $BEFORE"
     info "    npm ci && npm --prefix ui ci && npm run build:ui"
     info "    pm2 startOrReload ecosystem.config.js --update-env && pm2 save"
@@ -155,7 +159,7 @@ remote() {
     rc=0; start=$SECONDS
     # stdin from a pipe, not /dev/null, for the reason given at the login check.
     : | "$TIMEOUT" --foreground -k 10 "$limit" \
-      gcloud compute ssh "$INSTANCE" --zone="$ZONE" --quiet \
+      gcloud compute ssh "$INSTANCE" --zone="$ZONE" --project="$PROJECT" --quiet \
         --command="sudo -u $RUNAS -H bash -lc \"cd $APP && $1\"" \
       >"$TMP/out" 2>"$TMP/err" || rc=$?
     [ "$rc" -ne 0 ] && google_api_hiccup && [ "$attempt" -lt 3 ] || break
@@ -191,7 +195,7 @@ unreachable() {
   {
     red "✗ $1, while running: $2"
     tail -n 8 "$TMP/err" 2>/dev/null | tr -d '\r' | sed 's/^/      /'
-    info "check the VM is running and that 'gcloud compute ssh $INSTANCE --zone=$ZONE' works by hand"
+    info "check the VM is running and that 'gcloud compute ssh $INSTANCE --zone=$ZONE --project=$PROJECT' works by hand"
   } >&2 || true
   kill -TERM "$$"
   exit 1
