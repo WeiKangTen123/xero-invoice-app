@@ -131,8 +131,8 @@ TIMEOUT=$(command -v timeout || command -v gtimeout || true)
 [ -n "$TIMEOUT" ] || die "this script needs GNU timeout (on a Mac: brew install coreutils)"
 
 # Every command on the box goes through here, optionally with a time limit in
-# seconds as $2. stdin is /dev/null and --quiet is set, so nothing can wait on
-# a prompt, and `timeout` bounds whatever else can hang. Output goes to files
+# seconds as $2. stdin is an empty pipe and --quiet is set, so nothing can wait
+# on a prompt, and `timeout` bounds whatever else can hang. Output goes to files
 # rather than a pipe: an ssh client that outlives a killed gcloud would hold a
 # pipe open, and the caller would wait for it anyway.
 #
@@ -153,10 +153,11 @@ remote() {
   local limit="${2:-$SSH_TIMEOUT}" rc attempt start
   for attempt in 1 2 3; do
     rc=0; start=$SECONDS
-    "$TIMEOUT" --foreground -k 10 "$limit" \
+    # stdin from a pipe, not /dev/null, for the reason given at the login check.
+    : | "$TIMEOUT" --foreground -k 10 "$limit" \
       gcloud compute ssh "$INSTANCE" --zone="$ZONE" --quiet \
         --command="sudo -u $RUNAS -H bash -lc \"cd $APP && $1\"" \
-      </dev/null >"$TMP/out" 2>"$TMP/err" || rc=$?
+      >"$TMP/out" 2>"$TMP/err" || rc=$?
     [ "$rc" -ne 0 ] && google_api_hiccup && [ "$attempt" -lt 3 ] || break
     info "Google's API had a temporary error (attempt $attempt); trying again in $((attempt * 20))s" >&2
     sleep $((attempt * 20))
@@ -217,7 +218,13 @@ best_effort() {
 # on a prompt inside an ssh call. gh is checked for the same reason: a
 # logged-out gh made the CI gate below report "no CI run found" and carry on.
 command -v gcloud >/dev/null 2>&1 || die "gcloud is not installed (or not on PATH)"
-"$TIMEOUT" --foreground -k 5 60 gcloud auth print-access-token </dev/null >/dev/null 2>&1 \
+# stdin is a pipe, never /dev/null: under Git Bash /dev/null is Windows NUL, a
+# character device, which Python reports as a terminal, so an expired login
+# made gcloud start its password prompt and spin on it at full CPU for days,
+# outliving the timeout (which signals the sh wrapper, not python.exe). A pipe
+# is not a terminal, and gcloud then fails at once with "Reauthentication
+# failed".
+: | "$TIMEOUT" --foreground -k 5 60 gcloud auth print-access-token >/dev/null 2>&1 \
   || die "gcloud login expired — run: gcloud auth login"
 if [ "$CHECK_ONLY" != "1" ] && [ "${SKIP_CI:-0}" != "1" ]; then
   command -v gh >/dev/null 2>&1 \
