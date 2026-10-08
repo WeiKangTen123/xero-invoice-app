@@ -59,9 +59,16 @@ async function _allPages(fetchPage, field, { what, tenantId, maxPages = LIST_MAX
 }
 
 // Xero formats report cell values like "1,234.56" or "(123.45)" for negatives —
-// never a plain parseable number.
+// never a plain parseable number. A cell that is already a number, or anything
+// else that is not a string, is read for what it is worth rather than thrown
+// on: this runs on every cell of every report, and one odd cell must not take
+// the whole report down.
 function _parseReportNumber(s) {
   if (!s) return 0;
+  if (typeof s !== 'string') {
+    const n = Number(s);
+    return Number.isFinite(n) ? n : 0;
+  }
   const negative = /^\(.*\)$/.test(s.trim());
   const n = Number(s.replace(/[(),]/g, ''));
   if (Number.isNaN(n)) return 0;

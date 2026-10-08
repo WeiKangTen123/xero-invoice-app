@@ -487,11 +487,13 @@ describe('budget variance payload — what a period is called and what has close
   afterEach(() => jest.useRealTimers());
   const get = (period, tenant = 't-payload') => reports.getBudgetVariance(U, tenant, { timezone: 'UTC', period });
 
-  test('a year to date only when the period opens the financial year and stays inside it', async () => {
+  test('a year to date only when the period opens the financial year today is in and stays inside it', async () => {
     // The org's year runs Apr–Mar.
     expect((await get({ preset: 'fy' })).period.toDateLabel).toBe('Year to date');
     expect((await get({ preset: 'fy-ytd' })).period.toDateLabel).toBe('Year to date');
-    expect((await get({ preset: 'prev-fy' })).period.toDateLabel).toBe('Year to date');
+    // Last year has closed in full: its to-date figure is the whole year, not a
+    // year to date, and saying "YTD" over it would misdescribe the sum.
+    expect((await get({ preset: 'prev-fy' })).period.toDateLabel).toBe('Period to date');
     expect((await get({ from: '2026-04', to: '2026-09' })).period.toDateLabel).toBe('Year to date');
     expect((await get({ preset: 'last-12' })).period.toDateLabel).toBe('Period to date');
     expect((await get({ preset: 'this-quarter' })).period.toDateLabel).toBe('Period to date');

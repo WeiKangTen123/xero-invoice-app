@@ -46,16 +46,27 @@ const {
 // Runs `fn` over `items` with at most `limit` in flight, preserving input order.
 // Used for report chunks: strictly sequential wastes latency, unbounded parallel
 // would burst against a 60/min budget shared with real invoice submission.
+//
+// Once any item fails no further item is started — the result is lost either
+// way, and the remaining chunks would only spend more of that budget on calls
+// nobody will read. Items already in flight are left to finish, so no Xero
+// call is abandoned mid-way, and the first failure is what the caller sees.
 async function _mapWithConcurrency(items, limit, fn) {
   const out = new Array(items.length);
   let next = 0;
+  let failure = null;   // boxed, so a thrown `undefined` still counts as one
   const worker = async () => {
-    while (next < items.length) {
+    while (!failure && next < items.length) {
       const i = next++;
-      out[i] = await fn(items[i], i);
+      try {
+        out[i] = await fn(items[i], i);
+      } catch (err) {
+        if (!failure) failure = { err };
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure) throw failure.err;
   return out;
 }
 const REPORT_CHUNK_CONCURRENCY = 2;
@@ -103,8 +114,18 @@ function _pnlCallPlan(chunk) {
 // — Gross Profit, Total Expenses, Net Profit — which is exactly how they sit in
 // Xero's layout. `reverse` flips ProfitAndLoss's newest-first columns into the
 // oldest-first order the month list uses.
-function _reportLines(reportRows, { reverse = false } = {}) {
+//
+// `n` is how many columns the report was asked for. A line with fewer is
+// padded to it rather than left short, because columns are matched by
+// position and a short line would otherwise put its figures under the wrong
+// months: the P&L answers newest-first, so what it leaves out is the OLDEST
+// columns, and after the flip its values sit at the end with the zeros in
+// front; the budget answers oldest-first and is padded at the end. Said once
+// per report in the log, not per line, since every line of a short report is
+// short.
+function _reportLines(reportRows, { reverse = false, n } = {}) {
   const out = [];
+  let short = 0;
   (function walk(rows, title) {
     for (const row of rows || []) {
       if (row.rowType === 'Header') continue;
@@ -114,15 +135,22 @@ function _reportLines(reportRows, { reverse = false } = {}) {
       }
       const label = (row.cells?.[0]?.value || '').trim();
       if (!label) continue;
-      const values = (row.cells || []).slice(1).map(c => _parseReportNumber(c?.value));
+      let values = (row.cells || []).slice(1).map(c => _parseReportNumber(c?.value));
+      if (reverse) values.reverse();
+      if (n > values.length) {
+        short++;
+        const pad = Array(n - values.length).fill(0);
+        values = reverse ? [...pad, ...values] : [...values, ...pad];
+      }
       out.push({
         section: title,
         label,
         kind: !title ? 'summary' : (row.rowType === 'SummaryRow' ? 'subtotal' : 'account'),
-        values: reverse ? values.reverse() : values,
+        values,
       });
     }
   })(reportRows, '');
+  if (short) logger.warn('Report lines have fewer columns than months asked for; missing months read as nil', { lines: short, of: out.length, columns: n, newestFirst: reverse });
   return out;
 }
 
@@ -159,6 +187,27 @@ function _placeAfter(layout, prev) {
   return prev.kind === 'summary' ? p + 1 : _sectionEnd(layout, p);
 }
 
+// The one subtotal of the section titled `title` that this report has not
+// claimed yet, or null when the section has none or more than one.
+function _onlyFreeSubtotal(layout, title, claimed) {
+  const h = _sectionIndex(layout, title);
+  if (h < 0) return null;
+  const subs = layout.slice(h + 1, _sectionEnd(layout, h)).filter(r => r.kind === 'subtotal' && !claimed.has(r));
+  return subs.length === 1 ? subs[0] : null;
+}
+
+// Whether two section titles are on the same side of the P&L: both income,
+// both costs, or either one unclassified. A label the two reports share is
+// only the same account when its sections agree on this; an expense
+// "Consulting" is never the income "Consulting", whatever the section is
+// called.
+const COST_KINDS = new Set(['cogs', 'opex', 'otherExpense']);
+function _sameSide(a, b) {
+  const ka = _sectionKind(a), kb = _sectionKind(b);
+  if (ka === 'other' || kb === 'other') return true;
+  return COST_KINDS.has(ka) === COST_KINDS.has(kb);
+}
+
 // The layout row a report line belongs to, or null when it has none yet.
 // `claimed` holds rows an earlier line of the same report already took, so two
 // lines of one report never land on one row.
@@ -167,30 +216,31 @@ function _matchLine(layout, line, { claimed, alias, counts }) {
   const key = _lineKey(line.section, line.label);
   const exact = layout.find(r => free(r) && r.key === key);
   if (exact) return exact;
+  if (line.kind === 'summary') return null;
   // The two reports should title their sections identically under the standard
   // layout, but nothing guarantees it, and a small difference must not split
   // every line in two. So the label alone is enough when it names exactly one
-  // line in each report — but never for a section the budget has too: a
-  // section both reports share is a genuine second section, and a namesake
-  // elsewhere is a different account.
+  // line in each report and its sections are on the same side of the P&L —
+  // but never for a section the budget has too: a section both reports share
+  // is a genuine second section, and a namesake elsewhere is a different
+  // account. The one thing the two reports may still word differently under a
+  // shared section is its total ("Total Operating Expenses" in the budget,
+  // "Total Expenses" in the P&L), which is the section's one subtotal, not a
+  // second one with half its figures nil.
   const budgetHasSection = layout.some(r => r.kind === 'section' && !r.unbudgeted && _norm(r.label) === _norm(line.section));
-  if (line.kind === 'summary' || budgetHasSection) return null;
+  if (budgetHasSection) {
+    return line.kind === 'subtotal' ? _onlyFreeSubtotal(layout, line.section, claimed) : null;
+  }
   const name = _lineName(line.label);
   if (counts.get(name) === 1) {
     const same = layout.filter(r => r.kind !== 'section' && r.kind !== 'summary' && r.name === name);
-    if (same.length === 1 && !claimed.has(same[0])) return same[0];
+    if (same.length === 1 && !claimed.has(same[0]) && _sameSide(same[0].section, line.section)) return same[0];
   }
   // A retitled section usually retitles its total too ("Total Overheads"), so a
   // subtotal under a section already matched that way is that section's total
   // when it has exactly one.
   const target = alias.get(_norm(line.section));
-  if (line.kind === 'subtotal' && target !== undefined) {
-    const h = _sectionIndex(layout, target);
-    if (h >= 0) {
-      const subs = layout.slice(h + 1, _sectionEnd(layout, h)).filter(r => r.kind === 'subtotal' && !claimed.has(r));
-      if (subs.length === 1) return subs[0];
-    }
-  }
+  if (line.kind === 'subtotal' && target !== undefined) return _onlyFreeSubtotal(layout, target, claimed);
   return null;
 }
 
@@ -292,9 +342,9 @@ function _mergeChunks(parts, totalMonths) {
   let offset = 0;
   for (const part of parts) {
     const n = part.months.length;
-    budgets.push({ lines: _reportLines(part.budgetRows), offset, n });
+    budgets.push({ lines: _reportLines(part.budgetRows, { n }), offset, n });
     for (const piece of part.pnl || [{ rows: part.pnlRows, offset: 0, n }]) {
-      actuals.push({ lines: _reportLines(piece.rows, { reverse: true }), offset: offset + piece.offset, n: piece.n });
+      actuals.push({ lines: _reportLines(piece.rows, { reverse: true, n: piece.n }), offset: offset + piece.offset, n: piece.n });
     }
     offset += n;
   }
@@ -312,10 +362,12 @@ function _cents(v) {
   return r === 0 ? 0 : r;
 }
 
-// The bottom line. By name when it carries one of Xero's two names for it;
-// failing that, the last floating summary line, which is where Xero puts it.
+// The bottom line. By name when it carries one of Xero's two names for it —
+// the whole name, so a layout with a "Net Profit Before Tax" above the bottom
+// line does not stop there; failing that, the last floating summary line,
+// which is where Xero puts it.
 function _netRow(rows) {
-  return rows.find(r => r.kind === 'summary' && /^net (profit|loss)/i.test(r.label))
+  return rows.find(r => r.kind === 'summary' && /^net (profit|loss)$/.test(_norm(r.label)))
       || [...rows].reverse().find(r => r.kind === 'summary' && !r.section);
 }
 
@@ -324,8 +376,18 @@ function _netRow(rows) {
 // lines, and ./performance already depends on this module, not the other way
 // round.
 //
-// Which P&L section a row belongs to. Order matters: "Less Cost of Sales"
-// contains the word "Sales", so it has to be tested before the revenue pattern.
+// Which P&L section a row belongs to. The titles are the ones Xero's standard
+// layout uses across its regions — "Less Cost of Sales" here, "Cost of Goods
+// Sold" or "Direct Costs" elsewhere, "Turnover" and "Less Overheads" in the
+// UK layout, and "Less Expenses" or plain "Expenses" where there is no
+// operating/other split. Order matters: the revenue pattern is loose on
+// purpose (income, revenue, sales, turnover), so every cost pattern has to be
+// tested before it — "Less Cost of Sales" contains the word "Sales", "Less
+// Income Tax" the word "Income".
+//
+// Depreciation, income tax, finance costs and the like are 'otherExpense':
+// an expense for colouring, but not an overhead, so the dashboard's cost
+// totals (which read 'cogs' and 'opex' only) are not changed by it.
 //
 // Other income may be headed "Plus Other Income". Read as revenue — it contains
 // "income" — its total would now be added into revenue, since totals are found
@@ -333,10 +395,11 @@ function _netRow(rows) {
 // difference to the budget grid, which reads this only to tell costs apart.
 function _sectionKind(section) {
   const s = (section || '').trim();
-  if (/^less cost of sales/i.test(s))                      return 'cogs';
-  if (/^less (operating expenses|overheads)/i.test(s))     return 'opex';
-  if (/^(plus )?other income/i.test(s))                    return 'otherIncome';
-  if (/income|revenue|sales/i.test(s))                     return 'revenue';
+  if (/^(less )?(cost of (sales|goods sold)|direct costs)/i.test(s))                              return 'cogs';
+  if (/^(less )?(other expenses|depreciation|income tax|taxation|finance costs|interest expense)/i.test(s)) return 'otherExpense';
+  if (/^(less )?(operating expenses|administrative expenses|expenses|overheads)/i.test(s))         return 'opex';
+  if (/^(plus )?other income/i.test(s))                                                            return 'otherIncome';
+  if (/income|revenue|sales|turnover/i.test(s))                                                    return 'revenue';
   return 'other';
 }
 
@@ -365,8 +428,9 @@ function _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx, m
     const row = {
       kind: r.kind, label: r.label, section: r.section,
       // Costs, where a figure above budget is the bad direction: every line of
-      // the cost-of-sales and overhead sections, their subtotals included.
-      expense:    r.kind !== 'section' && ['cogs', 'opex'].includes(_sectionKind(r.section)),
+      // the cost-of-sales, overhead and other-expense sections, their
+      // subtotals included.
+      expense:    r.kind !== 'section' && COST_KINDS.has(_sectionKind(r.section)),
       unbudgeted: !!r.unbudgeted,
     };
     if (r.kind === 'section') return row;
@@ -461,8 +525,9 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
   const api        = _apiFor(token);
 
   // A period longer than 12 months exceeds what one call pair can return, so it
-  // is fetched as several. Sequentially, not in parallel: Xero's 60/min budget
-  // is shared with real invoice submission, and a long range shouldn't burst.
+  // is fetched as several, two chunks at a time (see _mapWithConcurrency) and
+  // never all at once: Xero's 60/min budget is shared with real invoice
+  // submission, and a long range shouldn't burst.
   // BudgetSummary only ever reports the OVERALL budget. Listing the budgets
   // makes that explicit rather than leaving the reader to assume the figures
   // cover a tracking-category budget they may also have.
@@ -532,7 +597,7 @@ async function _getBudgetVarianceRaw(userId, tenantId, { force = false, timezone
     budgets,
     period:       { key: win.key, label: win.label, months: months.length, chunks: chunks.length,
                     fromKey: months[0].key, toKey: months[months.length - 1].key,
-                    toDateLabel:      _toDateLabel(months, fiscalYearEnd),
+                    toDateLabel:      _toDateLabel(months, fiscalYearEnd, today),
                     closedFromLabel:  closedLast ? first.label : null,
                     closedToLabel:    closedLast ? closedLast.label : null,
                     closedThroughISO: closedLast ? closedLast.endISO : null },

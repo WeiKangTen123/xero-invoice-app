@@ -12,8 +12,24 @@
 // Short month labels for period headings.
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+// A stored timezone the runtime does not know used to throw here, inside every
+// report that read it — one bad Setup value and the whole Insights page was a
+// 500 until it was corrected. Setup now refuses such a value, but one saved
+// before that check (or by hand) is still read as UTC, said once in the log
+// rather than on every report.
+const _warnedTimezones = new Set();
 function _todayPartsInTz(timeZone) {
-  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const opts = { year: 'numeric', month: '2-digit', day: '2-digit' };
+  let fmt;
+  try {
+    fmt = new Intl.DateTimeFormat('en-CA', { timeZone, ...opts });
+  } catch {
+    if (!_warnedTimezones.has(timeZone)) {
+      _warnedTimezones.add(timeZone);
+      require('../utils/logger').warn('Unknown timezone; reports are dated in UTC', { timeZone });
+    }
+    fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC', ...opts });
+  }
   const parts = Object.fromEntries(fmt.formatToParts(new Date()).map(p => [p.type, p.value]));
   return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day) };
 }
@@ -50,9 +66,21 @@ function _parseISODate(s) {
 // common year, and it keeps 29 Feb inside the year whose last month it is —
 // otherwise "financial year to date" on that day would open on the March after
 // it and run backwards.
+//
+// A year end that is not the last day of its month (5 April, as in the UK) is
+// the exception: in whole months its year has to open in the SAME month, since
+// most of that month is on the new year's side of the date. Starting it the
+// month after, as for a month-end year end, put every April outside both
+// years — on 20 April "financial year to date" opened on 1 May, a month that
+// had not begun. The whole month goes to the new year, the first days before
+// the year-end date included, because a month can only be in one year and the
+// year must always contain today.
 function _fiscalYearStart(today, fiscalYearEnd) {
   const feMonth = fiscalYearEnd?.month || 12;
   const feDay   = fiscalYearEnd?.day   || 31;
+  if (!_isMonthEndYearEnd(feMonth, feDay)) {
+    return { year: today.month >= feMonth ? today.year : today.year - 1, month: feMonth, day: 1 };
+  }
   const monthEnd = _lastDayOfMonth(today.year, feMonth);
   const endDay   = feMonth === 2 && feDay >= 28 ? monthEnd : Math.min(feDay, monthEnd);
   // "Today" is inside the fiscal year that ends on the NEXT occurrence of the
@@ -65,18 +93,32 @@ function _fiscalYearStart(today, fiscalYearEnd) {
     : { year: endYear, month: feMonth + 1, day: 1 };
 }
 
+// Whether a year end falls on the last day of its month. February's is the
+// 28th or 29th, read as the month's end in every year (see _fiscalYearStart);
+// any other month is measured against its fixed length.
+function _isMonthEndYearEnd(feMonth, feDay) {
+  return feDay >= (feMonth === 2 ? 28 : _lastDayOfMonth(2001, feMonth));
+}
+
 function _lastDayOfMonth(year, month) { return new Date(Date.UTC(year, month, 0)).getUTCDate(); }
 
 // Pure. What a to-date figure over `months` is called. "Year to date" only
-// when it really is one: the period opens on the first month of a financial
-// year and stays inside that year. Anything else — a quarter, a rolling twelve
-// months, a span crossing a year end — is a period to date, and calling it a
-// year would tell the reader the wrong thing about what was added up.
-function _toDateLabel(months, fiscalYearEnd) {
-  const first = /^(\d{4})-(\d{2})$/.exec(months?.[0]?.key || '');
-  if (!first) return 'Period to date';
-  const startMonth = (fiscalYearEnd?.month || 12) % 12 + 1;
-  return +first[2] === startMonth && months.length <= 12 ? 'Year to date' : 'Period to date';
+// when it really is one: the period opens the financial year that `today` is
+// in, stays inside that year, and runs at least to the last closed month — so
+// its to-date figure is the year's. Anything else is a period to date: a
+// quarter, a rolling twelve months, a span crossing a year end, and also last
+// year, next year, or this year's first quarter read in October, each of
+// which opens on a financial year's first month but whose to-date figure is
+// not the year's so far. Calling those a year would tell the reader the wrong
+// thing about what was added up. Without `today` there is no telling, so it
+// is a period.
+function _toDateLabel(months, fiscalYearEnd, today) {
+  const n = months?.length || 0;
+  if (!today || !n || n > 12) return 'Period to date';
+  const key = p => `${p.year}-${String(p.month).padStart(2, '0')}`;
+  const fyStart   = _fiscalYearStart(today, fiscalYearEnd);
+  const lastClosed = _partsFromDate(new Date(Date.UTC(today.year, today.month - 2, 1)));
+  return months[0].key === key(fyStart) && months[n - 1].key >= key(lastClosed) ? 'Year to date' : 'Period to date';
 }
 
 

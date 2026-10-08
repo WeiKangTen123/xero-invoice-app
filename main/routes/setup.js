@@ -6,7 +6,7 @@ const { requireAuth, requireAdmin } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
 const {
   getUserConfig, saveUserConfig, getSetupStatus, getImapSettings,
-  getGeminiKeys, addGeminiKey, removeGeminiKey, checkAllowanceSettings, defaultsFrom,
+  getGeminiKeys, addGeminiKey, removeGeminiKey, checkAllowanceSettings, defaultsFrom, timezoneProblem,
 } = require('../utils/users');
 const logger  = require('../utils/logger');
 const { automaticImapValues } = require('../email/imap-settings');
@@ -169,6 +169,13 @@ router.post('/', requireAuth, (req, res) => {
     // Rates price claims, so a value that cannot be one is refused, and the
     // whole save with it: half a form applied is harder to notice than none.
     const { values: checkedPatch, errors } = checkAllowanceSettings(userPatch);
+    // The timezone is free text that every report dates itself in, and a name
+    // Intl does not know used to 500 every one of them until it was corrected.
+    if (userPatch.TIMEZONE !== undefined) {
+      const problem = timezoneProblem(userPatch.TIMEZONE);
+      if (problem) errors.push({ field: 'TIMEZONE', error: problem });
+      else checkedPatch.TIMEZONE = String(userPatch.TIMEZONE ?? '').trim();
+    }
     if (errors.length) return res.status(400).json({ error: errors[0].error, errors });
     Object.assign(userPatch, checkedPatch);
 

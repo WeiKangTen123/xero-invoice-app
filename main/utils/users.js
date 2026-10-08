@@ -40,6 +40,22 @@ const CONFIG_KEY_TO_COLUMN = {
 // the default because that's where this deployment's users are.
 const DEFAULT_TIMEZONE = 'Asia/Singapore';
 
+// Setup takes the timezone as free text, and every report dates itself in it
+// through Intl, which throws on a name it does not know. So a value is
+// checked the way it will be used — by asking Intl — before it is kept, and
+// a stored one that would not pass is read as unknown by the callers (see
+// routes/xero-reports tz and xero/periods _todayPartsInTz) rather than
+// thrown on. Blank means "the default" and is fine. Returns what is wrong
+// with it, or null.
+const TIMEZONE_PROBLEM = 'Not a known timezone (e.g. Asia/Singapore)';
+function isKnownTimezone(timeZone) {
+  try { new Intl.DateTimeFormat('en-US', { timeZone }); return true; } catch { return false; }
+}
+function timezoneProblem(value) {
+  const tz = String(value ?? '').trim();
+  return !tz || isKnownTimezone(tz) ? null : TIMEZONE_PROBLEM;
+}
+
 // A user counts as "online" if an authenticated request landed inside this window.
 // This is real browser presence, not the email pipeline's own activity tracking
 // (see process-state.js) — a value long enough that normal polling gaps (the
@@ -466,6 +482,6 @@ module.exports = {
   getUserConfig, saveUserConfig, getUserDefaults, defaultsFrom, getSetupStatus, getImapSettings, ensureUserDirectories,
   checkAllowanceSettings, allowanceSettingsFrom, getAllowanceSettings, formatRate,
   getGeminiKeys, addGeminiKey, removeGeminiKey,
-  touchLastSeen, isOnline, DEFAULT_TIMEZONE,
+  touchLastSeen, isOnline, DEFAULT_TIMEZONE, isKnownTimezone, timezoneProblem,
   CONFIG_KEY_TO_COLUMN, ENCRYPTED_COLUMNS, // exposed for the one-time JSON->SQLite importer
 };
