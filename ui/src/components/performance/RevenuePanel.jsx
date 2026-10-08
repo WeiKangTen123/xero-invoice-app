@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../../api/client';
 import { fmtMoney, fmtMoneyShort, fmtPct } from '../../utils/format';
 import { BarList, GroupedMonthlyBars, MonthlyBars } from './charts';
-import { CurrencyNote, Empty, Legend, Metric, Rows, Surface, closedAttainment, rangeLabel, slice, sliceSum, sum, useRangeTotals } from './primitives';
+import { CurrencyNote, Empty, Legend, Metric, Rows, Surface, closedAttainment, closedCaption, closedSpan, closedSum, closedVarianceItems, rangeLabel, slice, sliceSum, sum, useRangeTotals } from './primitives';
 
 // Labels are matched as the server matches them: case and spacing ignored.
 const labelKey = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -44,23 +44,24 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
   const actual = active ? slice(active.actual, from, to) : slice(data.totals.revenue.actual, from, to);
   const budget = active ? slice(active.budget, from, to) : slice(data.totals.revenue.budget, from, to);
   const total  = sum(actual);
-  const totalB = sum(budget);
-  // "Of budget" over the closed months only, as on Overview and the Budget tab:
-  // the whole range set part-booked and future months against a full budget.
+  // Everything compared with budget is on the closed months of the range, as
+  // on Overview and the Budget tab (see closedSpan): the whole range set
+  // part-booked and future months against a full budget.
+  const span = closedSpan(data, from, to);
+  const compared = span.months > 0;
   const att = closedAttainment(data,
     active ? active.actual : data.totals.revenue.actual,
     active ? active.budget : data.totals.revenue.budget, from, to);
+  const totalC  = closedSum(active ? active.actual : data.totals.revenue.actual, span);
+  const totalBC = closedSum(active ? active.budget : data.totals.revenue.budget, span);
 
   // A netted "vs budget" is close to useless on a revenue tab: this org's
   // implementation revenue is 75,000 UNDER budget while maintenance is 75,000
   // OVER, so the total reads 0 and the card claims "on budget" while the mix has
   // changed completely. Report the biggest single mover instead.
-  const lineVariances = lines
-    .map(l => ({ label: l.label, v: sliceSum(l.actual, from, to) - sliceSum(l.budget, from, to) }))
-    .filter(l => l.v !== 0)
-    .sort((a, b) => Math.abs(b.v) - Math.abs(a.v));
+  const lineVariances = closedVarianceItems(lines, span, lines.length);
   const biggest = lineVariances[0] || null;
-  const offsetting = lineVariances.length > 1 && Math.abs(total - totalB) < Math.abs(biggest?.v ?? 0);
+  const offsetting = lineVariances.length > 1 && Math.abs(totalC - totalBC) < Math.abs(biggest?.v ?? 0);
 
   // Annualised run-rate from the recurring lines. Derived, not a Xero figure —
   // labelled as such, and meaningless with no closed months to annualise from.
@@ -114,11 +115,14 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
       </div>
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
+        {/* The figure is everything booked in the range, the month in progress
+            included; the budget beside it is the closed months'. The foot says
+            so, because the two side by side otherwise read as one comparison. */}
         <Metric label={active ? active.label : 'Total revenue'} value={fmtMoney(total, cur)}
                 meter={att.ratio === null ? null : att.ratio * 100}
-                footLeft={rangeLabel(data.months, from, to)}
+                footLeft={T.openMonthLabel ? `incl. ${T.openMonthLabel} so far` : rangeLabel(data.months, from, to)}
                 footRight={att.ratio !== null ? `${fmtPct(att.ratio, 0)} of budget to ${att.throughLabel}`
-                         : totalB > 0 ? 'No closed month yet' : 'No budget set'} />
+                         : !compared ? 'No closed month yet' : 'No budget set'} />
         <Metric label="Recurring revenue" value={fmtMoney(T.recurring, cur)}
                 meter={T.recurringMix === null ? null : T.recurringMix * 100}
                 footLeft={T.recurringMix === null ? 'No revenue yet' : `${fmtPct(T.recurringMix, 0)} of revenue`}
@@ -132,8 +136,9 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
                 value={biggest ? `${biggest.v > 0 ? '+' : ''}${fmtMoney(biggest.v, cur)}` : '—'}
                 meter={null}
                 tone={!biggest ? undefined : biggest.v > 0 ? 'var(--success)' : 'var(--danger)'}
-                footLeft={biggest ? biggest.label : 'Nothing differs from budget'}
-                footRight={offsetting ? 'offsetting movements' : (totalB === 0 ? 'Nothing budgeted' : `net ${fmtMoney(total - totalB, cur)}`)} />
+                footLeft={!compared ? 'No closed month yet in this period' : biggest ? biggest.label : 'Nothing differs from budget'}
+                footRight={!compared ? '' : offsetting ? 'offsetting movements' : (totalBC === 0 ? 'Nothing budgeted' : `net ${fmtMoney(totalC - totalBC, cur)}`)}
+                compare={compared ? closedCaption(span) : null} />
       </div>
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
@@ -239,19 +244,25 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
         </div>
       )}
 
-      <Surface title="Service lines — actual vs budget" right={rangeLabel(data.months, from, to)}>
+      {/* Closed months, like every "vs budget" figure; with none closed, the
+          actual column is what has been booked so far and there is no budget
+          to set it against. */}
+      <Surface title="Service lines — actual vs budget" right={compared ? closedCaption(span) : `${rangeLabel(data.months, from, to)} · no closed month yet`}>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                {['Service line', 'Type', 'Actual', 'Budget', 'Variance', '% of revenue'].map((h, i) => (
+                {['Service line', 'Type', compared ? 'Actual' : 'Booked so far', 'Budget', 'Variance', '% of revenue'].map((h, i) => (
                   <th key={h} style={{ padding: '8px 10px', textAlign: i < 2 ? 'left' : 'right', fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {lines.map(l => {
-                const a = sliceSum(l.actual, from, to), b = sliceSum(l.budget, from, to), v = a - b;
+                const a = compared ? closedSum(l.actual, span) : sliceSum(l.actual, from, to);
+                const b = closedSum(l.budget, span);
+                const v = compared ? Math.round((a - b) * 100) / 100 : null;
+                const revenueBase = compared ? T.actualClosed.revenue : T.revenue;
                 return (
                   <tr key={l.label} style={{ borderTop: '1px solid var(--border)' }}>
                     <td style={{ padding: '8px 10px' }}>{l.label}</td>
@@ -272,12 +283,12 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
                       </select>
                     </td>
                     <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: a < 0 ? 'var(--danger)' : undefined }}>{fmtMoney(a, cur)}</td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-muted)' }}>{fmtMoney(b, cur)}</td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: v === 0 ? undefined : v > 0 ? 'var(--success)' : 'var(--danger)' }}>
-                      {v === 0 ? <span style={{ color: 'var(--text-muted)' }}>-</span> : `${v > 0 ? '+' : ''}${fmtMoney(v, cur)}`}
+                    <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-muted)' }}>{compared ? fmtMoney(b, cur) : '—'}</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: !v ? undefined : v > 0 ? 'var(--success)' : 'var(--danger)' }}>
+                      {!v ? <span style={{ color: 'var(--text-muted)' }}>-</span> : `${v > 0 ? '+' : ''}${fmtMoney(v, cur)}`}
                     </td>
                     <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-muted)' }}>
-                      {T.revenue === 0 ? '—' : fmtPct(a / T.revenue, 0)}
+                      {revenueBase === 0 ? '—' : fmtPct(a / revenueBase, 0)}
                     </td>
                   </tr>
                 );
@@ -288,7 +299,10 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
         <div style={{ fontSize: 10.5, color: markError ? 'var(--danger)' : 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
           {markError
             || (saving ? `Saving ${saving}…`
-                       : 'Type is guessed from each account\'s name unless you set it. Your choice applies to every period.')}
+                       : `${compared
+                            ? 'Actual, budget and variance cover the closed months only, as the Budget tab\'s year to date does.'
+                            : 'No closed month yet in this period, so there is no budget comparison; the figures are what has been booked so far.'
+                          } Type is guessed from each account's name unless you set it. Your choice applies to every period.`)}
         </div>
       </Surface>
     </>

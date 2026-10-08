@@ -141,4 +141,33 @@ describe('variance commentary compares closed months only, as the budget tab doe
     const [rev] = ai._buildCategoryVariances(bare, null);
     expect(rev.budget).toBe(12000);
   });
+
+  // The cash card compared the period's receipts with the period's revenue
+  // while the three beside it compared the closed months', so the four cards
+  // did not describe the same months.
+  const cf = {
+    movement: { customerReceipts: 4200, monthly: { customerReceipts: months(1000, 200) } },
+    reconciliation: { revenueAccrual: 4700, customerReceipts: 4200 },
+  };
+  const cashOf = (p, c) => ai._buildCategoryVariances(p, c).find(x => x.key === 'cash');
+
+  test('the cash category is on the closed months too: receipts from the monthly series, revenue the closed months\'', () => {
+    expect(cashOf(perf, cf)).toMatchObject({ actual: 4000, budget: 4400, variance: -400, status: 'unfavorable' });
+  });
+
+  test('without a monthly series both sides stay the period totals, on one basis', () => {
+    const totalsOnly = { reconciliation: cf.reconciliation };
+    expect(cashOf(perf, totalsOnly)).toMatchObject({ actual: 4200, budget: 4700, variance: -500 });
+  });
+
+  test('a perf without closed markers keeps the period totals for cash as well', () => {
+    const bare = { ...perf };
+    delete bare.actualThroughIdx;
+    delete bare.closedThroughIdx;
+    expect(cashOf(bare, cf)).toMatchObject({ actual: 4200, budget: 4700 });
+  });
+
+  test('with no month closed, cash compares nothing either', () => {
+    expect(cashOf({ ...perf, actualThroughIdx: -1, closedThroughIdx: -1 }, cf)).toMatchObject({ actual: 0, budget: 0, variance: 0 });
+  });
 });

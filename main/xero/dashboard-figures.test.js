@@ -40,7 +40,8 @@ const { __api: api } = require('xero-node');
 const reports = require('./reports');
 const {
   _buildSummary, _buildBankTransactions, _buildPayments, _buildCashMovement, _isReceiptPayment,
-  _buildAlerts, _buildBudgetVariance, _buildPerformance, _sectionKind, _monthsBetween,
+  _buildAlerts, _buildBudgetVariance, _buildPerformance, _buildWatchList, _sectionKind, _monthsBetween,
+  _fiscalYearMonths, _actualThroughIndex,
 } = reports;
 const { _raisedByMonth, _buildPaymentDays, _buildUnreconciled, _isLive, _monthOfDoc } = require('./cash-flow');
 
@@ -464,5 +465,150 @@ describe('Overview and Cash Flow read one debtor-days figure; the tie-out surviv
     api.getInvoices.mockRejectedValue(new Error('rate limited'));
     const perf = await reports.getPerformance(U, 't-dash-nosummary', { period: PERIOD });
     expect(perf.paymentDays).toMatchObject({ available: false, reason: 'unavailable', dso: null, dpo: null });
+  });
+});
+
+// ── The Dashboard and the Budget tab compare the same months ────────────────
+// Rebuilt from the live fixture in reports.test.js (Nexsoss Pte Ltd, FY Apr
+// 2026–Mar 2027, seen on 17 August): Apr–Jul closed, August part-booked. The
+// Budget tab compares closed months only. The dashboard summed the whole
+// selected range — so with the year to date selected, Overview said 109,330
+// of revenue against the Budget tab's 57,330, Profitability said net profit
+// was 34,385 ahead of a budget the Budget tab said it was exactly on, and the
+// variance list put September's wages down as a saving of 24,603. The UI's
+// arithmetic is lifted out of primitives.jsx and run over the same rows.
+describe('every "vs budget" figure on the Dashboard is the Budget tab\'s closed-month figure', () => {
+  const fs   = require('fs');
+  const path = require('path');
+  const UI   = path.join(__dirname, '../../ui/src/components/performance/primitives.jsx');
+  const src  = fs.readFileSync(UI, 'utf8');
+  const functionSource = name => {
+    const start = src.indexOf(`export function ${name}(`);
+    if (start < 0) throw new Error(`${name} not found`);
+    let i = src.indexOf('{', start), depth = 0;
+    for (; i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}' && --depth === 0) break;
+    }
+    return src.slice(start, i + 1).replace(/^export /, '');
+  };
+  const lift = (name, deps = {}) => new Function(...Object.keys(deps), `${functionSource(name)}\nreturn ${name};`)(...Object.values(deps));
+  const closedSpan          = lift('closedSpan');
+  const closedSum           = lift('closedSum');
+  const closedCaption       = lift('closedCaption');
+  const closedAttainment    = lift('closedAttainment', { closedSpan, closedSum });
+  const closedVarianceItems = lift('closedVarianceItems', { closedSum });
+  const sum = lift('sum'), slice = lift('slice');
+  const sliceSum = lift('sliceSum', { slice, sum });
+  const useRangeTotals = lift('useRangeTotals', { useMemo: f => f(), sliceSum, closedSpan, closedSum, closedAttainment });
+
+  const FY_END = { month: 3, day: 31 };
+  const TODAY  = { year: 2026, month: 8, day: 17 };
+  const BUDGET = [
+    ['Sales - Implementation',          [0,0,0,57330,37000,0,0,0,54500,0,27000,27500]],
+    ['Sales - Maintenance (Recurring)', [0,0,0,0,15000,0,0,0,0,0,10000,15000]],
+    ['Total Income',                    [0,0,0,57330,52000,0,0,0,54500,0,37000,42500]],
+    ['Cost of Goods Sold',              [0,0,0,0,7330,1030,1030,1030,1030,1030,7630,7930]],
+    ['Total Cost of Sales',             [0,0,0,0,7330,1030,1030,1030,1030,1030,7630,7930]],
+    ['Gross Profit',                    [0,0,0,57330,44670,-1030,-1030,-1030,53470,-1030,29370,34570]],
+    ['Other Income - Grant',            [0,0,0,0,0,16667,8333,8333,8333,8333,0,0]],
+    ['Total Other Income',              [0,0,0,0,0,16667,8333,8333,8333,8333,0,0]],
+    ['Bank Fees',                       [0,0,0,0,10,10,10,10,10,10,10,10]],
+    ['Consulting & Accounting',         [0,0,0,0,500,500,500,500,500,500,500,500]],
+    ['Insurance',                       [0,0,0,0,800,800,800,800,800,1400,1400,1400]],
+    ['Legal expenses',                  [0,0,0,0,1000,1000,1000,1000,1000,1000,1000,1000]],
+    ['Subscriptions',                   [0,0,0,0,142,142,142,142,142,642,642,642]],
+    ['Wages and Salaries',              [0,0,0,24603,24603,24603,24603,24603,24603,24603,24603,24603]],
+    ['Total Operating Expenses',        [0,0,0,24603,27055,27055,27055,27055,27055,28155,28155,28155]],
+    ['Net Profit',                      [0,0,0,32727,17615,-11418,-19752,-19752,34748,-20852,1215,6415]],
+  ];
+  const money = v => (v === 0 ? '0.00' : String(v.toFixed(2)));
+  const bRow  = (label, rowType = 'Row') => row(label, BUDGET.find(([l]) => l === label)[1].map(money), rowType);
+  const budgetRows = [
+    { rowType: 'Header', cells: ['Account','Apr-26','May-26','Jun-26','Jul-26','Aug-26','Sep-26','Oct-26','Nov-26','Dec-26','Jan-27','Feb-27','Mar-27'].map(cell) },
+    section('Income', [bRow('Sales - Implementation'), bRow('Sales - Maintenance (Recurring)'), bRow('Total Income', 'SummaryRow')]),
+    section('Less Cost of Sales', [bRow('Cost of Goods Sold'), bRow('Total Cost of Sales', 'SummaryRow')]),
+    section('', [bRow('Gross Profit', 'SummaryRow')]),
+    section('Other Income', [bRow('Other Income - Grant'), bRow('Total Other Income', 'SummaryRow')]),
+    section('Less Operating Expenses', [
+      bRow('Bank Fees'), bRow('Consulting & Accounting'), bRow('Insurance'), bRow('Legal expenses'), bRow('Subscriptions'),
+      bRow('Wages and Salaries'), bRow('Total Operating Expenses', 'SummaryRow'),
+    ]),
+    section('', [bRow('Net Profit', 'SummaryRow')]),
+  ];
+  // Newest-first, as the P&L comes: Aug (part-booked) then Jul.
+  const PNL = {
+    'Sales - Implementation':          [0,0,0,0,0,0,0,37000,-17670,0,0,0],
+    'Sales - Maintenance (Recurring)': [0,0,0,0,0,0,0,15000,75000,0,0,0],
+    'Total Income':                    [0,0,0,0,0,0,0,52000,57330,0,0,0],
+    'Gross Profit':                    [0,0,0,0,0,0,0,52000,57330,0,0,0],
+    'Wages and Salaries':              [0,0,0,0,0,0,0,0,24603,0,0,0],
+    'Total Operating Expenses':        [0,0,0,0,0,0,0,0,24603,0,0,0],
+    'Net Profit':                      [0,0,0,0,0,0,0,52000,32727,0,0,0],
+  };
+  const p = (label, rowType = 'Row') => row(label, PNL[label].map(money), rowType);
+  const pnlRows = [
+    { rowType: 'Header', cells: ['','31 Mar 27','28 Feb 27','31 Jan 27','31 Dec 26','30 Nov 26','31 Oct 26','30 Sep 26','31 Aug 26','31 Jul 26','30 Jun 26','31 May 26','30 Apr 26'].map(cell) },
+    section('Income', [p('Sales - Implementation'), p('Sales - Maintenance (Recurring)'), p('Total Income', 'SummaryRow')]),
+    section('', [p('Gross Profit')]),
+    section('Less Operating Expenses', [p('Wages and Salaries'), p('Total Operating Expenses', 'SummaryRow')]),
+    section('', [p('Net Profit')]),
+  ];
+
+  const months = _fiscalYearMonths(TODAY, FY_END);
+  const actualThroughIdx = _actualThroughIndex(months, TODAY);
+  const bv = _buildBudgetVariance({ budgetRows, pnlRows, months, actualThroughIdx, currentIdx: 4, asOfISO: '2026-08-17' });
+  const built = _buildPerformance({ months, rows: bv.rows, cash: null });
+  // The /performance payload as the panels read it.
+  const d = { months, actualThroughIdx, closedThroughIdx: actualThroughIdx, organisation: { currency: 'SGD' }, ...built };
+  const find = label => bv.rows.find(r => r.label === label);
+  const YTD = [0, 4];   // financial year to date on 17 August: April to August
+
+  test('the fixture is the one the Budget tab is pinned to', () => {
+    expect(actualThroughIdx).toBe(3);
+    expect(find('Net Profit')).toMatchObject({ actualToDate: 32727, budgetToDate: 32727, variance: 0 });
+    expect(bv.kpis.currentMonth).toMatchObject({ label: 'Aug 2026', actualNet: 52000 });
+  });
+
+  test('Overview revenue: the headline includes August so far, the comparison is the Budget tab\'s 57,330', () => {
+    const T = useRangeTotals(d, ...YTD);
+    expect(T.revenue).toBe(109330);
+    expect(T.openMonthLabel).toBe('Aug 2026');
+    expect(T.actualClosed.revenue).toBe(find('Total Income').actualToDate);
+    expect(T.budgetClosed.revenue).toBe(find('Total Income').budgetToDate);
+    expect(T.actualClosed.revenue).toBe(57330);
+    expect(T.attainment).toBe(1);
+    expect(closedCaption(closedSpan(d, ...YTD))).toBe('Closed months: Apr 2026 – Jul 2026 (4)');
+  });
+
+  test('Profitability net profit vs budget is the Budget tab\'s 0, not the whole range\'s +34,385', () => {
+    const T = useRangeTotals(d, ...YTD);
+    expect(T.netProfit - T.netProfitBudget).toBe(34385);
+    expect(T.actualClosed.netProfit - T.budgetClosed.netProfit).toBe(find('Net Profit').variance);
+    expect(T.actualClosed.netProfit).toBe(32727);
+    // The whole period's plan, the one place it is shown.
+    expect(useRangeTotals(d, 0, 11)).toMatchObject({ wholeMonths: 12, netProfitBudget: 20946, revenueBudget: 243330 });
+  });
+
+  test('the Overview and Analysis variance lists agree with the Budget tab line for line', () => {
+    const lines = [...d.serviceLines, ...d.expenseLines];
+    const items = closedVarianceItems(lines, closedSpan(d, ...YTD), 100);
+    for (const it of items) expect(it.v).toBe(find(it.label).variance);
+    const differing = bv.rows.filter(r => r.kind === 'account' && r.variance !== 0).map(r => r.label).sort();
+    expect(items.map(i => i.label).sort()).toEqual(differing);
+    expect(items.map(i => i.label)).toEqual(['Sales - Implementation', 'Sales - Maintenance (Recurring)']);
+    // September's wages are no longer a saving.
+    const wages = lines.find(l => l.label === 'Wages and Salaries');
+    expect(sliceSum(wages.actual, ...YTD) - sliceSum(wages.budget, ...YTD)).toBe(-24603);
+    expect(items.find(i => i.label === 'Wages and Salaries')).toBeUndefined();
+  });
+
+  test('with nothing closed there is no comparison, and the watch list says what the figures are', () => {
+    const T = useRangeTotals({ ...d, actualThroughIdx: -1, closedThroughIdx: -1 }, 0, 11);
+    expect(T).toMatchObject({ closedMonths: 0, attainment: null, actualClosed: { netProfit: 0 }, budgetClosed: { netProfit: 0 } });
+    const list = _buildWatchList({ months, totals: built.totals, actualThroughIdx: -1 });
+    const note = list.find(w => /No month of this period has closed yet/.test(w.text));
+    expect(note.text).toBe('No month of this period has closed yet — figures are what has been booked so far; budget comparisons start when a month closes.');
+    expect(list.some(w => /every figure shown is budget/.test(w.text))).toBe(false);
   });
 });

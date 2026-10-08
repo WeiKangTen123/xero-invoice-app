@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { fmtMoney, fmtPct } from '../../utils/format';
 import { BarList, ChartModeToggle, TrendChart } from './charts';
-import { GrowthPill, Legend, Metric, PriorYearLine, Rows, ScoreCard, Surface, WatchBand, changeText, closedInRange, comparedText, priorYearRange, priorYearReason, rangeGrowth, rangeLabel, slice, sliceSum, useRangeTotals } from './primitives';
+import { Empty, GrowthPill, Legend, Metric, PriorYearLine, Rows, ScoreCard, Surface, WatchBand, changeText, closedCaption, closedInRange, closedSpan, closedVarianceItems, comparedText, priorYearRange, priorYearReason, rangeGrowth, rangeLabel, slice, sliceSum, useRangeTotals } from './primitives';
 
 export function OverviewPanel({ data, from, to, insights, summary, narrative, onOpenAnalysis }) {
   const [trendMode, setTrendMode] = useState('bar');
@@ -9,6 +9,12 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
   const T   = useRangeTotals(data, from, to);
   const months = data.months.slice(from, to + 1);
   const closed = closedInRange(data, from, to);
+  // The months any figure here compares with budget: the closed ones of the
+  // range (see closedSpan). The category cards from the server cover the
+  // closed months of the whole period, whatever range is selected, so they
+  // carry their own caption.
+  const span = closedSpan(data, from, to);
+  const periodSpan = closedSpan(data, 0, data.months.length - 1);
   if (!T) return null;
 
   const healthy = T.netProfit > 0 && (T.grossMargin === null || T.grossMargin > 0);
@@ -72,12 +78,10 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
         : `${g.latestLabel} vs ${g.momLabel}` },
   ];
 
-  const varianceItems = [...data.serviceLines, ...data.expenseLines]
-    .map(l => ({ label: l.label, a: sliceSum(l.actual, from, to), b: sliceSum(l.budget, from, to) }))
-    .map(l => ({ ...l, v: l.a - l.b }))
-    .filter(l => l.v !== 0)
-    .sort((x, y) => Math.abs(y.v) - Math.abs(x.v))
-    .slice(0, 6);
+  // Closed months only, the Budget tab's basis. Over the whole range this
+  // listed next month's budgeted wages as a saving.
+  const varianceItems = closedVarianceItems([...data.serviceLines, ...data.expenseLines], span);
+  const categories = insights?.categories?.length && periodSpan.months > 0 ? insights.categories.slice(0, 3) : [];
 
   return (
     <>
@@ -123,11 +127,15 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
       <WatchBand items={data.watchList} />
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: py ? 8 : 16 }}>
+        {/* The figure is everything booked in the range, the month in progress
+            included; the budget beside it is the closed months'. The foot says
+            so, because the two side by side otherwise read as one comparison. */}
         <Metric label="Total revenue" value={fmtMoney(T.revenue, cur)}
                 meter={T.attainment === null ? null : T.attainment * 100}
-                footLeft={T.recurringMix === null ? 'No revenue yet' : `${fmtPct(T.recurringMix, 0)} recurring`}
+                footLeft={T.openMonthLabel ? `incl. ${T.openMonthLabel} so far`
+                        : T.recurringMix === null ? 'No revenue yet' : `${fmtPct(T.recurringMix, 0)} recurring`}
                 footRight={T.attainment !== null ? `${fmtPct(T.attainment, 0)} of budget to ${T.attainmentThrough}`
-                         : T.revenueBudget > 0 ? 'No closed month yet' : 'No budget set'}
+                         : T.closedMonths === 0 ? 'No closed month yet' : 'No budget set'}
                 compare={pyLine('', 'revenue')} />
         <Metric label="Gross margin" value={T.grossMargin === null ? '—' : fmtPct(T.grossMargin)}
                 meter={T.grossMargin === null ? null : T.grossMargin * 100}
@@ -245,13 +253,18 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
         </Surface>
         <Surface
           title="Variance Reasons"
-          right={insights?.categories?.length ? <span style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 700 }}>Executive Scorecard</span> : 'Actual − budget'}
+          right={categories.length ? <span style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 700 }}>Executive Scorecard</span> : 'Actual − budget'}
           flex={5}
           minWidth={320}
         >
-          {insights?.categories && insights.categories.length > 0 ? (
+          {/* Which months are compared. The cards are the server's, over the
+              period's closed months; the list below them is the range's. */}
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.5 }}>
+            {closedCaption(categories.length ? periodSpan : span)}
+          </div>
+          {categories.length > 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {insights.categories.slice(0, 3).map(cat => {
+              {categories.map(cat => {
                 const isFavorable = cat.status === 'favorable';
                 return (
                   <div
@@ -292,8 +305,12 @@ export function OverviewPanel({ data, from, to, insights, summary, narrative, on
             </div>
           ) : (
             <>
-              <Rows currency={cur} items={varianceItems.map(l => ({ label: l.label, value: l.v }))} />
-              {onOpenAnalysis && (
+              {span.months === 0
+                ? <Empty>Budget comparisons start when a month closes.</Empty>
+                : varianceItems.length === 0
+                  ? <Empty>Nothing differs from budget in the closed months.</Empty>
+                  : <Rows currency={cur} items={varianceItems.map(l => ({ label: l.label, value: l.v }))} />}
+              {onOpenAnalysis && span.months > 0 && (
                 <button
                   type="button"
                   onClick={onOpenAnalysis}

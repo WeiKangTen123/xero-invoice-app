@@ -1025,7 +1025,7 @@ describe('xero/reports — performance overview (pure)', () => {
   test('before any month has closed, the list says so instead of showing nothing', () => {
     const { totals } = build();
     const list = _buildWatchList({ months, totals, actualThroughIdx: -1 });
-    expect(list.some(w => /No month of this financial year has closed/.test(w.text))).toBe(true);
+    expect(list.some(w => /No month of this period has closed yet/.test(w.text))).toBe(true);
   });
 });
 

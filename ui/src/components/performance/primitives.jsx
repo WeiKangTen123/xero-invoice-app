@@ -175,39 +175,91 @@ export function Rows({ items, currency }) {
 
 // ── Shared derivation ────────────────────────────────────────────────────────
 
-// Budget attainment: actual against budget over the CLOSED months of the range
-// only — the rule the Budget tab's year to date follows. Attainment used to be
-// the whole range's actual over the whole range's budget, which set the current
-// month's part-booked actuals and every future month's nothing against a full
-// year of budget, so early in a financial year it read as a small fraction of
-// what had really been achieved against plan.
+// The months of the range a budget comparison may use: `from` through the
+// last closed month, or through `to` when that comes first. This is the rule
+// the Budget tab's year to date follows (budget-variance.js compares closed
+// months only), and every "vs budget" figure on the dashboard follows it too.
+// The whole range was compared before: its budget counted every month of the
+// range, reached or not, and its actuals counted the month in progress as
+// booked so far — so in mid-August the Overview listed September's wages as a
+// saving, and Profitability read a year of budget as a shortfall the business
+// had not yet had the chance to earn, while the Budget tab said "on plan".
 //
-// Null when no month of the range has closed, or nothing was budgeted for the
-// ones that have: a percentage of nothing is not 0% or 100%.
+// `months` is 0 and `to` is from - 1 when no month of the range has closed,
+// so a loop from `from` to `to` runs over nothing.
 //
 // Self-contained on purpose — no imports, no React — so a test can read it
 // straight out of this file and run it.
-export function closedAttainment(d, actual, budget, from, to) {
+export function closedSpan(d, from, to) {
   const idx = Number.isInteger(d?.closedThroughIdx) ? d.closedThroughIdx
             : Number.isInteger(d?.actualThroughIdx) ? d.actualThroughIdx : -1;
   const last = Math.min(idx, to);
   const months = last >= from ? last - from + 1 : 0;
-  let a = 0, b = 0;
-  for (let i = from; i <= last; i++) {
-    a += Number((actual && actual[i]) || 0);
-    b += Number((budget && budget[i]) || 0);
-  }
+  const label = i => (months > 0 && d?.months?.[i] ? d.months[i].label : null);
+  return { from, to: months > 0 ? last : from - 1, months, fromLabel: label(from), throughLabel: label(last) };
+}
+
+// A series summed over the closed months of a span. Zero when none has closed.
+export function closedSum(series, span) {
+  let s = 0;
+  for (let i = span.from; i <= span.to; i++) s += Number((series && series[i]) || 0);
+  return s;
+}
+
+// The caption every card comparing with budget carries, so the reader can see
+// which months the comparison covers without opening the Budget tab:
+// "Closed months: Apr – Jul 2026 (4)", or why there is nothing to compare.
+export function closedCaption(span) {
+  if (!span.months) return 'No closed month yet in this period';
+  const range = span.fromLabel === span.throughLabel ? span.fromLabel : `${span.fromLabel} – ${span.throughLabel}`;
+  return `Closed month${span.months === 1 ? '' : 's'}: ${range} (${span.months})`;
+}
+
+// Budget attainment: actual against budget over the closed months (see
+// closedSpan). Attainment used to be the whole range's actual over the whole
+// range's budget, which set the current month's part-booked actuals and every
+// future month's nothing against a full year of budget, so early in a
+// financial year it read as a small fraction of what had really been achieved
+// against plan.
+//
+// Null when no month of the range has closed, or nothing was budgeted for the
+// ones that have: a percentage of nothing is not 0% or 100%.
+export function closedAttainment(d, actual, budget, from, to) {
+  const span = closedSpan(d, from, to);
+  const a = closedSum(actual, span);
+  const b = closedSum(budget, span);
   return {
-    months,
+    months: span.months,
     actual: a,
     budget: b,
-    ratio: months > 0 && b > 0 ? a / b : null,
-    throughLabel: months > 0 && d?.months?.[last] ? d.months[last].label : null,
+    ratio: span.months > 0 && b > 0 ? a / b : null,
+    throughLabel: span.throughLabel,
   };
+}
+
+// The lines that differ from budget over the closed months, biggest gap first
+// — the Overview's and the Analysis tab's variance lists, from one function so
+// they cannot disagree, and the Budget tab's own arithmetic (actual to date
+// minus budget to date) so they agree with it. Rounded to the cent as the
+// server rounds, so float dust is not listed as a difference.
+export function closedVarianceItems(lines, span, limit = 6) {
+  const out = [];
+  for (const l of lines || []) {
+    const a = closedSum(l.actual, span);
+    const b = closedSum(l.budget, span);
+    const v = Math.round((a - b) * 100) / 100;
+    if (v !== 0) out.push({ label: l.label, a, b, v });
+  }
+  return out.sort((x, y) => Math.abs(y.v) - Math.abs(x.v)).slice(0, limit);
 }
 
 // Every headline number for the selected range, derived in one place so Overview
 // and Revenue can never disagree about what "total revenue" means.
+//
+// Two bases, named apart. The plain totals are the whole range as booked —
+// the month in progress included, which is what the reader expects a
+// headline to be. Everything compared with budget is on the closed months
+// (actualClosed, budgetClosed, attainment), see closedSpan.
 export function useRangeTotals(d, from, to) {
   return useMemo(() => {
     if (!d) return null;
@@ -221,17 +273,53 @@ export function useRangeTotals(d, from, to) {
     const grossProfit = S(t.grossProfit, 'actual') || (revenue - cogs);
     const recurring   = sliceSum(d.split.recurring.actual, from, to);
     const project     = sliceSum(d.split.project.actual, from, to);
-    const att         = closedAttainment(d, t.revenue.actual, t.revenue.budget, from, to);
+
+    const span = closedSpan(d, from, to);
+    const C = (series, kind) => closedSum(series[kind], span);
+    const actualClosed = {
+      revenue:     C(t.revenue, 'actual'),
+      otherIncome: C(t.otherIncome, 'actual'),
+      cogs:        C(t.cogs, 'actual'),
+      opex:        C(t.opex, 'actual'),
+      netProfit:   C(t.netProfit, 'actual'),
+    };
+    actualClosed.grossProfit = C(t.grossProfit, 'actual') || (actualClosed.revenue - actualClosed.cogs);
+    const budgetClosed = {
+      revenue:     C(t.revenue, 'budget'),
+      otherIncome: C(t.otherIncome, 'budget'),
+      cogs:        C(t.cogs, 'budget'),
+      opex:        C(t.opex, 'budget'),
+      netProfit:   C(t.netProfit, 'budget'),
+      grossProfit: C(t.grossProfit, 'budget'),
+    };
+    // The month after the closed ones, when the range reaches it and anything
+    // is booked in it: the month in progress. The headline totals include what
+    // it has booked so far; every closed-month figure leaves it out, and the
+    // screen says so wherever the two sit together.
+    const openIdx = span.to + 1;
+    const booked = i => [t.revenue, t.otherIncome, t.cogs, t.opex].some(s => Number((s.actual && s.actual[i]) || 0) !== 0);
+    const openMonthLabel = openIdx <= to && d.months?.[openIdx] && booked(openIdx) ? d.months[openIdx].label : null;
+
+    const att = closedAttainment(d, t.revenue.actual, t.revenue.budget, from, to);
     return {
       revenue, otherIncome, cogs, opex, netProfit, grossProfit, recurring, project,
-      // Closed months only, see closedAttainment. The *Budget totals below stay
-      // whole-range: Profitability compares every month and says how many of
-      // them are not yet earned.
+      // Closed months only, see closedAttainment.
       attainment:        att.ratio,
       attainmentActual:  att.actual,
       attainmentBudget:  att.budget,
       attainmentMonths:  att.months,
       attainmentThrough: att.throughLabel,
+      // The budget comparison's basis, see closedSpan.
+      closedMonths:       span.months,
+      closedFromLabel:    span.fromLabel,
+      closedThroughLabel: span.throughLabel,
+      actualClosed,
+      budgetClosed,
+      openMonthLabel,
+      // The whole range — every month of it, reached or not. Profitability
+      // shows it once, labelled as the plan for the whole period; nothing on
+      // the dashboard is compared with it.
+      wholeMonths:       to - from + 1,
       revenueBudget:     S(t.revenue, 'budget'),
       netProfitBudget:   S(t.netProfit, 'budget'),
       otherIncomeBudget: S(t.otherIncome, 'budget'),
@@ -376,6 +464,31 @@ export function PriorYearLine({ what, c, range, currency }) {
     <span title={title}>
       {what ? `${what} ` : ''}vs same months last year:{' '}
       <strong style={{ color: tone, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>{changeText(c, currency)}</strong>
+    </span>
+  );
+}
+
+// One tile's comparison with budget, on the closed months: "vs budget, Apr –
+// Jul 2026: +SGD 1,200.00", coloured for favourability rather than sign
+// (`favour` 'down' for a cost, where spending less is the good outcome). The
+// hover carries both amounts, so the difference can always be checked. Says
+// why when there is nothing to compare, never a figure against nothing.
+export function BudgetLine({ what, actual, budget, span, currency, favour = 'up' }) {
+  const lead = what ? `${what} ` : '';
+  if (!span?.months) {
+    return <span>{lead}vs budget: no closed month yet in this period</span>;
+  }
+  const v = Math.round((actual - budget) * 100) / 100;
+  const good = v === 0 ? null : favour === 'down' ? v < 0 : v > 0;
+  const tone = good === null ? 'var(--text-muted)' : good ? 'var(--success)' : 'var(--danger)';
+  const range = span.fromLabel === span.throughLabel ? span.fromLabel : `${span.fromLabel} – ${span.throughLabel}`;
+  const title = `${range}: ${fmtMoney(actual, currency)} against ${fmtMoney(budget, currency)} budgeted`;
+  return (
+    <span title={title}>
+      {lead}vs budget, {range}:{' '}
+      <strong style={{ color: tone, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+        {v > 0 ? '+' : v < 0 ? '-' : ''}{fmtMoney(Math.abs(v), currency)}
+      </strong>
     </span>
   );
 }

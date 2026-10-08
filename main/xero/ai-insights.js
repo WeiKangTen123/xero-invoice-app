@@ -193,10 +193,21 @@ function _buildCategoryVariances(perf, cf) {
     .sort((x, y) => Math.abs(y.variance) - Math.abs(x.variance))
     .slice(0, 3);
 
-  // Cash conversion delta
+  // Cash conversion delta: receipts from customers against the revenue
+  // invoiced, over the closed months like the three categories above. The
+  // cash flow report's reconciliation totals are the whole period on both
+  // sides, so this used to compare the period's cash with the period's
+  // revenue while the other cards compared the closed months, and the four
+  // did not describe the same months. The receipts are summed from the
+  // report's monthly series; the revenue is the closed months' revenue
+  // already in hand. Without the monthly series (an older payload), or with
+  // no closed markers at all, both sides fall back to the period totals
+  // together, so they are at least on one basis.
   const rec = cf?.reconciliation || {};
-  const customerReceipts = rec.customerReceipts ?? 0;
-  const revenueAccrual   = rec.revenueAccrual ?? revA;
+  const monthlyReceipts = cf?.movement?.monthly?.customerReceipts;
+  const sliceable = n !== null && Array.isArray(monthlyReceipts);
+  const customerReceipts = sliceable ? _sumClosed(monthlyReceipts, n) : (rec.customerReceipts ?? 0);
+  const revenueAccrual   = sliceable ? revA : (rec.revenueAccrual ?? revA);
   const cashGap          = customerReceipts - revenueAccrual;
   const dso              = cf?.workingCapital?.dso;
   const overdue          = cf?.workingCapital?.overdue;

@@ -28,6 +28,7 @@ const INSIGHT_CACHE_TTL_MS = 30 * 60 * 1000; // reasons only change when the fig
 // requestNarrative): this file fetches and caches, ai-insights asks and checks.
 const {
   _buildCategoryVariances,
+  _closedMonthCount,
   _groundNarrative,
   _narrativeFacts,
   _varianceCandidates,
@@ -52,7 +53,9 @@ async function _getVarianceInsightsRaw(userId, tenantId, { timezone = 'UTC', for
 
   const categories = _buildCategoryVariances(perf, cf);
   const candidates = _varianceCandidates(perf);
-  const closed = perf.actualThroughIdx + 1;
+  // The months the figures above were summed over, told to the model as such
+  // — the same count the sums used, not a second reading of the markers.
+  const closed = _closedMonthCount(perf) ?? perf.months.length;
 
   if (!categories.length && !candidates.length) {
     return { generated: false, reason: 'Nothing differs from budget yet.', categories: [], lines: [], source: 'none' };

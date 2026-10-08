@@ -1,19 +1,38 @@
 import { useState } from 'react';
 import { fmtMoney } from '../../utils/format';
-import {Empty, Surface, rangeLabel, sliceSum } from './primitives';
+import { Empty, Surface, closedCaption, closedSpan, closedVarianceItems, rangeLabel } from './primitives';
 
 // Real variance figures, each with the model's suggested cause where one was
 // generated. The figures are always shown; the prose is additive and clearly
 // marked, so an LLM outage degrades this card rather than emptying it.
 // Real variance figures & executive category reasons matching the management scorecard format.
 // Always grounded in pre-computed Xero ledger actuals vs budget.
-export function VarianceReasons({ items = [], insights, currency }) {
+//
+// Everything here is on closed months, as the Budget tab is. The category
+// cards and the account reasons are the server's, computed over the closed
+// months of the whole period (`periodSpan`); the account movers are worked
+// out here over the closed months of the selected range (`span`). The two
+// are the same months unless the range has been narrowed, and a reason is
+// attached to a figure only when they are — a cause written for April to
+// July must not sit under a figure for May.
+export function VarianceReasons({ items = [], insights, currency, span, periodSpan }) {
   const [showDrilldown, setShowDrilldown] = useState(false);
-  const categories = insights?.categories || [];
-  const reasonFor = new Map((insights?.lines || []).map(l => [l.account, l.reason]).filter(([, r]) => r));
+  const categories = periodSpan?.months > 0 ? (insights?.categories || []) : [];
+  const sameMonths = !!span && !!periodSpan && span.from === periodSpan.from && span.to === periodSpan.to;
+  const reasonFor = new Map(sameMonths
+    ? (insights?.lines || []).map(l => [l.account, l.reason]).filter(([, r]) => r)
+    : []);
 
+  if (periodSpan && periodSpan.months === 0) {
+    return <Empty>No closed month yet in this period — budget comparisons start when a month closes.</Empty>;
+  }
   if (!categories.length && !items.length) {
-    return <Empty>Nothing differs from budget in this range.</Empty>;
+    return (
+      <>
+        {span && <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>{closedCaption(span)}</div>}
+        <Empty>{span?.months === 0 ? 'Budget comparisons start when a month closes.' : 'Nothing differs from budget in the closed months.'}</Empty>
+      </>
+    );
   }
 
   return (
@@ -21,6 +40,9 @@ export function VarianceReasons({ items = [], insights, currency }) {
       {/* 4 Universal Executive Management Cards (Screenshot Format) */}
       {categories.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+            {closedCaption(periodSpan)}
+          </div>
           {categories.map(cat => {
             const isFavorable = cat.status === 'favorable';
             return (
@@ -85,6 +107,11 @@ export function VarianceReasons({ items = [], insights, currency }) {
 
           {showDrilldown && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 11, marginTop: 10 }}>
+              {/* Only said again when the movers cover different months from
+                  the cards above, or when there are no cards. */}
+              {(!categories.length || !sameMonths) && span && (
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5 }}>{closedCaption(span)}</div>
+              )}
               {items.map(it => {
                 const reason = reasonFor.get(it.label);
                 const neg = it.v < 0;
@@ -132,12 +159,12 @@ export function VarianceReasons({ items = [], insights, currency }) {
 export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse, reanalysing, lastAnalysedAt }) {
   const cur = data?.organisation?.currency || '';
 
-  const varianceItems = data ? [...data.serviceLines, ...data.expenseLines]
-    .map(l => ({ label: l.label, a: sliceSum(l.actual, from, to), b: sliceSum(l.budget, from, to) }))
-    .map(l => ({ ...l, v: l.a - l.b }))
-    .filter(l => l.v !== 0)
-    .sort((x, y) => Math.abs(y.v) - Math.abs(x.v))
-    .slice(0, 6) : [];
+  // Closed months of the range, the Budget tab's basis (see closedSpan): the
+  // whole range put months not yet reached down as savings. The server's
+  // reasons were always on closed months; now the figures they sit under are.
+  const span = data ? closedSpan(data, from, to) : null;
+  const periodSpan = data ? closedSpan(data, 0, data.months.length - 1) : null;
+  const varianceItems = data ? closedVarianceItems([...data.serviceLines, ...data.expenseLines], span) : [];
 
   const stamp = lastAnalysedAt
     ? new Date(lastAnalysedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -175,7 +202,7 @@ export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse
         }}>
           <span>
             <strong style={{ color: 'var(--success)', fontWeight: 700 }}>✓ Analysis up to date</strong>
-            {' · '}Evaluated 4 financial pillars based on latest Xero actuals vs budget.
+            {' · '}Evaluated 4 financial pillars on Xero actuals vs budget over the closed months.
           </span>
           <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>
             {stamp}
@@ -202,7 +229,7 @@ export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse
           ? <span style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 700 }}>AI Executive Scorecard</span>
           : 'Actual − budget'}
       >
-        <VarianceReasons items={varianceItems} insights={insights} currency={cur} />
+        <VarianceReasons items={varianceItems} insights={insights} currency={cur} span={span} periodSpan={periodSpan} />
       </Surface>
 
       <ExecutiveActionChecklist data={data} from={from} to={to} insights={insights} currency={cur} />

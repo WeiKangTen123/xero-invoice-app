@@ -268,7 +268,10 @@ function _buildWatchList({ months, totals, actualThroughIdx }) {
   if (ytdRev > 0 && ytdCogs === 0) {
     out.push({ severity: 'warn', text: 'No cost of sales has been booked this year, so gross margin reads 100%. It is not a pricing signal.' });
   }
-  if (elapsed === 0) out.push({ severity: 'info', text: 'No month of this financial year has closed yet — every figure shown is budget.' });
+  // Said as it is: the actuals on screen are what has been booked so far, and
+  // the period may be a single month in progress rather than a financial
+  // year. This used to claim every figure shown was budget.
+  if (elapsed === 0) out.push({ severity: 'info', text: 'No month of this period has closed yet — figures are what has been booked so far; budget comparisons start when a month closes.' });
   return out;
 }
 
