@@ -40,6 +40,10 @@ ZONE="${DEPLOY_ZONE:-us-central1-a}"
 # on this machine for another Google project reset the default, and the deploy
 # then asked a project with no Compute Engine at all for the VM.
 PROJECT="${DEPLOY_PROJECT:-steady-hallway-504812-d1}"
+# The same for the account: only this one can reach the project, and a login
+# for another account makes gcloud use that one by default, which then lacks
+# compute.instances.get. It must already be logged in (gcloud auth login).
+ACCOUNT="${DEPLOY_ACCOUNT:-wkang@flovon.ai}"
 APP="${DEPLOY_PATH:-/home/weika/xero-invoice-app}"
 RUNAS="${DEPLOY_USER:-weika}"
 HEALTH="${DEPLOY_HEALTH:-https://34-45-253-162.sslip.io/dashboard/health}"
@@ -159,7 +163,7 @@ remote() {
     rc=0; start=$SECONDS
     # stdin from a pipe, not /dev/null, for the reason given at the login check.
     : | "$TIMEOUT" --foreground -k 10 "$limit" \
-      gcloud compute ssh "$INSTANCE" --zone="$ZONE" --project="$PROJECT" --quiet \
+      gcloud compute ssh "$INSTANCE" --zone="$ZONE" --project="$PROJECT" --account="$ACCOUNT" --quiet \
         --command="sudo -u $RUNAS -H bash -lc \"cd $APP && $1\"" \
       >"$TMP/out" 2>"$TMP/err" || rc=$?
     [ "$rc" -ne 0 ] && google_api_hiccup && [ "$attempt" -lt 3 ] || break
@@ -195,7 +199,7 @@ unreachable() {
   {
     red "✗ $1, while running: $2"
     tail -n 8 "$TMP/err" 2>/dev/null | tr -d '\r' | sed 's/^/      /'
-    info "check the VM is running and that 'gcloud compute ssh $INSTANCE --zone=$ZONE --project=$PROJECT' works by hand"
+    info "check the VM is running and that 'gcloud compute ssh $INSTANCE --zone=$ZONE --project=$PROJECT --account=$ACCOUNT' works by hand"
   } >&2 || true
   kill -TERM "$$"
   exit 1
@@ -228,8 +232,8 @@ command -v gcloud >/dev/null 2>&1 || die "gcloud is not installed (or not on PAT
 # outliving the timeout (which signals the sh wrapper, not python.exe). A pipe
 # is not a terminal, and gcloud then fails at once with "Reauthentication
 # failed".
-: | "$TIMEOUT" --foreground -k 5 60 gcloud auth print-access-token >/dev/null 2>&1 \
-  || die "gcloud login expired — run: gcloud auth login"
+: | "$TIMEOUT" --foreground -k 5 60 gcloud auth print-access-token --account="$ACCOUNT" >/dev/null 2>&1 \
+  || die "gcloud login for $ACCOUNT is missing or expired — run: gcloud auth login $ACCOUNT"
 if [ "$CHECK_ONLY" != "1" ] && [ "${SKIP_CI:-0}" != "1" ]; then
   command -v gh >/dev/null 2>&1 \
     || die "gh (GitHub CLI) is not installed, so CI cannot be checked — install it, or run with SKIP_CI=1 to deploy without CI"
