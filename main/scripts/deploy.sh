@@ -158,13 +158,23 @@ TIMEOUT=$(command -v timeout || command -v gtimeout || true)
 # box, so running it again cannot do anything twice. A deploy stopped on one
 # such 502 on 2026-10-07.
 remote() {
-  local limit="${2:-$SSH_TIMEOUT}" rc attempt start
+  local limit="${2:-$SSH_TIMEOUT}" rc attempt start cmd="$1"
+  # A long command that writes only to a log (npm ci, the tests, the build)
+  # leaves the ssh channel silent for minutes, and twice on 2026-10-09 the
+  # client dropped it partway: plink exit 1, no error text. So a command with
+  # a long limit is run in the background on the box while a dot is written to
+  # stderr every 15 seconds until it ends. The dots keep the channel busy, land
+  # in $TMP/err where nothing reads them, and `wait` hands back the command's
+  # own status. The \$ are resolved on the box, as in every call site.
+  if [ "$limit" -gt "$SSH_TIMEOUT" ]; then
+    cmd="( $1 ) & "'__p=\$!; while kill -0 \$__p 2>/dev/null; do sleep 15; printf . >&2; done; wait \$__p'
+  fi
   for attempt in 1 2 3; do
     rc=0; start=$SECONDS
     # stdin from a pipe, not /dev/null, for the reason given at the login check.
     : | "$TIMEOUT" --foreground -k 10 "$limit" \
       gcloud compute ssh "$INSTANCE" --zone="$ZONE" --project="$PROJECT" --account="$ACCOUNT" --quiet \
-        --command="sudo -u $RUNAS -H bash -lc \"cd $APP && $1\"" \
+        --command="sudo -u $RUNAS -H bash -lc \"cd $APP && $cmd\"" \
       >"$TMP/out" 2>"$TMP/err" || rc=$?
     [ "$rc" -ne 0 ] && google_api_hiccup && [ "$attempt" -lt 3 ] || break
     info "Google's API had a temporary error (attempt $attempt); trying again in $((attempt * 20))s" >&2
