@@ -14,6 +14,7 @@
 //   ./summary            receivables and payables, right now
 //   ./bank               bank statement, Bank Summary, bank account currencies
 //   ./budget-variance    Budget vs Actual, and the P&L rows the rest read
+//   ./budget-check       the grid checked against Xero another way
 //   ./performance        the dashboard figures
 //   ./ageing             receivables and payables by age and by contact
 //   ./cash-flow-report   the Cash Flow tab, fetched (./cash-flow does the sums)
@@ -40,6 +41,7 @@ const {
   _reportLines, _pnlCallPlan, _buildBudgetVariance, _mergeChunks, _cents, _netRow,
   _mapWithConcurrency, _variancePct, _sectionKind,
 } = require('./budget-variance');
+const { getBudgetCheck } = require('./budget-check');
 const {
   getPerformance,
   _buildCustomerRevenue, _buildQuotePipeline, _growthPct, _buildGrowth, _sectionTotal,
@@ -117,7 +119,7 @@ const {
 module.exports = {
   FORCE_GRACE_MS, DIRECTORY_TTL_MS,
   getSummary, getAccounts, getBankAccounts, getContacts,
-  getBankTransactions, getBankSummary, getBudgetVariance, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
+  getBankTransactions, getBankSummary, getBudgetVariance, getBudgetCheck, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
   getAgeing, _buildAgeing, _creditsOf,
   _buildSummary, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildBankSummary,

@@ -87,6 +87,13 @@ router.get('/bank-transactions', requireAuth, report('Insights bank transactions
 // financial year.
 router.get('/budget-variance', requireAuth, report('Budget vs Actual',
   (req, t) => reports.getBudgetVariance(req.user.id, t, { timezone: tz(req), force: force(req), period: _budgetPeriodFromQuery(req) })));
+// The grid above checked against Xero another way: up to three read-only
+// calls that use no comparison periods, compared line by line with the grid
+// for the same period (see xero/budget-check.js). Same query as the grid, so
+// what is checked is what is on screen. A failure to reach Xero is an error
+// here, never an "agrees".
+router.get('/budget-check', requireAuth, report('Budget check',
+  (req, t) => reports.getBudgetCheck(req.user.id, t, { timezone: tz(req), force: force(req), period: _budgetPeriodFromQuery(req) })));
 // Powers Dashboard -> Overview and Revenue. Composed from the budget-variance
 // fetch plus a bank summary, so it needs no scope those two don't already have.
 // ?compare=prior-year adds the same months last year (one more budget-variance

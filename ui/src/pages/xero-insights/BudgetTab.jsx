@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { fmtCell, isNilAmount } from '../../utils/format';
 import { BudgetExport } from './BudgetExport';
 import { BudgetGrid } from './BudgetGrid';
+import { XeroCheckPanel } from './XeroCheckPanel';
 import { BudgetMissingNote, SourceNote, closedRange, isFullYear, lastLoaded, soFarCaption, soFarRead } from './bits';
 
 // A tile's figure is coloured by its sign, as the grid colours a cell; nil
@@ -8,6 +10,10 @@ import { BudgetMissingNote, SourceNote, closedRange, isFullYear, lastLoaded, soF
 const signTone = v => (isNilAmount(v) ? undefined : v < 0 ? 'var(--danger)' : 'var(--success)');
 
 export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }) {
+  // The check against Xero opens on request only — it costs up to three Xero
+  // calls — and is keyed on the query, so a change of period checks the new one.
+  const [checking, setChecking] = useState(false);
+  const ready = budget.status === 'done' && !budget.error;
   return (
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
@@ -19,12 +25,17 @@ export default function BudgetTab({ budget, fetchBudget, currency, exportQuery }
               <SourceNote>Xero Profit &amp; Loss (actuals) + Budget Summary — Overall Budget</SourceNote>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <BudgetExport kind="grid" query={exportQuery} disabled={budget.status !== 'done' || !!budget.error} />
+              <BudgetExport kind="grid" query={exportQuery} disabled={!ready} />
               <button className="btn btn-outline btn-sm" disabled={budget.status === 'loading'} onClick={() => fetchBudget({ force: true })}>
                 {budget.status === 'loading' ? <span className="btn-spinner" /> : '↻'} Refresh
               </button>
+              <button className="btn btn-outline btn-sm" disabled={!ready} aria-expanded={checking} onClick={() => setChecking(c => !c)}>
+                ✓ Check against Xero
+              </button>
             </div>
           </div>
+
+          {checking && ready && <XeroCheckPanel key={JSON.stringify(exportQuery)} query={exportQuery} onClose={() => setChecking(false)} />}
 
           {budget.status === 'loading' && <div style={{ padding: 28, color: 'var(--text-muted)', fontSize: 13 }}>Loading budget report...</div>}
 

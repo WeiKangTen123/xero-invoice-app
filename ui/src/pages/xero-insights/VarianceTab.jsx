@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { fmtCell, fmtVariancePct, isNilAmount } from '../../utils/format';
 import { BudgetExport } from './BudgetExport';
 import { VarianceTable } from './VarianceTable';
+import { XeroCheckPanel } from './XeroCheckPanel';
 import {
   BudgetMissingNote, SourceNote, cumulativeLabel, lastLoaded, monthSelectable, soFarCaption, toDateText, varianceSelection,
 } from './bits';
@@ -23,6 +25,10 @@ export default function VarianceTab({ isMobile, monthsRef, monthEdges, budget, v
   // never the raw selection: a key left over from another period can name a
   // month that has not started, and the server refuses to export that.
   const selected = varianceSelection(budget.data, varianceMonth);
+  // The check against Xero opens on request only — it costs up to three Xero
+  // calls — and is keyed on the query, so a change of period checks the new one.
+  const [checking, setChecking] = useState(false);
+  const ready = budget.status === 'done' && !budget.error;
   return (
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
@@ -34,12 +40,17 @@ export default function VarianceTab({ isMobile, monthsRef, monthEdges, budget, v
               <SourceNote>Xero Profit &amp; Loss (actuals) vs Budget Summary — variance computed per Xero&apos;s formula</SourceNote>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <BudgetExport kind="variance" month={selected} query={exportQuery} disabled={budget.status !== 'done' || !!budget.error} />
+              <BudgetExport kind="variance" month={selected} query={exportQuery} disabled={!ready} />
               <button className="btn btn-outline btn-sm" disabled={budget.status === 'loading'} onClick={() => fetchBudget({ force: true })}>
                 {budget.status === 'loading' ? <span className="btn-spinner" /> : '↻'} Refresh
               </button>
+              <button className="btn btn-outline btn-sm" disabled={!ready} aria-expanded={checking} onClick={() => setChecking(c => !c)}>
+                ✓ Check against Xero
+              </button>
             </div>
           </div>
+
+          {checking && ready && <XeroCheckPanel key={JSON.stringify(exportQuery)} query={exportQuery} onClose={() => setChecking(false)} />}
 
           {budget.status === 'loading' && <div style={{ padding: 28, color: 'var(--text-muted)', fontSize: 13 }}>Loading variance report...</div>}
           {budget.error && <div className="alert alert-error" style={{ marginTop: 14 }}><span className="alert-icon">✕</span>{budget.error}</div>}
