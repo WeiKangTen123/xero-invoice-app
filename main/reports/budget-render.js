@@ -288,4 +288,9 @@ function budgetVarianceWorkbook(payload, opts = {}) {
   return wb;
 }
 
-module.exports = { streamPdf, budgetVsActualWorkbook, budgetVarianceWorkbook, FONTS, MONEY_FMT, PCT_FMT };
+module.exports = {
+  streamPdf, budgetVsActualWorkbook, budgetVarianceWorkbook, FONTS, MONEY_FMT, PCT_FMT,
+  // The workbook furniture, shared with the other report exports
+  // (balance-doc.js) so every sheet opens with the same title block.
+  ARGB, _workbook, _sheetHeader, _num: num,
+};

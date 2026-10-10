@@ -753,6 +753,14 @@ module.exports = {
   dayLabel,
   BUDGET_MISSING,
   NOT_BUDGETED,
+  // The page furniture, shared with the other report exports (balance-doc.js)
+  // so every report prints with the same header, footer and type.
+  pageHeader,
+  pageFooter,
+  STYLES,
+  FOLDED_NOTE,
+  _hasFolded: hasFolded,
+  _colours: { ACCENT, MUTED, RULE, NEGATIVE, POSITIVE, AMBER, AMBER_TINT, BAND },
   // exported for tests
   _cell: cell, _money: money, _pct: pct, _pctCell: pctCell, _currencyNote: currencyNote, _latin1: latin1,
   _pdfLabel: pdfLabel, _isNil: isNil,
