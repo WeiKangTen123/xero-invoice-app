@@ -7,6 +7,7 @@ const budgetDoc        = require('../reports/budget-doc');
 const budgetRender     = require('../reports/budget-render');
 const tokenCache        = require('../utils/token-cache');
 const reports           = require('../xero/reports');
+const changeDetector    = require('../xero/change-detector');
 const { _periodFromQueryParams, _isPeriodError, PeriodError } = require('../xero/periods');
 const { xeroErrMsg, isScopeError } = require('../xero/xero-utils');
 const { getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
@@ -54,6 +55,8 @@ function report(label, fetch, { needs = [], check = null } = {}) {
     try {
       const { tenants, tenantId } = _resolveTenant(req);
       if (!tenantId) return res.json({ connected: false, tenants: [] });
+      // Someone is looking at this company, so the change detector looks at it more often; a failure to note that must not cost the report.
+      try { changeDetector.noteViewed(req.user.id, tenantId); } catch (err) { logger.warn('Could not note a report view', { error: err.message, userId: req.user.id }); }
       for (const q of needs) if (!req.query[q]) return res.status(400).json({ error: `${q} is required` });
       const refused = check && check(req);
       if (refused) return res.status(400).json({ error: refused });
@@ -73,6 +76,24 @@ function _periodRefused(res, label, req, err) {
   logger.info(`${label}: period refused`, { userId: req.user.id, reason: err.message });
   return res.status(400).json({ error: err.message });
 }
+
+// GET /api/xero-reports/version?tenantId=
+// Whether Xero has changed since the reports on screen were read: the page
+// polls this and refetches when changedAt moves (xero/change-detector.js).
+// One SQLite read and never a Xero call, so it is safe to ask every few
+// seconds; index.js keeps it out of the access log for the same reason.
+// `live` false with `liveReason` says why the company is not being watched
+// (the journals scope, the connection, the daily allowance).
+router.get('/version', requireAuth, asyncHandler(async (req, res) => {
+  const { tenantId } = _resolveTenant(req);
+  if (!tenantId) return res.json({ connected: false, tenantId: null, changedAt: null, changeReason: null, checkedAt: null, live: false, liveReason: null });
+  // A page polling this is a page being looked at: it keeps the detector on
+  // its two-minute cadence for this company, the way a report fetch does.
+  // Otherwise a Dashboard left open fell to the idle cadence after ten
+  // minutes and its "live" update arrived up to fifteen minutes late.
+  try { changeDetector.noteViewed(req.user.id, tenantId); } catch (err) { logger.warn('Could not note a Dashboard view', { error: err.message }); }
+  res.json({ connected: true, tenantId, ...changeDetector.version(req.user.id, tenantId) });
+}));
 
 router.get('/summary',       requireAuth, report('Insights summary',       (req, t) => reports.getSummary(req.user.id, t, { force: force(req) })));
 router.get('/accounts',      requireAuth, report('Insights accounts',      (req, t) => reports.getAccounts(req.user.id, t, { force: force(req) })));

@@ -164,8 +164,20 @@ function clearCache(userId) {
   }
 }
 
+// Called by the change detector (change-detector.js) when Xero has something
+// new for one company: its reports are read again on the next request, and
+// every other company's, and every other user's, stay as they are. Every key
+// here is `<report>:<userId>:<tenantId>` followed by `:<range...>` or nothing,
+// so the tenant is matched whole — not as the start of a longer ID.
+function clearTenant(userId, tenantId) {
+  const whole = `:${userId}:${tenantId}`;
+  for (const key of _cache.keys()) {
+    if (key.endsWith(whole) || key.includes(`${whole}:`)) _cache.delete(key);
+  }
+}
+
 module.exports = {
   CACHE_TTL_MS, DIRECTORY_TTL_MS, CACHE_MAX_ENTRIES, FORCE_GRACE_MS, _cache,
   _pruneCache, _cacheGet, _cacheSet, _canonical, _dedupeKey, _dedupe,
-  TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _periodCacheTtl, clearCache,
+  TTL_OPEN_MS, TTL_RECENT_MS, TTL_CLOSED_MS, _periodCacheTtl, clearCache, clearTenant,
 };

@@ -192,6 +192,41 @@ as usual, and `npm run deploy -- --check` reports the drift until then.
   shows its settings. To install it by hand:
   `pm2 install pm2-logrotate && pm2 set pm2-logrotate:max_size 10M && pm2 set pm2-logrotate:retain 10 && pm2 set pm2-logrotate:compress true`.
 
+## Live updates
+
+The reports refresh themselves when Xero changes. `main/jobs/xero-change-detector.js`
+ticks every minute and, for each active account's companies that are due,
+`main/xero/change-detector.js` asks Xero two small read-only questions:
+`GET /Journals` with `offset` set to the last journal number seen (journals
+are numbered in order and never altered, so anything numbered past it is
+new) and `If-Modified-Since` five minutes before the last look, and
+`GET /Budgets` for the newest `UpdatedDateUTC`. Either moving drops that
+company's report cache and records the change in `xero_change_cursor`; the
+page polls `GET /api/xero-reports/version` (one SQLite read, never a Xero
+call, kept out of the access log) and refetches when `changedAt` moves.
+
+- **How often.** A company someone has had a report of on screen in the last
+  ten minutes: every two minutes. Any other: every fifteen. Two calls a look,
+  so a watched company costs about 60 calls an hour.
+- **The scope.** Reading journals needs `accounting.journals.read`. Like
+  `accounting.attachments` it is asked for by the Web app (OAuth) consent
+  only: a Custom Connection cannot be granted it, and a client-credentials
+  request that names it would be refused outright. A Web app connection made
+  before it was added lists it under `missingScopes` in
+  `GET /api/xero/connection` and must be reconnected once in Setup. Until
+  then, and for every Custom Connection, the reports work as before and
+  `version` answers `live: false` with the reason in `liveReason`.
+- **The daily allowance.** When Xero last reported fewer than 50 calls left
+  for the day for a company, or its daily limit hit, the company is not
+  polled (`liveReason: "daily allowance low"`) until a later call shows the
+  allowance back.
+- **Is it working?** `GET /api/xero-reports/version?tenantId=…` as the user:
+  `checkedAt` moves on every look, `live` is true, and `changedAt` moves
+  (with `changeReason`, e.g. `3 new journals`) when something was posted.
+  `logs/combined.log` has `Xero change detector scheduled` at boot and
+  `Xero change detected` for each change; a company that could not be read
+  logs `Xero change check failed` and is left alone for fifteen minutes.
+
 ## Keys
 
 - Rotate `JWT_SECRET`: change it in `.env`, `pm2 restart`; everyone logs in

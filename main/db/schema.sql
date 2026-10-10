@@ -243,6 +243,26 @@ CREATE TABLE IF NOT EXISTS xero_status_sync (
   PRIMARY KEY (user_id, tenant_id)
 );
 
+-- Live updates (xero/change-detector.js): where the last look at each
+-- company's journal got to (last_journal_number, the newest budget edit),
+-- when it was taken, when a change was last noticed and why, when someone
+-- last had a report of the company on screen (which sets how often it is
+-- looked at), and whether looking is possible at all (live, live_reason:
+-- the journals scope, the connection, the daily allowance).
+CREATE TABLE IF NOT EXISTS xero_change_cursor (
+  user_id             TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tenant_id           TEXT NOT NULL,
+  last_journal_number INTEGER,
+  last_poll_at        TEXT,
+  last_budget_updated TEXT,
+  changed_at          TEXT,
+  change_reason       TEXT,
+  last_viewed_at      TEXT,
+  live                INTEGER,
+  live_reason         TEXT,
+  PRIMARY KEY (user_id, tenant_id)
+);
+
 -- 1:many — invoice reports (was invoices[i].reports[])
 CREATE TABLE IF NOT EXISTS invoice_reports (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,

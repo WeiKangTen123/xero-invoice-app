@@ -404,10 +404,18 @@ const SCOPES = 'accounting.invoices accounting.contacts accounting.settings.read
 // Connection set up without it. Those connections post as before, and an
 // attachment that is refused leaves a note on the row (xero/invoices.js).
 const ATTACHMENTS_SCOPE = 'accounting.attachments';
-const OAUTH_SCOPES = `${SCOPES} ${ATTACHMENTS_SCOPE}`;
+// Live updates (xero/change-detector.js) notice a change in Xero by reading
+// the journal numbers posted since the last look, which needs this. Web app
+// only, for the same reason as attachments: named in a client-credentials
+// request it was never granted, it would stop the Custom Connection from
+// connecting at all. The detector simply does not run for a connection
+// without it, and says so; a Web app connection made before it was added
+// shows it as missing (GET /api/xero/connection) until reconnected once.
+const JOURNALS_SCOPE = 'accounting.journals.read';
+const OAUTH_SCOPES = `${SCOPES} ${ATTACHMENTS_SCOPE} ${JOURNALS_SCOPE}`;
 
 module.exports = {
-  withRetry, xeroErrMsg, _parseXeroErr, isScopeError, SCOPES, OAUTH_SCOPES, ATTACHMENTS_SCOPE,
+  withRetry, xeroErrMsg, _parseXeroErr, isScopeError, SCOPES, OAUTH_SCOPES, ATTACHMENTS_SCOPE, JOURNALS_SCOPE,
   XeroReconnectError, reconnectReason, tokenErrorCode, isReconnectError, credentialFingerprint, grantedScopesFrom,
   getRateLimitBudget, MAX_RATE_LIMIT_WAIT_MS, DEFAULT_RECONNECT_REASON,
   _recordRateLimit, _recordFromResponse, _dailyLimitMsg,

@@ -176,7 +176,7 @@ function redactUrl(url) {
 // load pulls fingerprinted assets. Logged, they were most of combined.log, and
 // its 50MB cap rotated the lines worth keeping — sign-ins, admin actions,
 // errors — out within days. A failure of any of them is still logged.
-const QUIET_PATHS = new Set(['/api/process/status', '/api/claims/active', '/dashboard/health', '/api/dashboard/health']);
+const QUIET_PATHS = new Set(['/api/process/status', '/api/claims/active', '/api/xero-reports/version', '/dashboard/health', '/api/dashboard/health']);
 const STATIC_FILE = /\.(?:js|mjs|css|map|ico|png|jpe?g|gif|svg|webp|avif|woff2?|ttf|otf|webmanifest|txt)$/i;
 function quietRequest(req, res) {
   if (res.statusCode >= 400) return false;
@@ -494,6 +494,8 @@ const server = app.listen(PORT, HOST, () => {
   startXeroKeepalive();
   // Reads Xero's status for posted documents every 3 hours; like the keep-alive, a missing module or a throw only warns.
   Promise.resolve().then(() => require('./jobs/xero-status-sync').start()).catch(err => logger.warn('Xero status sync start failed', { error: err?.message || String(err) }));
+  // Looks for changes in Xero every minute so the reports refresh themselves (jobs/xero-change-detector.js); guarded the same way.
+  Promise.resolve().then(() => require('./jobs/xero-change-detector').start()).catch(err => logger.warn('Xero change detector start failed', { error: err?.message || String(err) }));
 });
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────

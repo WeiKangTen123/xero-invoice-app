@@ -64,6 +64,9 @@ const USED = {
   getTaxRates:           ['xeroTenantId'],
   getBrandingThemes:     ['xeroTenantId'],
   getBudgets:            ['xeroTenantId'],
+  // change-detector: If-Modified-Since (1) and the journal-number offset (2);
+  // swapped, the cursor would go out as a date and every look would start over
+  getJournals:           ['xeroTenantId', 'ifModifiedSince', 'offset'],
 };
 
 describe('xero/sdk-contract — argument positions the app passes', () => {
