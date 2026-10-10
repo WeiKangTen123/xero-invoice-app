@@ -243,6 +243,23 @@ describe('Xero call budget — identical work is fetched once', () => {
     await reports.getVarianceInsights(U, T2, { period: { preset: 'fy' }, force: true });
     expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
   });
+
+  test('a cold Dashboard load reads the organisation once: the summary and Budget vs Actual share it', async () => {
+    // Each used to read the record for itself, so the first paint asked Xero
+    // for the same organisation twice within the second. Together, as the
+    // page fires them, they share one in-flight read...
+    const T2 = 't-one-org';
+    await Promise.all([
+      reports.getSummary(U, T2),
+      reports.getBudgetVariance(U, T2, { period: { preset: 'fy' } }),
+    ]);
+    expect(api.getOrganisations).toHaveBeenCalledTimes(1);
+    // ...and one after the other, the second reads the first's entry.
+    const T3 = 't-one-org-seq';
+    await reports.getSummary(U, T3);
+    await reports.getBudgetVariance(U, T3, { period: { preset: 'fy' } });
+    expect(api.getOrganisations).toHaveBeenCalledTimes(2);   // one per tenant
+  });
 });
 
 describe('Xero call contract — invoice paging', () => {

@@ -358,9 +358,13 @@ describe('xero/reports — getSummary caching', () => {
   test('force:true refetches once the entry is older than the grace window, and reuses a fresher one', async () => {
     await reports.getSummary('user-1', 'tenant-1');
     await reports.getSummary('user-1', 'tenant-1', { force: true });          // seconds old: reused
+    expect(getInvoices).toHaveBeenCalledTimes(1);
     expect(getOrganisations).toHaveBeenCalledTimes(1);
-    reports._cache.get('summary:user-1:tenant-1').fetchedAt -= reports.FORCE_GRACE_MS + 1;
+    // The organisation record is cached in its own entry beside the summary's
+    // (see _getOrganisation), so a refresh past the grace re-reads both.
+    for (const [k, v] of reports._cache) if (k.includes(':user-1:tenant-1')) v.fetchedAt -= reports.FORCE_GRACE_MS + 1;
     await reports.getSummary('user-1', 'tenant-1', { force: true });          // past the grace: refetched
+    expect(getInvoices).toHaveBeenCalledTimes(2);
     expect(getOrganisations).toHaveBeenCalledTimes(2);
   });
 

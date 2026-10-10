@@ -1,7 +1,6 @@
-const { withRetry }      = require('./xero-utils');
 const logger             = require('../utils/logger');
 const { _cacheGet, _cacheSet, _dedupe } = require('./report-cache');
-const { _apiFor, _allInvoices, LIST_PAGE_SIZE, LIST_MAX_PAGES } = require('./report-fetch');
+const { _apiFor, _allInvoices, _getOrganisation, LIST_PAGE_SIZE, LIST_MAX_PAGES } = require('./report-fetch');
 const { _toBase, _foreignCurrency } = require('./currency');
 const { _raisedByMonth } = require('./cash-flow');
 
@@ -162,12 +161,16 @@ async function _getSummaryRaw(userId, tenantId, { force = false } = {}) {
   const token      = await tokenCache.getValidToken(tenantId);
   const api        = _apiFor(token);
 
-  const [orgRes, invoices] = await Promise.all([
-    withRetry(() => api.getOrganisations(tenantId)),
+  // The organisation record comes through the one cached, shared read of it
+  // (see _getOrganisation in ./report-fetch). The summary read it directly,
+  // and so did Budget vs Actual, so a cold Dashboard load asked Xero for the
+  // same record twice within the second. `force` is passed on: a refresh past
+  // the grace window re-reads the organisation with everything else.
+  const [org, invoices] = await Promise.all([
+    _getOrganisation(userId, tenantId, force),
     _allInvoices(api, tenantId, { order: 'Date DESC', statuses: ['AUTHORISED', 'PAID'] }),
   ]);
 
-  const org  = orgRes.body.organisations?.[0] || {};
   const data = _buildSummary(org, invoices);
   _cacheSet(_outstandingKey(userId, tenantId), {
     baseCurrency: org.baseCurrency || '',

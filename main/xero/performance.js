@@ -1,6 +1,6 @@
 const { isScopeError }   = require('./xero-utils');
 const logger             = require('../utils/logger');
-const { _dedupe }        = require('./report-cache');
+const { _cacheGet, _cacheSet, _dedupe, _periodCacheTtl } = require('./report-cache');
 const { _apiFor, _allInvoices, _allPages } = require('./report-fetch');
 const { getSummary }     = require('./summary');
 const { getBankSummary, _bankAccountList } = require('./bank');
@@ -14,6 +14,7 @@ const {
   _fmtXeroDate,
   _isPeriodError,
   _monthMeta,
+  _monthsBetween,
   _parseISODate,
   _todayPartsInTz,
 } = require('./periods');
@@ -24,7 +25,9 @@ const {
 // getPerformance keeps no cache entry of its own. It is built from
 // getBudgetVariance's rows, getBankSummary's balances and getSummary's totals,
 // each cached where it is fetched — so the Cash Flow tab and the AI
-// commentary, which both start from it, read those same entries.
+// commentary, which both start from it, read those same entries. The Revenue
+// tab's extras, top customers and the quote pipeline, are the one part fetched
+// here, and they are cached here (see _getRevenueExtras).
 
 // ── Performance overview (Dashboard → Overview + Revenue) ───────────────────
 // Composed entirely from data already fetched elsewhere: getBudgetVariance
@@ -361,6 +364,81 @@ function _buildQuotePipeline(quotes = [], baseCurrency = '', { todayISO = new Da
   };
 }
 
+// ── Top customers and the quote pipeline (Revenue tab) ──────────────────────
+// Only the Revenue tab asks for these, and they were read from Xero on every
+// visit to it: every report getPerformance is built from is cached where it is
+// fetched, and these two were fetched here, in a function with no entry of its
+// own. On an API billed by data volume that was every sales invoice of the
+// period, and every quote raised since it began, each time the tab was opened.
+//
+// Cached under their own key for as long as the period's figures are (see
+// _periodCacheTtl): five minutes while the period is still running, hours once
+// it has settled. The key is the period's months, so two periods are two
+// entries, as they are for Budget vs Actual. `force` bypasses the entry as it
+// does for every report, within the grace window.
+//
+// The pipeline judges each quote live or expired as of the day it was fetched,
+// so a quote expiring tonight can show as live for the entry's remaining life
+// tomorrow morning. For a period that includes today, the one a pipeline is
+// normally read against, that is five minutes at most.
+async function _getRevenueExtrasRaw(userId, tenantId, { fromKey, toKey, baseCurrency = '', timezone = 'UTC', force = false }) {
+  const key    = `perfcustomers:${userId}:${tenantId}:${fromKey}:${toKey}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached;
+
+  const months     = _monthsBetween(fromKey, toKey);
+  const todayParts = _todayPartsInTz(timezone);
+  const today      = _fmtISODate(todayParts);
+  const fromISO    = months[0].startISO;
+  const tokenCache = require('../utils/token-cache').forUser(userId);
+  const api        = _apiFor(await tokenCache.getValidToken(tenantId));
+
+  const start = _parseISODate(fromISO);
+  const endEx = _addDays(_parseISODate(months[months.length - 1].endISO), 1); // Xero's upper bound is exclusive
+  const where = `Type=="ACCREC" && Date >= ${_fmtXeroDate(start)} && Date < ${_fmtXeroDate(endEx)}`;
+  const invoices = await _allInvoices(api, tenantId, { where, order: 'Date DESC', statuses: ['AUTHORISED', 'PAID'] });
+  const customerRevenue = _buildCustomerRevenue(invoices, baseCurrency);
+
+  // Quoted-but-not-invoiced work exists commercially and nowhere in the
+  // accounts, so the forward view otherwise stops at issued invoices.
+  //
+  // The period rule: quotes DATED on or after the first day of the period on
+  // screen, with no upper bound, and judged live or expired as of today. The
+  // pipeline is what is open now, so a quote raised after the period still
+  // counts; the lower bound is a cost bound, because an unfiltered call
+  // returned every quote the org ever raised. A quote raised before the period
+  // that is still open is therefore not counted, which is why the payload says
+  // where the window starts. Paged like every other list (see _allPages).
+  let quotes;
+  try {
+    quotes = await _allPages(page => api.getQuotes(
+      tenantId, undefined, fromISO, undefined, undefined, undefined, undefined, undefined, page,
+    ), 'quotes', { what: 'Quote', tenantId });
+  } catch (err) {
+    // One card out of many: the customers are still shown. Nothing is cached,
+    // so the next visit asks for the quotes again rather than showing the card
+    // blank for the life of an entry.
+    logger.warn('Performance: quotes unavailable', { userId, tenantId, error: err.message });
+    return { customerRevenue, quotePipeline: _noQuotePipeline() };
+  }
+  const quotePipeline = { ..._buildQuotePipeline(quotes, baseCurrency, { todayISO: today }), fromISO };
+  logger.info('Performance: top customers and quotes fetched', {
+    userId, tenantId, range: `${fromKey}..${toKey}`, invoices: invoices.length, quotes: quotes.length,
+  });
+  return _cacheSet(key, { customerRevenue, quotePipeline }, _periodCacheTtl(months, todayParts));
+}
+
+// What the Revenue tab shows while a figure is missing: the same shape, so
+// the screen never has to check for it.
+const _noCustomerRevenue = () => ({ customers: [], total: 0, count: 0, average: null, available: false });
+const _noQuotePipeline   = () => ({ sent: 0, accepted: 0, total: 0, counts: { sent: 0, accepted: 0 }, expired: { count: 0, total: 0 }, available: false });
+
+// Bound through the one in-flight map, so two requests for the same period's
+// extras share one read of Xero whatever else they ask for (the Revenue tab
+// with and without the period's cash movement are two getPerformance requests,
+// and one fetch of these).
+const _getRevenueExtras = _dedupe('_getRevenueExtras', _getRevenueExtrasRaw, { timezone: 'UTC', force: false });
+
 // ── Same months last year (Overview + Profitability) ────────────────────────
 // Year on year in _buildGrowth needs thirteen closed months inside the period,
 // and every preset is twelve or fewer, so it never had a figure to show. This
@@ -587,36 +665,15 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
   }
 
   // Only the Revenue tab shows this, so Overview never pays for the extra call.
-  let customerRevenue = { customers: [], total: 0, count: 0, average: null, available: false };
-  let quotePipeline   = { sent: 0, accepted: 0, total: 0, counts: { sent: 0, accepted: 0 }, expired: { count: 0, total: 0 }, available: false };
+  // Asked for by the period's months, as the entry is keyed (see
+  // _getRevenueExtras), with the same `force` as the rest of the report.
+  let customerRevenue = _noCustomerRevenue();
+  let quotePipeline   = _noQuotePipeline();
   if (customers) {
     try {
-      const tokenCache = require('../utils/token-cache').forUser(userId);
-      const api = _apiFor(await tokenCache.getValidToken(tenantId));
-      const start = _parseISODate(bv.fiscalYear.fromISO);
-      const endEx = _addDays(_parseISODate(bv.fiscalYear.toISO), 1); // Xero's upper bound is exclusive
-      const where = `Type=="ACCREC" && Date >= ${_fmtXeroDate(start)} && Date < ${_fmtXeroDate(endEx)}`;
-      const fyInvoices = await _allInvoices(api, tenantId, { where, order: 'Date DESC', statuses: ['AUTHORISED', 'PAID'] });
-      customerRevenue = _buildCustomerRevenue(fyInvoices, baseCurrency);
-
-      // Quoted-but-not-invoiced work exists commercially and nowhere in the
-      // accounts, so the forward view otherwise stops at issued invoices.
-      try {
-        // The period rule: quotes DATED on or after the first day of the period
-        // on screen, with no upper bound, and judged live or expired as of
-        // today. The pipeline is what is open now, so a quote raised after the
-        // period still counts; the lower bound is a cost bound, because an
-        // unfiltered call returned every quote the org ever raised. A quote
-        // raised before the period that is still open is therefore not
-        // counted, which is why the payload says where the window starts.
-        // Paged like every other list (see _allPages).
-        const quotes = await _allPages(page => api.getQuotes(
-          tenantId, undefined, bv.fiscalYear.fromISO, undefined, undefined, undefined, undefined, undefined, page,
-        ), 'quotes', { what: 'Quote', tenantId });
-        quotePipeline = { ..._buildQuotePipeline(quotes, baseCurrency, { todayISO: today }), fromISO: bv.fiscalYear.fromISO };
-      } catch (qErr) {
-        logger.warn('Performance: quotes unavailable', { userId, tenantId, error: qErr.message });
-      }
+      ({ customerRevenue, quotePipeline } = await _getRevenueExtras(userId, tenantId, {
+        fromKey: bv.period.fromKey, toKey: bv.period.toKey, baseCurrency, timezone, force,
+      }));
     } catch (err) {
       // One card out of many — a failure here must not blank the tab.
       logger.warn('Performance: customer revenue unavailable', { userId, tenantId, error: err.message });
