@@ -191,3 +191,35 @@ export function KpiCard({ icon, tone, label, value, sub, onClick, active = false
     </div>
   );
 }
+
+// The line beside Refresh saying how current the figures are: when Xero was
+// last read for what is on screen, when the server last asked Xero whether
+// anything changed, and — when it cannot ask — that live updates are off and
+// why, with the way to Setup when a reconnect cures it. `label` is liveLabel's
+// output (live.js), so the wording runs in a test without React. `updated`
+// shows, for a few seconds, that a change seen in Xero has just brought new
+// figures in; it is a status region so a screen reader hears it once.
+export function LiveStatus({ label, updated = false, onSetup }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
+      <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', display: 'inline-block',
+                                        background: label.off ? 'var(--text-muted)' : 'var(--success)' }} />
+      <span title="When Xero was last read for the figures on screen">{label.asOf}</span>
+      {label.checked && <span title="When the server last asked Xero whether anything changed">{label.checked}</span>}
+      {label.off && (
+        <span title={label.reason || undefined}>
+          {label.off}
+          {label.reconnect && (
+            <> · <a href="/setup" style={{ color: 'var(--accent)', fontWeight: 600 }}
+                    onClick={e => { e.preventDefault(); onSetup?.(); }}>Setup</a></>
+          )}
+        </span>
+      )}
+      {updated && (
+        <span role="status" style={{ color: 'var(--success)', fontWeight: 600, animation: 'fadeIn .3s ease-out' }}>
+          Updated just now from Xero
+        </span>
+      )}
+    </div>
+  );
+}

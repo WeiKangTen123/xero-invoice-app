@@ -2,19 +2,22 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../api/client';
 import { useVisiblePolling } from '../../utils/useVisiblePolling';
+import { bannerTitle, bannerDetail } from '../../pages/xero-insights/live';
 
 // A Xero connection that has stopped working, said on every page rather than
 // only in Setup. A revoked or expired connection used to surface one failed
-// send at a time, on whichever document happened to be sent next; and a
+// send at a time, on whichever document happened to be sent next; a
 // connection made before attachments were asked for posts every bill without
-// its PDF, which nothing on screen mentioned at all.
+// its PDF, which nothing on screen mentioned at all; and one made before the
+// journals were asked for leaves the Dashboard unable to see when Xero
+// changes, so its figures wait for a Refresh. One reconnect cures the last
+// two, which is what the title says (see live.js#bannerTitle).
 //
 // Asked rarely: once on load, then every ten minutes while the tab is in view.
 // The answer changes when someone reconnects, which happens in Setup, and Setup
 // announces it (see 'xero-connection-changed') so the banner clears at once
 // instead of ten minutes later.
 const CHECK_EVERY_MS = 10 * 60 * 1000;
-const ATTACHMENTS_SCOPE = 'accounting.attachments';
 const DISMISSED_KEY = 'xeroBannerDismissed';
 
 // What to say, and a key naming the problem. Dismissing hides that problem for
@@ -27,9 +30,9 @@ function problemOf(c) {
     return { key: `reconnect:${c.reason || ''}`, title: 'Reconnect Xero in Setup',
              detail: c.reason || 'Xero is no longer accepting this connection, so nothing can be sent until it is reconnected.' };
   }
-  if (missing.includes(ATTACHMENTS_SCOPE)) {
-    return { key: `scopes:${[...missing].sort().join(',')}`, title: 'Reconnect Xero to allow attachments',
-             detail: c.reason || 'Bills and claims are reaching Xero without their PDF or receipt photo. Reconnecting asks Xero for that permission.' };
+  const scoped = bannerTitle(missing);
+  if (scoped) {
+    return { key: `scopes:${[...missing].sort().join(',')}`, title: scoped, detail: c.reason || bannerDetail(missing) };
   }
   if (missing.length) {
     return { key: `scopes:${[...missing].sort().join(',')}`, title: 'Reconnect Xero in Setup',

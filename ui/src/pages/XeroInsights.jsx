@@ -3,14 +3,15 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import RetryAlert from '../components/RetryAlert';
 import { useAuth } from '../context/AuthContext';
-import { formatRelative } from '../utils/formatDate';
+import { formatTime } from '../utils/formatDate';
 import { fmtMoney, fmtMoneyShort } from '../utils/format';
 import { useVisiblePolling } from '../utils/useVisiblePolling';
 import { useEdgeFade } from '../utils/useEdgeFade';
 import { useViewMode } from '../context/ViewModeContext';
 import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPanel, AnalysisPanel } from '../components/performance/PerformancePanels';
 import { balancesByName } from './xero-insights/balances';
-import { KpiCard, lastLoaded } from './xero-insights/bits';
+import { KpiCard, LiveStatus, lastLoaded } from './xero-insights/bits';
+import { hasChanged, shouldRefetchTab, oldestRead, liveLabel } from './xero-insights/live';
 import BankingTab from './xero-insights/BankingTab';
 import BudgetTab from './xero-insights/BudgetTab';
 import VarianceTab from './xero-insights/VarianceTab';
@@ -26,6 +27,12 @@ const COMPARE_TABS = ['overview', 'profit'];
 // the tab, so a reload or a shared link opens on it.
 const AGEING_SIDES = ['receivables', 'payables'];
 const AGEING_IDLE = { status: 'idle', data: null, error: '' };
+// How often the page asks the server whether Xero changed, while it is in
+// view. The server does the watching (xero-reports/version); this only asks
+// what it saw, so a minute costs nothing against the Xero allowance.
+const VERSION_EVERY_MS = 60 * 1000;
+// How long "Updated just now from Xero" stays on the status line.
+const UPDATED_NOTICE_MS = 8000;
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
@@ -107,7 +114,21 @@ export default function XeroInsights() {
   // when it opens; the cards sit directly above it and need no scroll.
   const scrollToAgeing = useRef(false);
   const [activeTenantId, setActiveTenantId] = useState(null);
-  const [, forceTick] = useState(0); // re-render every 15s so "synced Xs ago" stays live
+  // The server's word on whether Xero changed (see fetchVersion): the stamp of
+  // the last change it saw, when it last looked, and whether it can look at
+  // all. Null until the first read for the active organisation.
+  const [version, setVersion] = useState(null);
+  // The change stamp as of the previous read, for the active organisation:
+  // undefined before any read, so the first one records rather than reacts.
+  const seenChangedAt = useRef(undefined);
+  // A change seen but not yet acted on, and when the last one brought new
+  // figures in (the notice shows while that is set).
+  const [pendingChange, setPendingChange] = useState(null);
+  const [updatedAt, setUpdatedAt] = useState(null);
+  // The change each report was last re-asked for on being opened, so a report
+  // that comes back still stamped before the change — a cache entry the server
+  // kept — is asked for once per change, not on every render of its tab.
+  const reasked = useRef({});
 
 
   // Banking's account list, loaded lazily — the first time the tab is opened,
@@ -135,9 +156,10 @@ export default function XeroInsights() {
   // One counter per report. A response is applied only if no newer request for
   // that report was made since — two quick period changes could otherwise let
   // the slower, older answer land last and sit under the newer period's label.
-  // The summary, the bank account list and a bank statement are counted the
-  // same way, as a switch of organisation can leave any of them in flight.
-  const seq = useRef({ perf: 0, cashflow: 0, budget: 0, analysis: 0, summary: 0, banking: 0, statement: 0, ageingReceivables: 0, ageingPayables: 0 });
+  // The summary, the bank account list, a bank statement and the version read
+  // are counted the same way, as a switch of organisation can leave any of
+  // them in flight.
+  const seq = useRef({ perf: 0, cashflow: 0, budget: 0, analysis: 0, summary: 0, banking: 0, statement: 0, ageingReceivables: 0, ageingPayables: 0, version: 0 });
 
   // Performance overview — feeds BOTH the Overview and Revenue tabs from one
   // fetch. monthFrom/monthTo index into data.months, so changing the range
@@ -191,6 +213,9 @@ export default function XeroInsights() {
   // Only the newest summary is used. It also names the active organisation, so
   // a slow one — a forced refresh of the previous organisation, say — landing
   // after a switch used to switch the page back and reload everything for it.
+  // `quiet` is a re-read after a change seen in Xero: the figures stay up until
+  // the new ones land, and a failure keeps them rather than putting an error
+  // over figures that are still the last Xero gave.
   async function fetchSummary(opts = {}) {
     const n = ++seq.current.summary;
     const fresh = () => n === seq.current.summary;
@@ -208,7 +233,7 @@ export default function XeroInsights() {
       if (d.activeTenantId && loadedTenantRef.current === null) loadedTenantRef.current = d.activeTenantId;
       if (d.activeTenantId) setActiveTenantId(d.activeTenantId);
     } catch (err) {
-      if (fresh()) setError(err.message || 'Could not load the dashboard');
+      if (fresh() && !opts.quiet) setError(err.message || 'Could not load the dashboard');
     } finally {
       // A superseded refresh leaves the spinner to the request that replaced
       // it, which clears it when it lands.
@@ -222,7 +247,84 @@ export default function XeroInsights() {
 
 
 
+  // Whether Xero changed since the reports on screen were read, from the
+  // server: it watches Xero itself (new journals, a budget edit) and drops the
+  // company's cached reports when it sees a change, so after one a plain
+  // fetch of each is fresh — no force, and no second read of Xero from here.
+  // The first read for an organisation records where the stamp stands; a
+  // later one that finds it moved asks for everything on screen again (see
+  // refetchShown). `adopt` records without asking, after a manual Refresh
+  // that has already brought everything up to date. A failed read is not news
+  // about Xero: the status line keeps the last answer, and the next minute
+  // asks again.
+  async function fetchVersion({ adopt = false } = {}) {
+    const n = ++seq.current.version;
+    try {
+      const params = new URLSearchParams();
+      if (activeTenantId) params.set('tenantId', activeTenantId);
+      const v = await api.get(`/xero-reports/version?${params.toString()}`);
+      if (n !== seq.current.version) return;
+      setVersion(v);
+      const prev = seenChangedAt.current;
+      seenChangedAt.current = v.changedAt || null;
+      if (!adopt && hasChanged(prev, v.changedAt)) setPendingChange(v.changedAt);
+    } catch (_) {
+      // See above: nothing on screen changes for it.
+    }
+  }
+
+  // Everything on screen asked for again, quietly: the figures stay up until
+  // the new ones land, nothing says "loading", and a failure leaves the old
+  // figures rather than putting an error over them. Reports not on screen are
+  // left alone — the tab and ageing effects ask for them when next opened, as
+  // read before the change (shouldRefetchTab). The AI commentary is left alone
+  // too: it is regenerated on request from the Analysis tab, not spent on every
+  // journal Xero gains. The notice goes up once all of it has landed, so
+  // "updated" never runs ahead of the update.
+  async function refetchShown() {
+    const jobs = [fetchSummary({ quiet: true })];
+    if (PERF_TABS.includes(tab))                jobs.push(fetchPerf({ quiet: true }));
+    if (tab === 'cashflow')                     jobs.push(fetchCashflow({ quiet: true }));
+    if (tab === 'budget' || tab === 'variance') jobs.push(fetchBudget({ quiet: true }));
+    if (tab === 'banking')                      jobs.push(fetchBanking({ quiet: true }));
+    if (ageingSide)                             jobs.push(fetchAgeing(ageingSide, { quiet: true }));
+    await Promise.allSettled(jobs);
+    setUpdatedAt(Date.now());
+  }
+
+  // Whether a report read at `fetchedAt` must be asked for again on being
+  // opened, once per change (see `reasked`).
+  function staleOnOpen(key, fetchedAt) {
+    const changedAt = version?.changedAt;
+    if (!shouldRefetchTab(fetchedAt, changedAt) || reasked.current[key] === changedAt) return false;
+    reasked.current[key] = changedAt;
+    return true;
+  }
+
   useEffect(() => { fetchSummary(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Acted on in an effect rather than where it was seen, so the tab and the
+  // ageing side it reads are the ones open now, not the ones open when the
+  // question was asked a moment ago.
+  useEffect(() => {
+    if (!pendingChange) return;
+    setPendingChange(null);
+    refetchShown();
+  }, [pendingChange]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The version is read as soon as the organisation is known, and again on a
+  // switch: the stamp is per company, so the one seen for the previous
+  // company says nothing about the next, and the first read for it must
+  // record rather than react.
+  useEffect(() => {
+    if (!activeTenantId) return;
+    seenChangedAt.current = undefined;
+    reasked.current = {};
+    setVersion(null);
+    setPendingChange(null);
+    setUpdatedAt(null);
+    fetchVersion();
+  }, [activeTenantId]); // eslint-disable-line react-hooks/exhaustive-deps
   // A tenant is "loaded" once its summary is on screen. The first summary
   // resolves the default tenant, which used to re-trigger this effect: the
   // summary was fetched a second time and the performance report a third
@@ -265,10 +367,14 @@ export default function XeroInsights() {
   // The ageing is fetched when a side is opened and that side has not been
   // loaded yet: on opening it, on switching side, after a switch of
   // organisation, or on arriving with ?ageing= in the address. Waits for the
-  // summary, which it is built from, so the two share one read of Xero.
+  // summary, which it is built from, so the two share one read of Xero. A side
+  // read before the last change seen in Xero is asked for again, quietly, so
+  // what it shows stays up until the new figures land.
   useEffect(() => {
-    if (!ageingSide || !data?.connected || ageing[ageingSide].status !== 'idle') return;
-    fetchAgeing(ageingSide);
+    if (!ageingSide || !data?.connected) return;
+    const s = ageing[ageingSide];
+    if (s.status === 'idle') fetchAgeing(ageingSide);
+    else if (staleOnOpen(`ageing:${ageingSide}`, s.data?.fetchedAt)) fetchAgeing(ageingSide, { quiet: true });
   }, [ageingSide, data?.connected, ageing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -277,10 +383,19 @@ export default function XeroInsights() {
     document.getElementById('dashboard-ageing')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [ageingSide]);
 
-  // Only to keep the "synced Xs ago" labels honest — no fetching. It still
-  // re-rendered this whole page every 15 s in a backgrounded tab, and the
-  // labels are recomputed on return anyway, so it pauses while hidden.
-  useVisiblePolling(() => forceTick(t => t + 1), 15000);
+  // Asks every minute while the page is in view whether Xero changed, and at
+  // once on coming back to it, since a change while away is the likeliest
+  // kind. Not before the organisation is known: the first summary names it.
+  // (This replaced a 15 s re-render that kept a "synced 3m ago" label honest;
+  // the status line now shows clock times, which need no ticking.)
+  useVisiblePolling(() => { if (activeTenantId && data?.connected) return fetchVersion(); }, VERSION_EVERY_MS);
+
+  // The notice that a change brought new figures in stays for a few seconds.
+  useEffect(() => {
+    if (!updatedAt) return undefined;
+    const id = setTimeout(() => setUpdatedAt(null), UPDATED_NOTICE_MS);
+    return () => clearTimeout(id);
+  }, [updatedAt]);
 
   // The chat assistant answers about whichever company and period this page is
   // showing. It lives outside the page, so the page announces them; without
@@ -295,14 +410,28 @@ export default function XeroInsights() {
     }));
   }, [activeTenantId, perfPreset, perfRange]);
 
-  // Lazy tab loaders — only fire the first time a tab is opened.
+  // Lazy tab loaders — fire the first time a tab is opened, and again, quietly,
+  // when its report was read before the last change seen in Xero: the figures
+  // it has stay up until the new ones land (see fetchVersion).
   useEffect(() => {
-    if (tab === 'banking' && banking.status === 'idle') fetchBanking();
+    if (tab === 'banking') {
+      if (banking.status === 'idle') fetchBanking();
+      else if (staleOnOpen('banking', banking.fetchedAt)) fetchBanking({ quiet: true });
+    }
     // Both budget tabs share one fetch and one cache entry — the Budget Variance
     // view is a different presentation of the same merged data, not a second call.
-    if ((tab === 'budget' || tab === 'variance') && budget.status === 'idle') fetchBudget();
-    if (PERF_TABS.includes(tab) && perf.status === 'idle') fetchPerf();
-    if (tab === 'cashflow' && cashflow.status === 'idle') fetchCashflow();
+    if (tab === 'budget' || tab === 'variance') {
+      if (budget.status === 'idle') fetchBudget();
+      else if (staleOnOpen('budget', budget.data?.fetchedAt)) fetchBudget({ quiet: true });
+    }
+    if (PERF_TABS.includes(tab)) {
+      if (perf.status === 'idle') fetchPerf();
+      else if (staleOnOpen('perf', perf.data?.fetchedAt)) fetchPerf({ quiet: true });
+    }
+    if (tab === 'cashflow') {
+      if (cashflow.status === 'idle') fetchCashflow();
+      else if (staleOnOpen('cashflow', cashflow.data?.fetchedAt)) fetchCashflow({ quiet: true });
+    }
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A report loaded for another tab carries no comparison with last year, and
@@ -320,28 +449,39 @@ export default function XeroInsights() {
     fetchPerf({ figuresOnly: true });
   }, [tab, perf.status, perf.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  function fetchBanking() {
+  // `quiet` (a re-read after a change seen in Xero) keeps the list on screen
+  // while it reloads, and keeps it on a failure too. The read's stamp is kept
+  // with the list, to tell one read before a change from one read after.
+  function fetchBanking(opts = {}) {
     const n = ++seq.current.banking;
-    setBanking({ status: 'loading', data: [], error: '' });
-    api.get(`/xero-reports/bank-accounts${activeTenantId ? `?tenantId=${activeTenantId}` : ''}`)
-      .then(d => { if (n === seq.current.banking) setBanking({ status: 'done', data: d.bankAccounts || [], error: '' }); })
-      .catch(err => { if (n === seq.current.banking) setBanking({ status: 'done', data: [], error: err.message }); });
+    if (!opts.quiet) setBanking({ status: 'loading', data: [], error: '' });
+    return api.get(`/xero-reports/bank-accounts${activeTenantId ? `?tenantId=${activeTenantId}` : ''}`)
+      .then(d => { if (n === seq.current.banking) setBanking({ status: 'done', data: d.bankAccounts || [], error: '', fetchedAt: d.fetchedAt }); })
+      .catch(err => {
+        if (n !== seq.current.banking) return;
+        if (opts.quiet) setBanking(s => (s.status === 'done' ? s : { ...s, status: 'done' }));
+        else setBanking({ status: 'done', data: [], error: err.message });
+      });
   }
 
   // Counted per side, so a quick switch from one side to the other cannot let
   // the first answer land under the second's switch, nor strand the first as
-  // loading. A Refresh keeps the figures on screen while it reloads.
+  // loading. A Refresh keeps the figures on screen while it reloads; a quiet
+  // re-read (after a change seen in Xero) keeps them on a failure as well, and
+  // leaves the state alone then so the effect that asked is not asked again.
   function fetchAgeing(side, opts = {}) {
     const k = side === 'payables' ? 'ageingPayables' : 'ageingReceivables';
     const n = ++seq.current[k];
-    setAgeing(s => ({ ...s, [side]: { status: 'loading', error: '', data: s[side].data } }));
+    if (!opts.quiet) setAgeing(s => ({ ...s, [side]: { status: 'loading', error: '', data: s[side].data } }));
     const params = new URLSearchParams({ side });
     if (activeTenantId) params.set('tenantId', activeTenantId);
     if (opts.force) params.set('force', 'true');
-    api.get(`/xero-reports/ageing?${params.toString()}`)
+    return api.get(`/xero-reports/ageing?${params.toString()}`)
       .then(d => { if (n === seq.current[k]) setAgeing(s => ({ ...s, [side]: { status: 'done', data: d, error: '' } })); })
       .catch(err => {
-        if (n === seq.current[k]) setAgeing(s => ({ ...s, [side]: { status: 'done', data: s[side].data, error: err.message || 'Something went wrong' } }));
+        if (n !== seq.current[k]) return;
+        if (opts.quiet) setAgeing(s => (s[side].status === 'done' ? s : { ...s, [side]: { ...s[side], status: 'done' } }));
+        else setAgeing(s => ({ ...s, [side]: { status: 'done', data: s[side].data, error: err.message || 'Something went wrong' } }));
       });
   }
 
@@ -357,19 +497,24 @@ export default function XeroInsights() {
 
   // A Refresh keeps the figures on screen while it reloads; a new period or
   // organisation clears them, so last period's cash flow is never shown under
-  // this period's label.
+  // this period's label. A quiet re-read (after a change seen in Xero) keeps
+  // them, says nothing while it loads, and keeps them on a failure too.
   function fetchCashflow(opts = {}) {
     const n = ++seq.current.cashflow;
-    setCashflow(s => ({ status: 'loading', error: '', data: opts.force ? s.data : null }));
+    if (!opts.quiet) setCashflow(s => ({ status: 'loading', error: '', data: opts.force ? s.data : null }));
     const params = new URLSearchParams();
     if (activeTenantId) params.set('tenantId', activeTenantId);
     const range = opts.range !== undefined ? opts.range : perfRange;
     if (range) { params.set('from', range.from); params.set('to', range.to); }
     else       { params.set('preset', opts.preset || perfPreset); }
     if (opts.force) params.set('force', 'true');
-    api.get(`/xero-reports/cash-flow?${params.toString()}`)
+    return api.get(`/xero-reports/cash-flow?${params.toString()}`)
       .then(d => { if (n === seq.current.cashflow) setCashflow({ status: 'done', data: d, error: '' }); })
-      .catch(err => { if (n === seq.current.cashflow) setCashflow({ status: 'done', data: null, error: err.message }); });
+      .catch(err => {
+        if (n !== seq.current.cashflow) return;
+        if (opts.quiet) setCashflow(s => (s.status === 'done' ? s : { ...s, status: 'done' }));
+        else setCashflow({ status: 'done', data: null, error: err.message });
+      });
   }
 
   // Cash flow is fetched only for its own tab, and opening the tab was the
@@ -393,9 +538,12 @@ export default function XeroInsights() {
     return params;
   }
 
+  // `quiet` is a re-read after a change seen in Xero: the report on screen
+  // stays, nothing under it says "loading", a failure keeps it, and the
+  // commentary is left alone as on a figuresOnly re-ask.
   function fetchPerf(opts = {}) {
     const n = ++seq.current.perf;
-    setPerf(s => ({ ...s, status: 'loading', error: '' }));
+    if (!opts.quiet) setPerf(s => ({ ...s, status: 'loading', error: '' }));
     const params = periodParams(opts);
     if (opts.force) params.set('force', 'true');
     // Only Banking renders cash in/out. Asking for it elsewhere would make
@@ -407,7 +555,7 @@ export default function XeroInsights() {
     // Last year's same months are a second report, so only the tabs that show
     // them ask for them.
     if (COMPARE_TABS.includes(tab)) params.set('compare', 'prior-year');
-    api.get(`/xero-reports/performance?${params.toString()}`)
+    const req = api.get(`/xero-reports/performance?${params.toString()}`)
       .then(d => {
         if (n !== seq.current.perf) return;
         if (params.has('compare')) compareReply.current = d;
@@ -422,8 +570,15 @@ export default function XeroInsights() {
       // drawn from it, and without it the bar vanished, leaving no way to pick
       // a period other than the one that failed. The panels still require no
       // error, so its figures are never shown as the new period's.
-      .catch(err => { if (n === seq.current.perf) setPerf(s => ({ status: 'done', data: s.data, error: err.message })); });
+      .catch(err => {
+        if (n !== seq.current.perf) return;
+        if (opts.quiet) setPerf(s => (s.status === 'done' ? s : { ...s, status: 'done' }));
+        else setPerf(s => ({ status: 'done', data: s.data, error: err.message }));
+      });
 
+    // A quiet re-ask after a change leaves the commentary alone as well, and
+    // hands back the request so the caller can wait for it to land.
+    if (opts.quiet) return req;
     // Re-asked only to add last year's months: the period is unchanged, so the
     // commentary on screen still describes it, and is left alone.
     if (opts.figuresOnly) return;
@@ -447,12 +602,15 @@ export default function XeroInsights() {
     return q;
   }
 
+  // `quiet` is a re-read after a change seen in Xero: the grid stays — the
+  // budget tabs show it only while the status is 'done', so the status is not
+  // touched — and a failure keeps it.
   function fetchBudget(opts = {}) {
     const n = ++seq.current.budget;
-    setBudget(s => ({ ...s, status: 'loading', error: '' }));
+    if (!opts.quiet) setBudget(s => ({ ...s, status: 'loading', error: '' }));
     const params = new URLSearchParams(budgetQuery(opts));
     if (opts.force) params.set('force', 'true');
-    api.get(`/xero-reports/budget-variance?${params.toString()}`)
+    return api.get(`/xero-reports/budget-variance?${params.toString()}`)
       .then(d => {
         if (n !== seq.current.budget) return;
         setBudget({ status: 'done', data: d, error: '' });
@@ -466,7 +624,11 @@ export default function XeroInsights() {
       // The last good report is kept, not shown: the tabs show the error, but
       // the period bar is drawn from it, so the reader can pick another period
       // instead of being stuck on the one that failed.
-      .catch(err => { if (n === seq.current.budget) setBudget(s => ({ status: 'done', data: s.data, error: err.message })); });
+      .catch(err => {
+        if (n !== seq.current.budget) return;
+        if (opts.quiet) setBudget(s => (s.status === 'done' ? s : { ...s, status: 'done' }));
+        else setBudget(s => ({ status: 'done', data: s.data, error: err.message }));
+      });
   }
 
   // Counted so that a quick second click, or a switch of organisation, can't
@@ -564,6 +726,23 @@ export default function XeroInsights() {
   const { organisation, kpis, tenants } = data;
   const currency = organisation.currency !== '—' ? organisation.currency : '';
 
+  // When Xero was read for each report on screen: the summary always, the open
+  // tab's report while its figures are showing, and the open ageing side. The
+  // status line names the oldest, which is the most it can claim for all of
+  // them. A report that failed is left out: its last good copy is not showing.
+  function shownReads() {
+    const reads = [data.fetchedAt];
+    if (PERF_TABS.includes(tab) && !perf.error)                      reads.push(perf.data?.fetchedAt);
+    if (tab === 'cashflow' && !cashflow.error)                       reads.push(cashflow.data?.fetchedAt);
+    if ((tab === 'budget' || tab === 'variance') && !budget.error)   reads.push(budget.data?.fetchedAt);
+    if (tab === 'banking' && !banking.error)                         reads.push(banking.fetchedAt);
+    if (ageingSide && !ageing[ageingSide].error)                     reads.push(ageing[ageingSide].data?.fetchedAt);
+    return reads;
+  }
+  const status = liveLabel(
+    { fetchedAt: oldestRead(shownReads()), checkedAt: version?.checkedAt, live: version?.live, liveReason: version?.liveReason },
+    t => formatTime(t, user?.timezone));
+
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
@@ -585,16 +764,17 @@ export default function XeroInsights() {
               {tenants.map(t => <option key={t.tenantId} value={t.tenantId}>{t.tenantName}</option>)}
             </select>
           )}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--text-muted)' }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--success)', display: 'inline-block' }} />
-            Synced {formatRelative(new Date(data.fetchedAt).toISOString())}
-            {data.cached === false && <span style={{ color: 'var(--accent)', fontWeight: 600 }}>· fresh</span>}
-          </div>
+          {/* "Xero data as of 10:02 · checked 10:04": when Xero was last read
+              for what is on screen, and when the server last asked it whether
+              anything changed. It replaced "Synced 3m ago", which said neither:
+              a report served from the cache was "synced" the moment it arrived.
+              The version is re-read after a manual Refresh so the two agree. */}
+          <LiveStatus label={status} updated={!!updatedAt} onSetup={() => navigate('/setup')} />
           {/* Reloads what the open tab shows as well as the summary. It kept its
               own list of tabs, which had fallen behind PERF_TABS, and never
               reloaded cash flow or the budget at all. */}
           <button className="btn btn-outline btn-sm" disabled={refreshing} onClick={() => {
-            fetchSummary({ force: true });
+            fetchSummary({ force: true }).then(() => fetchVersion({ adopt: true }));
             if (PERF_TABS.includes(tab)) fetchPerf({ force: true });
             if (tab === 'cashflow') fetchCashflow({ force: true });
             if (tab === 'budget' || tab === 'variance') fetchBudget({ force: true });
