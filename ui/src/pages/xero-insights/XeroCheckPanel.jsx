@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../api/client';
 import { fmtCell } from '../../utils/format';
-import { checkSummary, checkedTime, findings, lineTitle, xeroHowTo } from './xero-check';
+import { checkIntro, checkSummary, checkedTime, findings, lineTitle, xeroHowTo } from './xero-check';
 
-// The "Check against Xero" panel under either budget tab.
+// The "Check against Xero" panel under either budget tab and the Balance
+// Sheet.
 //
 // The grid is built from two reports whose columns are matched by position
 // off opposite anchors, so nothing on the grid itself can show a reader that
@@ -15,8 +16,11 @@ import { checkSummary, checkedTime, findings, lineTitle, xeroHowTo } from './xer
 //
 // `query` is the organisation and period on screen, as the exports take it,
 // so what is checked is the report being looked at. The tab keys the panel on
-// it, so a new period is a new panel and a new check.
-export function XeroCheckPanel({ query, onClose }) {
+// it, so a new period is a new panel and a new check. `endpoint` names the
+// check route for the report ('budget-check' unless told otherwise) and
+// `howTo` words the steps to repeat it in Xero; both routes answer in the
+// same shape, so the verdict is laid out the same way.
+export function XeroCheckPanel({ query, onClose, endpoint = 'budget-check', howTo = xeroHowTo }) {
   const [state, setState] = useState({ status: 'loading', data: null, error: '' });
   // Counted so a "Check again" clicked while the first is still out cannot
   // let the older answer land last.
@@ -27,7 +31,13 @@ export function XeroCheckPanel({ query, onClose }) {
     setState(s => ({ ...s, status: 'loading', error: '' }));
     const params = new URLSearchParams(query || {});
     if (force) params.set('force', 'true');
-    api.get(`/xero-reports/budget-check?${params.toString()}`)
+    // Each route written out in full rather than spliced from `endpoint`, so
+    // the test that reads every path the UI calls against the server's
+    // routes (ui-api-paths.test.js) can see both.
+    const req = endpoint === 'balance-check'
+      ? api.get(`/xero-reports/balance-check?${params.toString()}`)
+      : api.get(`/xero-reports/budget-check?${params.toString()}`);
+    req
       .then(d => { if (n === seq.current) setState({ status: 'done', data: d, error: '' }); })
       // The last verdict is not kept under an error: a stale "agrees" over a
       // failed check is the false reassurance this panel exists to avoid.
@@ -45,9 +55,7 @@ export function XeroCheckPanel({ query, onClose }) {
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
         <div>
           <div style={{ fontWeight: 700, fontSize: 13 }}>Check against Xero</div>
-          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>
-            The grid asked for again without comparison periods, line by line. Read-only; up to three Xero calls.
-          </div>
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>{checkIntro(endpoint)}</div>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn btn-outline btn-sm" disabled={state.status === 'loading'} onClick={() => ask(true)}>
@@ -113,7 +121,7 @@ export function XeroCheckPanel({ query, onClose }) {
 
           <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.6 }}>
             <div style={{ fontWeight: 600, marginBottom: 2 }}>How to see the same figures in Xero</div>
-            {xeroHowTo(d).map((line, i) => <div key={i}>{line}</div>)}
+            {howTo(d).map((line, i) => <div key={i}>{line}</div>)}
           </div>
         </>
       )}

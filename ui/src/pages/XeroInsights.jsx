@@ -12,7 +12,9 @@ import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPa
 import { balancesByName } from './xero-insights/balances';
 import { KpiCard, LiveStatus, lastLoaded } from './xero-insights/bits';
 import { hasChanged, shouldRefetchTab, oldestRead, liveLabel } from './xero-insights/live';
+import { defaultControls, queryFor } from './xero-insights/balance';
 import BankingTab from './xero-insights/BankingTab';
+import BalanceSheetTab from './xero-insights/BalanceSheetTab';
 import BudgetTab from './xero-insights/BudgetTab';
 import VarianceTab from './xero-insights/VarianceTab';
 import AgeingSection from './xero-insights/AgeingSection';
@@ -27,6 +29,7 @@ const COMPARE_TABS = ['overview', 'profit'];
 // the tab, so a reload or a shared link opens on it.
 const AGEING_SIDES = ['receivables', 'payables'];
 const AGEING_IDLE = { status: 'idle', data: null, error: '' };
+const BALANCE_IDLE = { status: 'idle', data: null, error: '' };
 // How often the page asks the server whether Xero changed, while it is in
 // view. The server does the watching (xero-reports/version); this only asks
 // what it saw, so a minute costs nothing against the Xero allowance.
@@ -43,6 +46,10 @@ const TABS = [
   { key: 'cashflow', label: 'Cash Flow' },
   { key: 'profit',   label: 'Profitability' },
   { key: 'banking',  label: 'Banking' },
+  // A position, not a period: assets, liabilities and equity as at a date.
+  // It sits between the cash tabs and the budget ones, which is where the
+  // reading of a set of accounts moves from "what came in" to "what we hold".
+  { key: 'balance',  label: 'Balance Sheet' },
   // Chart of Accounts moved to Settings: it answers "is my setup right?", not
   // "how is the business doing?". Its route still backs AccountCodeSelect.
   { key: 'budget',   label: 'Budget vs Actual' },
@@ -153,13 +160,20 @@ export default function XeroInsights() {
   const [budgetPreset, setBudgetPreset] = useState('fy');
   const [budgetRange,  setBudgetRange]  = useState(null); // { from, to } when custom
 
+  // Balance Sheet — lazily loaded like the budget. Its controls (the date,
+  // the comparison, the basis) are kept here rather than in the tab, so a
+  // change seen in Xero, a Refresh or a switch of organisation asks for the
+  // sheet the reader has set up, not the default one (see fetchBalance).
+  const [balance, setBalance] = useState(BALANCE_IDLE);
+  const [balanceControls, setBalanceControls] = useState(defaultControls);
+
   // One counter per report. A response is applied only if no newer request for
   // that report was made since — two quick period changes could otherwise let
   // the slower, older answer land last and sit under the newer period's label.
   // The summary, the bank account list, a bank statement and the version read
   // are counted the same way, as a switch of organisation can leave any of
   // them in flight.
-  const seq = useRef({ perf: 0, cashflow: 0, budget: 0, analysis: 0, summary: 0, banking: 0, statement: 0, ageingReceivables: 0, ageingPayables: 0, version: 0 });
+  const seq = useRef({ perf: 0, cashflow: 0, budget: 0, balance: 0, analysis: 0, summary: 0, banking: 0, statement: 0, ageingReceivables: 0, ageingPayables: 0, version: 0 });
 
   // Performance overview — feeds BOTH the Overview and Revenue tabs from one
   // fetch. monthFrom/monthTo index into data.months, so changing the range
@@ -286,6 +300,7 @@ export default function XeroInsights() {
     if (PERF_TABS.includes(tab))                jobs.push(fetchPerf({ quiet: true }));
     if (tab === 'cashflow')                     jobs.push(fetchCashflow({ quiet: true }));
     if (tab === 'budget' || tab === 'variance') jobs.push(fetchBudget({ quiet: true }));
+    if (tab === 'balance')                      jobs.push(fetchBalance({ quiet: true }));
     if (tab === 'banking')                      jobs.push(fetchBanking({ quiet: true }));
     if (ageingSide)                             jobs.push(fetchAgeing(ageingSide, { quiet: true }));
     await Promise.allSettled(jobs);
@@ -341,6 +356,10 @@ export default function XeroInsights() {
     // to draw the period bar from, and here that is the previous organisation's.
     if (tab === 'budget' || tab === 'variance') { setBudget({ status: 'idle', data: null, error: '' }); fetchBudget(); }
     else { seq.current.budget++; setBudget({ status: 'idle', data: null, error: '' }); }
+    // The Balance Sheet is per-organisation as well. Its controls stay, so
+    // the next organisation opens on the same date and comparison.
+    if (tab === 'balance') { setBalance(BALANCE_IDLE); fetchBalance(); }
+    else { seq.current.balance++; setBalance(BALANCE_IDLE); }
     // Cash flow is listed too: its period bar is drawn from the performance
     // months, and the bar vanished on a switch made from the Cash Flow tab.
     // Cleared first for the same reason as the budget above.
@@ -423,6 +442,10 @@ export default function XeroInsights() {
     if (tab === 'budget' || tab === 'variance') {
       if (budget.status === 'idle') fetchBudget();
       else if (staleOnOpen('budget', budget.data?.fetchedAt)) fetchBudget({ quiet: true });
+    }
+    if (tab === 'balance') {
+      if (balance.status === 'idle') fetchBalance();
+      else if (staleOnOpen('balance', balance.data?.fetchedAt)) fetchBalance({ quiet: true });
     }
     if (PERF_TABS.includes(tab)) {
       if (perf.status === 'idle') fetchPerf();
@@ -631,6 +654,43 @@ export default function XeroInsights() {
       });
   }
 
+  // The organisation and the controls the Balance Sheet shows, as query
+  // values. The export and the check against Xero take the same ones, so a
+  // PDF is the sheet on screen. `controls` are ones just chosen on the tab,
+  // ahead of the state catching up with them.
+  function balanceQuery(controls) {
+    return queryFor({ ...balanceControls, ...(controls || {}), tenantId: activeTenantId || '' });
+  }
+
+  // `quiet` is a re-read after a change seen in Xero: the sheet stays — the
+  // tab shows it only while the status is 'done', so the status is not
+  // touched — and a failure keeps it. A failure's HTTP status is kept with
+  // its message: a 403 is a scope the connection lacks, which the tab words
+  // as a reconnect prompt rather than a fault in the figures.
+  function fetchBalance(opts = {}) {
+    const n = ++seq.current.balance;
+    if (!opts.quiet) setBalance(s => ({ ...s, status: 'loading', error: '' }));
+    const params = new URLSearchParams(balanceQuery(opts.controls));
+    if (opts.force) params.set('force', 'true');
+    return api.get(`/xero-reports/balance-sheet?${params.toString()}`)
+      .then(d => { if (n === seq.current.balance) setBalance({ status: 'done', data: d, error: '' }); })
+      // The last good sheet is kept, not shown: the tab shows the error, and
+      // its controls stay, so another date can be picked.
+      .catch(err => {
+        if (n !== seq.current.balance) return;
+        if (opts.quiet) setBalance(s => (s.status === 'done' ? s : { ...s, status: 'done' }));
+        else setBalance(s => ({ status: 'done', data: s.data, error: err.message, errorStatus: err.status }));
+      });
+  }
+
+  // A control changed on the tab: kept, and the sheet asked for with it at
+  // once — the state is not read back for the request, which would be a
+  // render late.
+  function changeBalanceControls(next) {
+    setBalanceControls(next);
+    fetchBalance({ controls: next });
+  }
+
   // Counted so that a quick second click, or a switch of organisation, can't
   // let an older account's statement land under the newer heading.
   function viewStatement(account) {
@@ -735,6 +795,7 @@ export default function XeroInsights() {
     if (PERF_TABS.includes(tab) && !perf.error)                      reads.push(perf.data?.fetchedAt);
     if (tab === 'cashflow' && !cashflow.error)                       reads.push(cashflow.data?.fetchedAt);
     if ((tab === 'budget' || tab === 'variance') && !budget.error)   reads.push(budget.data?.fetchedAt);
+    if (tab === 'balance' && !balance.error)                         reads.push(balance.data?.fetchedAt);
     if (tab === 'banking' && !banking.error)                         reads.push(banking.fetchedAt);
     if (ageingSide && !ageing[ageingSide].error)                     reads.push(ageing[ageingSide].data?.fetchedAt);
     return reads;
@@ -778,6 +839,7 @@ export default function XeroInsights() {
             if (PERF_TABS.includes(tab)) fetchPerf({ force: true });
             if (tab === 'cashflow') fetchCashflow({ force: true });
             if (tab === 'budget' || tab === 'variance') fetchBudget({ force: true });
+            if (tab === 'balance') fetchBalance({ force: true });
             // The open side is re-read; the other is dropped and reloads from
             // the refreshed cache when it is next opened.
             if (ageingSide) {
@@ -1052,6 +1114,12 @@ export default function XeroInsights() {
 
 
 
+
+      {tab === 'balance' && (
+        <BalanceSheetTab balance={balance} controls={balanceControls} onControls={changeBalanceControls}
+                         fetchBalance={fetchBalance} currency={currency} orgName={organisation.name}
+                         exportQuery={balanceQuery()} />
+      )}
 
       {tab === 'budget' && <BudgetTab budget={budget} fetchBudget={fetchBudget} currency={currency} exportQuery={budgetQuery()} />}
 

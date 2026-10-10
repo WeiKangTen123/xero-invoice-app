@@ -8,10 +8,11 @@ import { bannerTitle, bannerDetail } from '../../pages/xero-insights/live';
 // only in Setup. A revoked or expired connection used to surface one failed
 // send at a time, on whichever document happened to be sent next; a
 // connection made before attachments were asked for posts every bill without
-// its PDF, which nothing on screen mentioned at all; and one made before the
+// its PDF, which nothing on screen mentioned at all; one made before the
 // journals were asked for leaves the Dashboard unable to see when Xero
-// changes, so its figures wait for a Refresh. One reconnect cures the last
-// two, which is what the title says (see live.js#bannerTitle).
+// changes, so its figures wait for a Refresh; and one made before the report
+// scopes were asked for cannot read the Balance Sheet. One reconnect cures
+// all but the first, which is what the title says (see live.js#bannerTitle).
 //
 // Asked rarely: once on load, then every ten minutes while the tab is in view.
 // The answer changes when someone reconnects, which happens in Setup, and Setup
@@ -25,7 +26,11 @@ const DISMISSED_KEY = 'xeroBannerDismissed';
 // has a different key and shows again.
 function problemOf(c) {
   if (!c) return null;
-  const missing = Array.isArray(c.missingScopes) ? c.missingScopes : [];
+  // A scope Xero refused the app outright is missing too, but no reconnect
+  // can add it, so the banner does not ask for one over it: the tab that
+  // needs it says what happened instead (xero-insights/balance.js#errorNotice).
+  const refused = Array.isArray(c.refusedScopes) ? c.refusedScopes : [];
+  const missing = (Array.isArray(c.missingScopes) ? c.missingScopes : []).filter(s => !refused.includes(s));
   if (c.needsReconnect) {
     return { key: `reconnect:${c.reason || ''}`, title: 'Reconnect Xero in Setup',
              detail: c.reason || 'Xero is no longer accepting this connection, so nothing can be sent until it is reconnected.' };

@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { api } from '../../api/client';
 
-// Export buttons for the two budget reports.
+// Export buttons for the two budget reports and the Balance Sheet: `kind` is
+// 'grid', 'variance' or 'balance', and the route builds the file for it.
 //
 // Two steps, because a browser cannot put an Authorization header on a plain
 // navigation: ask the API (with the JWT) for a short-lived signed URL, then open
@@ -15,9 +16,10 @@ import { api } from '../../api/client';
 // three and a half screens wide. The workbook is there because a spreadsheet is
 // usually what an accountant actually wanted.
 //
-// `query` is the organisation and period on screen. Without it the export
-// was always the first connected organisation's current financial year,
-// whatever the reader was looking at.
+// `query` is the organisation and period on screen — for the Balance Sheet,
+// its date, comparison and basis. Without it the export was always the first
+// connected organisation's current financial year, whatever the reader was
+// looking at.
 export function BudgetExport({ kind, month, query, disabled }) {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');

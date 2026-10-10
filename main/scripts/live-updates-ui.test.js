@@ -134,6 +134,14 @@ describe('the banner title for the scopes a connection is missing', () => {
     [['accounting.attachments', 'accounting.journals.read'], 'Reconnect Xero once to allow attachments and live updates'],
     [['accounting.journals.read', 'accounting.attachments', 'accounting.budgets.read'], 'Reconnect Xero once to allow attachments and live updates'],
     [['accounting.attachments'], 'Reconnect Xero to allow attachments'],
+    // The Balance Sheet needs two report scopes, asked for together, so
+    // either missing is the one thing the banner names.
+    [['accounting.reports.balancesheet.read'], 'Reconnect Xero once to add the Balance Sheet'],
+    [['accounting.reports.trialbalance.read'], 'Reconnect Xero once to add the Balance Sheet'],
+    [['accounting.reports.balancesheet.read', 'accounting.reports.trialbalance.read'], 'Reconnect Xero once to add the Balance Sheet'],
+    [['accounting.attachments', 'accounting.journals.read', 'accounting.reports.balancesheet.read'], 'Reconnect Xero once to allow attachments, live updates and the Balance Sheet'],
+    [['accounting.reports.trialbalance.read', 'accounting.attachments'], 'Reconnect Xero once to allow attachments and the Balance Sheet'],
+    [['accounting.journals.read', 'accounting.reports.balancesheet.read'], 'Reconnect Xero once to allow live updates and the Balance Sheet'],
     [['accounting.budgets.read'], null],
     [[], null],
     [undefined, null],
@@ -147,6 +155,11 @@ describe('the banner title for the scopes a connection is missing', () => {
     expect(h.bannerDetail(['accounting.attachments', 'accounting.journals.read']))
       .toBe('Bills and claims are reaching Xero without their PDF or receipt photo. '
           + 'The Dashboard cannot see when Xero changes, so its figures wait for a Refresh. Reconnecting asks Xero for those permissions.');
+    expect(h.bannerDetail(['accounting.reports.balancesheet.read']))
+      .toBe('The Balance Sheet tab cannot be read until then. Reconnecting asks Xero for that permission.');
+    expect(h.bannerDetail(['accounting.journals.read', 'accounting.reports.trialbalance.read']))
+      .toBe('The Dashboard cannot see when Xero changes, so its figures wait for a Refresh. '
+          + 'The Balance Sheet tab cannot be read until then. Reconnecting asks Xero for those permissions.');
     expect(h.bannerDetail([])).toBe(null);
   });
 });

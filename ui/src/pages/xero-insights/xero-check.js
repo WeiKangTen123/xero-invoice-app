@@ -1,9 +1,10 @@
-// Wording for the "Check against Xero" panel: the one-line verdict, which
-// checks found something, and how to see the same figures in Xero itself.
+// Wording for the "Check against Xero" panel: what the check does for the
+// report it sits under, the one-line verdict, which checks found something,
+// and how to see the same figures in Xero itself.
 //
-// Plain functions with no imports, so main/scripts/xero-check-ui.test.js can
-// load and run them against a payload; the panel (XeroCheckPanel.jsx) only
-// lays them out.
+// Plain functions with no imports, so main/scripts/xero-check-ui.test.js and
+// main/scripts/balance-ui.test.js can load and run them against a payload;
+// the panel (XeroCheckPanel.jsx) only lays them out.
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -25,6 +26,18 @@ export function checkedTime(iso, opts = {}) {
 }
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// The line under the panel's title: what the check does for this report, so
+// "agrees" is read against the right proof. The budget grid is asked for
+// again without the comparison periods its columns are matched off; the
+// Balance Sheet is read a second way, from the Trial Balance, which carries
+// the same closing balances with no layout to get wrong.
+export function checkIntro(endpoint) {
+  if (endpoint === 'balance-check') {
+    return 'The sheet checked against Xero\'s Trial Balance, read separately, account by account. Read-only.';
+  }
+  return 'The grid asked for again without comparison periods, line by line. Read-only; up to three Xero calls.';
+}
 
 // What a check covered: the lines it compared, or for the budget the quarters.
 export function countOf(check) {
@@ -77,6 +90,23 @@ export function xeroHowTo(d) {
   }
   if (p.current?.endISO) {
     lines.push(`Date = ${isoDay(p.current.endISO)} matches the app with "${p.current.label} · so far" selected.`);
+  }
+  return lines;
+}
+
+// The same for the Balance Sheet. Xero's report is one date at a time, so
+// each column of the app's sheet is a date to set there; the basis is named
+// because a cash-basis sheet carries different balances under the same
+// headings. The columns are read off the check's payload (the server echoes
+// the sheet's), falling back to the as-at date alone.
+export function balanceHowTo(d) {
+  const basis = d.basis === 'cash' ? 'cash' : 'accrual';
+  const lines = [`In Xero: Reports → Balance Sheet. Accounting basis: ${basis}. Compare with: none.`];
+  const cols  = (d.columns || []).filter(c => c?.iso);
+  const dates = cols.length ? cols.map(c => c.iso) : (d.asAt?.iso ? [d.asAt.iso] : []);
+  if (dates.length) lines.push(`Date = ${isoDay(dates[0])} matches the app's first column.`);
+  if (dates.length > 1) {
+    lines.push(`Date = ${dates.slice(1).map(isoDay).join(' or ')} matches the comparison column of that date.`);
   }
   return lines;
 }

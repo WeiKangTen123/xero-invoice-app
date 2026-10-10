@@ -67,34 +67,46 @@ export function liveLabel({ fetchedAt, checkedAt, live, liveReason } = {}, forma
   };
 }
 
-// The two scopes a connection made before they were asked for is missing, and
-// what each costs: bills post without their PDF, and the Dashboard cannot be
-// told when Xero changes. Both are cured by one reconnect, which is what the
-// banner's title has to say — "once", so it does not read as a fault.
+// The scopes a connection made before they were asked for is missing, and
+// what each costs: bills post without their PDF, the Dashboard cannot be told
+// when Xero changes, and the Balance Sheet tab cannot read its report (nor
+// its check against Xero the Trial Balance, so the two report scopes count
+// as one thing). All are cured by one reconnect, which is what the banner's
+// title has to say — "once", so it does not read as a fault.
 const ATTACHMENTS_SCOPE = 'accounting.attachments';
 const JOURNALS_SCOPE    = 'accounting.journals.read';
+const BALANCE_SCOPES    = ['accounting.reports.balancesheet.read', 'accounting.reports.trialbalance.read'];
 
 function scopesMissing(missingScopes) {
   const missing = Array.isArray(missingScopes) ? missingScopes : [];
-  return { attachments: missing.includes(ATTACHMENTS_SCOPE), journals: missing.includes(JOURNALS_SCOPE) };
+  return {
+    attachments: missing.includes(ATTACHMENTS_SCOPE),
+    journals:    missing.includes(JOURNALS_SCOPE),
+    balance:     BALANCE_SCOPES.some(s => missing.includes(s)),
+  };
 }
 
 // The banner's title for the scopes a connection is missing, or null when
-// neither of the two it speaks for is among them.
+// none of the three it speaks for is among them. One missing scope is named
+// with its own verb; two or more are listed after "allow", so the title reads
+// as one reconnect for all of them rather than three faults.
 export function bannerTitle(missingScopes) {
-  const { attachments, journals } = scopesMissing(missingScopes);
-  if (attachments && journals) return 'Reconnect Xero once to allow attachments and live updates';
-  if (journals)                return 'Reconnect Xero once to turn on live updates';
-  if (attachments)             return 'Reconnect Xero to allow attachments';
+  const { attachments, journals, balance } = scopesMissing(missingScopes);
+  const parts = [attachments && 'attachments', journals && 'live updates', balance && 'the Balance Sheet'].filter(Boolean);
+  if (parts.length > 1) return `Reconnect Xero once to allow ${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  if (journals)    return 'Reconnect Xero once to turn on live updates';
+  if (attachments) return 'Reconnect Xero to allow attachments';
+  if (balance)     return 'Reconnect Xero once to add the Balance Sheet';
   return null;
 }
 
 // What is lost meanwhile, for the same scopes.
 export function bannerDetail(missingScopes) {
-  const { attachments, journals } = scopesMissing(missingScopes);
+  const { attachments, journals, balance } = scopesMissing(missingScopes);
   const lost = [];
   if (attachments) lost.push('Bills and claims are reaching Xero without their PDF or receipt photo.');
   if (journals)    lost.push('The Dashboard cannot see when Xero changes, so its figures wait for a Refresh.');
+  if (balance)     lost.push('The Balance Sheet tab cannot be read until then.');
   if (!lost.length) return null;
   return `${lost.join(' ')} Reconnecting asks Xero for ${lost.length > 1 ? 'those permissions' : 'that permission'}.`;
 }
