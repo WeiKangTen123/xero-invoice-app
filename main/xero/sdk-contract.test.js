@@ -50,6 +50,10 @@ const USED = {
     'trackingCategoryID', 'trackingCategoryID2', 'trackingOptionID', 'trackingOptionID2', 'standardLayout'],
   getReportBudgetSummary: ['xeroTenantId', 'date', 'periods', 'timeframe'],
   getReportBankSummary:   ['xeroTenantId', 'fromDate', 'toDate'],
+  // balance-sheet: standardLayout (6) on every call, paymentsOnly (7) on the
+  // cash basis; the two tracking slots between are left empty
+  getReportBalanceSheet:  ['xeroTenantId', 'date', 'periods', 'timeframe',
+    'trackingOptionID1', 'trackingOptionID2', 'standardLayout', 'paymentsOnly'],
   // reports: quotes from a date, paged (2, 8)
   getQuotes: ['xeroTenantId', 'ifModifiedSince', 'dateFrom', 'dateTo', 'expiryDateFrom',
     'expiryDateTo', 'contactID', 'status', 'page'],
@@ -82,6 +86,13 @@ describe('xero/sdk-contract — argument positions the app passes', () => {
 
   test('createInvoices takes idempotencyKey 5th, counting the tenant', () => {
     expect(paramsOf('createInvoices').indexOf('idempotencyKey')).toBe(4);
+  });
+
+  // Swapped, the Balance Sheet would come in the organisation's own layout,
+  // or on the cash basis when accrual was asked for, with no error.
+  test('getReportBalanceSheet takes standardLayout 7th and paymentsOnly 8th, counting the tenant', () => {
+    expect(paramsOf('getReportBalanceSheet').indexOf('standardLayout')).toBe(6);
+    expect(paramsOf('getReportBalanceSheet').indexOf('paymentsOnly')).toBe(7);
   });
 });
 

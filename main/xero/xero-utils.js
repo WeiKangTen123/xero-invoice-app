@@ -412,10 +412,23 @@ const ATTACHMENTS_SCOPE = 'accounting.attachments';
 // without it, and says so; a Web app connection made before it was added
 // shows it as missing (GET /api/xero/connection) until reconnected once.
 const JOURNALS_SCOPE = 'accounting.journals.read';
-const OAUTH_SCOPES = `${SCOPES} ${ATTACHMENTS_SCOPE} ${JOURNALS_SCOPE}`;
+// The Balance Sheet tab (xero/balance-sheet.js) reads Reports/BalanceSheet,
+// which has a granular scope of its own; the trial balance is asked for with
+// it so the next report does not cost a second reconnect. Web app only, like
+// attachments and journals: named in a client-credentials request they were
+// never granted, they would stop a Custom Connection from connecting at all.
+// They are also the scopes a consent may be REFUSED for — Xero answers the
+// authorize call with invalid_scope when an app may not ask for one — so
+// oauth.js drops exactly these two and asks again, and records them as
+// refused so GET /api/xero/connection does not go on listing them as missing.
+const BALANCE_SHEET_SCOPE = 'accounting.reports.balancesheet.read';
+const TRIAL_BALANCE_SCOPE = 'accounting.reports.trialbalance.read';
+const OPTIONAL_REPORT_SCOPES = [BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE];
+const OAUTH_SCOPES = `${SCOPES} ${ATTACHMENTS_SCOPE} ${JOURNALS_SCOPE} ${BALANCE_SHEET_SCOPE} ${TRIAL_BALANCE_SCOPE}`;
 
 module.exports = {
   withRetry, xeroErrMsg, _parseXeroErr, isScopeError, SCOPES, OAUTH_SCOPES, ATTACHMENTS_SCOPE, JOURNALS_SCOPE,
+  BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE, OPTIONAL_REPORT_SCOPES,
   XeroReconnectError, reconnectReason, tokenErrorCode, isReconnectError, credentialFingerprint, grantedScopesFrom,
   getRateLimitBudget, MAX_RATE_LIMIT_WAIT_MS, DEFAULT_RECONNECT_REASON,
   _recordRateLimit, _recordFromResponse, _dailyLimitMsg,

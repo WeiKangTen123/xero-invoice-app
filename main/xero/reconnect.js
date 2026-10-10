@@ -34,13 +34,19 @@ const NO_CUSTOM_CREDS_REASON = 'Your Custom Connection Client ID or Secret is mi
  *   missingScopes   OAuth scopes the app asks for that this connection was
  *                   not granted (it predates them); always [] for Custom
  *                   Connection and when the granted scopes are not known yet
+ *   refusedScopes   scopes Xero would not let this app ask for at consent
+ *                   (xero/oauth.js retryAuthorizeUrl); never in missingScopes,
+ *                   since reconnecting cannot gain them
+ *   refusedMessage  what to say about them, or null when there are none
  */
+const REFUSED_SCOPES_MESSAGE = 'Xero refused these permissions for this app';
 function getConnectionStatus(userId) {
   const { getUserConfig } = require('../utils/users');
   const tokenCache = require('../utils/token-cache');
   const config = getUserConfig(userId) || {};
   const method = connectionMethod(config);
-  if (!method) return { method: null, connected: false, needsReconnect: false, reason: null, missingScopes: [] };
+  const none = { method: null, connected: false, needsReconnect: false, reason: null, missingScopes: [], refusedScopes: [], refusedMessage: null };
+  if (!method) return none;
 
   const health  = (typeof tokenCache.getHealth === 'function' && tokenCache.getHealth(userId)) || {};
   const tenants = tokenCache.getPersistedTenants(userId) || [];
@@ -63,10 +69,13 @@ function getConnectionStatus(userId) {
     if (!health.fingerprint || health.fingerprint === current) reason = health.reason || DEFAULT_RECONNECT_REASON;
   }
 
+  // A refused scope is one no reconnect can gain, so it is not "missing" in
+  // the sense the banner means (reconnect to get it); it is reported apart.
+  const refusedScopes = method === 'oauth' && Array.isArray(health.refusedScopes) ? [...health.refusedScopes] : [];
   let missingScopes = [];
   if (method === 'oauth' && Array.isArray(health.grantedScopes)) {
-    const granted = new Set(health.grantedScopes);
-    missingScopes = require('./oauth').SCOPES.split(' ').filter(s => s && !granted.has(s));
+    const granted = new Set(health.grantedScopes), refused = new Set(refusedScopes);
+    missingScopes = require('./oauth').SCOPES.split(' ').filter(s => s && !granted.has(s) && !refused.has(s));
   }
 
   const needsReconnect = !!reason;
@@ -76,6 +85,8 @@ function getConnectionStatus(userId) {
     needsReconnect,
     reason,
     missingScopes,
+    refusedScopes,
+    refusedMessage: refusedScopes.length ? REFUSED_SCOPES_MESSAGE : null,
   };
 }
 
@@ -93,4 +104,4 @@ async function testConnection(userId) {
   return { method: method || 'custom', tenants };
 }
 
-module.exports = { reconnectXero, getConnectionStatus, testConnection, connectionMethod };
+module.exports = { reconnectXero, getConnectionStatus, testConnection, connectionMethod, REFUSED_SCOPES_MESSAGE };

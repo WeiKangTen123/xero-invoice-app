@@ -9,8 +9,10 @@ const { serverFor } = require('../scripts/test-server');
 const express = require('express');
 const jwt     = require('jsonwebtoken');
 
-const KEYS = ['connected', 'method', 'missingScopes', 'needsReconnect', 'reason'];
+const KEYS = ['connected', 'method', 'missingScopes', 'needsReconnect', 'reason', 'refusedMessage', 'refusedScopes'];
 const FUTURE = () => new Date(Date.now() + 30 * 60_000);
+// Nothing refused at consent, which is every case here but one.
+const NONE_REFUSED = { refusedScopes: [], refusedMessage: null };
 
 describe('routes/xero-oauth — connection status and disconnect', () => {
   let app, users, tokenCache, oauth, axios, jwtSecret, user;
@@ -52,25 +54,25 @@ describe('routes/xero-oauth — connection status and disconnect', () => {
     });
 
     test('nothing set up', async () => {
-      expect(await status()).toEqual({ method: null, connected: false, needsReconnect: false, reason: null, missingScopes: [] });
+      expect(await status()).toEqual({ method: null, connected: false, needsReconnect: false, reason: null, missingScopes: [], ...NONE_REFUSED });
     });
 
     test('a working OAuth connection with every scope', async () => {
       connectOAuth();
       withOrg('oauth');
       tokenCache.markRefreshed(user.id, { method: 'oauth', grantedScopes: oauth.SCOPES.split(' ') });
-      expect(await status()).toEqual({ method: 'oauth', connected: true, needsReconnect: false, reason: null, missingScopes: [] });
+      expect(await status()).toEqual({ method: 'oauth', connected: true, needsReconnect: false, reason: null, missingScopes: [], ...NONE_REFUSED });
     });
 
     test('a working Custom Connection', async () => {
       users.saveUserConfig(user.id, { XERO_CONNECTION_TYPE: 'custom', XERO_CLIENT_ID: 'cc', XERO_CLIENT_SECRET: 'cs' });
       withOrg('custom');
-      expect(await status()).toEqual({ method: 'custom', connected: true, needsReconnect: false, reason: null, missingScopes: [] });
+      expect(await status()).toEqual({ method: 'custom', connected: true, needsReconnect: false, reason: null, missingScopes: [], ...NONE_REFUSED });
     });
 
     test('Custom Connection credentials saved but no type recorded still count as custom', async () => {
       users.saveUserConfig(user.id, { XERO_CLIENT_ID: 'cc', XERO_CLIENT_SECRET: 'cs' });
-      expect(await status()).toEqual({ method: 'custom', connected: false, needsReconnect: false, reason: null, missingScopes: [] });
+      expect(await status()).toEqual({ method: 'custom', connected: false, needsReconnect: false, reason: null, missingScopes: [], ...NONE_REFUSED });
     });
 
     test('an OAuth connection Xero refused (invalid_grant) needs a reconnect', async () => {
@@ -84,7 +86,7 @@ describe('routes/xero-oauth — connection status and disconnect', () => {
       const body = await status();
       expect(body).toEqual({
         method: 'oauth', connected: false, needsReconnect: true,
-        reason: expect.stringMatching(/reconnect xero in setup/i), missingScopes: [],
+        reason: expect.stringMatching(/reconnect xero in setup/i), missingScopes: [], ...NONE_REFUSED,
       });
     });
 
@@ -101,7 +103,19 @@ describe('routes/xero-oauth — connection status and disconnect', () => {
       const before = oauth.SCOPES.split(' ').filter(s => s !== 'accounting.attachments');
       tokenCache.markRefreshed(user.id, { method: 'oauth', grantedScopes: before });
       expect(await status()).toEqual({
-        method: 'oauth', connected: true, needsReconnect: false, reason: null, missingScopes: ['accounting.attachments'],
+        method: 'oauth', connected: true, needsReconnect: false, reason: null, missingScopes: ['accounting.attachments'], ...NONE_REFUSED,
+      });
+    });
+
+    test('scopes Xero refused this app at consent are carried apart, with the message, and are not missing', async () => {
+      connectOAuth();
+      withOrg('oauth');
+      const refused = ['accounting.reports.balancesheet.read', 'accounting.reports.trialbalance.read'];
+      tokenCache.markScopesRefused(user.id, refused);
+      tokenCache.markRefreshed(user.id, { method: 'oauth', grantedScopes: oauth.SCOPES.split(' ').filter(s => !refused.includes(s)) });
+      expect(await status()).toEqual({
+        method: 'oauth', connected: true, needsReconnect: false, reason: null, missingScopes: [],
+        refusedScopes: refused, refusedMessage: 'Xero refused these permissions for this app',
       });
     });
 
@@ -131,7 +145,7 @@ describe('routes/xero-oauth — connection status and disconnect', () => {
       expect(config.XERO_OAUTH_REFRESH_TOKEN).toBeUndefined();
       expect(config.XERO_CONNECTION_TYPE).toBeUndefined();
       expect(tokenCache.getPersistedTenants(user.id)).toEqual([]);
-      expect(await status()).toEqual({ method: null, connected: false, needsReconnect: false, reason: null, missingScopes: [] });
+      expect(await status()).toEqual({ method: null, connected: false, needsReconnect: false, reason: null, missingScopes: [], ...NONE_REFUSED });
     });
 
     test('still disconnects when Xero cannot be reached to revoke', async () => {

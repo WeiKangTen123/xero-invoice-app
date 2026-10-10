@@ -227,6 +227,51 @@ call, kept out of the access log) and refetches when `changedAt` moves.
   `Xero change detected` for each change; a company that could not be read
   logs `Xero change check failed` and is left alone for fifteen minutes.
 
+## Balance Sheet
+
+The Balance Sheet tab reads Xero's `Reports/BalanceSheet` as at a month end
+(`main/xero/balance-sheet.js`, behind `GET /api/xero-reports/balance-sheet`).
+The report can only be as at the END of a month, so every preset resolves to
+one — `last-month-end`, `last-quarter-end`, `last-fy-end` (the organisation's
+own year end), `this-month` (in progress) or `month=YYYY-MM` — with
+`compare=month|quarter|year&periods=1..11` for comparison columns and
+`basis=accrual|cash`. Figures are kept exactly as Xero prints them; the
+groups (assets, liabilities, equity) are read from each section's position
+in Xero's flat list, not from a list of expected titles. The export rides on
+`/budget/export-url?kind=balance` and `/budget/export` like the budget ones.
+
+- **The scopes.** `accounting.reports.balancesheet.read` (and
+  `accounting.reports.trialbalance.read`, asked for with it so the next
+  report costs no further reconnect) are Web app (OAuth) scopes only, like
+  attachments and journals: a Custom Connection cannot ask for them. A Web
+  app connection made before they were added lists them under
+  `missingScopes` in `GET /api/xero/connection` and answers the tab with a
+  403 reconnect prompt until reconnected once in Setup.
+- **An app Xero will not grant them to.** Not every Xero app may ask for
+  the granular report scopes. When Xero refuses the consent
+  (`error=invalid_scope` on the OAuth callback, or an `error_description`
+  naming one), `GET /api/xero/oauth/callback` sends the browser straight back
+  to Xero once more without those two scopes — attachments and journals are
+  kept — and records them in `xero_connection_health.refused_scopes`. From
+  then on `GET /api/xero/connection` carries them as `refusedScopes` with
+  `refusedMessage` "Xero refused these permissions for this app", they are
+  left out of `missingScopes` and of every later consent link, and the
+  Balance Sheet tab answers the reconnect prompt for that connection. It
+  never retries more than once: a second refusal is the ordinary
+  `xero_oauth=error` redirect. `logs/combined.log` has `Xero refused the
+  optional report scopes for this app` when it happens. To try again after
+  Xero changes what the app may ask for: Disconnect in Setup (which clears
+  the record) and connect again.
+- **Is it working?** `GET /api/xero-reports/balance-check?…` as the user,
+  with the same query as the tab (`main/xero/balance-check.js`): `ok` true
+  and three checks — `identity` (Net Assets = Total Assets − Total
+  Liabilities = Total Equity, from the payload), `subtotals` (every total is
+  the sum of its lines) and `bank` (each Bank line against the Bank Summary's
+  closing balance at the same date, one read-only call). A check that could
+  not run says why in `reason`; a foreign-currency bank account is listed
+  under the bank check's `excluded`. `logs/combined.log` has `Balance Sheet
+  fetched` with the date, comparison and basis of every read.
+
 ## Keys
 
 - Rotate `JWT_SECRET`: change it in `.env`, `pm2 restart`; everyone logs in

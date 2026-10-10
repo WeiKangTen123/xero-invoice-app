@@ -91,6 +91,54 @@ describe('routes/xero-oauth', () => {
       const res = await request(serverFor(app)).get('/api/xero/oauth/callback?code=c&state=s');
       expect(res.status).toBe(302);
     });
+
+    // Xero would not let this app ask for the optional report scopes: the
+    // browser is sent back to Xero once more, for the user the flow was
+    // started for, without them (xero/oauth.js scopeRefusal, retryAuthorizeUrl).
+    describe('when Xero refuses the consent for its scopes', () => {
+      const REFUSED = ['accounting.reports.balancesheet.read', 'accounting.reports.trialbalance.read'];
+      beforeEach(() => {
+        xeroOAuth.scopeRefusal.mockImplementation(q => (q.error === 'invalid_scope' ? REFUSED : null));
+        oauthState.consume.mockReturnValue(testUser.id);
+      });
+
+      test('redirects straight to a consent link without those scopes, bound to the same user', async () => {
+        xeroOAuth.retryAuthorizeUrl.mockReturnValue('https://login.xero.com/identity/connect/authorize?retry=1');
+        const res = await request(serverFor(app)).get('/api/xero/oauth/callback?error=invalid_scope&state=some-state');
+        expect(res.status).toBe(302);
+        expect(res.headers.location).toBe('https://login.xero.com/identity/connect/authorize?retry=1');
+        expect(oauthState.consume).toHaveBeenCalledWith('some-state');
+        expect(xeroOAuth.retryAuthorizeUrl).toHaveBeenCalledWith(testUser.id, REFUSED);
+        expect(xeroOAuth.completeConnection).not.toHaveBeenCalled();
+      });
+
+      test('a second refusal is the error, not another retry', async () => {
+        xeroOAuth.retryAuthorizeUrl.mockReturnValue(null);
+        const res = await request(serverFor(app)).get('/api/xero/oauth/callback?error=invalid_scope&state=some-state');
+        expect(res.headers.location).toContain('xero_oauth=error');
+      });
+
+      test('a state that is unknown or expired cannot be retried for anyone', async () => {
+        oauthState.consume.mockReturnValue(null);
+        const res = await request(serverFor(app)).get('/api/xero/oauth/callback?error=invalid_scope&state=stale');
+        expect(res.headers.location).toContain('xero_oauth=error');
+        expect(xeroOAuth.retryAuthorizeUrl).not.toHaveBeenCalled();
+      });
+
+      test('a refusal that cannot be retried, or any other error, never touches the state', async () => {
+        const res = await request(serverFor(app)).get('/api/xero/oauth/callback?error=access_denied&state=some-state');
+        expect(res.headers.location).toContain('xero_oauth=error');
+        expect(oauthState.consume).not.toHaveBeenCalled();
+        expect(xeroOAuth.retryAuthorizeUrl).not.toHaveBeenCalled();
+      });
+
+      test('a failure to build the retry link is the error, not a crash', async () => {
+        xeroOAuth.retryAuthorizeUrl.mockImplementation(() => { throw new Error('Xero OAuth is not configured'); });
+        const res = await request(serverFor(app)).get('/api/xero/oauth/callback?error=invalid_scope&state=some-state');
+        expect(res.status).toBe(302);
+        expect(res.headers.location).toContain('xero_oauth=error');
+      });
+    });
   });
 
   describe('POST /oauth/complete', () => {

@@ -401,17 +401,20 @@ describe('report-cache clearTenant', () => {
     cache = require('./report-cache');
     for (const key of [
       'summary:u1:t1', 'org:u1:t1', 'banktx:u1:t1:acc-9', 'budgetvar:u1:t1:fy:2026-01:2026-12:9:9',
-      'summary:u1:t10', 'summary:u1:t2', 'summary:u2:t1', 'banktx:u2:t1:acc-9',
+      'balsheet:u1:t1:2026-09-30:0:-:accrual', 'balcheck:u1:t1:2026-09-30:2:month:cash',
+      'summary:u1:t10', 'summary:u1:t2', 'summary:u2:t1', 'banktx:u2:t1:acc-9', 'balsheet:u2:t1:2026-09-30:0:-:accrual',
     ]) cache._cacheSet(key, { key });
   });
 
   test('drops every key of that user and company, with or without a range, and nothing else', () => {
     cache.clearTenant('u1', 't1');
-    expect([...cache._cache.keys()].sort()).toEqual(['banktx:u2:t1:acc-9', 'summary:u1:t10', 'summary:u1:t2', 'summary:u2:t1']);
+    expect([...cache._cache.keys()].sort()).toEqual([
+      'balsheet:u2:t1:2026-09-30:0:-:accrual', 'banktx:u2:t1:acc-9', 'summary:u1:t10', 'summary:u1:t2', 'summary:u2:t1',
+    ]);
   });
 
   test('clearCache still drops every company of the user', () => {
     cache.clearCache('u1');
-    expect([...cache._cache.keys()].sort()).toEqual(['banktx:u2:t1:acc-9', 'summary:u2:t1']);
+    expect([...cache._cache.keys()].sort()).toEqual(['balsheet:u2:t1:2026-09-30:0:-:accrual', 'banktx:u2:t1:acc-9', 'summary:u2:t1']);
   });
 });

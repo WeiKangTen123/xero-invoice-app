@@ -13,12 +13,14 @@ jest.mock('../utils/token-cache', () => ({
   getHealth:          jest.fn(() => ({ needsReconnect: false })),
   markNeedsReconnect: jest.fn(),
   markRefreshed:      jest.fn(),
+  markScopesRefused:  jest.fn(),
 }));
 
 const axios = require('axios');
 const { getUserConfig, saveUserConfig } = require('../utils/users');
 const tokenCache = require('../utils/token-cache');
 const oauth = require('./oauth');
+const { BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE } = require('./xero-utils');
 
 // Client ID/Secret are per-user (each user brings their own Xero Web app); only the
 // redirect URI is global — a property of this server's deployment, not of any user.
@@ -74,9 +76,61 @@ describe('xero/oauth', () => {
         'accounting.banktransactions.read', 'accounting.payments.read',
         'accounting.reports.profitandloss.read', 'accounting.reports.banksummary.read',
         'accounting.reports.budgetsummary.read', 'accounting.budgets.read',
+        BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE,
       ]) {
         expect(scopes).toContain(required);
       }
+    });
+
+    test('leaves out the scopes Xero has refused this app, and nothing else', () => {
+      tokenCache.getHealth.mockReturnValue({ needsReconnect: false, refusedScopes: [BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE] });
+      const scopes = new URL(oauth.buildAuthorizeUrl('user-1')).searchParams.get('scope').split(' ');
+      expect(scopes).not.toContain(BALANCE_SHEET_SCOPE);
+      expect(scopes).not.toContain(TRIAL_BALANCE_SCOPE);
+      expect(scopes).toEqual(expect.arrayContaining(['offline_access', 'accounting.invoices', 'accounting.attachments', 'accounting.journals.read']));
+      expect(tokenCache.getHealth).toHaveBeenCalledWith('user-1');
+    });
+  });
+
+  // Not every Xero app may ask for the granular report scopes. When one may
+  // not, Xero skips the consent screen and sends the browser back with
+  // error=invalid_scope; the callback asks once more without those scopes.
+  describe('a consent Xero refuses for its scopes', () => {
+    const REPORT_SCOPES = [BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE];
+
+    test('scopeRefusal reads invalid_scope, or a description naming a report scope, as the two report scopes to drop', () => {
+      expect(oauth.scopeRefusal({ error: 'invalid_scope' })).toEqual(REPORT_SCOPES);
+      expect(oauth.scopeRefusal({ error: 'invalid_scope', error_description: `The scope ${TRIAL_BALANCE_SCOPE} is not allowed for this client` })).toEqual(REPORT_SCOPES);
+      expect(oauth.scopeRefusal({ error: 'invalid_request', error_description: `Invalid scope: ${BALANCE_SHEET_SCOPE}` })).toEqual(REPORT_SCOPES);
+      // Returned unchanged: the caller may keep it.
+      expect(oauth.scopeRefusal({ error: 'invalid_scope' })).not.toBe(oauth.scopeRefusal({ error: 'invalid_scope' }));
+    });
+
+    test('a person declining, another error, or a refusal of a required scope is not something to retry', () => {
+      expect(oauth.scopeRefusal({ error: 'access_denied' })).toBeNull();
+      expect(oauth.scopeRefusal({ error: 'server_error', error_description: 'Try again later.' })).toBeNull();
+      expect(oauth.scopeRefusal({ error: 'invalid_scope', error_description: 'accounting.invoices is not allowed' })).toBeNull();
+      expect(oauth.scopeRefusal({})).toBeNull();
+      expect(oauth.scopeRefusal(undefined)).toBeNull();
+    });
+
+    test('retryAuthorizeUrl records the refused scopes and mints a link without them, once', () => {
+      let refused = [];
+      tokenCache.getHealth.mockImplementation(() => ({ needsReconnect: false, refusedScopes: refused }));
+      tokenCache.markScopesRefused.mockImplementation((_, scopes) => { refused = [...refused, ...scopes]; });
+
+      const url = oauth.retryAuthorizeUrl('user-1', REPORT_SCOPES);
+      expect(tokenCache.markScopesRefused).toHaveBeenCalledWith('user-1', REPORT_SCOPES);
+      const scopes = new URL(url).searchParams.get('scope').split(' ');
+      expect(scopes).not.toContain(BALANCE_SHEET_SCOPE);
+      expect(scopes).not.toContain(TRIAL_BALANCE_SCOPE);
+      expect(scopes).toEqual(expect.arrayContaining(['offline_access', 'accounting.invoices', 'accounting.attachments', 'accounting.journals.read']));
+      expect(new URL(url).searchParams.get('client_id')).toBe(USER_CREDS.XERO_OAUTH_CLIENT_ID);
+
+      // The link that came back refused was already without them: nothing
+      // more to drop, so no second retry and nothing recorded again.
+      expect(oauth.retryAuthorizeUrl('user-1', REPORT_SCOPES)).toBeNull();
+      expect(tokenCache.markScopesRefused).toHaveBeenCalledTimes(1);
     });
   });
 

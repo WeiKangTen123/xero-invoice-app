@@ -64,6 +64,9 @@ function run() {
     _ensureColumn('user_credentials', col, `${col} TEXT`);
   }
   _ensureColumn('users', 'last_seen_at', 'last_seen_at TEXT');
+  // Scopes Xero's consent screen refused this app (xero/oauth.js): left out of
+  // the next consent link and of the connection status's missing scopes.
+  _ensureColumn('xero_connection_health', 'refused_scopes', 'refused_scopes TEXT');
   _ensureColumn('users', 'sessions_valid_from', 'sessions_valid_from TEXT');
   _ensureColumn('users', 'disabled_at', 'disabled_at TEXT');
   for (const [col, ddl] of [

@@ -9,6 +9,10 @@ const tokenCache        = require('../utils/token-cache');
 const reports           = require('../xero/reports');
 const changeDetector    = require('../xero/change-detector');
 const { _periodFromQueryParams, _isPeriodError, PeriodError } = require('../xero/periods');
+// From the module itself rather than through reports.js: it is the query
+// check, run before the report, and a test that replaces the reports must
+// still have the real check in front of them.
+const { _balanceQueryFromParams } = require('../xero/balance-sheet');
 const { xeroErrMsg, isScopeError } = require('../xero/xero-utils');
 const { getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const logger             = require('../utils/logger');
@@ -115,6 +119,20 @@ router.get('/budget-variance', requireAuth, report('Budget vs Actual',
 // here, never an "agrees".
 router.get('/budget-check', requireAuth, report('Budget check',
   (req, t) => reports.getBudgetCheck(req.user.id, t, { timezone: tz(req), force: force(req), period: _budgetPeriodFromQuery(req) })));
+// GET /api/xero-reports/balance-sheet?preset=&month=&compare=&periods=&basis=
+// The Balance Sheet as at a month end (xero/balance-sheet.js). Needs
+// accounting.reports.balancesheet.read. Its query is not a period — a date
+// named by a preset, a comparison and a basis — so it has its own check,
+// which refuses anything the report cannot be asked for with a 400 before any
+// Xero call, as the period check does for the other reports.
+router.get('/balance-sheet', requireAuth, report('Balance Sheet',
+  (req, t) => reports.getBalanceSheet(req.user.id, t, { timezone: tz(req), force: force(req), ..._balanceQueryFromParams(req.query) })));
+// The sheet above checked: Net Assets against the totals and every total
+// against its lines from the payload itself, and the Bank section against
+// the Bank Summary in one read-only call (see xero/balance-check.js). Same
+// query as the sheet, so what is checked is what is on screen.
+router.get('/balance-check', requireAuth, report('Balance check',
+  (req, t) => reports.getBalanceCheck(req.user.id, t, { timezone: tz(req), force: force(req), ..._balanceQueryFromParams(req.query) })));
 // Powers Dashboard -> Overview and Revenue. Composed from the budget-variance
 // fetch plus a bank summary, so it needs no scope those two don't already have.
 // ?compare=prior-year adds the same months last year (one more budget-variance
@@ -197,7 +215,9 @@ router.get('/narrative', requireAuth, asyncHandler(async (req, res) => {
 // than leaving them in the query where they could be edited to point at another
 // organisation's figures after the token was issued.
 const EXPORT_TOKEN_TTL = '5m';
-const EXPORT_KINDS   = new Set(['grid', 'variance']);
+// 'balance' is the Balance Sheet tab's export; it rides on these two routes
+// so the browser has one way of opening a signed report file.
+const EXPORT_KINDS   = new Set(['grid', 'variance', 'balance']);
 const EXPORT_FORMATS = new Set(['pdf', 'xlsx']);
 // The answer to an export of a month that has not started. The screen cannot
 // ask for one (its buttons are disabled), so this is for a link made by hand
@@ -231,8 +251,20 @@ router.get('/budget/export-url', requireAuth, asyncHandler(async (req, res) => {
 
     const kind   = String(req.query.kind || 'grid');
     const format = String(req.query.format || 'pdf');
-    if (!EXPORT_KINDS.has(kind))     return res.status(400).json({ error: 'kind must be grid or variance' });
+    if (!EXPORT_KINDS.has(kind))     return res.status(400).json({ error: 'kind must be grid, variance or balance' });
     if (!EXPORT_FORMATS.has(format)) return res.status(400).json({ error: 'format must be pdf or xlsx' });
+
+    // The Balance Sheet's query is its own (a date, a comparison, a basis),
+    // checked by its own gate; and the as-at date is checked against today
+    // by fetching the report — the one the screen has just loaded, so it is
+    // cached and costs no Xero call — before the link is signed, so a link
+    // can never carry a month the sheet route would refuse.
+    if (kind === 'balance') {
+      const balance = _balanceQueryFromParams(req.query);
+      await reports.getBalanceSheet(req.user.id, tenantId, { timezone: tz(req), ...balance });
+      const token = issueExportToken(req.user.id, { tenantId, kind, format, balance });
+      return res.json({ url: `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`, expiresIn: EXPORT_TOKEN_TTL });
+    }
 
     const month  = kind === 'variance' ? String(req.query.month || 'ytd') : undefined;
     // The period on screen travels in the token, so the file is the report the
@@ -267,6 +299,29 @@ router.get('/budget/export', asyncHandler(async (req, res) => {
 
   try {
     const timezone = getUserConfig(spec.userId).TIMEZONE || DEFAULT_TIMEZONE;
+
+    if (spec.kind === 'balance') {
+      // Required here, not at the top: the document module is the Balance
+      // Sheet's own, and if it is missing only this branch fails, not every
+      // budget export with it.
+      const { balanceSheetDefinition, balanceSheetWorkbook, balanceFilename } = require('../reports/balance-doc');
+      const sheet = await reports.getBalanceSheet(spec.userId, spec.tenantId, { timezone, ...(spec.balance || {}) });
+      const opts  = { timezone };
+      // The document module names the file; a name it gave with the
+      // extension on is not given a second one by setDownloadName.
+      const base  = String(balanceFilename(sheet, spec.format) || 'Balance Sheet').replace(new RegExp(`\\.${spec.format}$`, 'i'), '');
+      if (spec.format === 'xlsx') {
+        const wb = balanceSheetWorkbook(sheet, opts);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        setDownloadName(res, base, 'xlsx');
+        await wb.xlsx.write(res);
+        return res.end();
+      }
+      res.setHeader('Content-Type', 'application/pdf');
+      setDownloadName(res, base, 'pdf');
+      return budgetRender.streamPdf(balanceSheetDefinition(sheet, opts), res);
+    }
+
     // Reads the same cached payload the screen renders, so an exported figure
     // and an on-screen one cannot disagree — and because it is already cached,
     // an export costs no additional Xero call.

@@ -172,6 +172,7 @@ function _ensureHealthTable() {
       reason             TEXT,
       fingerprint        TEXT,
       granted_scopes     TEXT,
+      refused_scopes     TEXT,
       last_refreshed_at  TEXT,
       updated_at         TEXT NOT NULL
     )
@@ -180,7 +181,7 @@ function _ensureHealthTable() {
 }
 
 const EMPTY_HEALTH = Object.freeze({
-  method: null, needsReconnect: false, reason: null, fingerprint: null, grantedScopes: null, lastRefreshedAt: null,
+  method: null, needsReconnect: false, reason: null, fingerprint: null, grantedScopes: null, refusedScopes: [], lastRefreshedAt: null,
 });
 
 function _rowToHealth(row) {
@@ -190,13 +191,16 @@ function _rowToHealth(row) {
     reason:          row.reason || null,
     fingerprint:     row.fingerprint || null,
     grantedScopes:   row.granted_scopes ? row.granted_scopes.split(' ').filter(Boolean) : null,
+    refusedScopes:   row.refused_scopes ? row.refused_scopes.split(' ').filter(Boolean) : [],
     lastRefreshedAt: row.last_refreshed_at || null,
   };
 }
 
 /**
  * This user's connection health: { method, needsReconnect, reason, fingerprint,
- * grantedScopes (array or null when unknown), lastRefreshedAt (ISO or null) }.
+ * grantedScopes (array or null when unknown), refusedScopes (scopes Xero would
+ * not let this app ask for; see markScopesRefused), lastRefreshedAt (ISO or
+ * null) }.
  */
 function getHealth(userId) {
   if (_health.has(userId)) return { ..._health.get(userId) };
@@ -218,15 +222,17 @@ function _saveHealth(userId, record) {
     _ensureHealthTable();
     db.prepare(`
       INSERT INTO xero_connection_health
-        (user_id, method, needs_reconnect, reason, fingerprint, granted_scopes, last_refreshed_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (user_id, method, needs_reconnect, reason, fingerprint, granted_scopes, refused_scopes, last_refreshed_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET
         method = excluded.method, needs_reconnect = excluded.needs_reconnect, reason = excluded.reason,
-        fingerprint = excluded.fingerprint, granted_scopes = excluded.granted_scopes,
+        fingerprint = excluded.fingerprint, granted_scopes = excluded.granted_scopes, refused_scopes = excluded.refused_scopes,
         last_refreshed_at = excluded.last_refreshed_at, updated_at = excluded.updated_at
     `).run(
       userId, record.method, record.needsReconnect ? 1 : 0, record.reason, record.fingerprint,
-      record.grantedScopes ? record.grantedScopes.join(' ') : null, record.lastRefreshedAt, new Date().toISOString(),
+      record.grantedScopes ? record.grantedScopes.join(' ') : null,
+      record.refusedScopes?.length ? record.refusedScopes.join(' ') : null,
+      record.lastRefreshedAt, new Date().toISOString(),
     );
   } catch (err) {
     logger.warn('Failed to persist Xero connection health', { error: err.message, userId });
@@ -257,6 +263,17 @@ function markRefreshed(userId, { method = null, grantedScopes = null, at = new D
   });
 }
 
+// Xero's authorize endpoint refused a consent that named these scopes
+// (invalid_scope: the app may not ask for them). Kept until the next
+// disconnect so the next consent link leaves them out (oauth.js
+// buildAuthorizeUrl) and the connection status does not go on listing them
+// as missing. Added to what is recorded, never replacing it.
+function markScopesRefused(userId, scopes) {
+  const prev = getHealth(userId);
+  const refusedScopes = [...new Set([...(prev.refusedScopes || []), ...(scopes || [])])];
+  return _saveHealth(userId, { ...prev, refusedScopes });
+}
+
 // Disconnect: nothing about the old connection applies to the next one.
 function clearHealth(userId) {
   _health.delete(userId);
@@ -268,4 +285,4 @@ function clearHealth(userId) {
   }
 }
 
-module.exports = { forUser, getPersistedTenants, getHealth, markNeedsReconnect, markRefreshed, clearHealth };
+module.exports = { forUser, getPersistedTenants, getHealth, markNeedsReconnect, markRefreshed, markScopesRefused, clearHealth };

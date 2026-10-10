@@ -107,7 +107,7 @@ describe('Xero connection health', () => {
       await oauth.completeConnection(user.id, 'the-code');
 
       expect(reconnect.getConnectionStatus(user.id)).toEqual({
-        method: 'oauth', connected: true, needsReconnect: false, reason: null, missingScopes: [],
+        method: 'oauth', connected: true, needsReconnect: false, reason: null, missingScopes: [], refusedScopes: [], refusedMessage: null,
       });
     });
 
@@ -163,6 +163,37 @@ describe('Xero connection health', () => {
     axios.post.mockResolvedValueOnce(tokenResponse({ scope: withoutAttachments }));
     await oauth.refreshAuthCodeToken(user.id);
     expect(tokenCache.getHealth(user.id).grantedScopes).not.toContain('accounting.attachments');
+  });
+
+  // Not every Xero app may ask for the granular report scopes. Ones Xero
+  // refused at consent are recorded (by the callback's retry, xero/oauth.js
+  // retryAuthorizeUrl) and are then not "missing": no reconnect can gain them.
+  test('scopes Xero refused at consent are reported apart, left out of the next consent link, and cleared by a disconnect', () => {
+    const { BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE } = xeroUtils;
+    tokenCache.forUser(user.id).cacheToken('t-1', 'Org One', 'at', new Date(Date.now() + 60_000), 'oauth');
+    tokenCache.markScopesRefused(user.id, [BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE]);
+    const granted = oauth.SCOPES.split(' ').filter(s => ![BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE, 'accounting.attachments'].includes(s));
+    tokenCache.markRefreshed(user.id, { method: 'oauth', grantedScopes: granted });
+
+    expect(reconnect.getConnectionStatus(user.id)).toEqual({
+      method: 'oauth', connected: true, needsReconnect: false, reason: null,
+      missingScopes:  ['accounting.attachments'],
+      refusedScopes:  [BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE],
+      refusedMessage: 'Xero refused these permissions for this app',
+    });
+    // Written to the database, so a restart still knows; and a refresh
+    // recording granted scopes did not wipe it.
+    const row = require('../db').prepare('SELECT refused_scopes FROM xero_connection_health WHERE user_id = ?').get(user.id);
+    expect(row.refused_scopes).toBe(`${BALANCE_SHEET_SCOPE} ${TRIAL_BALANCE_SCOPE}`);
+
+    const scopes = new URL(oauth.buildAuthorizeUrl(user.id)).searchParams.get('scope').split(' ');
+    expect(scopes).not.toContain(BALANCE_SHEET_SCOPE);
+    expect(scopes).not.toContain(TRIAL_BALANCE_SCOPE);
+    expect(scopes).toEqual(expect.arrayContaining(['offline_access', 'accounting.attachments', 'accounting.journals.read']));
+
+    tokenCache.clearHealth(user.id);
+    expect(reconnect.getConnectionStatus(user.id)).toMatchObject({ refusedScopes: [], refusedMessage: null });
+    expect(new URL(oauth.buildAuthorizeUrl(user.id)).searchParams.get('scope').split(' ')).toContain(BALANCE_SHEET_SCOPE);
   });
 
   test('the scopes can be read from the access token when the response does not list them', () => {

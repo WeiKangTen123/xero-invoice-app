@@ -45,7 +45,24 @@ router.get('/oauth/callback', (req, res) => {
   const base = _frontendSetupUrl();
 
   if (xeroError) {
-    logger.warn('Xero OAuth consent denied or errored', { error: xeroError });
+    // Xero would not let this app ask for the optional report scopes
+    // (invalid_scope). Asked once more without them, for the user the flow was
+    // started for; the second refusal, if any, is the error below. Consuming
+    // the state here is safe: no code came with it, so the flow it bound is
+    // over, and the new link binds a new state to the same user. See
+    // xero/oauth.js scopeRefusal and retryAuthorizeUrl.
+    const refused = xeroOAuth.scopeRefusal(req.query);
+    if (refused && state) {
+      const userId = oauthState.consume(String(state));
+      let retry = null;
+      try {
+        retry = userId ? xeroOAuth.retryAuthorizeUrl(userId, refused) : null;
+      } catch (err) {
+        logger.warn('Could not ask for Xero consent again without the refused scopes', { error: err.message, userId });
+      }
+      if (retry) return res.redirect(retry);
+    }
+    logger.warn('Xero OAuth consent denied or errored', { error: xeroError, description: req.query.error_description || undefined });
     return res.redirect(`${base}?xero_oauth=error`);
   }
   if (!code || !state) {
@@ -106,8 +123,9 @@ router.delete('/oauth/disconnect', requireAuth, asyncHandler(async (req, res) =>
 
 // GET /api/xero/connection — the state of this user's Xero connection for the
 // app-wide banner. Exactly { method, connected, needsReconnect, reason,
-// missingScopes } — see xero/reconnect.js getConnectionStatus. Reads what is
-// on file and never calls Xero, so it is safe to poll.
+// missingScopes, refusedScopes, refusedMessage } — see xero/reconnect.js
+// getConnectionStatus. Reads what is on file and never calls Xero, so it is
+// safe to poll.
 router.get('/connection', requireAuth, asyncHandler(async (req, res) => {
   const s = getConnectionStatus(req.user.id);
   res.json({
@@ -116,6 +134,8 @@ router.get('/connection', requireAuth, asyncHandler(async (req, res) => {
     needsReconnect: s.needsReconnect,
     reason:         s.reason,
     missingScopes:  s.missingScopes,
+    refusedScopes:  s.refusedScopes,
+    refusedMessage: s.refusedMessage,
   });
 }));
 

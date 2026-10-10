@@ -2,8 +2,8 @@ const axios  = require('axios');
 const logger = require('../utils/logger');
 const oauthState = require('../utils/oauth-state');
 const {
-  OAUTH_SCOPES, XeroReconnectError, reconnectReason, tokenErrorCode, credentialFingerprint, grantedScopesFrom,
-  xeroErrMsg,
+  OAUTH_SCOPES, OPTIONAL_REPORT_SCOPES, XeroReconnectError, reconnectReason, tokenErrorCode, credentialFingerprint,
+  grantedScopesFrom, xeroErrMsg,
 } = require('./xero-utils');
 
 // offline_access is what actually grants a refresh token — without it Xero only
@@ -58,6 +58,15 @@ function _basicAuth(clientId, clientSecret) {
   return `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`;
 }
 
+// The scopes this user's consent link asks for: every one the app uses, less
+// any Xero has refused this app (see retryAuthorizeUrl). Without that, every
+// later reconnect would bounce off the same refusal before being asked again
+// without them.
+function _scopesFor(userId) {
+  const refused = new Set(require('../utils/token-cache').getHealth(userId).refusedScopes || []);
+  return SCOPES.split(' ').filter(s => !refused.has(s)).join(' ');
+}
+
 function buildAuthorizeUrl(userId) {
   const { clientId, redirectUri } = _appCreds(userId);
   const state = oauthState.create(userId);
@@ -65,10 +74,52 @@ function buildAuthorizeUrl(userId) {
     response_type: 'code',
     client_id:     clientId,
     redirect_uri:  redirectUri,
-    scope:         SCOPES,
+    scope:         _scopesFor(userId),
     state,
   });
   return `${AUTHORIZE_URL}?${params.toString()}`;
+}
+
+// ── A consent Xero refuses for its scopes ───────────────────────────────────
+// The balance sheet and trial balance scopes are granular ones not every Xero
+// app may ask for. When an app may not, Xero does not show the consent screen
+// at all: the browser comes straight back to the callback with
+// error=invalid_scope (sometimes with an error_description naming the scope),
+// and before this the person saw a bare "connection failed" with no way past
+// it. So the callback asks once more without those two scopes — never the
+// required ones, which cannot be dropped, and never attachments or journals,
+// which Xero has not refused — and records what was dropped so the next link
+// and the connection status know.
+
+// Pure. The scopes to drop for the error Xero sent back to the callback, or
+// null when the error is not about scopes (a person declining consent is
+// access_denied, and that is their answer, not something to retry). An
+// error_description naming a scope counts whatever the error code, since
+// Xero's wording has varied; one naming only a required scope is still a
+// refusal, but there is nothing optional to drop for it, so it is null too.
+function scopeRefusal(query) {
+  const error = String(query?.error || '');
+  const description = String(query?.error_description || '');
+  const named = description.match(/[a-z]+\.[a-z.]+/gi) || [];
+  const aboutScopes = error === 'invalid_scope' || named.some(s => /^(accounting|offline_access|payroll|files|assets|projects)\b/i.test(s));
+  if (!aboutScopes) return null;
+  if (named.length && !named.some(s => OPTIONAL_REPORT_SCOPES.includes(s.toLowerCase()))) return null;
+  return [...OPTIONAL_REPORT_SCOPES];
+}
+
+// Records `scopes` as refused and returns a consent link without them, or
+// null when they were already recorded — which is how the retry happens at
+// most once: the link that came back refused was itself built without them,
+// so asking a third time would ask the same question. Nothing privileged
+// happens here: the link is the same one GET /oauth/connect mints for this
+// user, and completing it still takes POST /oauth/complete as that user.
+function retryAuthorizeUrl(userId, scopes) {
+  const tokenCache = require('../utils/token-cache');
+  const already = new Set(tokenCache.getHealth(userId).refusedScopes || []);
+  if (scopes.every(s => already.has(s))) return null;
+  tokenCache.markScopesRefused(userId, scopes);
+  logger.warn('Xero refused the optional report scopes for this app — asking for consent again without them', { userId, scopes });
+  return buildAuthorizeUrl(userId);
 }
 
 async function exchangeCodeForTokens(userId, code) {
@@ -251,6 +302,6 @@ async function reconnect(userId, { force = false } = {}) {
 }
 
 module.exports = {
-  buildAuthorizeUrl, exchangeCodeForTokens, refreshAuthCodeToken, revokeRefreshToken,
+  buildAuthorizeUrl, scopeRefusal, retryAuthorizeUrl, exchangeCodeForTokens, refreshAuthCodeToken, revokeRefreshToken,
   completeConnection, reconnect, SCOPES, REVOCATION_URL,
 };

@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS xero_connection_health (
   reason             TEXT,
   fingerprint        TEXT,
   granted_scopes     TEXT,
+  refused_scopes     TEXT,
   last_refreshed_at  TEXT,
   updated_at         TEXT NOT NULL
 );
