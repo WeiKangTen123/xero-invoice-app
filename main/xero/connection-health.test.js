@@ -106,8 +106,10 @@ describe('Xero connection health', () => {
       axios.get.mockResolvedValueOnce({ data: [{ tenantId: 't-1', tenantName: 'Org One' }] });
       await oauth.completeConnection(user.id, 'the-code');
 
-      expect(reconnect.getConnectionStatus(user.id)).toEqual({
+      expect(reconnect.getConnectionStatus(user.id)).toMatchObject({
         method: 'oauth', connected: true, needsReconnect: false, reason: null, missingScopes: [], refusedScopes: [], refusedMessage: null,
+        optional: { live: { status: 'granted' }, balance: { status: 'granted' } },
+        probe: null,
       });
     });
 
@@ -175,11 +177,12 @@ describe('Xero connection health', () => {
     const granted = oauth.SCOPES.split(' ').filter(s => ![BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE, 'accounting.attachments'].includes(s));
     tokenCache.markRefreshed(user.id, { method: 'oauth', grantedScopes: granted });
 
-    expect(reconnect.getConnectionStatus(user.id)).toEqual({
+    expect(reconnect.getConnectionStatus(user.id)).toMatchObject({
       method: 'oauth', connected: true, needsReconnect: false, reason: null,
       missingScopes:  ['accounting.attachments'],
       refusedScopes:  [BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE],
       refusedMessage: 'Xero refused these permissions for this app',
+      optional: { live: { status: 'granted' }, balance: { status: 'refused' } },
     });
     // Written to the database, so a restart still knows; and a refresh
     // recording granted scopes did not wipe it.

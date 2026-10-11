@@ -173,6 +173,8 @@ function _ensureHealthTable() {
       fingerprint        TEXT,
       granted_scopes     TEXT,
       refused_scopes     TEXT,
+      declined_scopes    TEXT,
+      scope_probe        TEXT,
       last_refreshed_at  TEXT,
       updated_at         TEXT NOT NULL
     )
@@ -181,17 +183,28 @@ function _ensureHealthTable() {
 }
 
 const EMPTY_HEALTH = Object.freeze({
-  method: null, needsReconnect: false, reason: null, fingerprint: null, grantedScopes: null, refusedScopes: [], lastRefreshedAt: null,
+  method: null, needsReconnect: false, reason: null, fingerprint: null, grantedScopes: null, refusedScopes: [], declinedScopes: [],
+  scopeProbe: null, lastRefreshedAt: null,
 });
 
+function _scopeList(text) {
+  return text ? text.split(' ').filter(Boolean) : [];
+}
+
 function _rowToHealth(row) {
+  let scopeProbe = null;
+  try {
+    scopeProbe = row.scope_probe ? JSON.parse(row.scope_probe) : null;
+  } catch (_) { /* an unreadable probe is the same as none: the next connect probes again */ }
   return {
     method:          row.method || null,
     needsReconnect:  !!row.needs_reconnect,
     reason:          row.reason || null,
     fingerprint:     row.fingerprint || null,
-    grantedScopes:   row.granted_scopes ? row.granted_scopes.split(' ').filter(Boolean) : null,
-    refusedScopes:   row.refused_scopes ? row.refused_scopes.split(' ').filter(Boolean) : [],
+    grantedScopes:   row.granted_scopes ? _scopeList(row.granted_scopes) : null,
+    refusedScopes:   _scopeList(row.refused_scopes),
+    declinedScopes:  _scopeList(row.declined_scopes),
+    scopeProbe:      scopeProbe && typeof scopeProbe === 'object' ? scopeProbe : null,
     lastRefreshedAt: row.last_refreshed_at || null,
   };
 }
@@ -199,8 +212,10 @@ function _rowToHealth(row) {
 /**
  * This user's connection health: { method, needsReconnect, reason, fingerprint,
  * grantedScopes (array or null when unknown), refusedScopes (scopes Xero would
- * not let this app ask for; see markScopesRefused), lastRefreshedAt (ISO or
- * null) }.
+ * not let this app ask for; see markScopesRefused), declinedScopes (optional
+ * scopes the person chose to connect without; see markScopesDeclined),
+ * scopeProbe (what Xero's authorize page said this app may ask for, or null;
+ * see saveScopeProbe), lastRefreshedAt (ISO or null) }.
  */
 function getHealth(userId) {
   if (_health.has(userId)) return { ..._health.get(userId) };
@@ -222,16 +237,20 @@ function _saveHealth(userId, record) {
     _ensureHealthTable();
     db.prepare(`
       INSERT INTO xero_connection_health
-        (user_id, method, needs_reconnect, reason, fingerprint, granted_scopes, refused_scopes, last_refreshed_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (user_id, method, needs_reconnect, reason, fingerprint, granted_scopes, refused_scopes, declined_scopes, scope_probe,
+         last_refreshed_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET
         method = excluded.method, needs_reconnect = excluded.needs_reconnect, reason = excluded.reason,
         fingerprint = excluded.fingerprint, granted_scopes = excluded.granted_scopes, refused_scopes = excluded.refused_scopes,
+        declined_scopes = excluded.declined_scopes, scope_probe = excluded.scope_probe,
         last_refreshed_at = excluded.last_refreshed_at, updated_at = excluded.updated_at
     `).run(
       userId, record.method, record.needsReconnect ? 1 : 0, record.reason, record.fingerprint,
       record.grantedScopes ? record.grantedScopes.join(' ') : null,
       record.refusedScopes?.length ? record.refusedScopes.join(' ') : null,
+      record.declinedScopes?.length ? record.declinedScopes.join(' ') : null,
+      record.scopeProbe ? JSON.stringify(record.scopeProbe) : null,
       record.lastRefreshedAt, new Date().toISOString(),
     );
   } catch (err) {
@@ -249,9 +268,12 @@ function markNeedsReconnect(userId, { method = null, reason, fingerprint = null 
 }
 
 // A token was issued: the connection works, whatever was recorded before.
-// Scopes are replaced only when the token response said which were granted.
+// Scopes are replaced only when the token response said which were granted,
+// and a scope the token carries is neither refused nor declined any more,
+// whatever was recorded: Xero granting it is the final word.
 function markRefreshed(userId, { method = null, grantedScopes = null, at = new Date() } = {}) {
   const prev = getHealth(userId);
+  const granted = new Set(Array.isArray(grantedScopes) ? grantedScopes : []);
   return _saveHealth(userId, {
     ...prev,
     method:          method || prev.method,
@@ -259,19 +281,62 @@ function markRefreshed(userId, { method = null, grantedScopes = null, at = new D
     reason:          null,
     fingerprint:     null,
     grantedScopes:   Array.isArray(grantedScopes) ? grantedScopes : prev.grantedScopes,
+    refusedScopes:   (prev.refusedScopes || []).filter(s => !granted.has(s)),
+    declinedScopes:  (prev.declinedScopes || []).filter(s => !granted.has(s)),
     lastRefreshedAt: new Date(at).toISOString(),
   });
 }
 
+function _without(list, scopes) {
+  const drop = new Set(scopes || []);
+  return (list || []).filter(s => !drop.has(s));
+}
+
 // Xero's authorize endpoint refused a consent that named these scopes
 // (invalid_scope: the app may not ask for them). Kept until the next
-// disconnect so the next consent link leaves them out (oauth.js
-// buildAuthorizeUrl) and the connection status does not go on listing them
-// as missing. Added to what is recorded, never replacing it.
-function markScopesRefused(userId, scopes) {
+// disconnect, or until a probe finds Xero accepts them (markScopesAllowed),
+// so the next consent link leaves them out (oauth.js buildAuthorizeUrl) and
+// the connection status does not go on listing them as missing. Added to
+// what is recorded, never replacing it. A refused scope cannot also be one
+// the person declined: Xero made that choice for them. `reason` is for the
+// log — where the refusal was seen.
+function markScopesRefused(userId, scopes, { reason = null } = {}) {
   const prev = getHealth(userId);
+  const added = (scopes || []).filter(s => !(prev.refusedScopes || []).includes(s));
+  if (added.length) logger.warn('Xero refused these scopes for this app', { userId, scopes: added, reason: reason || undefined });
   const refusedScopes = [...new Set([...(prev.refusedScopes || []), ...(scopes || [])])];
-  return _saveHealth(userId, { ...prev, refusedScopes });
+  return _saveHealth(userId, { ...prev, refusedScopes, declinedScopes: _without(prev.declinedScopes, scopes) });
+}
+
+// A probe found Xero's authorize page accepting these scopes (oauth.js
+// probeOptionalScopes), so a refusal recorded for them no longer holds —
+// without this, a forced re-probe could never let an app that Xero has since
+// allowed ask for them again short of a disconnect.
+function markScopesAllowed(userId, scopes) {
+  const prev = getHealth(userId);
+  if (!(scopes || []).some(s => (prev.refusedScopes || []).includes(s))) return { ...prev };
+  return _saveHealth(userId, { ...prev, refusedScopes: _without(prev.refusedScopes, scopes) });
+}
+
+// The person connected without these optional scopes (the consent link left
+// their group out). Recorded so the connection status reports them as their
+// choice rather than as something missing that a reconnect would fix, and
+// so nothing nags them to reconnect for a feature they did not want. Cleared
+// for any scope a later consent grants (markRefreshed), and never recorded
+// for a scope Xero refused, which is not a choice.
+function markScopesDeclined(userId, scopes) {
+  const prev = getHealth(userId);
+  const refused = new Set(prev.refusedScopes || []);
+  const declinedScopes = [...new Set([...(prev.declinedScopes || []), ...(scopes || []).filter(s => !refused.has(s))])];
+  return _saveHealth(userId, { ...prev, declinedScopes });
+}
+
+// What Xero's authorize page said this app may ask for (oauth.js
+// probeOptionalScopes): { at, fingerprint, base, groups }. Replaces the last
+// probe; the probe itself decides when it is too old to trust.
+function saveScopeProbe(userId, probe) {
+  const prev = getHealth(userId);
+  return _saveHealth(userId, { ...prev, scopeProbe: probe ? { ...probe } : null });
 }
 
 // Disconnect: nothing about the old connection applies to the next one.
@@ -285,4 +350,7 @@ function clearHealth(userId) {
   }
 }
 
-module.exports = { forUser, getPersistedTenants, getHealth, markNeedsReconnect, markRefreshed, markScopesRefused, clearHealth };
+module.exports = {
+  forUser, getPersistedTenants, getHealth, markNeedsReconnect, markRefreshed, markScopesRefused, markScopesAllowed, markScopesDeclined,
+  saveScopeProbe, clearHealth,
+};

@@ -424,11 +424,29 @@ const JOURNALS_SCOPE = 'accounting.journals.read';
 const BALANCE_SHEET_SCOPE = 'accounting.reports.balancesheet.read';
 const TRIAL_BALANCE_SCOPE = 'accounting.reports.trialbalance.read';
 const OPTIONAL_REPORT_SCOPES = [BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE];
-const OAUTH_SCOPES = `${SCOPES} ${ATTACHMENTS_SCOPE} ${JOURNALS_SCOPE} ${BALANCE_SHEET_SCOPE} ${TRIAL_BALANCE_SCOPE}`;
+
+// The scopes a consent may go without, by the feature each one unlocks. Not
+// every Xero app may ask for the journals and granular report scopes, and an
+// app that may not is answered at Xero's OWN authorize page ("invalid_scope",
+// error code 500) — the browser never comes back to the callback, so there is
+// nothing to retry and the person is simply stuck. So these are the groups a
+// consent link can leave out: oauth.js probes which ones this app may ask for
+// before Connect, and GET /api/xero/connection reports each group's standing
+// so Setup can offer them one by one. Attachments stays in the always-asked
+// set (BASE_OAUTH_SCOPES): every app may ask for it. Each key is what the
+// Connect route and the connection status call the group.
+const OPTIONAL_SCOPE_GROUPS = Object.freeze({
+  live:    Object.freeze({ scopes: Object.freeze([JOURNALS_SCOPE]), label: 'Live updates' }),
+  balance: Object.freeze({ scopes: Object.freeze([BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE]), label: 'Balance Sheet' }),
+});
+// What every Web app consent asks for, and everything the app would like —
+// the second is what the connection status measures "missing" against.
+const BASE_OAUTH_SCOPES = `${SCOPES} ${ATTACHMENTS_SCOPE}`;
+const OAUTH_SCOPES = `${BASE_OAUTH_SCOPES} ${JOURNALS_SCOPE} ${BALANCE_SHEET_SCOPE} ${TRIAL_BALANCE_SCOPE}`;
 
 module.exports = {
-  withRetry, xeroErrMsg, _parseXeroErr, isScopeError, SCOPES, OAUTH_SCOPES, ATTACHMENTS_SCOPE, JOURNALS_SCOPE,
-  BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE, OPTIONAL_REPORT_SCOPES,
+  withRetry, xeroErrMsg, _parseXeroErr, isScopeError, SCOPES, OAUTH_SCOPES, BASE_OAUTH_SCOPES, ATTACHMENTS_SCOPE, JOURNALS_SCOPE,
+  BALANCE_SHEET_SCOPE, TRIAL_BALANCE_SCOPE, OPTIONAL_REPORT_SCOPES, OPTIONAL_SCOPE_GROUPS,
   XeroReconnectError, reconnectReason, tokenErrorCode, isReconnectError, credentialFingerprint, grantedScopesFrom,
   getRateLimitBudget, MAX_RATE_LIMIT_WAIT_MS, DEFAULT_RECONNECT_REASON,
   _recordRateLimit, _recordFromResponse, _dailyLimitMsg,

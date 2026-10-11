@@ -72,7 +72,11 @@ export function liveLabel({ fetchedAt, checkedAt, live, liveReason } = {}, forma
 // when Xero changes, and the Balance Sheet tab cannot read its report (nor
 // its check against Xero the Trial Balance, so the two report scopes count
 // as one thing). All are cured by one reconnect, which is what the banner's
-// title has to say — "once", so it does not read as a fault.
+// title has to say — "once", so it does not read as a fault. Which of them
+// the banner still speaks for is decided before these are called: not one
+// the person left unticked in Setup, nor one Xero refuses this app
+// (setup/connect.js#bannerGroups), so the wording here is only ever for a
+// permission never asked for.
 const ATTACHMENTS_SCOPE = 'accounting.attachments';
 const JOURNALS_SCOPE    = 'accounting.journals.read';
 const BALANCE_SCOPES    = ['accounting.reports.balancesheet.read', 'accounting.reports.trialbalance.read'];

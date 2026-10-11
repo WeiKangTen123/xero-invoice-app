@@ -74,6 +74,12 @@ const REASONS = Object.freeze({
   custom:        'Live updates need a Xero Web app connection: a Custom Connection cannot be granted the journals scope',
   scopesUnknown: 'Xero has not said yet which scopes this connection has; checked again after its next token refresh',
   scope:         'Reconnect Xero in Setup to grant accounting.journals.read',
+  // Xero's authorize page refuses some apps the journals scope outright
+  // (xero/oauth.js probeOptionalScopes found it, or a consent was refused),
+  // and then no reconnect can add it: saying "reconnect" would send the
+  // person back into Xero's "invalid_scope" page.
+  refused:       'Xero does not allow this app the journals permission, so live updates are off',
+  declined:      'Live updates were left unticked when Xero was connected; tick them in Setup and connect again',
   allowance:     'daily allowance low',
 });
 
@@ -135,9 +141,19 @@ function _whyNotLive(userId, tenantId, now) {
   if (!status.method) return REASONS.notConnected;
   if (status.method !== 'oauth') return REASONS.custom;
   if (status.needsReconnect) return status.reason || 'The Xero connection needs reconnecting';
-  const granted = (require('../utils/token-cache').getHealth(userId) || {}).grantedScopes;
-  if (!Array.isArray(granted)) return REASONS.scopesUnknown;
-  if (!granted.includes(JOURNALS_SCOPE)) return REASONS.scope;
+  const health  = require('../utils/token-cache').getHealth(userId) || {};
+  const granted = health.grantedScopes;
+  if (Array.isArray(granted) && granted.includes(JOURNALS_SCOPE)) {
+    // granted: carry on to the allowance check below
+  } else if ((health.refusedScopes || []).includes(JOURNALS_SCOPE)) {
+    return REASONS.refused;
+  } else if ((health.declinedScopes || []).includes(JOURNALS_SCOPE)) {
+    return REASONS.declined;
+  } else if (!Array.isArray(granted)) {
+    return REASONS.scopesUnknown;
+  } else {
+    return REASONS.scope;
+  }
   const budget = getRateLimitBudget(tenantId);
   if (budget && _allowanceLow(budget, now)) return REASONS.allowance;
   return null;

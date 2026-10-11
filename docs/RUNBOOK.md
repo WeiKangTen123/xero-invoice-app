@@ -248,20 +248,36 @@ in Xero's flat list, not from a list of expected titles. The export rides on
   `missingScopes` in `GET /api/xero/connection` and answers the tab with a
   403 reconnect prompt until reconnected once in Setup.
 - **An app Xero will not grant them to.** Not every Xero app may ask for
-  the granular report scopes. When Xero refuses the consent
-  (`error=invalid_scope` on the OAuth callback, or an `error_description`
-  naming one), `GET /api/xero/oauth/callback` sends the browser straight back
-  to Xero once more without those two scopes — attachments and journals are
-  kept — and records them in `xero_connection_health.refused_scopes`. From
-  then on `GET /api/xero/connection` carries them as `refusedScopes` with
-  `refusedMessage` "Xero refused these permissions for this app", they are
-  left out of `missingScopes` and of every later consent link, and the
-  Balance Sheet tab answers the reconnect prompt for that connection. It
-  never retries more than once: a second refusal is the ordinary
-  `xero_oauth=error` redirect. `logs/combined.log` has `Xero refused the
-  optional report scopes for this app` when it happens. To try again after
-  Xero changes what the app may ask for: Disconnect in Setup (which clears
-  the record) and connect again.
+  every optional scope. Xero does NOT tell the app at the callback: its
+  authorize page shows its own "Error: invalid_scope, Error code: 500" page
+  and the browser never comes back, so a Connect asking for a refused scope
+  simply looks broken. Seen on 2026-10-11: the owner's app was refused
+  `accounting.journals.read` and allowed both report scopes. So Connect asks
+  only for what is allowed:
+  - **The probe** (`main/xero/oauth.js` `probeOptionalScopes`). An
+    unauthenticated GET to `https://login.xero.com/identity/connect/authorize`
+    with the user's Client ID, the redirect URI and a scope list, no secret,
+    redirects not followed: a 302 to `/identity/user/login` means Xero
+    accepts that scope list, a 302 to `/identity/error?errorId=…` means it
+    does not. It asks the base set, then the base set plus each optional
+    group (`live` = journals, `balance` = balance sheet + trial balance), and
+    records a refused group in `refused_scopes`. The answer is kept in
+    `xero_connection_health.scope_probe` for a day per Client ID and redirect
+    URI; `GET /api/xero/connection?force=true` (Setup's "Check again") asks
+    again. `logs/combined.log` has `Asked Xero which optional permissions
+    this app may request` with the answer.
+  - **Connect** (`GET /api/xero/oauth/connect?extras=live,balance`) asks for
+    the ticked groups less any the probe found refused, and answers
+    `{ url, requested, excluded }`. With no `extras`, it asks for every
+    group the probe found allowed. A group left unticked is recorded in
+    `declined_scopes` once the connect completes, and reported as
+    `declined`, not missing.
+  - **The status.** `GET /api/xero/connection` carries `optional.live` and
+    `optional.balance` with `status` granted / missing (Xero allows it, a
+    reconnect adds it) / declined / refused / unknown. The banner only asks
+    for a reconnect over `missing`.
+  - The callback's own `invalid_scope` retry is kept for any Xero that does
+    send the browser back; it never retries more than once.
 - **Is it working?** `GET /api/xero-reports/balance-check?…` as the user,
   with the same query as the tab (`main/xero/balance-check.js`): `ok` true
   and three checks — `identity` (Net Assets = Total Assets − Total

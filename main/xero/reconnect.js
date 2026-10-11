@@ -38,14 +38,44 @@ const NO_CUSTOM_CREDS_REASON = 'Your Custom Connection Client ID or Secret is mi
  *                   (xero/oauth.js retryAuthorizeUrl); never in missingScopes,
  *                   since reconnecting cannot gain them
  *   refusedMessage  what to say about them, or null when there are none
+ *   optional        for an OAuth connection, each optional group (xero-utils
+ *                   OPTIONAL_SCOPE_GROUPS) as { label, scopes, status }; see
+ *                   _groupStatus. null for Custom Connection, which never
+ *                   asks for them
+ *   probe           what Xero's authorize page last said this app may ask
+ *                   for ({ at, base, groups }), or null
  */
 const REFUSED_SCOPES_MESSAGE = 'Xero refused these permissions for this app';
+
+// What became of one optional group, in the order that settles it:
+//   granted   the connection carries every scope of the group
+//   refused   Xero will not let this app ask for it (seen at consent, or
+//             found by the probe) — no reconnect can add it
+//   declined  the last Connect left it unticked — the person's choice
+//   missing   never granted, and the probe found Xero would allow it: a
+//             reconnect with it ticked adds it
+//   unknown   not granted, and nothing says whether Xero would allow it —
+//             asking might land on Xero's "invalid_scope" page, so nothing
+//             nags anyone to try
+function _groupStatus(scopes, health, probed) {
+  const granted = Array.isArray(health.grantedScopes) ? new Set(health.grantedScopes) : null;
+  if (granted && scopes.every(s => granted.has(s))) return 'granted';
+  if (scopes.some(s => (health.refusedScopes || []).includes(s))) return 'refused';
+  if (scopes.some(s => (health.declinedScopes || []).includes(s))) return 'declined';
+  if (probed === 'refused')   return 'refused';
+  if (probed === 'available') return 'missing';
+  return 'unknown';
+}
+
 function getConnectionStatus(userId) {
   const { getUserConfig } = require('../utils/users');
   const tokenCache = require('../utils/token-cache');
   const config = getUserConfig(userId) || {};
   const method = connectionMethod(config);
-  const none = { method: null, connected: false, needsReconnect: false, reason: null, missingScopes: [], refusedScopes: [], refusedMessage: null };
+  const none = {
+    method: null, connected: false, needsReconnect: false, reason: null, missingScopes: [], refusedScopes: [], refusedMessage: null,
+    optional: null, probe: null,
+  };
   if (!method) return none;
 
   const health  = (typeof tokenCache.getHealth === 'function' && tokenCache.getHealth(userId)) || {};
@@ -72,10 +102,28 @@ function getConnectionStatus(userId) {
   // A refused scope is one no reconnect can gain, so it is not "missing" in
   // the sense the banner means (reconnect to get it); it is reported apart.
   const refusedScopes = method === 'oauth' && Array.isArray(health.refusedScopes) ? [...health.refusedScopes] : [];
+  // Declined is the person's choice, so not "missing" either: a reconnect
+  // would only add it if they tick it again.
+  const declined = new Set(method === 'oauth' && Array.isArray(health.declinedScopes) ? health.declinedScopes : []);
   let missingScopes = [];
   if (method === 'oauth' && Array.isArray(health.grantedScopes)) {
     const granted = new Set(health.grantedScopes), refused = new Set(refusedScopes);
-    missingScopes = require('./oauth').SCOPES.split(' ').filter(s => s && !granted.has(s) && !refused.has(s));
+    missingScopes = require('./oauth').SCOPES.split(' ').filter(s => s && !granted.has(s) && !refused.has(s) && !declined.has(s));
+  }
+
+  let optional = null, probe = null;
+  if (method === 'oauth') {
+    const { OPTIONAL_SCOPE_GROUPS } = require('./xero-utils');
+    const p = health.scopeProbe && typeof health.scopeProbe === 'object' ? health.scopeProbe : null;
+    probe = p ? { at: p.at || null, base: p.base || 'unknown', groups: { ...(p.groups || {}) } } : null;
+    optional = {};
+    for (const [key, group] of Object.entries(OPTIONAL_SCOPE_GROUPS)) {
+      optional[key] = {
+        label:  group.label,
+        scopes: [...group.scopes],
+        status: _groupStatus(group.scopes, health, probe ? probe.groups[key] : null),
+      };
+    }
   }
 
   const needsReconnect = !!reason;
@@ -87,6 +135,8 @@ function getConnectionStatus(userId) {
     missingScopes,
     refusedScopes,
     refusedMessage: refusedScopes.length ? REFUSED_SCOPES_MESSAGE : null,
+    optional,
+    probe,
   };
 }
 

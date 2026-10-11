@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../../api/client';
 import { useVisiblePolling } from '../../utils/useVisiblePolling';
 import { bannerTitle, bannerDetail } from '../../pages/xero-insights/live';
+import { bannerGroups } from '../../pages/setup/connect';
 
 // A Xero connection that has stopped working, said on every page rather than
 // only in Setup. A revoked or expired connection used to surface one failed
@@ -13,6 +14,9 @@ import { bannerTitle, bannerDetail } from '../../pages/xero-insights/live';
 // changes, so its figures wait for a Refresh; and one made before the report
 // scopes were asked for cannot read the Balance Sheet. One reconnect cures
 // all but the first, which is what the title says (see live.js#bannerTitle).
+// It asks only over a permission never asked for: one the person left
+// unticked in Setup, or one Xero refuses this app, is not cured by a
+// reconnect, and asking for one sent people into Xero's "invalid_scope" page.
 //
 // Asked rarely: once on load, then every ten minutes while the tab is in view.
 // The answer changes when someone reconnects, which happens in Setup, and Setup
@@ -29,8 +33,13 @@ function problemOf(c) {
   // A scope Xero refused the app outright is missing too, but no reconnect
   // can add it, so the banner does not ask for one over it: the tab that
   // needs it says what happened instead (xero-insights/balance.js#errorNotice).
+  // Nor over one the person chose not to ask for: the box in Setup is the
+  // cure, and `optional` is where that choice is read from
+  // (setup/connect.js#bannerGroups). The refused list is read as well, for a
+  // server that sends only that.
   const refused = Array.isArray(c.refusedScopes) ? c.refusedScopes : [];
-  const missing = (Array.isArray(c.missingScopes) ? c.missingScopes : []).filter(s => !refused.includes(s));
+  const addable = (Array.isArray(c.missingScopes) ? c.missingScopes : []).filter(s => !refused.includes(s));
+  const missing = bannerGroups(c.optional, addable);
   if (c.needsReconnect) {
     return { key: `reconnect:${c.reason || ''}`, title: 'Reconnect Xero in Setup',
              detail: c.reason || 'Xero is no longer accepting this connection, so nothing can be sent until it is reconnected.' };

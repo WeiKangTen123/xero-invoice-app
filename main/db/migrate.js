@@ -67,6 +67,10 @@ function run() {
   // Scopes Xero's consent screen refused this app (xero/oauth.js): left out of
   // the next consent link and of the connection status's missing scopes.
   _ensureColumn('xero_connection_health', 'refused_scopes', 'refused_scopes TEXT');
+  // Optional scopes the person connected without, and what Xero's authorize
+  // page said this app may ask for (xero/oauth.js probeOptionalScopes).
+  _ensureColumn('xero_connection_health', 'declined_scopes', 'declined_scopes TEXT');
+  _ensureColumn('xero_connection_health', 'scope_probe', 'scope_probe TEXT');
   _ensureColumn('users', 'sessions_valid_from', 'sessions_valid_from TEXT');
   _ensureColumn('users', 'disabled_at', 'disabled_at TEXT');
   for (const [col, ddl] of [

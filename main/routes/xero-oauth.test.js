@@ -37,18 +37,40 @@ describe('routes/xero-oauth', () => {
       await request(serverFor(app)).get('/api/xero/oauth/connect').expect(401);
     });
 
-    test('returns the authorize URL from xero/oauth', async () => {
-      xeroOAuth.buildAuthorizeUrl.mockReturnValue('https://login.xero.com/identity/connect/authorize?state=abc');
+    test('returns the authorize URL from xero/oauth, with what it asks for and what it left out', async () => {
+      xeroOAuth.authorizeFor.mockResolvedValue({
+        url: 'https://login.xero.com/identity/connect/authorize?state=abc', requested: ['balance'], excluded: { live: 'refused' },
+      });
       const res = await request(serverFor(app))
         .get('/api/xero/oauth/connect')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
         .expect(200);
-      expect(res.body.url).toContain('login.xero.com');
-      expect(xeroOAuth.buildAuthorizeUrl).toHaveBeenCalledWith(testUser.id);
+      expect(res.body).toEqual({
+        url: 'https://login.xero.com/identity/connect/authorize?state=abc', requested: ['balance'], excluded: { live: 'refused' },
+      });
+      // No ?extras= at all: the person has not said, so the probe decides.
+      expect(xeroOAuth.authorizeFor).toHaveBeenCalledWith(testUser.id, { extras: null, force: false });
+    });
+
+    // Setup's boxes: the ticked groups, an empty value for none, and nothing
+    // the server does not know passed on.
+    test.each([
+      ['live,balance', ['live', 'balance']],
+      ['balance',      ['balance']],
+      ['',             []],
+      ['balance,nope', ['balance']],
+    ])('?extras=%s asks for %j', async (extras, expected) => {
+      xeroOAuth.GROUP_KEYS = ['live', 'balance'];
+      xeroOAuth.authorizeFor.mockResolvedValue({ url: 'https://login.xero.com/x', requested: expected, excluded: {} });
+      await request(serverFor(app))
+        .get(`/api/xero/oauth/connect?extras=${extras}`)
+        .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+        .expect(200);
+      expect(xeroOAuth.authorizeFor).toHaveBeenCalledWith(testUser.id, { extras: expected, force: false });
     });
 
     test('surfaces a config error as 400, not a 500 crash', async () => {
-      xeroOAuth.buildAuthorizeUrl.mockImplementation(() => { throw new Error('Xero OAuth is not configured'); });
+      xeroOAuth.authorizeFor.mockRejectedValue(new Error('Xero OAuth is not configured'));
       const res = await request(serverFor(app))
         .get('/api/xero/oauth/connect')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
@@ -99,7 +121,8 @@ describe('routes/xero-oauth', () => {
       const REFUSED = ['accounting.reports.balancesheet.read', 'accounting.reports.trialbalance.read'];
       beforeEach(() => {
         xeroOAuth.scopeRefusal.mockImplementation(q => (q.error === 'invalid_scope' ? REFUSED : null));
-        oauthState.consume.mockReturnValue(testUser.id);
+        xeroOAuth.groupScopes.mockImplementation(keys => (keys.includes('balance') ? REFUSED : []));
+        oauthState.consumeEntry.mockReturnValue({ userId: testUser.id, data: { groups: ['balance'] } });
       });
 
       test('redirects straight to a consent link without those scopes, bound to the same user', async () => {
@@ -107,8 +130,11 @@ describe('routes/xero-oauth', () => {
         const res = await request(serverFor(app)).get('/api/xero/oauth/callback?error=invalid_scope&state=some-state');
         expect(res.status).toBe(302);
         expect(res.headers.location).toBe('https://login.xero.com/identity/connect/authorize?retry=1');
-        expect(oauthState.consume).toHaveBeenCalledWith('some-state');
-        expect(xeroOAuth.retryAuthorizeUrl).toHaveBeenCalledWith(testUser.id, REFUSED);
+        expect(oauthState.consumeEntry).toHaveBeenCalledWith('some-state');
+        // Judged against what that link asked for (its state), and the retry
+        // asks for the same groups less the refused ones.
+        expect(xeroOAuth.scopeRefusal).toHaveBeenLastCalledWith(expect.objectContaining({ error: 'invalid_scope' }), REFUSED);
+        expect(xeroOAuth.retryAuthorizeUrl).toHaveBeenCalledWith(testUser.id, REFUSED, ['balance']);
         expect(xeroOAuth.completeConnection).not.toHaveBeenCalled();
       });
 
@@ -119,7 +145,7 @@ describe('routes/xero-oauth', () => {
       });
 
       test('a state that is unknown or expired cannot be retried for anyone', async () => {
-        oauthState.consume.mockReturnValue(null);
+        oauthState.consumeEntry.mockReturnValue(null);
         const res = await request(serverFor(app)).get('/api/xero/oauth/callback?error=invalid_scope&state=stale');
         expect(res.headers.location).toContain('xero_oauth=error');
         expect(xeroOAuth.retryAuthorizeUrl).not.toHaveBeenCalled();
@@ -129,6 +155,7 @@ describe('routes/xero-oauth', () => {
         const res = await request(serverFor(app)).get('/api/xero/oauth/callback?error=access_denied&state=some-state');
         expect(res.headers.location).toContain('xero_oauth=error');
         expect(oauthState.consume).not.toHaveBeenCalled();
+        expect(oauthState.consumeEntry).not.toHaveBeenCalled();
         expect(xeroOAuth.retryAuthorizeUrl).not.toHaveBeenCalled();
       });
 
@@ -156,7 +183,7 @@ describe('routes/xero-oauth', () => {
     });
 
     test('rejects when state is missing/invalid/expired', async () => {
-      oauthState.consume.mockReturnValue(null);
+      oauthState.consumeEntry.mockReturnValue(null);
       const res = await request(serverFor(app))
         .post('/api/xero/oauth/complete')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`)
@@ -172,7 +199,7 @@ describe('routes/xero-oauth', () => {
     // having the victim's Xero org linked to the attacker's account instead.
     test('rejects when the authenticated caller is not who the state was minted for', async () => {
       const otherUser = await users.createUser('other@test.com', 'password123', 'user');
-      oauthState.consume.mockReturnValue(otherUser.id); // state belongs to a DIFFERENT user
+      oauthState.consumeEntry.mockReturnValue({ userId: otherUser.id, data: {} }); // state belongs to a DIFFERENT user
       const res = await request(serverFor(app))
         .post('/api/xero/oauth/complete')
         .set('Authorization', `Bearer ${tokenFor(testUser)}`) // caller is testUser, not otherUser
@@ -182,8 +209,8 @@ describe('routes/xero-oauth', () => {
       expect(res.body.error).toMatch(/invalid or expired/i);
     });
 
-    test('completes the connection when the caller matches who started it', async () => {
-      oauthState.consume.mockReturnValue(testUser.id);
+    test('completes the connection when the caller matches who started it, with the groups its link asked for', async () => {
+      oauthState.consumeEntry.mockReturnValue({ userId: testUser.id, data: { groups: ['balance'] } });
       xeroOAuth.completeConnection.mockResolvedValue([{ tenantId: 't1', tenantName: 'Org' }]);
 
       const res = await request(serverFor(app))
@@ -192,12 +219,12 @@ describe('routes/xero-oauth', () => {
         .send({ code: 'the-code', state: 'valid-state' })
         .expect(200);
 
-      expect(xeroOAuth.completeConnection).toHaveBeenCalledWith(testUser.id, 'the-code');
+      expect(xeroOAuth.completeConnection).toHaveBeenCalledWith(testUser.id, 'the-code', { groups: ['balance'] });
       expect(res.body).toEqual({ success: true });
     });
 
     test('surfaces a completeConnection failure as 400, not a 500 crash', async () => {
-      oauthState.consume.mockReturnValue(testUser.id);
+      oauthState.consumeEntry.mockReturnValue({ userId: testUser.id, data: {} });
       xeroOAuth.completeConnection.mockRejectedValue(new Error('Xero rejected the code'));
 
       const res = await request(serverFor(app))

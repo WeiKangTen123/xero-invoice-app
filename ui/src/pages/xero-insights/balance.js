@@ -201,24 +201,51 @@ export function sheetRows(d, { zeroRows = false } = {}) {
   return out;
 }
 
-// Whether Xero refused this app the Balance Sheet permission outright, as
-// /api/xero/connection reports it. That is not a scope a reconnect can add,
-// so the tab must not send the reader to Setup for it.
-export function balanceRefused(connection) {
+// What the connection says of the Balance Sheet permission, as
+// /api/xero/connection reports it under `optional.balance`: 'granted',
+// 'declined' (left unticked in Setup, by the person's choice), 'refused'
+// (Xero will not let this app ask for it), 'missing' (never asked) or
+// 'unknown'. An older server says only which scopes Xero refused and which
+// are missing, and is read to the same answer.
+export function balanceStatus(connection) {
+  const s = connection?.optional?.balance?.status;
+  if (['granted', 'declined', 'refused', 'missing', 'unknown'].includes(s)) return s;
   const refused = Array.isArray(connection?.refusedScopes) ? connection.refusedScopes : [];
-  return refused.includes(BALANCE_SHEET_SCOPE);
+  if (refused.includes(BALANCE_SHEET_SCOPE)) return 'refused';
+  const missing = Array.isArray(connection?.missingScopes) ? connection.missingScopes : [];
+  return missing.includes(BALANCE_SHEET_SCOPE) ? 'missing' : 'unknown';
+}
+
+// Whether Xero refused this app the Balance Sheet permission outright. That
+// is not a scope a reconnect can add, so the tab must not send the reader to
+// Setup for it.
+export function balanceRefused(connection) {
+  return balanceStatus(connection) === 'refused';
+}
+
+// What the tab says when what became of the permission is the reason it
+// cannot read, or null when the server's own reconnect prompt is the right
+// thing to show. Refused: nothing in Setup helps, so no way there is
+// offered. Declined: the box in Setup does, so the reader is sent to it by
+// name. Missing, or not known: the server's prompt, which asks for a
+// reconnect, and a reconnect asks for the scope.
+export function balanceOffMessage(connection) {
+  const status = balanceStatus(connection);
+  if (status === 'refused') {
+    return { text: 'Xero does not allow this app the Balance Sheet permission, so the tab cannot be read. Reconnecting will not add it.', reconnect: false };
+  }
+  if (status === 'declined') {
+    return { text: 'The Balance Sheet permission was not requested when Xero was connected. Tick \'Balance Sheet\' in Setup and connect again.', reconnect: true };
+  }
+  return null;
 }
 
 // What the tab says over a failed load. A 403 is the connection lacking the
-// scope, and the server's own message is a reconnect prompt, so the way to
-// Setup is offered with it — unless Xero refused the app the permission
-// itself, when a reconnect changes nothing and the reader is told that
-// instead. Any other failure is said as the server said it.
+// scope: what became of it decides the wording (balanceOffMessage), and
+// failing that the server's own message, a reconnect prompt, is shown with
+// the way to Setup. Any other failure is said as the server said it.
 export function errorNotice(balance, connection) {
   const text = balance?.error || '';
   if (balance?.errorStatus !== 403) return { text, reconnect: false };
-  if (balanceRefused(connection)) {
-    return { text: 'Xero refused the Balance Sheet permission for this app, so the report cannot be read. Reconnecting will not add it.', reconnect: false };
-  }
-  return { text, reconnect: true };
+  return balanceOffMessage(connection) || { text, reconnect: true };
 }

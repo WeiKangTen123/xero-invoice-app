@@ -2,8 +2,8 @@ const axios  = require('axios');
 const logger = require('../utils/logger');
 const oauthState = require('../utils/oauth-state');
 const {
-  OAUTH_SCOPES, OPTIONAL_REPORT_SCOPES, XeroReconnectError, reconnectReason, tokenErrorCode, credentialFingerprint,
-  grantedScopesFrom, xeroErrMsg,
+  OAUTH_SCOPES, BASE_OAUTH_SCOPES, OPTIONAL_SCOPE_GROUPS, OPTIONAL_REPORT_SCOPES, XeroReconnectError, reconnectReason,
+  tokenErrorCode, credentialFingerprint, grantedScopesFrom, xeroErrMsg,
 } = require('./xero-utils');
 
 // offline_access is what actually grants a refresh token — without it Xero only
@@ -28,6 +28,10 @@ const {
 // Xero granted are recorded at connect and on every refresh, so
 // GET /api/xero/connection can name what such a connection is missing.
 const SCOPES = `offline_access ${OAUTH_SCOPES}`;
+// What every consent asks for whatever is ticked in Setup: the scopes the app
+// cannot work without, plus attachments, which every Web app may ask for.
+const BASE_SCOPES = `offline_access ${BASE_OAUTH_SCOPES}`;
+const GROUP_KEYS  = Object.keys(OPTIONAL_SCOPE_GROUPS);
 const AUTHORIZE_URL  = 'https://login.xero.com/identity/connect/authorize';
 const TOKEN_URL      = 'https://identity.xero.com/connect/token';
 const REVOCATION_URL = 'https://identity.xero.com/connect/revocation';
@@ -58,26 +62,152 @@ function _basicAuth(clientId, clientSecret) {
   return `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`;
 }
 
-// The scopes this user's consent link asks for: every one the app uses, less
-// any Xero has refused this app (see retryAuthorizeUrl). Without that, every
-// later reconnect would bounce off the same refusal before being asked again
-// without them.
-function _scopesFor(userId) {
-  const refused = new Set(require('../utils/token-cache').getHealth(userId).refusedScopes || []);
-  return SCOPES.split(' ').filter(s => !refused.has(s)).join(' ');
+// The scopes of the named optional groups (xero-utils OPTIONAL_SCOPE_GROUPS),
+// in the order the groups are defined; an unknown key contributes nothing.
+function groupScopes(keys) {
+  return GROUP_KEYS.filter(k => (keys || []).includes(k)).flatMap(k => OPTIONAL_SCOPE_GROUPS[k].scopes);
 }
 
-function buildAuthorizeUrl(userId) {
+// The scopes a consent link asks for: the base set plus the given optional
+// groups — every group when none is named, as before groups existed — less
+// any scope Xero has refused this app. Asking for a refused one again would
+// send the person to Xero's own "invalid_scope" page, which never comes back.
+function _scopesFor(userId, groups) {
+  const refused = new Set(require('../utils/token-cache').getHealth(userId).refusedScopes || []);
+  const wanted  = [...BASE_SCOPES.split(' '), ...groupScopes(groups === undefined ? GROUP_KEYS : groups)];
+  return [...new Set(wanted)].filter(s => s && !refused.has(s)).join(' ');
+}
+
+// The consent link. `groups` names the optional groups to ask for; the state
+// carries them, so the callback knows which ones were asked for this time and
+// can tell a group the person left out from one Xero refused.
+function buildAuthorizeUrl(userId, { groups } = {}) {
   const { clientId, redirectUri } = _appCreds(userId);
-  const state = oauthState.create(userId);
+  const asked = groups === undefined ? [...GROUP_KEYS] : GROUP_KEYS.filter(k => groups.includes(k));
+  const state = oauthState.create(userId, { groups: asked });
   const params = new URLSearchParams({
     response_type: 'code',
     client_id:     clientId,
     redirect_uri:  redirectUri,
-    scope:         _scopesFor(userId),
+    scope:         _scopesFor(userId, asked),
     state,
   });
   return `${AUTHORIZE_URL}?${params.toString()}`;
+}
+
+// ── Which optional scopes this app may ask for ───────────────────────────────
+// An app Xero will not let ask for a scope is not told so at the callback:
+// Xero's authorize page answers on its own site ("Error: invalid_scope,
+// Error code: 500") and the browser never comes back, so Connect simply
+// looked broken. Confirmed against Xero on 2026-10-11: the authorize endpoint
+// answers an unauthenticated GET with a 302 — to /identity/user/login when it
+// accepts the request (the scopes included), to /identity/error?errorId=…
+// when it does not. That is the same request the browser makes when a person
+// presses Connect, with no secret, no cookie and nothing signed in, so it can
+// be asked in advance: the base set first (a refusal there is a problem with
+// the app's own settings, such as its redirect URI, and says nothing about
+// the optional scopes), then the base set plus each optional group.
+
+const PROBE_TTL_MS     = 24 * 60 * 60 * 1000;
+const PROBE_TIMEOUT_MS = 10_000;
+
+// Pure. What one answer from the authorize endpoint says: 'available',
+// 'refused' or 'unknown'. Only a redirect is read as an answer; anything else
+// — a challenge page, an outage, a changed site — is unknown, never refused.
+function classifyAuthorizeAnswer(status, location, body = '') {
+  const loc = String(location || '');
+  if (status >= 300 && status < 400) {
+    if (/\/identity\/user\/login\b|[?&]ReturnUrl=/i.test(loc)) return 'available';
+    if (/\/identity\/error\b|[?&]errorId=|invalid_scope/i.test(loc)) return 'refused';
+    return 'unknown';
+  }
+  if (/invalid_scope|invalid scope/i.test(String(body || ''))) return 'refused';
+  return 'unknown';
+}
+
+async function _askAuthorize(clientId, redirectUri, scope) {
+  try {
+    const res = await axios.get(AUTHORIZE_URL, {
+      params:         { response_type: 'code', client_id: clientId, redirect_uri: redirectUri, scope, state: 'probe' },
+      maxRedirects:   0,
+      validateStatus: () => true,
+      timeout:        PROBE_TIMEOUT_MS,
+      headers:        { Accept: 'text/html' },
+    });
+    return classifyAuthorizeAnswer(res.status, res.headers?.location, typeof res.data === 'string' ? res.data : '');
+  } catch (_) {
+    return 'unknown';
+  }
+}
+
+// Asks Xero's authorize page which optional groups this user's Web app may
+// ask for, and records the answer: { at, fingerprint, base, groups: { live,
+// balance } }, each 'available' | 'refused' | 'unknown'. A group found
+// refused has its scopes recorded as refused (left out of every later link
+// and of the "missing" list); one found available has any old refusal lifted.
+// Reused for a day per Client ID and redirect URI; `force` asks again.
+// userId -> the probe running for them, so a Setup page and the banner
+// polling at the same moment ask Xero once, not twice.
+const _probing = new Map();
+
+async function probeOptionalScopes(userId, { force = false } = {}) {
+  const tokenCache = require('../utils/token-cache');
+  const { clientId, redirectUri } = _appCreds(userId);
+  const fingerprint = credentialFingerprint(clientId, redirectUri);
+  const last = tokenCache.getHealth(userId).scopeProbe;
+  const fresh = last && last.fingerprint === fingerprint && Date.now() - Date.parse(last.at) < PROBE_TTL_MS;
+  if (!force && fresh) return last;
+
+  let running = _probing.get(userId);
+  if (!running) {
+    running = _probe(userId, clientId, redirectUri, fingerprint).finally(() => _probing.delete(userId));
+    _probing.set(userId, running);
+  }
+  return running;
+}
+
+async function _probe(userId, clientId, redirectUri, fingerprint) {
+  const tokenCache = require('../utils/token-cache');
+  const base = await _askAuthorize(clientId, redirectUri, BASE_SCOPES);
+  const groups = {};
+  for (const key of GROUP_KEYS) {
+    groups[key] = base === 'available'
+      ? await _askAuthorize(clientId, redirectUri, `${BASE_SCOPES} ${groupScopes([key]).join(' ')}`)
+      : 'unknown';
+  }
+  for (const key of GROUP_KEYS) {
+    if (groups[key] === 'refused')   tokenCache.markScopesRefused(userId, groupScopes([key]), { reason: 'refused at the authorize page' });
+    if (groups[key] === 'available') tokenCache.markScopesAllowed(userId, groupScopes([key]));
+  }
+  const probe = { at: new Date().toISOString(), fingerprint, base, groups };
+  tokenCache.saveScopeProbe(userId, probe);
+  logger.info('Asked Xero which optional permissions this app may request', { userId, base, ...groups });
+  return probe;
+}
+
+// The consent link for Connect, with what it asks for. `extras` is the list
+// of optional groups ticked in Setup; null means the person has not said, and
+// then every group the probe found available is asked for. A group the probe
+// found refused is never asked for, ticked or not — it is reported in
+// `excluded` instead — and a group it could not settle is asked for only when
+// ticked. Never throws over the probe: a probe that fails is 'unknown'.
+async function authorizeFor(userId, { extras = null, force = false } = {}) {
+  let probe = null;
+  try {
+    probe = await probeOptionalScopes(userId, { force });
+  } catch (err) {
+    // _appCreds refusing (no Client ID, no redirect URI) is said by
+    // buildAuthorizeUrl below, in the words the Setup page already shows.
+    if (!/not configured/i.test(err.message)) logger.warn('Could not ask Xero which permissions this app may request', { userId, error: err.message });
+  }
+  const status = key => (probe && probe.groups && probe.groups[key]) || 'unknown';
+  const wanted = Array.isArray(extras)
+    ? GROUP_KEYS.filter(k => extras.includes(k))
+    : GROUP_KEYS.filter(k => status(k) === 'available');
+  const excluded = {};
+  for (const key of wanted) if (status(key) === 'refused') excluded[key] = 'refused';
+  const requested = wanted.filter(k => !excluded[k]);
+  return { url: buildAuthorizeUrl(userId, { groups: requested }), requested, excluded, probe };
 }
 
 // ── A consent Xero refuses for its scopes ───────────────────────────────────
@@ -97,13 +227,29 @@ function buildAuthorizeUrl(userId) {
 // error_description naming a scope counts whatever the error code, since
 // Xero's wording has varied; one naming only a required scope is still a
 // refusal, but there is nothing optional to drop for it, so it is null too.
-function scopeRefusal(query) {
+//
+// `requested` is the optional scopes that link asked for, when known (the
+// state carries the groups). A refusal naming no scope then drops all of
+// them, since any could be the one; with no record of what was asked, the
+// report scopes are dropped, as before groups existed.
+function scopeRefusal(query, requested = null) {
   const error = String(query?.error || '');
   const description = String(query?.error_description || '');
   const named = description.match(/[a-z]+\.[a-z.]+/gi) || [];
   const aboutScopes = error === 'invalid_scope' || named.some(s => /^(accounting|offline_access|payroll|files|assets|projects)\b/i.test(s));
   if (!aboutScopes) return null;
-  if (named.length && !named.some(s => OPTIONAL_REPORT_SCOPES.includes(s.toLowerCase()))) return null;
+  const optional = groupScopes(GROUP_KEYS);
+  const namedOptional = named.map(s => s.toLowerCase()).filter(s => optional.includes(s));
+  if (named.length && !namedOptional.length) return null;
+  // A group is asked for and refused as one: the Balance Sheet tab needs both
+  // of its scopes, so naming either drops both.
+  const whole = scopes => groupScopes(GROUP_KEYS.filter(k => OPTIONAL_SCOPE_GROUPS[k].scopes.some(s => scopes.includes(s))));
+  if (Array.isArray(requested)) {
+    const asked = requested.filter(s => optional.includes(s));
+    const drop  = (namedOptional.length ? whole(namedOptional) : asked).filter(s => asked.includes(s));
+    return drop.length ? drop : null;
+  }
+  if (namedOptional.length) return whole(namedOptional);
   return [...OPTIONAL_REPORT_SCOPES];
 }
 
@@ -113,13 +259,16 @@ function scopeRefusal(query) {
 // so asking a third time would ask the same question. Nothing privileged
 // happens here: the link is the same one GET /oauth/connect mints for this
 // user, and completing it still takes POST /oauth/complete as that user.
-function retryAuthorizeUrl(userId, scopes) {
+// `groups` is what the refused link asked for; the retry asks for the same
+// less the refused ones.
+function retryAuthorizeUrl(userId, scopes, groups = undefined) {
   const tokenCache = require('../utils/token-cache');
   const already = new Set(tokenCache.getHealth(userId).refusedScopes || []);
   if (scopes.every(s => already.has(s))) return null;
-  tokenCache.markScopesRefused(userId, scopes);
-  logger.warn('Xero refused the optional report scopes for this app — asking for consent again without them', { userId, scopes });
-  return buildAuthorizeUrl(userId);
+  tokenCache.markScopesRefused(userId, scopes, { reason: 'refused at the callback' });
+  logger.warn('Xero refused optional scopes for this app — asking for consent again without them', { userId, scopes });
+  const keep = groups === undefined ? undefined : groups.filter(k => !groupScopes([k]).some(s => scopes.includes(s)));
+  return buildAuthorizeUrl(userId, { groups: keep });
 }
 
 async function exchangeCodeForTokens(userId, code) {
@@ -273,8 +422,14 @@ async function _listAndCacheTenants(userId, access_token, expires_at) {
 
 // Called once, right after the user completes Xero's consent screen and the
 // callback route receives a `code`.
-async function completeConnection(userId, code) {
+//
+// `groups` is the optional groups the consent link asked for (from its
+// state). A group it did not ask for, and the token does not carry, is
+// recorded as declined: the person's choice, which the connection status
+// reports as such rather than as something a reconnect would fix.
+async function completeConnection(userId, code, { groups } = {}) {
   const { saveUserConfig } = require('../utils/users');
+  const tokenCache = require('../utils/token-cache');
   logger.info('Completing Xero OAuth connection...', { userId });
 
   const { access_token, refresh_token, expires_at, granted_scopes } = await exchangeCodeForTokens(userId, code);
@@ -286,7 +441,12 @@ async function completeConnection(userId, code) {
   });
   // A fresh consent replaces whatever was wrong with the old connection, and
   // says which scopes this one has.
-  require('../utils/token-cache').markRefreshed(userId, { method: 'oauth', grantedScopes: granted_scopes });
+  tokenCache.markRefreshed(userId, { method: 'oauth', grantedScopes: granted_scopes });
+  if (Array.isArray(groups)) {
+    const granted = new Set(Array.isArray(granted_scopes) ? granted_scopes : []);
+    const left = groupScopes(GROUP_KEYS.filter(k => !groups.includes(k))).filter(s => !granted.has(s));
+    if (left.length) tokenCache.markScopesDeclined(userId, left);
+  }
 
   return _listAndCacheTenants(userId, access_token, expires_at);
 }
@@ -302,6 +462,7 @@ async function reconnect(userId, { force = false } = {}) {
 }
 
 module.exports = {
-  buildAuthorizeUrl, scopeRefusal, retryAuthorizeUrl, exchangeCodeForTokens, refreshAuthCodeToken, revokeRefreshToken,
-  completeConnection, reconnect, SCOPES, REVOCATION_URL,
+  buildAuthorizeUrl, authorizeFor, probeOptionalScopes, classifyAuthorizeAnswer, groupScopes, scopeRefusal, retryAuthorizeUrl,
+  exchangeCodeForTokens, refreshAuthCodeToken, revokeRefreshToken, completeConnection, reconnect,
+  SCOPES, BASE_SCOPES, GROUP_KEYS, PROBE_TTL_MS, REVOCATION_URL,
 };

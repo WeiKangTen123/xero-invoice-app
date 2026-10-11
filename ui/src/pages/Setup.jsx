@@ -5,8 +5,10 @@ import HelpTooltip from '../components/HelpTooltip';
 import AccountCodeSelect from '../components/AccountCodeSelect';
 import RetryAlert from '../components/RetryAlert';
 import { useAuth } from '../context/AuthContext';
+import { useConfirm } from '../context/ConfirmContext';
 import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
 import { useUnsavedChanges } from '../utils/useUnsavedChanges';
+import { boxState, defaultBoxes, extrasParam, optionalBoxes } from './setup/connect';
 
 const HELP = {
   XERO_CLIENT_ID:        'Your Xero Custom Connection client ID. Found in developer.xero.com → My Apps → your app.',
@@ -399,13 +401,50 @@ function DefaultTenantPicker({ tenants }) {
 // once; whichever the user successfully completes becomes the active method
 // (config.xero.connectionType, decided server-side by which one actually succeeds).
 function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs, onTest, onConnectionChange }) {
+  const confirm = useConfirm();
   const [tenants, setTenants]       = useState(null); // null = loading
   const [connectionType, setConnectionType] = useState('custom');
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [banner, setBanner]         = useState(null);
+  // What became of each optional permission, as /xero/connection reports it
+  // under `optional` — null until the server has answered — and the boxes
+  // beside Connect, keyed by group (setup/connect.js says what each means).
+  const [connection, setConnection] = useState(null);
+  const [boxes, setBoxes]           = useState(() => defaultBoxes(null));
+  const [checking, setChecking]     = useState(false);
+
+  // The boxes are set afresh from every answer: a Connect that just finished
+  // changes what is granted, and "Check again" may find a refusal, whose box
+  // must untick. `force` makes the server probe Xero's sign-in page again
+  // rather than read what it found last time.
+  async function fetchConnection({ force = false } = {}) {
+    try {
+      const c = await api.get(`/xero/connection${force ? '?force=true' : ''}`);
+      setConnection(c);
+      setBoxes(defaultBoxes(c.optional));
+    } catch (_) {
+      // A failed check is not news about Xero: the last answer stands, and
+      // with none, Connect leaves the choice of permissions to the server.
+    }
+  }
+
+  async function checkAgain() {
+    setChecking(true);
+    try {
+      await fetchConnection({ force: true });
+    } finally {
+      setChecking(false);
+      // The banner reads the same answer, and a refusal found now changes
+      // what it has to say.
+      window.dispatchEvent(new CustomEvent('xero-connection-changed'));
+    }
+  }
 
   async function fetchTenants() {
+    // Everything that changes the companies — a connect, a disconnect, a
+    // Custom Connection test — changes the permissions too.
+    fetchConnection();
     try {
       const d = await api.get('/xero/tenants');
       setConnectionType(d.connectionType || 'custom');
@@ -472,7 +511,14 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
   async function handleConnect() {
     setConnecting(true);
     try {
-      const { url } = await api.get('/xero/oauth/connect');
+      // Only the ticked permissions are asked for, so Xero's sign-in page is
+      // never asked for a scope it answers with "invalid_scope" (the page
+      // never comes back from that, and Connect looked broken). The value is
+      // built from the boxes' fixed keys, so it needs no encoding. With no
+      // answer from the server about the permissions yet, the parameter is
+      // left out and the server asks for whatever its own probe allows.
+      const extras = connection ? `?extras=${extrasParam(boxes)}` : '';
+      const { url } = await api.get(`/xero/oauth/connect${extras}`);
       window.location.href = url;
     } catch (err) {
       setBanner({ ok: false, text: err.message });
@@ -481,6 +527,13 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
   }
 
   async function handleDisconnect() {
+    // Said here because the fear that stops people is of being left with
+    // nothing: a Connect that fails at Xero leaves this connection as it is.
+    if (!(await confirm({
+      title: 'Disconnect Xero?',
+      message: 'You can reconnect afterwards; a failed Connect never removes the current connection.',
+      confirmLabel: 'Disconnect', danger: true,
+    }))) return;
     setDisconnecting(true);
     try {
       await api.delete('/xero/oauth/disconnect');
@@ -580,8 +633,47 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
           ))}
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12 }}>
-        <button type="button" className="btn btn-primary btn-sm" disabled={connecting} onClick={handleConnect}>
+      {/* The permissions Connect may ask for beyond what the app needs. Each
+          box is set from the server's answer (setup/connect.js#boxState): one
+          Xero refuses this app is unticked and locked, with the reason, since
+          asking for it sends the person to Xero's "invalid_scope" page and
+          never back; one already granted says so, so an unticked box is seen
+          for what it is — giving the permission up on the next connect. */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 320px', minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>Also ask Xero for</div>
+          {optionalBoxes().map(({ key, label }) => {
+            const box = boxState(connection?.optional, key);
+            return (
+              <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13, marginBottom: 6 }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, opacity: box.disabled ? 0.6 : 1 }}>
+                  <input
+                    type="checkbox" checked={!box.disabled && !!boxes[key]} disabled={box.disabled}
+                    onChange={e => setBoxes(prev => ({ ...prev, [key]: e.target.checked }))}
+                  />
+                  {label}
+                </label>
+                {box.status === 'granted' && <span className="badge badge-green">granted</span>}
+                {(box.status === 'refused' || box.status === 'unknown') && (
+                  <span style={{ fontSize: 12, color: box.status === 'refused' ? 'var(--warning)' : 'var(--text-muted)' }}>
+                    {box.note} —{' '}
+                    <button
+                      type="button" onClick={checkAgain} disabled={checking}
+                      style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', fontWeight: 600, color: 'var(--accent)', cursor: 'pointer' }}
+                    >
+                      {checking ? 'Checking…' : 'Check again'}
+                    </button>
+                  </span>
+                )}
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.55 }}>
+            If Xero answers 'Invalid scope', untick the permission it refused and connect again.
+            Your existing connection is not affected by a failed attempt.
+          </div>
+        </div>
+        <button type="button" className="btn btn-primary btn-sm" disabled={connecting} onClick={handleConnect} style={{ whiteSpace: 'nowrap' }}>
           {connecting ? '...' : '🔗 Connect to Xero'}
         </button>
       </div>

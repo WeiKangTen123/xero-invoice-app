@@ -223,6 +223,31 @@ describe('xero/change-detector', () => {
       noCall();
     });
 
+    // Xero refuses some apps the journals scope at its authorize page. No
+    // reconnect adds it, so "reconnect" must not be the reason given: it sent
+    // people straight into Xero's "invalid_scope" page.
+    test('Xero refuses this app the journals scope: not live, says so, never says reconnect', async () => {
+      tokenCache.markRefreshed(user.id, { method: 'oauth', grantedScopes: `offline_access ${xeroUtils.SCOPES} accounting.attachments`.split(' ') });
+      tokenCache.markScopesRefused(user.id, ['accounting.journals.read']);
+
+      const result = await poll();
+
+      expect(result).toMatchObject({ live: false, liveReason: detector.REASONS.refused, calls: 0 });
+      expect(result.liveReason).not.toMatch(/reconnect/i);
+      noCall();
+    });
+
+    test('live updates left unticked at Connect: not live, points at the box in Setup', async () => {
+      tokenCache.markRefreshed(user.id, { method: 'oauth', grantedScopes: `offline_access ${xeroUtils.SCOPES} accounting.attachments`.split(' ') });
+      tokenCache.markScopesDeclined(user.id, ['accounting.journals.read']);
+
+      const result = await poll();
+
+      expect(result).toMatchObject({ live: false, liveReason: detector.REASONS.declined, calls: 0 });
+      expect(result.liveReason).toMatch(/tick them in Setup/);
+      noCall();
+    });
+
     test('the scopes are not known yet: not live, and no guess is made', async () => {
       tokenCache.clearHealth(user.id);
       const result = await poll();

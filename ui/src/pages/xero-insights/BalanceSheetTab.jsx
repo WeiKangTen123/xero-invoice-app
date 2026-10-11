@@ -43,8 +43,10 @@ export default function BalanceSheetTab({ balance, controls, onControls, fetchBa
   const [zeroRows, setZeroRows] = useState(false);
   const [more,     setMore]     = useState(false);
   // Asked only after a 403, to tell a scope the connection has yet to be
-  // given (a reconnect adds it) from one Xero refused the app outright (it
-  // does not). Nothing is asked otherwise: the banner already polls it.
+  // given (a reconnect adds it) from one left unticked in Setup (ticking it
+  // there does) and from one Xero refused the app outright (nothing does) —
+  // see balance.js#balanceOffMessage. Nothing is asked otherwise: the banner
+  // already polls it.
   const [connection, setConnection] = useState(null);
   useEffect(() => {
     if (balance.errorStatus !== 403) return undefined;

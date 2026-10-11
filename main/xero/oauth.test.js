@@ -120,7 +120,7 @@ describe('xero/oauth', () => {
       tokenCache.markScopesRefused.mockImplementation((_, scopes) => { refused = [...refused, ...scopes]; });
 
       const url = oauth.retryAuthorizeUrl('user-1', REPORT_SCOPES);
-      expect(tokenCache.markScopesRefused).toHaveBeenCalledWith('user-1', REPORT_SCOPES);
+      expect(tokenCache.markScopesRefused).toHaveBeenCalledWith('user-1', REPORT_SCOPES, { reason: 'refused at the callback' });
       const scopes = new URL(url).searchParams.get('scope').split(' ');
       expect(scopes).not.toContain(BALANCE_SHEET_SCOPE);
       expect(scopes).not.toContain(TRIAL_BALANCE_SCOPE);

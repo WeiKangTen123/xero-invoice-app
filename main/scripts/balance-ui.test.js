@@ -247,10 +247,22 @@ describe('what a failed load says', () => {
   test('unless Xero refused the app the permission, when no reconnect is offered', () => {
     const n = h.errorNotice({ error: reconnect, errorStatus: 403 }, { missingScopes: [SCOPE], refusedScopes: [SCOPE] });
     expect(n.reconnect).toBe(false);
-    expect(n.text).toMatch(/^Xero refused the Balance Sheet permission for this app/);
+    expect(n.text).toMatch(/^Xero does not allow this app the Balance Sheet permission/);
     expect(h.balanceRefused({ refusedScopes: [SCOPE] })).toBe(true);
     expect(h.balanceRefused({ refusedScopes: ['accounting.reports.trialbalance.read'] })).toBe(false);
     expect(h.balanceRefused(undefined)).toBe(false);
+  });
+
+  // The connection's own word on the permission, when it gives one, decides:
+  // refused offers no way to Setup, declined points at the box there, and
+  // missing or unknown leaves the server's reconnect prompt.
+  test('reads optional.balance.status first', () => {
+    const at = status => h.errorNotice({ error: reconnect, errorStatus: 403 }, { optional: { balance: { status } } });
+    expect(at('refused')).toEqual({ text: expect.stringMatching(/^Xero does not allow this app/), reconnect: false });
+    expect(at('declined')).toEqual({ text: expect.stringMatching(/Tick 'Balance Sheet' in Setup/), reconnect: true });
+    expect(at('missing')).toEqual({ text: reconnect, reconnect: true });
+    expect(at('unknown')).toEqual({ text: reconnect, reconnect: true });
+    expect(h.balanceStatus({ optional: { balance: { status: 'granted' } }, refusedScopes: [SCOPE] })).toBe('granted');
   });
 });
 
