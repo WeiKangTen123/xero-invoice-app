@@ -16,7 +16,9 @@ export default function MobileSelectionBar({ selected, setSelected, busy, onActi
             position: 'fixed',
             bottom: 'calc(var(--bottom-nav-total) + 8px)',
             left: 12,
-            right: 12,
+            // Stops short of the chat launcher's corner (globals.css
+            // --fab-clearance) rather than running under it.
+            right: 'var(--fab-clearance)',
             background: 'var(--bg-card)',
             border: '1px solid var(--border)',
             borderRadius: 12,

@@ -7,7 +7,9 @@ export default function StickyActionBar({ inv, marking, submitting, editing, sav
             // bar can sit flush on the nav; it has to track that padding, which
             // is now derived from the same variable.
             margin: '16px calc(-1 * var(--page-pad-x)) calc(-1 * (var(--bottom-nav-total) + 16px))',
-            padding: '10px var(--page-pad-x)',
+            // The right-hand room is the chat launcher's corner (globals.css
+            // --fab-clearance), so the last button is never under it.
+            padding: '10px calc(var(--page-pad-x) + var(--fab-clearance)) 10px var(--page-pad-x)',
             background: 'var(--bg-card)',
             borderTop: '1px solid var(--border)',
             boxShadow: '0 -4px 16px rgba(0,0,0,0.1)',

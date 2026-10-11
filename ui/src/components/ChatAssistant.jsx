@@ -323,12 +323,15 @@ export default function ChatAssistant() {
         aria-hidden={open}
         // Invisible while the panel is open, so out of the Tab order too.
         tabIndex={open ? -1 : 0}
+        // Size and corner from globals.css (--fab-size, --fab-offset), which
+        // also define --fab-clearance: the room every bottom-pinned bar keeps
+        // free on its right so this button never covers a Save or Send.
         style={{
           position: 'fixed',
-          right: isMobile ? 16 : 26,
-          bottom: isMobile ? 'calc(var(--bottom-nav-total) + 14px)' : 26,
-          width: isMobile ? 48 : 54,
-          height: isMobile ? 48 : 54,
+          right: 'var(--fab-offset)',
+          bottom: isMobile ? 'calc(var(--bottom-nav-total) + 14px)' : 'var(--fab-offset)',
+          width: 'var(--fab-size)',
+          height: 'var(--fab-size)',
           borderRadius: '50%',
           background: 'var(--accent-gradient)',
           border: 'none',

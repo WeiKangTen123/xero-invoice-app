@@ -996,7 +996,9 @@ export default function Setup() {
         {/* Save bar */}
         <div className="setup-save-bar" style={{
           display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12,
-          padding: '16px 0',
+          // The right-hand room is the chat launcher's corner (globals.css
+          // --fab-clearance): the button is right-aligned and sat under it.
+          padding: '16px var(--fab-clearance) 16px 0',
           position: 'sticky', bottom: 0,
           background: 'linear-gradient(to top, var(--bg-primary) 80%, transparent)',
           zIndex: 10,

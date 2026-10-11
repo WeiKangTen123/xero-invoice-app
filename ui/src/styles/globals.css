@@ -22,6 +22,20 @@
   /* Horizontal padding of .page-body on mobile. Anything that wants to sit
      flush with the screen edge cancels THIS, not a number it hopes matches. */
   --page-pad-x: 12px;
+  /* The chat launcher (components/ChatAssistant.jsx) is a round button pinned
+     to the bottom-right corner of every page, above everything else. Any bar
+     pinned to the bottom must leave that corner alone: the Setup page's
+     "Save settings" sat right under it, read "Save setti" and opened the chat
+     when clicked. The launcher is sized from these, and every bottom bar
+     keeps --fab-clearance free on its right, so the two cannot meet. */
+  --fab-size:      54px;
+  --fab-offset:    26px;
+  --fab-clearance: calc(var(--fab-offset) + var(--fab-size) + 14px);
+}
+
+.mobile-mode {
+  --fab-size:   48px;
+  --fab-offset: 16px;
 }
 
 /* ── Reset ───────────────────────────────────────── */
