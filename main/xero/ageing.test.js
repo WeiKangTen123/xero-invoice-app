@@ -362,9 +362,11 @@ describe('getAgeing — Xero calls', () => {
     expect(ap).toMatchObject({ side: 'payables', total: 70, cached: true });
   });
 
-  test('after the dashboard\'s summary has loaded, the ageing costs only the credit notes, and the summary nothing after it', async () => {
+  // The summary nets the same credit notes, so it reads them, and an ageing
+  // opened after it finds both reads cached.
+  test('after the dashboard\'s summary has loaded, the ageing costs no Xero call, and the summary nothing after it', async () => {
     await reports.getSummary(U, T, { force: false });
-    expect(calls()).toEqual({ org: 1, invoices: 1, credits: 0 });
+    expect(calls()).toEqual({ org: 1, invoices: 1, credits: 1 });
     await reports.getAgeing(U, T, { side: 'receivables' });
     expect(calls()).toEqual({ org: 1, invoices: 1, credits: 1 });
     const summary = await reports.getSummary(U, T, { force: false });
@@ -386,7 +388,7 @@ describe('getAgeing — Xero calls', () => {
       reports.getSummary(U, T, { force: false }),
       reports.getAgeing(U, T, { side: 'receivables' }),
     ]);
-    expect(a.gross).toBe(summary.kpis.totalReceivables);
+    expect(a.gross).toBe(summary.kpis.totalReceivables + summary.kpis.creditsNetted.receivables);
     expect(a.count).toBe(summary.kpis.receivablesCount);
   });
 

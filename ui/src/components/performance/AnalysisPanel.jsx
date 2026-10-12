@@ -2,6 +2,48 @@ import { useState } from 'react';
 import { fmtMoney } from '../../utils/format';
 import { Empty, Surface, closedCaption, closedSpan, closedVarianceItems, rangeLabel } from './primitives';
 
+// Pure. The colours of a category card's verdict badge. A card with nothing
+// measured (the cash card when the payments could not be read) has status
+// 'unavailable' and gets neither green nor red: it was drawn red, as though
+// collections had failed, whenever the verdict was not "favorable".
+//
+// Self-contained on purpose — no imports, no React — so a test can read it
+// straight out of this file and run it; the same goes for the plain functions
+// after it.
+export function statusTone(status) {
+  if (status === 'favorable') {
+    return { background: 'rgba(34, 197, 94, 0.12)', color: 'var(--success, #16a34a)', border: '1px solid rgba(34, 197, 94, 0.28)' };
+  }
+  if (status === 'unfavorable') {
+    return { background: 'rgba(239, 68, 68, 0.12)', color: 'var(--danger, #ef4444)', border: '1px solid rgba(239, 68, 68, 0.28)' };
+  }
+  return { background: 'var(--bg-secondary)', color: 'var(--text-muted)', border: '1px solid var(--border)' };
+}
+
+// Pure. The line under the variance reasons. When the model could not be
+// asked or could not be read (`failed`), the reasons on screen are the
+// computed defaults, and the old "Figures are computed from Xero." left the
+// reader to guess that the AI had not answered.
+export function reasonsFooter(insights) {
+  if (insights?.failed) return 'AI unavailable — the reasons shown are computed from Xero.';
+  if (insights?.source === 'gemini') {
+    return 'Figures are computed directly from Xero ledger actuals vs budget. The explanations are AI-suggested operational causes to verify.';
+  }
+  return insights?.reason || 'Figures are computed from Xero.';
+}
+
+// Pure. What the action checklist can show: 'loading' until the insights
+// arrive, 'failed' when their request failed (`error`) or came back with
+// nothing to build from after a failure, 'empty' when there is nothing to act
+// on, and 'ready'. It used to render an empty card in all but the last.
+export function checklistState(insights, opts) {
+  const { error = false, loading = false } = opts || {};
+  if (loading) return 'loading';
+  if (!insights) return error ? 'failed' : 'loading';
+  if (insights.categories?.length) return 'ready';
+  return insights.failed ? 'failed' : 'empty';
+}
+
 // Real variance figures, each with the model's suggested cause where one was
 // generated. The figures are always shown; the prose is additive and clearly
 // marked, so an LLM outage degrades this card rather than emptying it.
@@ -44,7 +86,6 @@ export function VarianceReasons({ items = [], insights, currency, span, periodSp
             {closedCaption(periodSpan)}
           </div>
           {categories.map(cat => {
-            const isFavorable = cat.status === 'favorable';
             return (
               <div
                 key={cat.key}
@@ -71,9 +112,7 @@ export function VarianceReasons({ items = [], insights, currency, span, periodSp
                       borderRadius: 12,
                       textTransform: 'lowercase',
                       letterSpacing: '0.02em',
-                      background: isFavorable ? 'rgba(34, 197, 94, 0.12)' : 'rgba(239, 68, 68, 0.12)',
-                      color: isFavorable ? 'var(--success, #16a34a)' : 'var(--danger, #ef4444)',
-                      border: `1px solid ${isFavorable ? 'rgba(34, 197, 94, 0.28)' : 'rgba(239, 68, 68, 0.28)'}`,
+                      ...statusTone(cat.status),
                     }}
                   >
                     {cat.status}
@@ -140,9 +179,7 @@ export function VarianceReasons({ items = [], insights, currency, span, periodSp
       )}
 
       <div style={{ fontSize: 10, color: 'var(--text-muted)', borderTop: '1px solid var(--border)', paddingTop: 8, lineHeight: 1.5 }}>
-        {insights?.source === 'gemini'
-          ? 'Figures are computed directly from Xero ledger actuals vs budget. The explanations are AI-suggested operational causes to verify.'
-          : (insights?.reason || 'Figures are computed from Xero.')}
+        {reasonsFooter(insights)}
       </div>
     </div>
   );
@@ -156,7 +193,10 @@ export function VarianceReasons({ items = [], insights, currency, span, periodSp
 // reasons near the bottom — on a tab that already carried twelve blocks. Pulling
 // both out makes Overview lighter AND gives the AI somewhere with room for the
 // controls it needs: when it last ran, and a way to ask again.
-export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse, reanalysing, lastAnalysedAt }) {
+//
+// `insightsError` is truthy when the variance-insights request itself failed;
+// without it a missing `insights` reads as still loading.
+export function AnalysisPanel({ data, from, to, insights, insightsError, narrative, onReanalyse, reanalysing, lastAnalysedAt }) {
   const cur = data?.organisation?.currency || '';
 
   // Closed months of the range, the Budget tab's basis (see closedSpan): the
@@ -169,6 +209,9 @@ export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse
   const stamp = lastAnalysedAt
     ? new Date(lastAnalysedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : null;
+  // Said only over an analysis the model actually wrote: over the computed
+  // fallback it claimed an analysis that had not happened.
+  const upToDate = !!stamp && !!insights && !insights.failed;
 
   return (
     <>
@@ -186,7 +229,7 @@ export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse
         </button>
       </div>
 
-      {stamp && (
+      {upToDate && (
         <div style={{
           background: 'rgba(34, 197, 94, 0.08)',
           border: '1px solid rgba(34, 197, 94, 0.22)',
@@ -232,7 +275,9 @@ export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse
         <VarianceReasons items={varianceItems} insights={insights} currency={cur} span={span} periodSpan={periodSpan} />
       </Surface>
 
-      <ExecutiveActionChecklist data={data} from={from} to={to} insights={insights} currency={cur} />
+      <ExecutiveActionChecklist data={data} from={from} to={to} insights={insights} currency={cur}
+                                state={checklistState(insights, { error: insightsError, loading: reanalysing })}
+                                onRetry={onReanalyse} retrying={reanalysing} />
 
       <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 14, lineHeight: 1.6 }}>
         Every figure on this page is computed from your Xero data before the model sees it — it explains,
@@ -244,8 +289,9 @@ export function AnalysisPanel({ data, from, to, insights, narrative, onReanalyse
 }
 
 // ── Executive Action Checklist (Signal-from-Noise Takeaways) ─────────────────
-export function ExecutiveActionChecklist({ data, from, to, insights, currency }) {
+export function ExecutiveActionChecklist({ data, insights, state, onRetry, retrying }) {
   if (!data) return null;
+  const status = state || checklistState(insights);
 
   const categories = insights?.categories || [];
   
@@ -256,8 +302,18 @@ export function ExecutiveActionChecklist({ data, from, to, insights, currency })
 
   const actionItems = [];
 
-  // 1. Cash & Collections
-  if (cashCat && cashCat.status === 'unfavorable') {
+  // 1. Cash & Collections. Nothing to say either way when the receipts could
+  // not be read: "Healthy Cash Realization" over an unmeasured card was a
+  // reassurance with nothing behind it.
+  if (cashCat?.unavailable) {
+    actionItems.push({
+      icon: '⏸',
+      badge: 'Working Capital',
+      badgeColor: 'var(--text-muted)',
+      title: 'Collections Not Assessed',
+      desc: cashCat.deltaText,
+    });
+  } else if (cashCat && cashCat.status === 'unfavorable') {
     actionItems.push({
       icon: '💵',
       badge: 'Cash Flow Priority',
@@ -322,44 +378,63 @@ export function ExecutiveActionChecklist({ data, from, to, insights, currency })
         <div className="card-title" style={{ marginBottom: 0 }}>Executive Action Checklist &amp; Key Focus</div>
         <span style={{ fontSize: 10, color: 'var(--accent)', fontWeight: 700 }}>Signal-from-Noise Filter</span>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
-        {actionItems.map((item, idx) => (
-          <div
-            key={idx}
-            style={{
-              background: 'var(--bg-secondary)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              padding: '12px 14px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 6,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>
-                <span>{item.icon}</span> {item.title}
-              </span>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: 700,
-                  padding: '2px 7px',
-                  borderRadius: 10,
-                  color: item.badgeColor,
-                  border: `1px solid ${item.badgeColor}`,
-                  background: 'transparent',
-                }}
-              >
-                {item.badge}
-              </span>
+      {status === 'loading' && <Empty>Loading…</Empty>}
+      {status === 'failed' && (
+        <Empty>
+          Couldn&apos;t produce the checklist —{' '}
+          {onRetry
+            ? (
+              <button type="button" onClick={onRetry} disabled={retrying}
+                      style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--accent)', fontWeight: 600, fontSize: 'inherit' }}>
+                Retry
+              </button>
+            )
+            : 'Retry'}
+        </Empty>
+      )}
+      {(status === 'empty' || (status === 'ready' && !actionItems.length)) && (
+        <Empty>{insights?.reason || 'Nothing to act on in the closed months.'}</Empty>
+      )}
+      {status === 'ready' && actionItems.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+          {actionItems.map((item, idx) => (
+            <div
+              key={idx}
+              style={{
+                background: 'var(--bg-secondary)',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                padding: '12px 14px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>
+                  <span>{item.icon}</span> {item.title}
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    padding: '2px 7px',
+                    borderRadius: 10,
+                    color: item.badgeColor,
+                    border: `1px solid ${item.badgeColor}`,
+                    background: 'transparent',
+                  }}
+                >
+                  {item.badge}
+                </span>
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                {item.desc}
+              </div>
             </div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-              {item.desc}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

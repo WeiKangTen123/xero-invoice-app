@@ -170,4 +170,46 @@ describe('variance commentary compares closed months only, as the budget tab doe
   test('with no month closed, cash compares nothing either', () => {
     expect(cashOf({ ...perf, actualThroughIdx: -1, closedThroughIdx: -1 }, cf)).toMatchObject({ actual: 0, budget: 0, variance: 0 });
   });
+
+  // With the payments or bank transactions unread, the receipts were a 0 from
+  // the failed read, and the card called that an unfavourable collection gap.
+  test('without the receipts the cash card says so, with no figure and no verdict; with them it is "vs revenue"', () => {
+    expect(cashOf(perf, cf).deltaText).toBe('-SGD 400 vs revenue');
+    for (const unread of [null, { ...cf, recordsAvailable: false }]) {
+      expect(cashOf(perf, unread)).toMatchObject({
+        status: 'unavailable', unavailable: true, actual: null, budget: null, variance: null,
+        deltaText: 'Receipts unavailable — couldn\'t read payments from Xero',
+      });
+    }
+    const cats = ai._buildCategoryVariances(perf, { ...cf, recordsAvailable: false });
+    // The model is told nothing was measured, never a 0...
+    const sent = JSON.parse(ai._insightPrompt('Org', 'FY2026', 4, cats, [])[1].content);
+    expect(sent.categories.find(c => c.key === 'cash')).not.toHaveProperty('actual');
+    // ...and a verdict it writes for the card anyway is not shown.
+    const reply = JSON.stringify({ categories: [{ key: 'cash', reason: 'Collections are badly behind.' }], reasons: [] });
+    const cash = ai._parseInsights(reply, cats, []).categories.find(c => c.key === 'cash');
+    expect(cash.reason).toBe('Collections are not compared with revenue until the payments can be read.');
+  });
+});
+
+// The cash-flow report carries a closing balance of 0 when the bank summary
+// could not be read, and receipts of 0 when the payments could not; handed to
+// the model as facts, they told an owner with money in the bank that they had
+// none, and had collected nothing.
+describe('the narrative is told only the cash figures that were read', () => {
+  const cf = {
+    organisation: { currency: 'SGD' },
+    reconciliation: { revenueAccrual: 109330, customerReceipts: 26000 },
+    cash: { available: true, closing: 75397 },
+  };
+  const lines = c => ai._narrativeFacts(c).lines.join('\n');
+
+  test('cash at bank and receipts are left out when their read failed, rather than given as 0', () => {
+    expect(lines(cf)).toMatch(/Cash at bank now: SGD 75,397/);
+    expect(lines(cf)).toMatch(/received from customers: SGD 26,000/);
+    expect(lines({ ...cf, cash: { available: false, closing: 0 } })).not.toMatch(/Cash at bank/);
+    const unread = lines({ ...cf, recordsAvailable: false });
+    expect(unread).not.toMatch(/received from customers/);
+    expect(unread).toMatch(/Revenue invoiced \(accrual\): SGD 109,330/);
+  });
 });

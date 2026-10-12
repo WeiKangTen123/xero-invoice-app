@@ -56,7 +56,7 @@ describe('routes/xero-reports', () => {
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(200);
 
-    expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't1', { force: false });
+    expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't1', { force: false, timezone: 'Asia/Singapore' });
     expect(res.body.activeTenantId).toBe('t1');
     expect(res.body.tenants).toHaveLength(2);
   });
@@ -73,7 +73,7 @@ describe('routes/xero-reports', () => {
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(200);
 
-    expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't2', { force: false });
+    expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't2', { force: false, timezone: 'Asia/Singapore' });
   });
 
   test('a ?tenantId the user does not actually have falls back to their first tenant, not an arbitrary org', async () => {
@@ -85,7 +85,7 @@ describe('routes/xero-reports', () => {
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(200);
 
-    expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't1', { force: false });
+    expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't1', { force: false, timezone: 'Asia/Singapore' });
   });
 
   test('?force=true is threaded through to reports.getSummary', async () => {
@@ -97,7 +97,22 @@ describe('routes/xero-reports', () => {
       .set('Authorization', `Bearer ${tokenFor(testUser)}`)
       .expect(200);
 
-    expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't1', { force: true });
+    expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't1', { force: true, timezone: 'Asia/Singapore' });
+  });
+
+  // The summary says which invoices are overdue, which turns at midnight where
+  // the reader is, so it is asked for in their own timezone.
+  test('the user\'s timezone from Setup reaches reports.getSummary', async () => {
+    tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1' }]);
+    reports.getSummary.mockResolvedValue({ connected: true, organisation: {}, kpis: {}, invoices: [] });
+    users.saveUserConfig(testUser.id, { TIMEZONE: 'America/Los_Angeles' });
+
+    await request(serverFor(app))
+      .get('/api/xero-reports/summary')
+      .set('Authorization', `Bearer ${tokenFor(testUser)}`)
+      .expect(200);
+
+    expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't1', { force: false, timezone: 'America/Los_Angeles' });
   });
 
   test('surfaces a Xero API failure as 500 with a readable message, not a crash', async () => {

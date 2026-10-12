@@ -99,7 +99,7 @@ router.get('/version', requireAuth, asyncHandler(async (req, res) => {
   res.json({ connected: true, tenantId, ...changeDetector.version(req.user.id, tenantId) });
 }));
 
-router.get('/summary',       requireAuth, report('Insights summary',       (req, t) => reports.getSummary(req.user.id, t, { force: force(req) })));
+router.get('/summary',       requireAuth, report('Insights summary',       (req, t) => reports.getSummary(req.user.id, t, { force: force(req), timezone: tz(req) })));
 router.get('/accounts',      requireAuth, report('Insights accounts',      (req, t) => reports.getAccounts(req.user.id, t, { force: force(req) })));
 router.get('/bank-accounts', requireAuth, report('Insights bank accounts', (req, t) => reports.getBankAccounts(req.user.id, t, { force: force(req) })));
 // The statement view behind Banking's "View transactions" — needs

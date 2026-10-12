@@ -203,6 +203,14 @@ function _buildCategoryVariances(perf, cf) {
   // already in hand. Without the monthly series (an older payload), or with
   // no closed markers at all, both sides fall back to the period totals
   // together, so they are at least on one basis.
+  //
+  // The receipts are read from Xero's payments and bank transactions. With no
+  // cash-flow report, or one whose read of either failed (recordsAvailable is
+  // false), they are a 0 from a failed read, and set against revenue that read
+  // as nothing collected: an "unfavorable" verdict on a figure nobody had
+  // measured. That card says the receipts could not be read instead, and
+  // carries no figure and no verdict.
+  const receiptsRead = !!cf && cf.available !== false && cf.recordsAvailable !== false;
   const rec = cf?.reconciliation || {};
   const monthlyReceipts = cf?.movement?.monthly?.customerReceipts;
   const sliceable = n !== null && Array.isArray(monthlyReceipts);
@@ -212,12 +220,14 @@ function _buildCategoryVariances(perf, cf) {
   const dso              = cf?.workingCapital?.dso;
   const overdue          = cf?.workingCapital?.overdue;
 
-  // Helper to format delta text e.g. +$520.00 vs plan
-  const fmtDelta = (v) => {
+  // Helper to format delta text e.g. +$520.00 vs plan. The cash card measures
+  // receipts against the revenue invoiced, not against a budget, so it says
+  // "vs revenue": "vs plan" there named a comparison it never made.
+  const fmtDelta = (v, against = 'plan') => {
     const s = v >= 0 ? '+' : '-';
     const abs = Math.abs(v);
     const num = abs >= 1000000 ? `${(abs / 1000000).toFixed(2)}M` : abs >= 1000 ? `${(abs / 1000).toFixed(1)}k` : `${Math.round(abs)}`;
-    return `${s}${cur ? cur + ' ' : '$'}${num} vs plan`;
+    return `${s}${cur ? cur + ' ' : '$'}${num} vs ${against}`;
   };
 
   const categories = [
@@ -266,18 +276,32 @@ function _buildCategoryVariances(perf, cf) {
           ? `Operating discipline delivered cost savings against plan${opexDrivers[0] ? ` across ${opexDrivers[0].name}` : ''}.`
           : `Operating expenses exceeded planned allocation${opexDrivers[0] ? ` primarily due to ${opexDrivers[0].name}` : ''}.`,
     },
-    {
+    receiptsRead ? {
       key: 'cash',
       title: 'Cash conversion',
       status: cashGap >= 0 ? 'favorable' : 'unfavorable',
       variance: cashGap,
       actual: customerReceipts,
       budget: revenueAccrual,
-      deltaText: fmtDelta(cashGap),
+      deltaText: fmtDelta(cashGap, 'revenue'),
       topDrivers: [],
       defaultReason: cashGap >= 0
         ? 'Customer cash collections kept pace with or exceeded invoiced billing for the period.'
         : `Debtor collection timing${dso ? ` (averaging ${Math.round(dso)} days)` : ''}${overdue ? ` with overdue customer receivables` : ''} explains the gap between accrual revenue and bank cash.`,
+    } : {
+      key: 'cash',
+      title: 'Cash conversion',
+      // Neither verdict: nothing was measured. `unavailable` keeps the
+      // model's reason off this card (_parseInsights) and its figures out of
+      // the prompt (_insightPrompt), where a null would round to a 0.
+      status: 'unavailable',
+      unavailable: true,
+      variance: null,
+      actual: null,
+      budget: null,
+      deltaText: 'Receipts unavailable — couldn\'t read payments from Xero',
+      topDrivers: [],
+      defaultReason: 'Collections are not compared with revenue until the payments can be read.',
     },
   ];
   // Nothing has closed, so nothing is compared — said plainly rather than
@@ -327,7 +351,12 @@ function _insightPrompt(org, fyLabel, closedMonths, categories, candidates) {
         organisation: org,
         financialYear: fyLabel,
         monthsClosed: closedMonths,
-        categories: categories.map(c => ({
+        categories: categories.map(c => (c.unavailable ? {
+          key: c.key,
+          title: c.title,
+          status: 'unavailable',
+          note: 'The figures for this category could not be read from Xero. State that plainly; give no figure and no verdict.',
+        } : {
           key: c.key,
           title: c.title,
           status: c.status,
@@ -447,6 +476,9 @@ function _parseInsights(raw, arg2, arg3) {
     .filter(c => c && typeof c === 'object')
     .map(c => [c.key, String(c.reason || '').trim()]));
   const parsedCategories = categories.map(cat => {
+    // A card with nothing measured keeps its own words: a model reason there
+    // could only be a verdict on figures nobody read.
+    if (cat.unavailable) return { ...cat, reason: cat.defaultReason };
     const aiReason = catMap.get(cat.key);
     const reason = (aiReason && _insightIsGrounded(aiReason, allowed)) ? aiReason : cat.defaultReason;
     return { ...cat, reason };
@@ -507,8 +539,13 @@ function _narrativeFacts(cf) {
 
   lines.push(`- Period: ${cf.period?.label || 'current period'}`);
   add('Revenue invoiced (accrual)', rec.revenueAccrual);
-  add('Cash actually received from customers', rec.customerReceipts);
-  add('Cash at bank now', cf.cash?.closing);
+  // Not when the payments or bank transactions could not be read: the
+  // receipts are then a 0 from the failed read, not money that did not come in.
+  if (cf.recordsAvailable !== false) add('Cash actually received from customers', rec.customerReceipts);
+  // Only when the bank summary was read. Unread, the report still carries a
+  // closing balance of 0, and "Cash at bank now: 0" handed to the model as
+  // fact had it tell an owner with money in the bank that they had none.
+  if (cf.cash?.available !== false) add('Cash at bank now', cf.cash?.closing);
   add('Owed to you by customers', wc.receivable);
   add('Of that, past its due date', wc.overdue);
   add('You owe suppliers', wc.payable);

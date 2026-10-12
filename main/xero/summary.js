@@ -1,14 +1,18 @@
 const logger             = require('../utils/logger');
+const { xeroErrMsg }     = require('./xero-utils');
 const { _cacheGet, _cacheSet, _dedupe } = require('./report-cache');
 const { _apiFor, _allInvoices, _getOrganisation, LIST_PAGE_SIZE, LIST_MAX_PAGES } = require('./report-fetch');
 const { _toBase, _foreignCurrency } = require('./currency');
 const { _raisedByMonth } = require('./cash-flow');
-const { _addDays, _dateFromParts, _fmtISODate, _parseISODate, _partsFromDate } = require('./periods');
+const { _addDays, _dateFromParts, _fmtISODate, _parseISODate, _partsFromDate, _todayPartsInTz } = require('./periods');
 
 // The calendar day of a Xero date (see performance.js#_xeroDay). Required when
 // first used rather than at load: performance.js reads the summary, so the two
 // would otherwise require each other and one would see the other half-built.
 const _day = v => require('./performance')._xeroDay(v);
+// The unallocated credit notes the ageing view reads and caches. Required when
+// first used for the same reason: ./ageing reads this module at load.
+const _creditNotes = (...args) => require('./ageing')._getCreditNotes(...args);
 
 // What is owed each way right now: receivables, payables, what is overdue, how
 // it ages, and the most recent invoices. It takes no period, and getPerformance
@@ -18,23 +22,38 @@ const _day = v => require('./performance')._xeroDay(v);
 
 // ── Snapshot summary (Receivables/Payables/status — always "right now") ─────
 
+// Today's date where the user is, as the ageing view dates it (./ageing#_asOf).
+function _todayIn(timezone) {
+  return _fmtISODate(_todayPartsInTz(timezone || 'UTC'));
+}
+
 // PAID invoices, and AUTHORISED ones already fully paid down to zero, both read
 // as "paid" here — amountDue is the source of truth for what's actually owed,
 // not just the coarse Xero status.
-function _statusLabel(inv) {
-  const amountDue = Number(inv.amountDue || 0);
-  if (inv.status === 'PAID' || amountDue <= 0) return 'paid';
-  if (inv.dueDate && new Date(inv.dueDate) < new Date()) return 'overdue';
-  return 'awaiting';
+function _isPaid(inv) {
+  return inv.status === 'PAID' || Number(inv.amountDue || 0) <= 0;
+}
+
+// Overdue from the day after the due date, where the user is, as the ageing
+// view counts it: the due date is a calendar day and is set against today's
+// date in the user's timezone. It was compared as an instant with the clock, so
+// in Singapore an invoice due today turned overdue at 08:00 (midnight UTC)
+// while the ageing still called it current.
+function _isOverdue(dueDate, todayISO) {
+  const due = _day(dueDate);
+  return !!due && due < todayISO;
 }
 
 // Buckets an outstanding invoice by how soon it's due — same shape as Xero's
 // own "Invoices owed to you" / "Bills to pay" dashboard widgets (grouped into
 // overdue, due this week, due soon, due later), just with fixed day windows
 // instead of Xero's dynamic weekly columns, since those shift with "today".
-function _agingBucketOf(dueDate) {
-  if (!dueDate) return 'later';
-  const days = Math.floor((new Date(dueDate) - new Date()) / 86400000);
+// Counted in calendar days from today where the user is, for the reason given
+// at _isOverdue, so the two never disagree about an invoice due today.
+function _agingBucketOf(dueDate, todayISO) {
+  const due = _parseISODate(_day(dueDate)), today = _parseISODate(todayISO);
+  if (!due || !today) return 'later';
+  const days = Math.round((_dateFromParts(due) - _dateFromParts(today)) / 86400000);
   if (days < 0) return 'overdue';
   if (days <= 7) return 'within7';
   if (days <= 30) return 'within30';
@@ -44,49 +63,36 @@ function _emptyAging() {
   return { overdue: { count: 0, amount: 0 }, within7: { count: 0, amount: 0 }, within30: { count: 0, amount: 0 }, later: { count: 0, amount: 0 } };
 }
 
-function _buildSummary(org, invoices) {
-  let totalReceivables = 0, totalPayables = 0;
-  let receivablesCount = 0, payablesCount = 0;
-  // Overdue is kept per direction. It used to be one sum of every overdue
-  // document, so a bill you were late paying was added to an invoice a customer
-  // was late paying: two opposite positions netted into a figure that described
-  // neither, and grew whenever you fell behind with a supplier.
-  let overdueReceivables = 0, overduePayables = 0;
-  let overdueReceivablesCount = 0, overduePayablesCount = 0;
-  const statusBreakdown = { paid: 0, awaiting: 0, overdue: 0 };
-  const aging = { receivables: _emptyAging(), payables: _emptyAging() };
+// Money is added in whole cents, each document converted and rounded to the
+// cent first, exactly as the ageing view adds it, so the headline totals and
+// the ageing's agree to the last cent rather than nearly.
+const _cents     = v => Math.round(Number(v || 0) * 100);
+const _fromCents = c => (c === 0 ? 0 : c / 100);
 
-  // Totals are in the org's base currency. Each row keeps its own currency
-  // and face amount; the KPIs used to add USD to SGD and label the sum as base.
+// Pure. Everything in the summary that does not depend on which day it is,
+// from every invoice fetched: the organisation, the fifty newest rows (each
+// "paid" or "awaiting"; _summaryAsOf turns the late ones overdue), how many
+// are paid, and what was raised each month. This is what is cached, so one
+// read of Xero serves a reader in any timezone, and getPerformance's read
+// (which names none) still shares the /summary route's.
+function _summaryBase(org, invoices) {
   const base = org.baseCurrency || '';
+  let paidCount = 0;
+  // Each row keeps its own currency and face amount; the KPIs, worked out in
+  // _summaryAsOf, are in the base currency.
   const list = invoices.map(inv => {
-    const isReceivable = inv.type === 'ACCREC';
-    const amountDue     = Number(inv.amountDue || 0);
-    const dueBase       = _toBase(inv, amountDue, base);
-    const status         = _statusLabel(inv);
-    statusBreakdown[status]++;
-    if (status === 'overdue') {
-      if (isReceivable) { overdueReceivables += dueBase; overdueReceivablesCount++; }
-      else              { overduePayables    += dueBase; overduePayablesCount++; }
-    }
-
-    if (inv.status === 'AUTHORISED' && amountDue > 0) {
-      if (isReceivable) { totalReceivables += dueBase; receivablesCount++; }
-      else               { totalPayables    += dueBase; payablesCount++; }
-      const bucket = aging[isReceivable ? 'receivables' : 'payables'][_agingBucketOf(inv.dueDate)];
-      bucket.count++; bucket.amount += dueBase;
-    }
-
+    const paid = _isPaid(inv);
+    if (paid) paidCount++;
     return {
       invoiceId:     inv.invoiceID,
-      type:          isReceivable ? 'Sale' : 'Bill',
+      type:          inv.type === 'ACCREC' ? 'Sale' : 'Bill',
       contact:       inv.contact?.name || 'Unknown',
       invoiceNumber: inv.invoiceNumber || '',
       date:          inv.date || null,
       dueDate:       inv.dueDate || null,
-      status,
+      status:        paid ? 'paid' : 'awaiting',
       total:         Number(inv.total || 0),
-      amountDue,
+      amountDue:     Number(inv.amountDue || 0),
       currency:      inv.currencyCode || org.baseCurrency || '',
     };
   }).slice(0, 50); // recent-invoices table doesn't need the full org history
@@ -101,20 +107,95 @@ function _buildSummary(org, invoices) {
         ? `${String(org.financialYearEndDay).padStart(2, '0')}/${String(org.financialYearEndMonth).padStart(2, '0')}`
         : '—',
     },
-    kpis: {
-      totalReceivables, totalPayables, receivablesCount, payablesCount,
-      overdueReceivables, overduePayables, overdueReceivablesCount, overduePayablesCount,
-      statusBreakdown,
-    },
-    aging,
+    paidCount,
     invoices: list,
     // What was invoiced and billed in each month, from every invoice fetched
     // rather than the fifty listed. getPerformance measures debtor and creditor
-    // days from this and the totals above, so those need no invoice fetch of
-    // their own.
+    // days from this and the totals, so those need no invoice fetch of their
+    // own.
     raisedByMonth: _raisedByMonth(invoices, base),
     currency: _foreignCurrency(invoices, base),
   };
+}
+
+// Pure. The summary as of `todayISO`, from _summaryBase's figures and the
+// invoices still owed (_outstandingOf's records, cached beside them).
+//
+// `credits` is ./ageing#_creditsOf's unallocated credit notes, or null when
+// they could not be read. They are taken off each side's total exactly as the
+// ageing view takes them off, so Total Receivables is the ageing's total and
+// the receivables on Xero's Balance Sheet, where the gross figure overstated
+// both by every credit a customer had not yet used. The counts stay counts of
+// invoices, and creditsNetted says how much was taken off. When the notes
+// could not be read the gross figure is still worth showing, so it is, and
+// creditsUnavailable says nothing was taken off.
+//
+// What is overdue, and the forward aging, are the invoices alone: a credit
+// note is never late. Overdue is kept per direction. It used to be one sum of
+// every overdue document, so a bill you were late paying was added to an
+// invoice a customer was late paying: two opposite positions netted into a
+// figure that described neither.
+function _summaryAsOf(base, outstanding = [], { baseCurrency = '', todayISO = _todayIn('UTC'), credits = [] } = {}) {
+  const sideOf = type => (type === 'ACCREC' ? 'receivables' : 'payables');
+  const owed = { receivables: 0, payables: 0 }, count = { receivables: 0, payables: 0 };
+  const late = { receivables: 0, payables: 0 }, lateCount = { receivables: 0, payables: 0 };
+  const aging = { receivables: _emptyAging(), payables: _emptyAging() };
+  for (const inv of outstanding || []) {
+    const side  = sideOf(inv.type);
+    const cents = _cents(_toBase(inv, Number(inv.amountDue || 0), baseCurrency));
+    owed[side] += cents; count[side]++;
+    if (_isOverdue(inv.dueDate, todayISO)) { late[side] += cents; lateCount[side]++; }
+    const bucket = aging[side][_agingBucketOf(inv.dueDate, todayISO)];
+    bucket.count++; bucket.amount += cents;
+  }
+
+  const netted = { receivables: 0, payables: 0 };
+  for (const cn of credits || []) {
+    const side = cn?.type === 'ACCRECCREDIT' ? 'receivables' : cn?.type === 'ACCPAYCREDIT' ? 'payables' : null;
+    const remaining = Number(cn?.remainingCredit || 0);
+    if (!side || !(remaining > 0)) continue;
+    netted[side] += _cents(_toBase(cn, remaining, baseCurrency));
+  }
+
+  const overdue = lateCount.receivables + lateCount.payables;
+  const invoices = (base.invoices || []).map(r => (
+    r.status === 'awaiting' && _isOverdue(r.dueDate, todayISO) ? { ...r, status: 'overdue' } : r));
+  const agingOut = side => Object.fromEntries(Object.entries(aging[side])
+    .map(([k, b]) => [k, { count: b.count, amount: _fromCents(b.amount) }]));
+
+  return {
+    connected: true,
+    organisation: base.organisation,
+    kpis: {
+      totalReceivables: _fromCents(owed.receivables - netted.receivables),
+      totalPayables:    _fromCents(owed.payables - netted.payables),
+      receivablesCount: count.receivables,
+      payablesCount:    count.payables,
+      overdueReceivables: _fromCents(late.receivables),
+      overduePayables:    _fromCents(late.payables),
+      overdueReceivablesCount: lateCount.receivables,
+      overduePayablesCount:    lateCount.payables,
+      statusBreakdown: {
+        paid: base.paidCount || 0,
+        awaiting: count.receivables + count.payables - overdue,
+        overdue,
+      },
+      creditsNetted: { receivables: _fromCents(netted.receivables), payables: _fromCents(netted.payables) },
+      creditsUnavailable: credits === null,
+    },
+    aging: { receivables: agingOut('receivables'), payables: agingOut('payables') },
+    invoices,
+    raisedByMonth: base.raisedByMonth,
+    currency: base.currency,
+  };
+}
+
+// Pure. The whole summary from one fetch of every invoice, as of `todayISO`
+// (today in UTC unless given), with `credits` netted as _summaryAsOf says.
+function _buildSummary(org, invoices, { todayISO, credits } = {}) {
+  return _summaryAsOf(_summaryBase(org, invoices), _outstandingOf(invoices), {
+    baseCurrency: org.baseCurrency || '', todayISO, credits,
+  });
 }
 
 // Pure. The invoices and bills still owed, cut down to what the ageing view
@@ -215,14 +296,21 @@ function _latenessOf(invoices = [], todayISO = new Date().toISOString().slice(0,
   return out;
 }
 
-async function _getSummaryRaw(userId, tenantId, { force = false } = {}) {
+// One read of Xero for the summary and the open invoices behind it, cached as
+// two entries: the figures that do not depend on the day (_summaryBase) and
+// the invoices still owed (_outstandingOf). Neither depends on the day or the
+// timezone, so the /summary route in Singapore and getPerformance's read,
+// which names no timezone, share one fetch and one cache entry; the day is
+// applied per request in getSummary.
+async function _fetchSummaryRaw(userId, tenantId, { force = false } = {}) {
   const key    = `summary:${userId}:${tenantId}`;
   const cached = _cacheGet(key, force);
   // The two entries come from one fetch, so they count as a hit only together.
   // Should the cache ever drop one without the other, the summary is fetched
   // again rather than the ageing view finding nothing to read and showing an
   // empty ledger as "nothing outstanding".
-  if (cached && _cacheGet(_outstandingKey(userId, tenantId), force)) return cached;
+  const held = cached && _cacheGet(_outstandingKey(userId, tenantId), force);
+  if (held) return { base: cached, outstanding: held };
 
   const tokenCache = require('../utils/token-cache').forUser(userId);
   const token      = await tokenCache.getValidToken(tenantId);
@@ -238,8 +326,7 @@ async function _getSummaryRaw(userId, tenantId, { force = false } = {}) {
     _allInvoices(api, tenantId, { order: 'Date DESC', statuses: ['AUTHORISED', 'PAID'] }),
   ]);
 
-  const data = _buildSummary(org, invoices);
-  _cacheSet(_outstandingKey(userId, tenantId), {
+  const outstanding = _cacheSet(_outstandingKey(userId, tenantId), {
     baseCurrency: org.baseCurrency || '',
     invoices: _outstandingOf(invoices),
     // The fetch is newest first and stops at the page cap, so an organisation
@@ -250,16 +337,53 @@ async function _getSummaryRaw(userId, tenantId, { force = false } = {}) {
     // from one fetch: the cash manager never predicts from a stale history.
     lateness: _latenessOf(invoices, _fmtISODate(_partsFromDate(new Date()))),
   });
-  logger.info('Insights summary fetched', { userId, tenantId, invoiceCount: data.invoices.length });
-  return _cacheSet(key, data);
+  const base = _cacheSet(key, _summaryBase(org, invoices));
+  logger.info('Insights summary fetched', { userId, tenantId, invoiceCount: base.invoices.length });
+  return { base, outstanding };
 }
 
 function _outstandingKey(userId, tenantId) { return `outstanding:${userId}:${tenantId}`; }
 
 // Bound after the declaration, through the one in-flight map in
-// ./report-cache, so getPerformance's read of it shares the /summary route's
-// request rather than starting its own.
-const getSummary             = _dedupe('getSummary', _getSummaryRaw);
+// ./report-cache, so the /summary route, getPerformance and the ageing view
+// asking at once share one fetch.
+const _fetchSummary = _dedupe('_fetchSummary', _fetchSummaryRaw, { force: false });
+
+// The summary as of today where the user is. As with the ageing view, only
+// what it is built from is cached, not the result: an invoice turns overdue at
+// midnight in the reader's timezone, which a cached result would not notice,
+// and building it is one pass over the open invoices. A caller that names no
+// timezone gets UTC's day; the totals getPerformance reads do not depend on
+// the day at all. `cached` is true when nothing in this request went to Xero.
+async function _getSummaryRaw(userId, tenantId, { timezone = 'UTC', force = false } = {}) {
+  const [{ base, outstanding }, creditRes] = await Promise.all([
+    _fetchSummary(userId, tenantId, { force }),
+    // Asked for exactly as the ageing view asks, so the two share one read.
+    // A failure costs the netting, not the summary: the gross figures are
+    // shown and creditsUnavailable says nothing was taken off.
+    _creditNotes(userId, tenantId, { force }).catch(err => {
+      logger.warn('Summary: credit notes unavailable, nothing netted', { userId, tenantId, error: xeroErrMsg(err) });
+      return null;
+    }),
+  ]);
+  const data = _summaryAsOf(base, outstanding.invoices, {
+    baseCurrency: outstanding.baseCurrency,
+    todayISO: _todayIn(timezone),
+    credits: creditRes ? creditRes.creditNotes : null,
+  });
+  const stamps = [base.fetchedAt, creditRes?.fetchedAt].filter(Number.isFinite);
+  return {
+    ...data,
+    cached: base.cached !== false && (!creditRes || creditRes.cached !== false),
+    // The older of the two reads, so "synced" never claims fresher than the
+    // oldest figure on screen.
+    fetchedAt: stamps.length ? Math.min(...stamps) : Date.now(),
+  };
+}
+
+// The timezone is part of the request, so readers whose days differ never
+// share one in flight; left out it is UTC, the same request as UTC named.
+const getSummary             = _dedupe('getSummary', _getSummaryRaw, { timezone: 'UTC', force: false });
 
 // The invoices still owed, from the summary's own fetch: one read of Xero
 // serves the headline totals and the ageing view alike, and the two cannot
@@ -270,16 +394,14 @@ async function _getOutstanding(userId, tenantId, { force = false } = {}) {
   const key = _outstandingKey(userId, tenantId);
   const hit = _cacheGet(key, force);
   if (hit) return hit;
-  // Asked for exactly as the /summary route asks, so it shares that request
-  // when both arrive together, and the summary's cache entry is refreshed with
-  // it.
-  const summary = await getSummary(userId, tenantId, { force });
-  const filled  = _cacheGet(key, false);
-  if (!filled) throw new Error('The outstanding invoices could not be read from the summary');
-  return { ...filled, cached: summary.cached !== false };
+  // Through the same fetch the /summary route's request makes, so it shares
+  // that request when both arrive together, and the summary's cache entry is
+  // refreshed with it.
+  const { outstanding } = await _fetchSummary(userId, tenantId, { force });
+  return outstanding;
 }
 
 module.exports = {
-  getSummary, _buildSummary, _outstandingOf, _getOutstanding, _latenessOf, _contactKey,
+  getSummary, _buildSummary, _summaryBase, _summaryAsOf, _outstandingOf, _getOutstanding, _latenessOf, _contactKey,
   LATENESS_LOOKBACK_DAYS, LATENESS_MIN_PAID, LATENESS_MAX_DAYS,
 };

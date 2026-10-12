@@ -93,7 +93,7 @@ describe('routes/xero-reports /version', () => {
       expect(row('t2')).toMatchObject({ last_viewed_at: expect.any(String), last_poll_at: null });
       expect(Date.now() - Date.parse(row('t2').last_viewed_at)).toBeLessThan(10_000);
       expect(row('t1')).toBeUndefined();
-      expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't2', { force: false });
+      expect(reports.getSummary).toHaveBeenCalledWith(testUser.id, 't2', { force: false, timezone: 'Asia/Singapore' });
     });
 
     test('not when there is no company to view', async () => {

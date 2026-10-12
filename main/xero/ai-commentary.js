@@ -62,7 +62,9 @@ async function _getVarianceInsightsRaw(userId, tenantId, { timezone = 'UTC', for
   }
 
   // Keyed on the figures themselves, so the model is re-asked only when the numbers actually move.
-  const sig = categories.map(c => `${c.key}:${Math.round(c.variance)}`).join('|') + '::' + candidates.map(c => `${c.account}:${Math.round(c.variance)}`).join('|');
+  // An unmeasured card is named as such: its variance is null, which rounds to
+  // the same 0 as a card exactly on plan, and the two need different answers.
+  const sig = categories.map(c => `${c.key}:${c.unavailable ? 'unavailable' : Math.round(c.variance)}`).join('|') + '::' + candidates.map(c => `${c.account}:${Math.round(c.variance)}`).join('|');
   const key = `insights:v3:${userId}:${tenantId}:${perf.period?.fromKey}:${perf.period?.toKey}:${sig}`;
   const cached = _cacheGet(key, force || reanalyse, { noGrace: true });
   if (cached) return cached;
