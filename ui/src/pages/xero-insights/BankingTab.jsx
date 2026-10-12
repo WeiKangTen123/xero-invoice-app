@@ -4,6 +4,35 @@ import { BarList, GroupedMonthlyBars } from '../../components/performance/Perfor
 import { balanceFor, balancesByName } from './balances';
 import { SourceNote } from './bits';
 
+// One account's figure in the accounts table: the Bank Summary's, nil
+// included (muted, since nothing moved), or "Unavailable" when it gave none —
+// it could not be read, or names no line for this account. Said in words: the
+// In and Out columns dashed a nil and a missing figure alike, so an account
+// whose figures were simply not read looked like one where nothing moved.
+export function bankFigure(bal, field, cur) {
+  const v = bal ? bal[field] : undefined;
+  if (v === undefined || v === null || !Number.isFinite(Number(v))) return { text: 'Unavailable', muted: true };
+  return { text: fmtMoney(Number(v), cur), muted: Math.round(Number(v) * 100) === 0 };
+}
+
+// The card across the top, from the performance payload's cash. Shown whether
+// or not the Bank Summary was read, so a failed read says so instead of the
+// card quietly disappearing.
+export function cashCard(cash, cur) {
+  if (!cash?.available) {
+    return { total: 'Unavailable', cashIn: 'Unavailable', cashOut: 'Unavailable', net: 'Unavailable', netTone: undefined,
+             note: 'Couldn’t read the Bank Summary from Xero' };
+  }
+  return {
+    total: fmtMoney(cash.total, cur), cashIn: fmtMoney(cash.cashIn, cur), cashOut: fmtMoney(cash.cashOut, cur),
+    net: fmtMoney(cash.net, cur), netTone: cash.net >= 0 ? 'var(--success)' : 'var(--danger)', note: null,
+  };
+}
+
+// What an account's statement says with no lines in it: the read covers the
+// last 365 days (bank.js#_getBankTransactionsRaw), so that is the claim.
+export const NO_STATEMENT_LINES = 'No transactions in the last 365 days';
+
 export default function BankingTab({ user, isMobile, banking, selectedBankAccount, setSelectedBankAccount, statement, perf, viewStatement, bankBalances, currency }) {
   // Accounts in a currency other than the organisation's. Every total and
   // chart on this tab is base-currency accounts only — adding a USD balance to
@@ -14,16 +43,19 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
   // The accounts table joins balances by name, and the page's lookup holds
   // only the base-currency accounts, so the others are looked up here.
   const foreignBalances = balancesByName(foreign);
+  const card = cashCard(perf.data?.cash, currency);
+  const muted = { color: 'var(--text-muted)' };
   return (
         <>
           {/* Moved from Overview: cash movement belongs with the accounts it
               moved through. Reads the cached performance payload, so it costs no
               extra Xero call. */}
-          {perf.data?.cash?.available && (
+          {perf.data?.cash && (
             <div className="card" style={{ display: 'flex', gap: 26, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
               <div>
                 <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '.07em', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 3 }}>Cash at bank</div>
-                <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(perf.data.cash.total, currency)}</div>
+                <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: 'tabular-nums', ...(card.note ? muted : {}) }}>{card.total}</div>
+                {card.note && <div style={{ fontSize: 10.5, color: 'var(--warning)', marginTop: 2 }}>{card.note}</div>}
                 {baseOnly && (
                   <div style={{ fontSize: 10.5, color: 'var(--warning)', marginTop: 2 }}>
                     Base-currency accounts only{currency ? ` (${currency})` : ''}
@@ -31,9 +63,9 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                 )}
               </div>
               <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap', fontSize: 12.5 }}>
-                <div><span style={{ color: 'var(--text-muted)' }}>Cash in </span><b style={{ color: 'var(--success)' }}>{fmtMoney(perf.data.cash.cashIn, currency)}</b></div>
-                <div><span style={{ color: 'var(--text-muted)' }}>Cash out </span><b style={{ color: 'var(--danger)' }}>{fmtMoney(perf.data.cash.cashOut, currency)}</b></div>
-                <div><span style={{ color: 'var(--text-muted)' }}>Net </span><b style={{ color: perf.data.cash.net >= 0 ? 'var(--success)' : 'var(--danger)' }}>{fmtMoney(perf.data.cash.net, currency)}</b></div>
+                <div><span style={{ color: 'var(--text-muted)' }}>Cash in </span><b style={card.note ? muted : { color: 'var(--success)' }}>{card.cashIn}</b></div>
+                <div><span style={{ color: 'var(--text-muted)' }}>Cash out </span><b style={card.note ? muted : { color: 'var(--danger)' }}>{card.cashOut}</b></div>
+                <div><span style={{ color: 'var(--text-muted)' }}>Net </span><b style={card.note ? muted : { color: card.netTone }}>{card.net}</b></div>
               </div>
               {/* Per account, a transfer really is money in or out of that
                   account, so the Bank Summary's figures are shown as Xero gives
@@ -132,21 +164,25 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                     // The currency the Bank Summary line was read in, which is
                     // the account's own; the list's own field otherwise.
                     const balCur = bal?.currency || a.currency || currency;
+                    const balance = bankFigure(bal, 'balance', balCur);
+                    const moneyIn = bankFigure(bal, 'cashIn', balCur);
+                    const moneyOut = bankFigure(bal, 'cashOut', balCur);
                     return (
                     <tr key={a.accountId} style={{ borderTop: '1px solid var(--border)', background: selectedBankAccount?.accountId === a.accountId ? 'var(--bg-hover)' : undefined }}>
                       <td style={{ padding: '9px 10px' }}>
                         {a.name}
                         {a.code ? <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> · {a.code}</span> : null}
                       </td>
-                      {/* Em dash when the name join misses, never a wrong number. */}
-                      <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
-                        {bal ? fmtMoney(bal.balance, balCur) : '—'}
+                      {/* "Unavailable" when the name join misses or the Bank
+                          Summary was not read, never a wrong number. */}
+                      <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: balance.muted ? 400 : 700, fontVariantNumeric: 'tabular-nums', color: balance.muted ? 'var(--text-muted)' : undefined }}>
+                        {balance.text}
                       </td>
-                      <td style={{ padding: '9px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: bal?.cashIn ? 'var(--success)' : 'var(--text-muted)' }}>
-                        {bal?.cashIn ? fmtMoney(bal.cashIn, balCur) : '—'}
+                      <td style={{ padding: '9px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: moneyIn.muted ? 'var(--text-muted)' : 'var(--success)' }}>
+                        {moneyIn.text}
                       </td>
-                      <td style={{ padding: '9px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: bal?.cashOut ? 'var(--danger)' : 'var(--text-muted)' }}>
-                        {bal?.cashOut ? fmtMoney(bal.cashOut, balCur) : '—'}
+                      <td style={{ padding: '9px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: moneyOut.muted ? 'var(--text-muted)' : 'var(--danger)' }}>
+                        {moneyOut.text}
                       </td>
                       <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{a.accountNumber || '—'}</td>
                       <td style={{ padding: '9px 10px' }}>{a.currency || '—'}</td>
@@ -191,7 +227,7 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
               ) : statement.error ? (
                 <div className="alert alert-error"><span className="alert-icon">✕</span>{statement.error}</div>
               ) : statement.data.length === 0 ? (
-                <div className="empty-state" style={{ padding: '30px 0' }}><div className="empty-state-icon">📄</div><div>No transactions found for this account</div></div>
+                <div className="empty-state" style={{ padding: '30px 0' }}><div className="empty-state-icon">📄</div><div>{NO_STATEMENT_LINES}</div></div>
               ) : (
                 <div style={{
                   overflowX: 'auto',

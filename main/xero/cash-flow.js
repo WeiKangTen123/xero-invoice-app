@@ -337,7 +337,10 @@ function _buildWorkingCapital({ invoices = [], today, baseCurrency = '', payment
     const dueBase = _toBase(inv, inv.amountDue, baseCurrency);
     g.raised += _toBase(inv, inv.total, baseCurrency);
     g.due    += dueBase;
-    g.count  += 1;
+    // The count sits beside what is owed ("Owed to you (2 sales invoices)"),
+    // so it counts only invoices with something still to pay. Counting the
+    // paid ones too printed "2 sales invoices" over an amount of nothing.
+    if (dueBase > 0) g.count += 1;
 
     if (inv.type === 'ACCREC' && dueBase > 0) {
       const overdueDays = inv.dueDate ? Math.floor((now - new Date(inv.dueDate)) / 86400000) : 0;
@@ -416,9 +419,13 @@ function _buildCashForecast({ invoices = [], openingBalance = 0, today, weeks = 
 // Gross burn is what leaves each month; net burn is what leaves after receipts.
 // Both are averaged over CLOSED months, so a half-finished month cannot flatter
 // or panic the figure.
+// `reason` says why there is no figure, in words the screen shows as they are.
+const NO_CLOSED_MONTH = 'No closed month yet';
+const NO_CASH_MOVED   = 'No cash moved in the closed months';
+
 function _buildRunway({ months = [], monthly = {}, closing = 0, today } = {}) {
   const ins = monthly.in || [], outs = monthly.out || [];
-  if (!months.length || !ins.length) return { available: false };
+  if (!months.length || !ins.length) return { available: false, reason: NO_CLOSED_MONTH };
 
   // Fall back to the partial current month only when there is no closed one —
   // a first-month org should see a rough figure, flagged, rather than nothing.
@@ -426,11 +433,18 @@ function _buildRunway({ months = [], monthly = {}, closing = 0, today } = {}) {
   const partial = n === 0;
   if (partial) n = 1;
   n = Math.min(n, ins.length, outs.length);
-  if (n < 1) return { available: false };
+  if (n < 1) return { available: false, reason: NO_CLOSED_MONTH };
 
   const sum = a => a.reduce((x, y) => x + y, 0);
   const cin = ins.slice(0, n), cout = outs.slice(0, n);
   const avgIn = sum(cin) / n, avgOut = sum(cout) / n;
+  // Nothing in and nothing out is not a business taking in more than it
+  // spends: it is no measurement at all. Read as one, it printed "0.00/mo,
+  // Taking in more than it spends" and "Self-funding" over months in which no
+  // money moved.
+  if (Math.round(avgIn * 100) === 0 && Math.round(avgOut * 100) === 0) {
+    return { available: false, reason: partial ? 'No cash moved this month yet' : NO_CASH_MOVED, months: n, partial };
+  }
   const avgNet = avgIn - avgOut;
   const burning = avgNet < 0;
   const runwayMonths = burning ? Math.max(0, closing / -avgNet) : null;

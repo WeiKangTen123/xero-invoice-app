@@ -1,7 +1,8 @@
-// The Cash Flow Manager tab's decisions: which days the window covers, what
-// the chart draws and how its axis is ruled, what colour a balance is, what
-// the tiles say, which items each list shows and how it groups them, what a
-// date's marker reads, what a form may send, and how the calendar lays out.
+// The Cash Flow Manager tab's decisions: which days the window covers, which
+// days before today are shown as they happened, what the chart draws and how
+// its axis is ruled, what colour a balance is, what the tiles say, which
+// items each list shows and how it groups them, what a date's marker reads,
+// what a form may send, and how the calendar lays out.
 //
 // Plain functions with no imports, so main/scripts/cash-manager-ui.test.js
 // can load and run them against a payload; the tab (CashManagerTab.jsx) and
@@ -28,6 +29,12 @@ const DEFAULT_PREFS = { days: 60, view: 'chart', mode: 'inout' };
 // The longest description the server keeps, so the form refuses what the
 // server would.
 const DESCRIPTION_MAX = 120;
+// Below this width the chart shows only the last week before today: thirty
+// more slots on a phone would leave the projection's bars a pixel wide.
+const PHONE_WIDTH = 600;
+const PHONE_ACTUAL_DAYS = 7;
+// What the screen says when the server could not read the days before today.
+const PAST_UNAVAILABLE = 'Past cash unavailable';
 // A shift of more than ten years is a slip of the keyboard, not a plan.
 const SHIFT_MAX = 3650;
 // The server's bounds: no amount past a billion, no date outside 1990–2100.
@@ -164,21 +171,62 @@ export function weekdayDay(iso) {
 
 // ── The window ──────────────────────────────────────────────────────────────
 
-// The days on screen: the first `days` of the server's 90-day series, from
-// today, and the last of them for the heading "Projected for 60 days ending
-// on 10 Dec 2026". A short series (a payload from a server with a shorter
-// horizon) is taken as it is, and the heading counts what is there.
+// The days on screen: today and the `days` after it, from the server's
+// series, as Xero counts a window: its "60 days" runs from 6 Oct to 5 Dec, the
+// day sixty days on. The last of them is the heading's, "Projected for 60
+// days ending on 11 Dec 2026", so it names the day Xero's does; it named the
+// day before, a day short of Xero's, when the window was the first 60 days.
+// A short series (a payload from a server with a shorter horizon) is taken as
+// it is, and the heading counts what is there.
 export function windowOf(payload, days) {
   const all = Array.isArray(payload?.series) ? payload.series : [];
-  const n = Math.min(normaliseDays(days), all.length);
+  const n = Math.min(normaliseDays(days) + 1, all.length);
   const series = all.slice(0, n);
+  const ahead = Math.max(0, n - 1);
   const start = series[0]?.date || payload?.today || '';
   const end = series[n - 1]?.date || '';
   return {
-    days: n, series, start, end,
+    days: ahead, series, start, end,
     endLabel: longDay(end),
-    title: n ? `Projected for ${n} day${n === 1 ? '' : 's'} ending on ${longDay(end)}` : 'Nothing projected yet',
+    title: n ? `Projected for ${ahead} day${ahead === 1 ? '' : 's'} ending on ${longDay(end)}` : 'Nothing projected yet',
   };
+}
+
+// How many of the days before today the chart shows at a width: all of them
+// where there is room, the last week on a phone. Graph days counts only the
+// days ahead; these are always shown before them. The table and the calendar
+// show every one.
+export function actualDaysFor(width) {
+  const w = num(width);
+  return w > 0 && w < PHONE_WIDTH ? PHONE_ACTUAL_DAYS : null;
+}
+
+// The days before today the server sent (what actually moved), oldest first,
+// the last `count` of them, or all when `count` is null. `note` is what the
+// screen says when the server could not read them, so it says so rather than
+// drawing nothing as nil; a payload from before they existed has none and
+// says nothing.
+export function actualWindow(payload, count = null) {
+  const all = (Array.isArray(payload?.actuals) ? payload.actuals : []).filter(a => a && isIsoDate(a.date));
+  const n = count === null || count === undefined ? all.length : Math.max(0, Math.min(all.length, Math.floor(num(count))));
+  const rows = (n ? all.slice(-n) : []).map(a => {
+    const cin = mag(a.in), cout = mag(a.out);
+    return {
+      date: a.date, actual: true, in: cin, out: cout,
+      net: a.net === undefined || a.net === null ? cin - cout : num(a.net),
+      // Null when there was no balance today to work back from: a line
+      // drawn at zero would be a balance nobody had.
+      balance: a.balance === undefined || a.balance === null ? null : num(a.balance),
+    };
+  });
+  return { rows, note: payload?.actualsAvailable === false ? PAST_UNAVAILABLE : '' };
+}
+
+// Whether a date is one of the days before today the server sent, which is
+// how a click on one finds what moved on it rather than what is expected.
+function isActualDay(payload, date) {
+  return isIsoDate(date) && !!payload?.today && date < payload.today
+    && Array.isArray(payload?.actuals) && payload.actuals.some(a => a?.date === date);
 }
 
 // How many days apart the axis labels sit so that at most `maxLabels` fit:
@@ -201,13 +249,18 @@ function modeOf(mode) {
 // What the chart draws for the window. `points` are the days from today, each
 // with its cash in and out (as amounts, both positive), net movement and the
 // projected bank balance at the end of the day; `tick` marks the days that
-// get an axis label. `overdue` is the pair drawn left of the today line —
-// what was due before today and has not been paid — and is left out of the
-// bank balance line, which is a projection from today. `min` and `max` are
-// the span the values reach, always taking in zero so the bars stand on a
-// real baseline; under "Bank balance" the overdraft limit is taken in too
-// once the balance goes below zero, so the reader can see how close it runs.
-export function chartBars(payload, days, mode, { maxLabels = 10 } = {}) {
+// get an axis label. `actual` are the days before today as they happened
+// (the last `actualDays` of them, all when null), drawn muted left of
+// everything else, their balance line too under "Bank balance"; `actualNote`
+// says when they could not be read. `overdue` is the pair drawn left of the
+// today line — what was due before today and has not been paid — and is left
+// out of the bank balance line, which is a projection from today. `min` and
+// `max` are the span the values reach, always taking in zero so the bars
+// stand on a real baseline; under "Bank balance" the overdraft limit is taken
+// in too once the balance goes below zero, so the reader can see how close it
+// runs. `empty` is about the days ahead and the overdue pair only: what moved
+// before today is not something expected.
+export function chartBars(payload, days, mode, { maxLabels = 10, actualDays = null } = {}) {
   const m = modeOf(mode);
   const { series } = windowOf(payload, days);
   const step = labelStep(series.length, maxLabels);
@@ -217,6 +270,8 @@ export function chartBars(payload, days, mode, { maxLabels = 10 } = {}) {
     const net = s.net === undefined || s.net === null ? cin - cout : num(s.net);
     return { date: s.date, label: shortDay(s.date), tick: i % step === 0, in: cin, out: cout, net, balance: num(s.balance) };
   });
+  const past = actualWindow(payload, actualDays);
+  const actual = past.rows.map(a => ({ ...a, label: shortDay(a.date) }));
 
   let overdue = null;
   if (m !== 'balance') {
@@ -227,17 +282,17 @@ export function chartBars(payload, days, mode, { maxLabels = 10 } = {}) {
 
   let values;
   if (m === 'inout') {
-    values = points.flatMap(p => [p.in, -p.out]);
+    values = [...actual, ...points].flatMap(p => [p.in, -p.out]);
     if (overdue) values.push(overdue.in, -overdue.out);
   } else if (m === 'net') {
-    values = points.map(p => p.net);
+    values = [...actual, ...points].map(p => p.net);
     if (overdue) values.push(overdue.net);
   } else {
-    values = points.map(p => p.balance);
+    values = [...actual.filter(a => a.balance !== null).map(a => a.balance), ...points.map(p => p.balance)];
     if (overdraft > 0 && values.some(v => v < 0)) values.push(-overdraft);
   }
   return {
-    mode: m, points, overdue, overdraft, step,
+    mode: m, points, actual, actualNote: past.note, overdue, overdraft, step,
     min: Math.min(0, ...values),
     max: Math.max(0, ...values),
     empty: points.every(p => !cents(p.in) && !cents(p.out)) && !(overdue && (cents(overdue.in) || cents(overdue.out))),
@@ -436,6 +491,7 @@ const BASIS = {
   scheduled: ['Repeating',    'The next date of a repeating invoice or bill in Xero.'],
   payment:   ['Payment',      'The date of a payment recorded in Xero.'],
   manual:    ['Your entry',   'An entry made in this app. Xero is unchanged.'],
+  actual:    ['Actual',       'Money that moved: a payment or bank transaction recorded in Xero on this day.'],
 };
 
 export function basisLabel(dateBasis) {
@@ -653,8 +709,16 @@ const sideFirst = (a, b) => (a.direction === b.direction ? mag(b.amount) - mag(a
 // The items behind one day of the chart, or behind its Overdue pair when
 // `date` is 'overdue': cash in before cash out, largest first. Excluded items
 // are left out, as the chart leaves them out. An overdue item belongs to the
-// Overdue pair whatever date it carries, so it is never counted twice.
+// Overdue pair whatever date it carries, so it is never counted twice. A day
+// before today lists what actually moved on it, each marked as actual: those
+// are records in Xero, not items of the forecast to move or leave out.
 export function dayItems(payload, date) {
+  if (isActualDay(payload, date)) {
+    return (Array.isArray(payload?.actualItems) ? payload.actualItems : [])
+      .filter(i => i && i.date === date)
+      .map(i => ({ ...i, actual: true, dateBasis: 'actual' }))
+      .sort(sideFirst);
+  }
   const items = Array.isArray(payload?.items) ? payload.items : [];
   return items
     .filter(i => i && !i.excluded && (date === 'overdue' ? i.overdue : !i.overdue && i.date === date))
@@ -667,8 +731,12 @@ export function dayItems(payload, date) {
 // how many more there are.
 export function daySummary(payload, date, limit = 5) {
   const all = dayItems(payload, date);
+  const actual = isActualDay(payload, date);
   let cin, cout, net, balance = null;
-  if (date === 'overdue') {
+  if (actual) {
+    const a = actualWindow(payload).rows.find(x => x.date === date);
+    cin = a.in; cout = a.out; net = a.net; balance = a.balance;
+  } else if (date === 'overdue') {
     const od = payload?.tiles?.overdue || {};
     cin = mag(od.in); cout = mag(od.out); net = od.net === undefined || od.net === null ? cin - cout : num(od.net);
   } else {
@@ -683,27 +751,36 @@ export function daySummary(payload, date, limit = 5) {
     }
   }
   const title = date === 'overdue' ? 'Overdue'
-    : date === payload?.today ? `Today, ${weekdayDay(date)}` : `${weekdayDay(date)} ${parts(date)?.y || ''}`.trim();
-  return { date, title, in: cin, out: cout, net, balance, items: all.slice(0, limit), more: Math.max(0, all.length - limit), count: all.length };
+    : date === payload?.today ? `Today, ${weekdayDay(date)}`
+    : `${weekdayDay(date)} ${parts(date)?.y || ''}`.trim() + (actual ? ' · Actual' : '');
+  return { date, title, actual, in: cin, out: cout, net, balance, items: all.slice(0, limit), more: Math.max(0, all.length - limit), count: all.length };
 }
 
 // ── The table and the calendar ──────────────────────────────────────────────
 
-// The table view: the Overdue row first (it has no balance — it is not a
-// day), then a row a day, and the window's totals with the balance it ends on.
+// The table view: the days before today as they happened, each marked as
+// actual, then the Overdue row (it has no balance — it is not a day), then a
+// row a day ahead, and the window's totals with the balance it ends on. The
+// totals and `days` are the days ahead only: what moved before today is not
+// part of what the window projects. `actualNote` says when the days before
+// today could not be read.
 export function tableRows(payload, days) {
   const { series } = windowOf(payload, days);
+  const past = actualWindow(payload);
   const od = payload?.tiles?.overdue || {};
   const oin = mag(od.in), oout = mag(od.out);
-  const rows = [{ key: 'overdue', date: 'overdue', label: 'Overdue', in: oin, out: oout, net: od.net === undefined || od.net === null ? oin - oout : num(od.net), balance: null }];
+  const rows = past.rows.map(a => ({ key: `actual:${a.date}`, ...a, label: weekdayDay(a.date) }));
+  rows.push({ key: 'overdue', date: 'overdue', label: 'Overdue', in: oin, out: oout, net: od.net === undefined || od.net === null ? oin - oout : num(od.net), balance: null });
+  const daysRows = [];
   for (const s of series) {
     const cin = mag(s.in), cout = mag(s.out);
-    rows.push({ key: s.date, date: s.date, label: weekdayDay(s.date), today: s.date === payload?.today,
-                in: cin, out: cout, net: s.net === undefined || s.net === null ? cin - cout : num(s.net), balance: num(s.balance) });
+    daysRows.push({ key: s.date, date: s.date, label: weekdayDay(s.date), today: s.date === payload?.today,
+                    in: cin, out: cout, net: s.net === undefined || s.net === null ? cin - cout : num(s.net), balance: num(s.balance) });
   }
-  const daysRows = rows.slice(1);
   return {
-    rows,
+    rows: [...rows, ...daysRows],
+    actualNote: past.note,
+    days: daysRows.length,
     total: {
       in: daysRows.reduce((s, r) => s + r.in, 0),
       out: daysRows.reduce((s, r) => s + r.out, 0),
@@ -717,15 +794,19 @@ export function weekdayLabels() {
   return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 }
 
-// The calendar view: a month grid for each month the window touches, weeks
-// from Monday. Every day of those months is a cell, so the grid reads as a
-// calendar; the days outside the window (before today, after its end) carry
-// no figures. A blank cell pads the first and last week.
+// The calendar view: a month grid for each month the window and the days
+// before today touch, weeks from Monday. Every day of those months is a cell,
+// so the grid reads as a calendar; the days outside both (before the first
+// actual day, after the window's end) carry no figures. A day before today
+// carries what actually moved and is marked `actual`. A blank cell pads the
+// first and last week.
 export function calendarMonths(payload, days) {
-  const { series, start, end } = windowOf(payload, days);
-  if (!series.length || !isIsoDate(start) || !isIsoDate(end)) return [];
-  const byDate = new Map(series.map(s => [s.date, s]));
-  const today = payload?.today || start;
+  const { series, start: from, end } = windowOf(payload, days);
+  if (!series.length || !isIsoDate(from) || !isIsoDate(end)) return [];
+  const past = actualWindow(payload).rows;
+  const byDate = new Map([...past, ...series].map(s => [s.date, s]));
+  const today = payload?.today || from;
+  const start = past.length && past[0].date < from ? past[0].date : from;
   const a = parts(start), b = parts(end);
   const months = [];
   for (let idx = a.y * 12 + a.m - 1; idx <= b.y * 12 + b.m - 1; idx++) {
@@ -739,9 +820,9 @@ export function calendarMonths(payload, days) {
       const inWindow = !!s;
       const cin = inWindow ? mag(s.in) : 0, cout = inWindow ? mag(s.out) : 0;
       cells.push({
-        date, day: d, inWindow, today: date === today,
+        date, day: d, inWindow, today: date === today, actual: !!s?.actual,
         in: cin, out: cout, net: inWindow ? (s.net === undefined || s.net === null ? cin - cout : num(s.net)) : 0,
-        balance: inWindow ? num(s.balance) : null,
+        balance: inWindow && s.balance !== null ? num(s.balance) : null,
       });
     }
     while (cells.length % 7) cells.push(null);

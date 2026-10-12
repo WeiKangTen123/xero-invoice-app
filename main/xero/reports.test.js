@@ -20,6 +20,7 @@ describe('xero/reports — _buildSummary (pure)', () => {
       totalReceivables: 0, totalPayables: 0, receivablesCount: 0, payablesCount: 0,
       overdueReceivables: 0, overduePayables: 0, overdueReceivablesCount: 0, overduePayablesCount: 0,
       statusBreakdown: { paid: 0, awaiting: 0, overdue: 0 },
+      creditsNetted: { receivables: 0, payables: 0 }, creditsUnavailable: false,
     });
     expect(result.invoices).toEqual([]);
     expect(result.organisation).toEqual({ name: 'Blacklab Pte. Ltd.', country: 'SG', currency: 'SGD', yearEnd: '31/12' });
@@ -1851,12 +1852,12 @@ describe('xero/reports — working capital (pure)', () => {
     expect(wc.overdue).toBe(900);
   });
 
-  test('a fully paid bill leaves no payable', () => {
+  test('a fully paid bill leaves no payable, and is not counted among the bills owed', () => {
     const wc = _buildWorkingCapital({ today: TODAY, invoices: [
       { type: 'ACCPAY', total: 24603, amountDue: 0, dueDate: '2026-07-31' },
     ]});
     expect(wc.payable).toBe(0);
-    expect(wc.counts.payable).toBe(1);
+    expect(wc.counts.payable).toBe(0);
   });
 
   test('DSO/DPO are null when no payment-days figure is supplied, never Infinity', () => {

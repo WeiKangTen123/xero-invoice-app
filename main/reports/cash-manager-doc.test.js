@@ -42,12 +42,13 @@ const ITEMS = [
   item({ key: 'invoice:inv-6', date: '2026-12-28', dueDate: '2026-12-28', dateBasis: 'expected', amount: 3000, contactName: 'Theta', number: 'INV-0060' }),
 ];
 
-// Ninety days from today, made of the live items above, as the service builds
-// it: excluded and overdue items move no day. The balance goes below zero on
-// 20 Nov and recovers on 1 Dec, inside the 60-day span and past the 30-day one.
+// Today and the ninety days after it, made of the live items above, as the
+// service builds it: excluded and overdue items move no day. The balance goes
+// below zero on 20 Nov and recovers on 1 Dec, inside the 60-day span and past
+// the 30-day one.
 const SERIES = (() => {
   let balance = 135491;
-  return Array.from({ length: 90 }, (_, i) => {
+  return Array.from({ length: 91 }, (_, i) => {
     const date = addDays(TODAY, i);
     const live = ITEMS.filter(it => it.date === date && !it.excluded && !it.overdue);
     const sum  = dir => live.filter(it => it.direction === dir).reduce((s, it) => s + it.amount, 0);
@@ -57,12 +58,26 @@ const SERIES = (() => {
   });
 })();
 
+// The thirty days before today as they happened, oldest first: 57,330 received
+// on 6 Oct and 1,200 paid on 9 Oct, the balance worked back from today's.
+const ACTUALS = (() => {
+  const moves = { '2026-10-06': [57330, 0], '2026-10-09': [0, 1200] };
+  const days = Array.from({ length: 30 }, (_, i) => addDays(TODAY, i - 30));
+  let balance = 135491;
+  return days.reverse().map(date => {
+    const [cin, out] = moves[date] || [0, 0];
+    const row = { date, in: cin, out, net: cin - out, balance };
+    balance -= cin - out;
+    return row;
+  }).reverse();
+})();
+
 // The payload as the cash manager route sends it.
 function payload(over = {}) {
   return {
     organisation: { name: 'Nexsoss Pte Ltd', currency: 'SGD' },
     today: TODAY,
-    horizonDays: 90,
+    horizonDays: 91,
     bank: {
       accounts: [{ accountId: 'a1', name: 'Aspire SGD account', currency: 'SGD', balance: 135491, included: true, openingAdjustment: 0, overdraft: 0, foreign: false }],
       balance: 135491,
@@ -77,6 +92,9 @@ function payload(over = {}) {
     },
     runwayDays: null,
     series: SERIES.map(r => ({ ...r })),
+    actualDays: 30,
+    actualsAvailable: true,
+    actuals: ACTUALS.map(r => ({ ...r })),
     items: ITEMS.map(it => ({ ...it })),
     notes: ['Overpayments and prepayments are already in the bank and are not projected.'],
     cached: true,
@@ -139,13 +157,14 @@ describe('reports/cash-manager-doc — the PDF definition', () => {
     const header = JSON.stringify(d60.header);
     expect(header).toContain('Nexsoss Pte Ltd');
     expect(header).toContain('Cash Flow Manager');
-    expect(header).toContain('Projected for 60 days ending on 10 Dec 2026 · SGD');
+    // Xero's "60 days" ends sixty days on: 12 Oct to 11 Dec.
+    expect(header).toContain('Projected for 60 days ending on 11 Dec 2026 · SGD');
     expect(header).toContain('Generated 12 Oct 2026, 17:00');
     expect(header).toContain('Figures read from Xero at');
     expect(d60.footer(1, 3).columns[0].text).toBe("Figures in SGD, the organisation's base currency.");
     expect(d60.footer(1, 3).columns[1].text).toBe('Page 1 of 3');
     expect(JSON.stringify(cm.cashManagerDefinition(payload(), { ...SGT, days: 30 }).header))
-      .toContain('Projected for 30 days ending on 10 Nov 2026 · SGD');
+      .toContain('Projected for 30 days ending on 11 Nov 2026 · SGD');
   });
 
   test('the five figures lead the page, in order, each net with its cash in and out beneath', () => {
@@ -171,24 +190,50 @@ describe('reports/cash-manager-doc — the PDF definition', () => {
   });
 
   for (const days of [30, 60]) {
-    test(`the daily table has every one of the first ${days} days, in order, with every figure in its column`, () => {
+    test(`the daily table has today and every one of the ${days} days after it, in order, with every figure in its column`, () => {
       const d    = cm.cashManagerDefinition(payload(), { ...SGT, days });
       const body = bodyAfter(d, 'Day by day');
       expect(body[0].map(c => c.text)).toEqual(['Date', 'Cash in', 'Cash out', 'Net movement', 'Bank balance']);
-      expect(body).toHaveLength(days + 1);
-      expect(body.slice(1).map(r => r.map(c => c.text))).toEqual(SERIES.slice(0, days).map(r => [
+      expect(body).toHaveLength(days + 2);
+      expect(body.slice(1).map(r => r.map(c => c.text))).toEqual(SERIES.slice(0, days + 1).map(r => [
         `${weekday(r.date)} ${doc.dayLabel(r.date)}`, cell(r.in), cell(r.out), cell(r.net), cell(r.balance),
       ]));
       expect(body[1][0].text).toBe('Mon 12 Oct 2026');
-      expect(body[days][0].text).toBe(days === 30 ? 'Tue 10 Nov 2026' : 'Thu 10 Dec 2026');
+      expect(body[days + 1][0].text).toBe(days === 30 ? 'Wed 11 Nov 2026' : 'Fri 11 Dec 2026');
       expect(after(d, 'Day by day').table.headerRows).toBe(1);
     });
   }
 
+  test('the last thirty days as they happened come first, oldest first, before the projection', () => {
+    const body = bodyAfter(d60, 'Actual (last 30 days)');
+    expect(at(d60, 'Actual (last 30 days)')).toBeLessThan(at(d60, 'Day by day'));
+    expect(at(d60, 'Actual (last 30 days)')).toBeGreaterThan(0);
+    expect(body[0].map(c => c.text)).toEqual(['Date', 'Cash in', 'Cash out', 'Net movement', 'Bank balance']);
+    expect(body.slice(1).map(r => r.map(c => c.text))).toEqual(ACTUALS.map(r => [
+      `${weekday(r.date)} ${doc.dayLabel(r.date)}`, cell(r.in), cell(r.out), cell(r.net), cell(r.balance),
+    ]));
+    expect(body[1][0].text).toBe('Sat 12 Sep 2026');
+    expect(body.find(r => r[0].text === 'Tue 6 Oct 2026').map(c => c.text))
+      .toEqual(['Tue 6 Oct 2026', '57,330.00', '-', '57,330.00', '136,691.00']);
+    // A balance with nothing to work back from is blank, not nil.
+    const p = payload({ actuals: ACTUALS.map(r => ({ ...r, balance: null })) });
+    expect(bodyAfter(cm.cashManagerDefinition(p, SGT), 'Actual (last 30 days)')[1][4].text).toBe('');
+  });
+
+  test('past cash that could not be read is said, and a payload without any prints no section', () => {
+    const p = payload({ actualsAvailable: false, actuals: [] });
+    expect(after(cm.cashManagerDefinition(p, SGT), 'Actual (last 30 days)'))
+      .toEqual({ text: 'Past cash could not be read from Xero, so the days before today are not shown.', style: 'note' });
+    const none = payload();
+    delete none.actuals;
+    delete none.actualsAvailable;
+    expect(at(cm.cashManagerDefinition(none, SGT), 'Actual (last 30 days)')).toBe(-1);
+  });
+
   test('weekends are shaded lightly and nothing else is', () => {
     const t    = after(d60, 'Day by day');
     const fill = t.layout.fillColor;
-    SERIES.slice(0, 60).forEach((r, i) => expect({ date: r.date, fill: fill(i + 1) }).toEqual({ date: r.date, fill: weekend(r.date) ? BAND : null }));
+    SERIES.slice(0, 61).forEach((r, i) => expect({ date: r.date, fill: fill(i + 1) }).toEqual({ date: r.date, fill: weekend(r.date) ? BAND : null }));
     expect(t.table.body[6][0].text).toBe('Sat 17 Oct 2026');
     expect(fill(6)).toBe(BAND);
     expect(fill(0)).toBeNull();
@@ -196,7 +241,7 @@ describe('reports/cash-manager-doc — the PDF definition', () => {
 
   test('a balance below zero is red and parenthesised, and only the balance', () => {
     const body = bodyAfter(d60, 'Day by day');
-    SERIES.slice(0, 60).forEach((r, i) => {
+    SERIES.slice(0, 61).forEach((r, i) => {
       expect({ date: r.date, color: body[i + 1][4].color }).toEqual({ date: r.date, color: r.balance < 0 ? NEGATIVE : undefined });
       expect(body[i + 1][3].color).toBeUndefined();
     });
@@ -206,8 +251,8 @@ describe('reports/cash-manager-doc — the PDF definition', () => {
     expect(SERIES.slice(0, 30).some(r => r.balance < 0)).toBe(false);
   });
 
-  test('the sections come in order: figures, days, cash in, cash out, overdue, then the notes', () => {
-    const order = ['Day by day', 'Cash in', 'Cash out', 'Overdue'].map(h => at(d60, h));
+  test('the sections come in order: figures, past days, days, cash in, cash out, overdue, then the notes', () => {
+    const order = ['Actual (last 30 days)', 'Day by day', 'Cash in', 'Cash out', 'Overdue'].map(h => at(d60, h));
     expect(order.every(i => i > 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     const notes = d60.content.slice(at(d60, 'Overdue') + 2);
@@ -298,12 +343,15 @@ describe('reports/cash-manager-doc — date basis in words', () => {
 });
 
 describe('reports/cash-manager-doc — the span', () => {
-  test('is the days asked for, else the payload\'s horizon, and never more than the series has', () => {
-    expect(cm.cashSpan(payload(), 30)).toMatchObject({ days: 30, end: '2026-11-10' });
-    expect(cm.cashSpan(payload(), undefined)).toMatchObject({ days: 90, end: addDays(TODAY, 89) });
+  test('is today and the days asked for after it, else the payload\'s horizon, and never more than the series has', () => {
+    expect(cm.cashSpan(payload(), 30)).toMatchObject({ days: 30, end: '2026-11-11' });
+    expect(cm.cashSpan(payload(), 60)).toMatchObject({ days: 60, end: '2026-12-11' });
+    expect(cm.cashSpan(payload(), 90)).toMatchObject({ days: 90, end: '2027-01-10' });
+    expect(cm.cashSpan(payload(), undefined)).toMatchObject({ days: 90, end: addDays(TODAY, 90) });
     expect(cm.cashSpan(payload(), 'nonsense').days).toBe(90);
     expect(cm.cashSpan(payload(), 365).days).toBe(90);
-    expect(cm.cashSpan(payload(), 30).rows).toEqual(SERIES.slice(0, 30));
+    expect(cm.cashSpan(payload(), 30).rows).toEqual(SERIES.slice(0, 31));
+    expect(cm.cashSpan({}, 60)).toEqual({ days: 0, rows: [], end: '' });
   });
 });
 
@@ -325,12 +373,12 @@ describe('reports/cash-manager-doc — the workbook', () => {
   const iso = v => (v instanceof Date ? v.toISOString().slice(0, 10) : v);
   const wb = cm.cashManagerWorkbook(payload(), { ...SGT, days: 60 });
 
-  test('has the five sheets, each opening with the title block', () => {
-    expect(wb.worksheets.map(w => w.name)).toEqual(['Summary', 'Daily', 'Cash in', 'Cash out', 'Overdue']);
+  test('has the six sheets, the last thirty days ahead of the projection, each opening with the title block', () => {
+    expect(wb.worksheets.map(w => w.name)).toEqual(['Summary', 'Actual (last 30 days)', 'Daily', 'Cash in', 'Cash out', 'Overdue']);
     for (const ws of wb.worksheets) {
       const text = sheetRows(ws).map(([, v]) => v.filter(x => typeof x === 'string').join(' ')).join('\n');
       expect(text).toContain('Nexsoss Pte Ltd — Cash Flow Manager');
-      expect(text).toContain('Projected for 60 days ending on 10 Dec 2026 · SGD · Generated 12 Oct 2026, 17:00');
+      expect(text).toContain('Projected for 60 days ending on 11 Dec 2026 · SGD · Generated 12 Oct 2026, 17:00');
       expect(text).toContain('Figures read from Xero at');
       expect(text).toContain("Figures in SGD, the organisation's base currency.");
     }
@@ -348,13 +396,22 @@ describe('reports/cash-manager-doc — the workbook', () => {
     expect(sheetRows(ws).some(([, v]) => v[0] === 'Overpayments and prepayments are already in the bank and are not projected.')).toBe(true);
   });
 
+  test('the last thirty days sheet carries the payload\'s actuals as dates and numbers, oldest first', () => {
+    const ws   = wb.getWorksheet('Actual (last 30 days)');
+    const rows = tableRows(ws, 'Date');
+    expect(rows.map(r => values(r, 5).map(iso))).toEqual(ACTUALS.map(r => [r.date, r.in, r.out, r.net, r.balance]));
+    for (const r of rows) expect([2, 3, 4, 5].map(c => r.getCell(c).numFmt)).toEqual(new Array(4).fill(render.MONEY_FMT));
+    const gone = cm.cashManagerWorkbook(payload({ actualsAvailable: false, actuals: [] }), SGT).getWorksheet('Actual (last 30 days)');
+    expect(sheetRows(gone).some(([, v]) => v[0] === 'Past cash could not be read from Xero, so the days before today are not shown.')).toBe(true);
+  });
+
   for (const days of [30, 60]) {
-    test(`Daily carries every one of the first ${days} days as a date and numbers equal to the payload`, () => {
+    test(`Daily carries today and every one of the ${days} days after it as a date and numbers equal to the payload`, () => {
       const ws   = cm.cashManagerWorkbook(payload(), { ...SGT, days }).getWorksheet('Daily');
       expect(ws.getRow(headRow(ws, 'Date')).values.slice(1)).toEqual(['Date', 'Cash in', 'Cash out', 'Net movement', 'Bank balance']);
       const rows = tableRows(ws, 'Date');
-      expect(rows).toHaveLength(days);
-      expect(rows.map(r => values(r, 5).map(iso))).toEqual(SERIES.slice(0, days).map(r => [r.date, r.in, r.out, r.net, r.balance]));
+      expect(rows).toHaveLength(days + 1);
+      expect(rows.map(r => values(r, 5).map(iso))).toEqual(SERIES.slice(0, days + 1).map(r => [r.date, r.in, r.out, r.net, r.balance]));
       for (const r of rows) {
         expect(r.getCell(1).value).toBeInstanceOf(Date);
         expect(r.getCell(1).numFmt).toBe('ddd d mmm yyyy');

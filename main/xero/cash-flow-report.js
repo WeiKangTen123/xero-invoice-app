@@ -1,5 +1,5 @@
 const logger             = require('../utils/logger');
-const { _cacheGet, _cacheSet, _dedupe, _periodCacheTtl } = require('./report-cache');
+const { _cacheGet, _cacheSet, _dedupe, _periodCacheTtl, CACHE_TTL_MS } = require('./report-cache');
 const { _apiFor, _allInvoices, _allPages } = require('./report-fetch');
 const { getBankSummary, _bankAccountList } = require('./bank');
 const { getPerformance } = require('./performance');
@@ -36,6 +36,9 @@ const {
 // happens with no invoice behind it at all. Building this from the P&L would
 // report revenue as though it were cash, which for an org that has collected
 // none of its invoices is the opposite of the truth.
+
+// What the runway says when the records it is averaged from were not read.
+const RECORDS_UNAVAILABLE = 'Couldn’t read payments or bank transactions from Xero';
 
 // How far before the reporting period we will look for still-open invoices.
 // Trades forecast completeness against Xero's per-GB egress billing.
@@ -125,6 +128,11 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
 
   // Every call here is a GET. Nothing in this path writes to Xero. Payments and
   // bank transactions are paged (see _allPages).
+  //
+  // A failed read of either is null, not an empty list. Read as empty it said
+  // "0.00 from customers", drew empty months and raised the "does not tie"
+  // alert against a bank whose money the records had simply not been read
+  // for. Null lets everything built on them say they could not be read.
   const [bank, bankAccounts, todayBank, payments, bankTransactions, invRes] = await Promise.all([
     getBankSummary(userId, tenantId, { from: first, to: last, force }).catch(err => {
       logger.warn('Cash flow: bank summary unavailable', { userId, error: err.message });
@@ -139,9 +147,9 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
       return null;
     }),
     _allPages(page => api.getPayments(tenantId, undefined, dateWhere, 'Date DESC', page), 'payments', { what: 'Payment', tenantId })
-      .catch(err => { logger.warn('Cash flow: payments unavailable', { userId, error: err.message }); return []; }),
+      .catch(err => { logger.warn('Cash flow: payments unavailable', { userId, error: err.message }); return null; }),
     _allPages(page => api.getBankTransactions(tenantId, undefined, dateWhere, 'Date DESC', page), 'bankTransactions', { what: 'Bank transaction', tenantId })
-      .catch(err => { logger.warn('Cash flow: bank transactions unavailable', { userId, error: err.message }); return []; }),
+      .catch(err => { logger.warn('Cash flow: bank transactions unavailable', { userId, error: err.message }); return null; }),
     // Deliberately reaches back BEFORE the period: the forecast needs every OPEN
     // invoice, including ones raised earlier that are still unpaid. Bounded at
     // INVOICE_LOOKBACK_MONTHS rather than left unfiltered, because Xero now
@@ -159,7 +167,10 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
 
   const invoices = invRes;
   const baseCurrency = perf.organisation?.currency || '';
-  const movement = _buildCashMovement({ payments, bankTransactions, months, baseCurrency });
+  // Both or neither: the movement is receipts AND payments, and half of it
+  // read is not a figure for either side.
+  const recordsAvailable = payments !== null && bankTransactions !== null;
+  const movement = _buildCashMovement({ payments: payments || [], bankTransactions: bankTransactions || [], months, baseCurrency });
 
   // The bank's figures below are its base-currency accounts only (see
   // _bankByCurrency). The records are every account's, converted to base, and
@@ -173,7 +184,7 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
   const foreignIds = new Set((byCur?.foreignAccounts || []).map(a => a.accountId).filter(Boolean));
   const inBase = r => !foreignIds.has(_recordAccountId(r));
   const banked = foreignIds.size
-    ? _buildCashMovement({ payments: payments.filter(inBase), bankTransactions: bankTransactions.filter(inBase), months, baseCurrency })
+    ? _buildCashMovement({ payments: (payments || []).filter(inBase), bankTransactions: (bankTransactions || []).filter(inBase), months, baseCurrency })
     : movement;
 
   const S = a => a.reduce((x, y) => x + y, 0);
@@ -210,8 +221,15 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
     ..._buildCashForecast({ invoices, openingBalance: todayByCur ? todayByCur.closing : closing, today, baseCurrency }),
     openingAsOf: todayByCur ? _fmtISODate(today) : last,
   };
-  const runway   = _buildRunway({ months, monthly: movement.monthly, closing, today });
-  const waterfall = _buildCashWaterfall({ opening, closing, movement: banked });
+  // Averaged from the records, so without them there is no run rate to give.
+  const runway   = recordsAvailable
+    ? _buildRunway({ months, monthly: movement.monthly, closing, today })
+    : { available: false, reason: RECORDS_UNAVAILABLE };
+  // Opening to closing through the records' steps, so it needs both the bank's
+  // balances and the records. Without the balances it walked 0 → receipts →
+  // "Unreconciled" → 0; without the records, the whole movement became one
+  // "Unreconciled" step. Null, and the screen says which is missing.
+  const waterfall = byCur && recordsAvailable ? _buildCashWaterfall({ opening, closing, movement: banked }) : null;
 
   // The bank statement is what actually happened. Payments and bank transactions
   // explain WHERE it came from — but they are separate records, and they can
@@ -219,10 +237,11 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
   // or never reconciled. Deriving the opening balance by subtraction hid that;
   // reading Xero's own opening balance exposes it instead.
   //
-  // Only when there is a bank figure to compare with. Without one, every
-  // payment recorded used to read as missing from a bank that was simply not
-  // fetched.
-  const unreconciled = byCur
+  // Only when there is a bank figure to compare with and records to compare.
+  // Without the bank figure, every payment recorded used to read as missing
+  // from a bank that was simply not fetched; without the records, every
+  // payment the bank shows read as one Xero had no record of.
+  const unreconciled = byCur && recordsAvailable
     ? _buildUnreconciled({ movement: banked, bankIn: byCur.cashIn, bankOut: byCur.cashOut })
     : { inGap: 0, outGap: 0, transfersIn: 0, transfersOut: 0, material: false };
 
@@ -240,6 +259,10 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
     organisation: perf.organisation,
     period:       perf.period,
     months,
+    // False when the payments or the bank transactions could not be read: the
+    // movement, the monthly bars, the runway and the tie-out are then not
+    // figures, and the screen says so rather than showing nothing as nil.
+    recordsAvailable,
     cash: {
       available: !!bank,
       closing, opening,
@@ -269,7 +292,9 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
       customerReceipts: movement.customerReceipts,
       notCollected:     revenue - movement.customerReceipts,
     },
-  }, _periodCacheTtl(months, today));
+  // A payload missing a read is asked for again within minutes, not kept for
+  // the hours a settled period's would be.
+  }, recordsAvailable && bank ? _periodCacheTtl(months, today) : CACHE_TTL_MS);
 }
 
 // Names its defaults for the reason given at getBudgetVariance. Bound after

@@ -155,7 +155,7 @@ export default function CashManagerTab({ cash, fetchCashManager, tenantId, curre
         <div>
           <div className="card-title" style={{ marginBottom: 2 }}>Cash Flow Manager</div>
           <div className="card-subtitle" style={{ marginBottom: 2 }}>{subtitle || 'What is expected in and out of the bank, day by day'}</div>
-          <SourceNote>Xero bank accounts, invoices, bills, repeating invoices and payments</SourceNote>
+          <SourceNote>Xero bank accounts, invoices, bills, repeating invoices, payments and bank transactions</SourceNote>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <button className="btn btn-outline btn-sm" disabled={cash.status === 'loading'} onClick={() => fetchCashManager({ force: true })}>
@@ -263,7 +263,8 @@ export default function CashManagerTab({ cash, fetchCashManager, tenantId, curre
             Each invoice and bill is placed on the date set here if there is one, else its expected (invoice) or planned
             (bill) payment date in Xero, else a date predicted from the contact&apos;s payment history, else its due date.
             Repeating invoices and bills are placed on their next dates. Overdue items &mdash; due before today and not yet
-            paid &mdash; stand apart, left of today.
+            paid &mdash; stand apart, left of today. Further left, behind a solid line, the days before today are what
+            actually moved: the payments and bank transactions recorded in Xero. Graph days counts the days ahead only.
             {(d.notes || []).map((note, i) => <div key={i}>{note}</div>)}
           </div>
         </>

@@ -31,7 +31,7 @@ const TODAY = '2026-10-12';
 const MOVES = { 0: [1200, 300], 3: [5000, 15000], 5: [0, 4000], 10: [900, 0] };
 const series = (() => {
   let balance = 10000;
-  return Array.from({ length: 90 }, (_, i) => {
+  return Array.from({ length: 91 }, (_, i) => {
     const [cin, cout] = MOVES[i] || [0, 0];
     balance += cin - cout;
     return { date: h.addDays(TODAY, i), in: cin, out: cout, net: cin - cout, balance };
@@ -61,7 +61,7 @@ const payload = {
   connected: true,
   organisation: { name: 'Nexsoss Pte Ltd', currency: 'SGD' },
   today: TODAY,
-  horizonDays: 90,
+  horizonDays: 91,
   bank: {
     accounts: [
       { accountId: 'a1', name: 'Aspire SGD', currency: 'SGD', balance: 9000, included: true, openingAdjustment: 0, overdraft: 0, foreign: false },
@@ -109,21 +109,26 @@ describe('dates, read from the string', () => {
 });
 
 describe('the window and what is remembered', () => {
-  test('the first 30, 60 or 90 days from today, and the day it ends on', () => {
+  test('today and the 30, 60 or 90 days after it, ending on the day Xero\'s window does', () => {
     const w = h.windowOf(payload, 60);
     expect(w.days).toBe(60);
-    expect(w.series).toHaveLength(60);
+    expect(w.series).toHaveLength(61);
     expect(w.start).toBe(TODAY);
-    expect(w.end).toBe('2026-12-10');
-    expect(w.title).toBe('Projected for 60 days ending on 10 Dec 2026');
-    expect(h.windowOf(payload, 30).end).toBe('2026-11-10');
-    expect(h.windowOf(payload, 90).title).toBe('Projected for 90 days ending on 9 Jan 2027');
+    expect(w.end).toBe('2026-12-11');
+    expect(w.title).toBe('Projected for 60 days ending on 11 Dec 2026');
+    expect(h.windowOf(payload, 30)).toMatchObject({ days: 30, end: '2026-11-11', title: 'Projected for 30 days ending on 11 Nov 2026' });
+    expect(h.windowOf(payload, 90)).toMatchObject({ days: 90, end: '2027-01-10', title: 'Projected for 90 days ending on 10 Jan 2027' });
+    // Xero's own example: seen on 6 Oct, "60 days" ends on 5 Dec.
+    const xero = { today: '2026-10-06', series: Array.from({ length: 91 }, (_, i) => ({ date: h.addDays('2026-10-06', i), in: 0, out: 0, net: 0, balance: 0 })) };
+    expect(h.windowOf(xero, 60).title).toBe('Projected for 60 days ending on 5 Dec 2026');
+    expect(h.windowOf(xero, 30).end).toBe('2026-11-05');
+    expect(h.windowOf(xero, 90).end).toBe('2027-01-04');
   });
 
   test('anything but 30, 60 or 90 is 60, and a short series is counted as it is', () => {
     expect(h.windowOf(payload, 45).days).toBe(60);
     expect(h.windowOf(payload, '90').days).toBe(90);
-    expect(h.windowOf({ ...payload, series: series.slice(0, 20) }, 30).title).toBe('Projected for 20 days ending on 31 Oct 2026');
+    expect(h.windowOf({ ...payload, series: series.slice(0, 20) }, 30).title).toBe('Projected for 19 days ending on 31 Oct 2026');
     expect(h.windowOf(null, 30)).toMatchObject({ days: 0, series: [], title: 'Nothing projected yet' });
   });
 
@@ -153,7 +158,7 @@ describe('what the chart draws', () => {
   test('cash in above zero and out below, a day each, with the overdue pair apart', () => {
     const c = h.chartBars(payload, 30, 'inout');
     expect(c.mode).toBe('inout');
-    expect(c.points).toHaveLength(30);
+    expect(c.points).toHaveLength(31);
     expect(c.points[0]).toMatchObject({ date: TODAY, label: '12 Oct', in: 1200, out: 300, net: 900, balance: 10900, tick: true });
     expect(c.overdue).toEqual({ in: 500, out: 800, net: -300 });
     // The tax bill on the 15th is the lowest bar, the loan the highest.
@@ -434,10 +439,12 @@ describe('a day\'s items, the table and the calendar', () => {
   });
 
   test('the table: Overdue first with no balance, a row a day, and the window\'s totals', () => {
-    const { rows, total } = h.tableRows(payload, 30);
-    expect(rows).toHaveLength(31);
+    const { rows, total, days } = h.tableRows(payload, 30);
+    expect(rows).toHaveLength(32);
+    expect(days).toBe(31);
     expect(rows[0]).toEqual({ key: 'overdue', date: 'overdue', label: 'Overdue', in: 500, out: 800, net: -300, balance: null });
     expect(rows[1]).toMatchObject({ date: TODAY, label: 'Mon 12 Oct', today: true, balance: 10900 });
+    expect(rows[31]).toMatchObject({ date: '2026-11-11', label: 'Wed 11 Nov' });
     expect(total).toEqual({ in: 7100, out: 19300, net: -12200, balance: -2200 });
   });
 
@@ -451,14 +458,102 @@ describe('a day\'s items, the table and the calendar', () => {
     const cells = months.flatMap(m => m.weeks.flat()).filter(Boolean);
     expect(cells.find(c => c.date === '2026-10-11').inWindow).toBe(false);
     expect(cells.find(c => c.date === TODAY)).toMatchObject({ inWindow: true, today: true, net: 900, in: 1200, out: 300 });
-    expect(cells.find(c => c.date === '2026-11-10').inWindow).toBe(true);
-    expect(cells.find(c => c.date === '2026-11-11')).toMatchObject({ inWindow: false, net: 0, balance: null });
+    expect(cells.find(c => c.date === '2026-11-11').inWindow).toBe(true);
+    expect(cells.find(c => c.date === '2026-11-12')).toMatchObject({ inWindow: false, net: 0, balance: null });
     // 1 Nov 2026 is a Sunday; every week is seven cells.
     expect(months[1].weeks[0].slice(0, 6)).toEqual([null, null, null, null, null, null]);
     expect(months.every(m => m.weeks.every(w => w.length === 7))).toBe(true);
     expect(h.weekdayLabels()).toEqual(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
     expect(h.calendarMonths(payload, 90).map(m => m.key)).toEqual(['2026-10', '2026-11', '2026-12', '2027-01']);
     expect(h.calendarMonths(null, 30)).toEqual([]);
+  });
+});
+
+// ── The last thirty days, as they happened ──────────────────────────────────
+
+describe('what actually moved before today', () => {
+  // Thirty days as the server sends them: 8,000 received on 6 Oct and 1,200
+  // paid on 9 Oct, the balance worked back from today's 10,000.
+  const actuals = (() => {
+    const moves = { '2026-10-06': [8000, 0], '2026-10-09': [0, 1200] };
+    let balance = 10000;
+    return Array.from({ length: 30 }, (_, i) => h.addDays(TODAY, i - 30)).reverse().map(date => {
+      const [cin, out] = moves[date] || [0, 0];
+      const row = { date, in: cin, out, net: cin - out, balance };
+      balance -= cin - out;
+      return row;
+    }).reverse();
+  })();
+  const actualItems = [
+    { key: 'actual:payment:p1', direction: 'in', date: '2026-10-06', amount: 8000, source: 'payment', contactName: 'Acme Ltd', number: 'INV-0007', reference: '' },
+    { key: 'actual:banktransaction:t1', direction: 'out', date: '2026-10-09', amount: 1200, source: 'banktransaction', contactName: 'Landlord', number: '', reference: 'Sep rent' },
+  ];
+  const withPast = { ...payload, actualDays: 30, actualsAvailable: true, actuals, actualItems };
+
+  test('drawn muted left of everything, all thirty on a desktop and the last week on a phone, Graph days counting the days ahead only', () => {
+    const c = h.chartBars(withPast, 60, 'inout');
+    expect(c.points).toHaveLength(61);
+    expect(c.actual).toHaveLength(30);
+    expect(c.actual[0]).toMatchObject({ date: '2026-09-12', actual: true, in: 0, out: 0 });
+    expect(c.actual.find(p => p.date === '2026-10-06')).toMatchObject({ in: 8000, out: 0, net: 8000, balance: 11200 });
+    // The receipt is the tallest bar now.
+    expect(c.max).toBe(8000);
+    expect(c.actualNote).toBe('');
+    expect(h.actualDaysFor(1200)).toBeNull();
+    expect(h.actualDaysFor(390)).toBe(7);
+    const phone = h.chartBars(withPast, 60, 'inout', { actualDays: h.actualDaysFor(390) });
+    expect(phone.actual.map(p => p.date)).toEqual(['2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11']);
+    expect(phone.points).toHaveLength(61);
+  });
+
+  test('under "Bank balance" the line runs back through the days before today; a balance that could not be worked back draws none', () => {
+    const c = h.chartBars(withPast, 30, 'balance');
+    expect(c.overdue).toBe(null);
+    expect(c.actual.map(p => p.balance).slice(-7)).toEqual([3200, 11200, 11200, 11200, 10000, 10000, 10000]);
+    expect(c.min).toBe(-5000);
+    expect(c.max).toBe(11200);
+    const blind = h.chartBars({ ...withPast, actuals: actuals.map(a => ({ ...a, balance: null })) }, 30, 'balance');
+    expect(blind.actual.every(p => p.balance === null)).toBe(true);
+    expect(blind.max).toBe(10900);
+  });
+
+  test('past cash the server could not read is said, never drawn as nil', () => {
+    const gone = { ...payload, actualsAvailable: false, actuals: [], actualItems: [] };
+    expect(h.chartBars(gone, 30, 'inout')).toMatchObject({ actual: [], actualNote: 'Past cash unavailable' });
+    expect(h.tableRows(gone, 30).actualNote).toBe('Past cash unavailable');
+    expect(h.actualWindow(gone)).toEqual({ rows: [], note: 'Past cash unavailable' });
+    // A payload from before the actuals existed says nothing either way.
+    expect(h.actualWindow(payload)).toEqual({ rows: [], note: '' });
+  });
+
+  test('a day before today lists what moved on it, marked Actual, with its own figures', () => {
+    expect(h.dayItems(withPast, '2026-10-06')).toEqual([{ ...actualItems[0], actual: true, dateBasis: 'actual' }]);
+    expect(h.basisLabel('actual')).toBe('Actual');
+    expect(h.daySummary(withPast, '2026-10-09')).toMatchObject({
+      title: 'Fri 9 Oct 2026 · Actual', actual: true, in: 0, out: 1200, net: -1200, balance: 10000, count: 1,
+    });
+    expect(h.daySummary(withPast, '2026-10-07')).toMatchObject({ actual: true, count: 0, balance: 11200 });
+    // Today and the days ahead are the forecast's, as before.
+    expect(h.daySummary(withPast, TODAY)).toMatchObject({ actual: false, title: 'Today, Mon 12 Oct', count: 2 });
+  });
+
+  test('the table leads with the thirty days, each marked Actual, before Overdue; the totals are the days ahead only', () => {
+    const t = h.tableRows(withPast, 30);
+    expect(t.rows).toHaveLength(30 + 1 + 31);
+    expect(t.rows[0]).toMatchObject({ key: 'actual:2026-09-12', actual: true, label: 'Sat 12 Sep', balance: 3200 });
+    expect(t.rows[29]).toMatchObject({ date: '2026-10-11', actual: true, balance: 10000 });
+    expect(t.rows[30].key).toBe('overdue');
+    expect(t.days).toBe(31);
+    expect(t.total).toEqual(h.tableRows(payload, 30).total);
+  });
+
+  test('the calendar shades the days before today as actual, from the month they start in', () => {
+    const months = h.calendarMonths(withPast, 30);
+    expect(months.map(m => m.key)).toEqual(['2026-09', '2026-10', '2026-11']);
+    const cells = months.flatMap(m => m.weeks.flat()).filter(Boolean);
+    expect(cells.find(c => c.date === '2026-09-11')).toMatchObject({ inWindow: false, actual: false });
+    expect(cells.find(c => c.date === '2026-10-06')).toMatchObject({ inWindow: true, actual: true, in: 8000, net: 8000, balance: 11200 });
+    expect(cells.find(c => c.date === TODAY)).toMatchObject({ inWindow: true, actual: false, today: true });
   });
 });
 
@@ -563,11 +658,18 @@ describe('the tab and its parts are wired to the helpers and the server', () => 
   });
 
   test('the chart, the table, the calendar and the lists lay out the helpers\' decisions', () => {
-    for (const name of ['chartBars', 'axisTicks', 'balanceColour', 'calendarMonths', 'daySummary', 'tableRows']) {
+    for (const name of ['chartBars', 'axisTicks', 'balanceColour', 'calendarMonths', 'daySummary', 'tableRows', 'actualDaysFor', 'actualWindow']) {
       expect(chart).toMatch(new RegExp(`import \\{[^}]*\\b${name}\\b[^}]*\\} from '\\./cash-manager'`, 's'));
     }
     expect(chart).toMatch(/strokeDasharray="3 3"/);
     expect(chart).toMatch(/>Overdue<\/text>/);
+    // The days before today: the chart's width decides how many, they are
+    // muted and labelled, and nothing of Xero's record can be edited.
+    expect(chart).toMatch(/chartBars\(payload, days, mode, \{ maxLabels, actualDays: actualDaysFor\(W\) \}\)/);
+    expect(chart).toMatch(/>Actual<\/text>/);
+    expect(chart).toMatch(/ACTUAL_OPACITY = 0\.\d+/);
+    expect(chart).toMatch(/\{onEdit && !item\.actual && \(/);
+    expect(chart).toMatch(/· Actual<\/span>/);
     expect(lists).toMatch(/listRows\(payload\?\.items, direction, \{ filter, groupBy \}\)/);
     // The tables scroll sideways in their own box with the first column pinned.
     for (const src of [chart, lists]) {

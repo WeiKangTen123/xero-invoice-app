@@ -26,6 +26,101 @@ export function unreconciledText(u, cur) {
   return `The payment records don't tie to the bank statement${parts.length ? `: ${parts.join(' ')}` : '.'}`;
 }
 
+// The Cash in and Cash out figures. When the payments or bank transactions
+// could not be read, the split by customer and supplier is not known, and
+// neither is the bank's figure less transfers (the transfers are bank
+// transactions), so both say so. They read "0.00 from customers" before,
+// which is a figure, and a wrong one. A payload from before recordsAvailable
+// existed is taken as read.
+export function movementMetrics(data, cur) {
+  const m = data?.movement || {};
+  const cash = data?.cash || {};
+  if (data?.recordsAvailable === false) {
+    const unread = { value: '—', footLeft: 'Couldn’t read payments/bank transactions from Xero', footRight: '' };
+    return { cashIn: unread, cashOut: unread };
+  }
+  return {
+    cashIn: {
+      value: fmtMoney(cash.available ? cash.cashIn : m.cashIn, cur),
+      footLeft: `${fmtMoney(m.customerReceipts, cur)} from customers`,
+      footRight: `${fmtMoney(m.otherReceipts, cur)} other`,
+    },
+    cashOut: {
+      value: fmtMoney(cash.available ? cash.cashOut : m.cashOut, cur),
+      footLeft: `${fmtMoney(m.supplierPayments, cur)} to suppliers`,
+      footRight: `${fmtMoney(m.otherPayments, cur)} other`,
+    },
+  };
+}
+
+// The runway card. Without a figure it says why, in the server's words: no
+// closed month, no cash moved, or the records not read. It said "No closed
+// month yet" whatever the reason, and a period in which nothing moved read
+// as a business "taking in more than it spends".
+export function runwayMetric(rw, cur) {
+  if (!rw?.available) {
+    return { label: 'Cash runway', value: '—', meter: null, tone: undefined, footLeft: rw?.reason || 'No closed month yet', footRight: '' };
+  }
+  return {
+    label: rw.burning ? 'Cash runway' : 'Net cash flow',
+    value: !rw.burning ? `${fmtMoney(rw.avgNet, cur)}/mo`
+      : rw.runwayMonths >= 24 ? '24+ months'
+      : `${rw.runwayMonths.toFixed(1)} months`,
+    meter: rw.burning ? Math.min(100, (rw.runwayMonths / 12) * 100) : null,
+    tone: !rw.burning ? 'var(--success)'
+      : rw.runwayMonths < 3 ? 'var(--danger)'
+      : rw.runwayMonths < 6 ? 'var(--warning)' : undefined,
+    footLeft: rw.burning ? `Burning ${fmtMoney(rw.netBurn, cur)}/mo net` : 'Taking in more than it spends',
+    footRight: `${rw.months}-mo avg${rw.partial ? ', partial' : ''}`,
+  };
+}
+
+// The balance rows under the waterfall. Without the Bank Summary there is no
+// opening or closing balance, so each is a dash (Rows draws a nil value as
+// one) and the note says why, rather than the rows reading as a balance of
+// nothing.
+export function balanceRows(cash) {
+  const ok = !!cash?.available;
+  return {
+    items: [
+      { label: 'Opening balance', value: ok ? cash.opening : 0 },
+      { label: 'Net movement',    value: ok ? cash.net : 0 },
+      { label: 'Closing balance', value: ok ? cash.closing : 0, strong: true },
+    ],
+    note: ok ? null : 'Bank balance unavailable',
+  };
+}
+
+// What is owed each way, counting only invoices and bills with something
+// still due (the server's count), and saying so plainly when there is none
+// rather than "Owed to you (0 sales invoices)".
+export function owedRows(wc) {
+  const n = wc?.counts || {};
+  const r = Number(n.receivable || 0), p = Number(n.payable || 0);
+  return [
+    { label: r ? `Owed to you (${r} sales invoice${r === 1 ? '' : 's'})` : 'Nothing owed to you', value: wc?.receivable || 0 },
+    { label: p ? `You owe (${p} bill${p === 1 ? '' : 's'})` : 'No bills to pay', value: wc?.payable || 0 },
+    { label: 'Net position', value: wc?.net || 0, strong: true },
+  ];
+}
+
+// What the receivables ageing and the 13-week chart say when they have
+// nothing to draw, or null when they have something. The ageing panel said
+// "No activity in this range", the chart helper's words for an empty period;
+// a receivables ageing with nothing in it is nothing outstanding, as the
+// ageing view says, and a forecast with nothing in it is nothing falling due.
+// Read in cents, so float dust is not "something".
+export function emptyNotes(wc, fc) {
+  const some = v => Math.round(Number(v || 0) * 100) !== 0;
+  const a = wc?.arAgeing || {};
+  const owed = ['current', 'd1_30', 'd31_60', 'd60plus'].some(k => some(a[k]));
+  const due = (fc?.weeks || []).some(w => some(w.receipts) || some(w.payments));
+  return {
+    ageing: owed ? null : 'Nothing outstanding',
+    forecast: due ? null : 'Nothing falls due in the next 13 weeks',
+  };
+}
+
 export function CashFlowPanel({ data, onOpenAgeing }) {
   const cur = data.organisation?.currency || '';
   const m   = data.movement;
@@ -35,11 +130,13 @@ export function CashFlowPanel({ data, onOpenAgeing }) {
   const rw  = data.runway  || { available: false };
   const wf  = data.waterfall;
   const months = data.months;
-
-  const runwayTone = !rw.available ? undefined
-    : !rw.burning ? 'var(--success)'
-    : rw.runwayMonths < 3 ? 'var(--danger)'
-    : rw.runwayMonths < 6 ? 'var(--warning)' : undefined;
+  // False only when the server said so; a payload without the field was read.
+  const records = data.recordsAvailable !== false;
+  const unread = 'Couldn’t read payments/bank transactions from Xero';
+  const moved = movementMetrics(data, cur);
+  const runway = runwayMetric(rw, cur);
+  const balance = balanceRows(data.cash);
+  const empty = emptyNotes(wc, fc);
 
   const collectionTone = wc.collectionRate === null ? undefined
     : wc.collectionRate < 0.5 ? 'var(--danger)' : wc.collectionRate < 0.9 ? 'var(--warning)' : 'var(--success)';
@@ -60,14 +157,14 @@ export function CashFlowPanel({ data, onOpenAgeing }) {
                       : '')
                   : 'Bank summary unavailable'}
                 footRight="Closing balance" />
-        <Metric label="Cash in" value={fmtMoney(data.cash.available ? data.cash.cashIn : m.cashIn, cur)} meter={null}
-                tone="var(--success)"
-                footLeft={`${fmtMoney(m.customerReceipts, cur)} from customers`}
-                footRight={`${fmtMoney(m.otherReceipts, cur)} other`} />
-        <Metric label="Cash out" value={fmtMoney(data.cash.available ? data.cash.cashOut : m.cashOut, cur)} meter={null}
-                tone="var(--danger)"
-                footLeft={`${fmtMoney(m.supplierPayments, cur)} to suppliers`}
-                footRight={`${fmtMoney(m.otherPayments, cur)} other`} />
+        <Metric label="Cash in" value={moved.cashIn.value} meter={null}
+                tone={records ? 'var(--success)' : undefined}
+                footLeft={moved.cashIn.footLeft}
+                footRight={moved.cashIn.footRight} />
+        <Metric label="Cash out" value={moved.cashOut.value} meter={null}
+                tone={records ? 'var(--danger)' : undefined}
+                footLeft={moved.cashOut.footLeft}
+                footRight={moved.cashOut.footRight} />
         <Metric label="Collection rate"
                 value={wc.collectionRate === null ? '—' : fmtPct(wc.collectionRate, 0)}
                 meter={wc.collectionRate === null ? null : wc.collectionRate * 100}
@@ -78,17 +175,8 @@ export function CashFlowPanel({ data, onOpenAgeing }) {
             runway sits alongside the balance rather than buried below it. A
             cash-positive month has no runway to report — it says so instead of
             rendering an infinity. */}
-        <Metric label={rw.available && !rw.burning ? 'Net cash flow' : 'Cash runway'}
-                value={!rw.available ? '—'
-                     : !rw.burning ? `${fmtMoney(rw.avgNet, cur)}/mo`
-                     : rw.runwayMonths >= 24 ? '24+ months'
-                     : `${rw.runwayMonths.toFixed(1)} months`}
-                meter={rw.available && rw.burning ? Math.min(100, (rw.runwayMonths / 12) * 100) : null}
-                tone={runwayTone}
-                footLeft={!rw.available ? 'No closed month yet'
-                        : rw.burning ? `Burning ${fmtMoney(rw.netBurn, cur)}/mo net`
-                        : 'Taking in more than it spends'}
-                footRight={rw.available ? `${rw.months}-mo avg${rw.partial ? ', partial' : ''}` : ''} />
+        <Metric label={runway.label} value={runway.value} meter={runway.meter} tone={runway.tone}
+                footLeft={runway.footLeft} footRight={runway.footRight} />
         {/* Operations on their own. Shown whenever the split is available, and
             coloured only when the headline is flattering the operating picture. */}
         {rw.available && rw.operatingNet !== null && (
@@ -107,7 +195,11 @@ export function CashFlowPanel({ data, onOpenAgeing }) {
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Surface title="How the cash balance moved" right={wf?.reconciles === false ? 'does not tie to bank' : undefined} flex={6} minWidth={340}>
-          {wf ? <Waterfall steps={wf.steps} currency={cur} /> : (
+          {/* The waterfall needs the bank's balances and the records; the
+              server sends none without both. Without the records there is
+              nothing to draw at all; without the balances, the records' own
+              movement is still worth showing. */}
+          {wf ? <Waterfall steps={wf.steps} currency={cur} /> : !records ? <Empty>{unread}</Empty> : (
             <BarList currency={cur} items={[
               { label: 'Customer receipts', value: m.customerReceipts, color: 'var(--success)' },
               { label: 'Other receipts',    value: m.otherReceipts,    color: 'var(--accent)' },
@@ -116,12 +208,11 @@ export function CashFlowPanel({ data, onOpenAgeing }) {
             ].filter(i => i.value !== 0)} />
           )}
           <div style={{ borderTop: '1px solid var(--border)', marginTop: 14, paddingTop: 10 }}>
-            <Rows currency={cur} items={[
-              { label: 'Opening balance', value: data.cash.opening },
-              { label: 'Net movement',    value: data.cash.net },
-              { label: 'Closing balance', value: data.cash.closing, strong: true },
-            ]} />
-            {rec.notCollected !== 0 && (
+            <Rows currency={cur} items={balance.items} />
+            {balance.note && (
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 6, lineHeight: 1.5 }}>{balance.note}</div>
+            )}
+            {records && rec.notCollected !== 0 && (
               <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
                 A sales invoice hits the Profit &amp; Loss the day it is raised; cash only moves when it is
                 paid. {fmtMoney(rec.revenueAccrual, cur)} invoiced, {fmtMoney(rec.customerReceipts, cur)} received.
@@ -142,11 +233,7 @@ export function CashFlowPanel({ data, onOpenAgeing }) {
         </Surface>
 
         <Surface title="Working capital" right="right now" flex={6} minWidth={340}>
-          <Rows currency={cur} items={[
-            { label: `Owed to you (${wc.counts.receivable} sales invoices)`, value: wc.receivable },
-            { label: `You owe (${wc.counts.payable} bills)`,                 value: wc.payable },
-            { label: 'Net position', value: wc.net, strong: true },
-          ]} />
+          <Rows currency={cur} items={owedRows(wc)} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 14 }}>
             {[{ l: 'Debtor days', v: wc.dso }, { l: 'Creditor days', v: wc.dpo }].map(x => (
               <div key={x.l} style={{ background: 'var(--bg-secondary)', borderRadius: 9, padding: '10px 12px' }}>
@@ -173,11 +260,17 @@ export function CashFlowPanel({ data, onOpenAgeing }) {
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Surface title="Monthly cash in and out" flex={7} minWidth={380}>
-          <GroupedMonthlyBars months={months} currency={cur} series={[
-            { label: 'Cash in',  color: 'var(--success)', values: m.monthly.in },
-            { label: 'Cash out', color: 'var(--danger)',  values: m.monthly.out },
-          ]} />
-          <Legend items={[{ label: 'Cash in', color: 'var(--success)' }, { label: 'Cash out', color: 'var(--danger)' }]} />
+          {/* Unread months are not empty ones: the chart's own empty text,
+              "Nothing recorded in this period", would say they were. */}
+          {records ? (
+            <>
+              <GroupedMonthlyBars months={months} currency={cur} series={[
+                { label: 'Cash in',  color: 'var(--success)', values: m.monthly.in },
+                { label: 'Cash out', color: 'var(--danger)',  values: m.monthly.out },
+              ]} />
+              <Legend items={[{ label: 'Cash in', color: 'var(--success)' }, { label: 'Cash out', color: 'var(--danger)' }]} />
+            </>
+          ) : <Empty>{unread}</Empty>}
           {rw.available && (
             <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 10, lineHeight: 1.5 }}>
               Averaging {fmtMoney(rw.avgCashIn, cur)} in and {fmtMoney(rw.avgCashOut, cur)} out per month
@@ -221,12 +314,14 @@ export function CashFlowPanel({ data, onOpenAgeing }) {
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
         <Surface title="Receivables ageing" right={fmtMoney(wc.receivable, cur)} flex={5} minWidth={300}>
-          <BarList currency={cur} items={[
-            { label: 'Not yet due',      value: wc.arAgeing.current, color: 'var(--success)' },
-            { label: '1–30 days late',   value: wc.arAgeing.d1_30,   color: 'var(--warning)' },
-            { label: '31–60 days late',  value: wc.arAgeing.d31_60,  color: '#f97316' },
-            { label: 'Over 60 days',     value: wc.arAgeing.d60plus, color: 'var(--danger)' },
-          ].filter(i => i.value !== 0)} />
+          {empty.ageing ? <Empty>{empty.ageing}</Empty> : (
+            <BarList currency={cur} items={[
+              { label: 'Not yet due',      value: wc.arAgeing.current, color: 'var(--success)' },
+              { label: '1–30 days late',   value: wc.arAgeing.d1_30,   color: 'var(--warning)' },
+              { label: '31–60 days late',  value: wc.arAgeing.d31_60,  color: '#f97316' },
+              { label: 'Over 60 days',     value: wc.arAgeing.d60plus, color: 'var(--danger)' },
+            ].filter(i => i.value !== 0)} />
+          )}
           {wc.overdue > 0 && (
             <div style={{ fontSize: 11.5, color: 'var(--warning)', marginTop: 12 }}>
               ▲ {fmtMoney(wc.overdue, cur)} is past its due date.
@@ -273,14 +368,18 @@ export function CashFlowPanel({ data, onOpenAgeing }) {
             those are past due, so treating them as scheduled would overstate the projection.
           </div>
         )}
-        <GroupedMonthlyBars
-          months={fc.weeks.map(w => ({ key: w.startISO, label: w.label }))}
-          currency={cur}
-          series={[
-            { label: 'Receipts', color: 'var(--success)', values: fc.weeks.map(w => w.receipts) },
-            { label: 'Payments', color: 'var(--danger)',  values: fc.weeks.map(w => w.payments) },
-          ]} />
-        <Legend items={[{ label: 'Expected receipts', color: 'var(--success)' }, { label: 'Expected payments', color: 'var(--danger)' }]} />
+        {empty.forecast ? <Empty>{empty.forecast}</Empty> : (
+          <>
+            <GroupedMonthlyBars
+              months={fc.weeks.map(w => ({ key: w.startISO, label: w.label }))}
+              currency={cur}
+              series={[
+                { label: 'Receipts', color: 'var(--success)', values: fc.weeks.map(w => w.receipts) },
+                { label: 'Payments', color: 'var(--danger)',  values: fc.weeks.map(w => w.payments) },
+              ]} />
+            <Legend items={[{ label: 'Expected receipts', color: 'var(--success)' }, { label: 'Expected payments', color: 'var(--danger)' }]} />
+          </>
+        )}
         <div style={{ overflowX: 'auto', marginTop: 14 }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5, fontVariantNumeric: 'tabular-nums' }}>
             <thead><tr style={{ borderBottom: '1px solid var(--border)' }}>

@@ -1,8 +1,8 @@
 // The Cash Flow Manager: how each item is dated, what is overdue, what is
 // netted, what the repeating templates and future payments add, the entries
-// and changes kept here, the arithmetic of the days and tiles, and what it
-// costs in Xero calls. Xero is mocked, as everywhere in this suite; nothing
-// here reaches it.
+// and changes kept here, the arithmetic of the days and tiles, what actually
+// moved in the last thirty days, and what it costs in Xero calls. Xero is
+// mocked, as everywhere in this suite; nothing here reaches it.
 jest.mock('xero-node', () => {
   const api = {
     getOrganisations:       jest.fn(),
@@ -29,8 +29,8 @@ const { AccountingApi, __api: api } = require('xero-node');
 require('../db/migrate').run();
 const reports = require('./reports');
 const {
-  _buildCashManager, _repeatingDates, _repeatingDue, _templatesOf, _futurePaymentsOf, _manualDates, _todayBalanceWindow,
-  HORIZON_DAYS,
+  _buildCashManager, _repeatingDates, _repeatingDue, _templatesOf, _paymentsOf, _bankTransactionsOf, _manualDates, _todayBalanceWindow,
+  HORIZON_DAYS, ACTUAL_DAYS,
 } = require('./cash-manager');
 const { _outstandingOf, _latenessOf, LATENESS_MAX_DAYS } = require('./summary');
 const { _creditsOf } = require('./ageing');
@@ -40,7 +40,7 @@ const day = (n, from = TODAY) => {
   const [y, m, d] = from.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 };
-const HORIZON_END = day(89);   // 2027-01-09
+const HORIZON_END = day(90);   // 2027-01-10
 
 let seq = 0;
 // A Xero invoice as the summary's summaryOnly fetch returns it.
@@ -76,7 +76,7 @@ const build = ({ invoices = [], paidHistory = [], credits = [], ...opts } = {}) 
   todayISO: TODAY, timezone: 'UTC', organisation: { name: 'Org' }, baseCurrency: 'SGD',
   outstanding: _outstandingOf(invoices), lateness: _latenessOf(paidHistory, TODAY),
   credits: credits === null ? null : _creditsOf(credits),
-  bank: BANK, bankAccounts: LIST, templates: [], payments: [],
+  bank: BANK, bankAccounts: LIST, templates: [], payments: [], bankTransactions: [],
   ...opts,
 });
 const item = (cm, key) => cm.items.find(i => i.key === key);
@@ -184,7 +184,7 @@ describe('overdue', () => {
     expect(cm.tiles.overdue).toEqual({ in: 70, out: 20, net: 50 });
     expect(cm.tiles.today).toEqual({ in: 5, out: 0, net: 5 });
     expect(cm.series.reduce((s, d) => s + d.in - d.out, 0)).toBe(5);
-    expect(cm.series[89].balance).toBe(1005);
+    expect(cm.series[90].balance).toBe(1005);
   });
 
   test('a date set here takes an overdue item off the overdue list and onto its day', () => {
@@ -366,7 +366,7 @@ describe('future-dated payments', () => {
       pay({ paymentID: 'p-refund', paymentType: 'ARCREDITPAYMENT', amount: 10, date: `${day(4)}T00:00:00` }),
       pay({ paymentID: 'p-gone', status: 'DELETED' }),
     ];
-    const cm = build({ payments: _futurePaymentsOf(list) });
+    const cm = build({ payments: _paymentsOf(list) });
     expect(item(cm, 'payment:p-in')).toMatchObject({ direction: 'in', date: day(3), dateBasis: 'payment', amount: 250, source: 'payment', contactName: 'Acme', number: 'INV-9' });
     expect(item(cm, 'payment:p-out')).toMatchObject({ direction: 'out', amount: 80 });
     expect(item(cm, 'payment:p-refund')).toMatchObject({ direction: 'out', amount: 10 });
@@ -380,7 +380,7 @@ describe('future-dated payments', () => {
       pay({ paymentID: 'p-off', account: { accountID: 'a-off' } }),
     ];
     const cm = build({
-      payments: _futurePaymentsOf(list),
+      payments: _paymentsOf(list),
       bank: { accounts: [...BANK.accounts, { name: 'Savings', closingBalance: 50 }] },
       bankAccounts: [...LIST, { accountId: 'a-off', name: 'Savings', currency: 'SGD' }],
       bankOptions: { 'a-off': { included: false } },
@@ -388,6 +388,109 @@ describe('future-dated payments', () => {
     expect(item(cm, 'payment:p-usd')).toMatchObject({ amount: 100, currency: 'USD', faceAmount: 74 });
     expect(item(cm, 'payment:p-off')).toBeUndefined();
     expect(cm.notes.join(' ')).toMatch(/1 future payment goes through a bank account left out of the balance/);
+  });
+});
+
+// ── What actually moved ─────────────────────────────────────────────────────
+
+describe('the last thirty days, as they happened', () => {
+  // Operating counts in the balance (60,000 today); Savings is switched off here.
+  const bank = { accounts: [
+    { name: 'Operating', closingBalance: 60000, cashReceived: 57139, cashSpent: 1420, openingBalance: 0 },
+    { name: 'Savings',   closingBalance: 5000,  cashReceived: 1050,  cashSpent: 0,    openingBalance: 0 },
+  ] };
+  const list = [...LIST, { accountId: 'a-sav', name: 'Savings', currency: 'SGD' }];
+  const pay = (id, n, amount, over = {}) => ({
+    paymentID: id, paymentType: 'ACCRECPAYMENT', status: 'AUTHORISED', date: `${day(n)}T00:00:00`, amount,
+    account: { accountID: 'a-op' }, invoice: { invoiceNumber: `INV-${id}`, contact: { name: 'Acme' } }, ...over,
+  });
+  const btx = (id, n, type, total, account = 'a-op', over = {}) => ({
+    bankTransactionID: id, type, status: 'AUTHORISED', date: new Date(`${day(n)}T00:00:00Z`), total,
+    bankAccount: { accountID: account }, contact: { name: 'Shop' }, reference: `ref ${id}`, isReconciled: false, ...over,
+  });
+  const PAYMENTS = [
+    pay('p1', -5, 57000),                                             // the receipt Xero draws left of today
+    pay('p2', -5, 300, { paymentType: 'ACCPAYPAYMENT' }),
+    pay('p3', 0, 40),                                                 // today: in today's balance
+    pay('p4', 3, 250),                                                // ahead: projected
+    pay('p5', -31, 99),                                               // the Bank Summary window's first day
+  ];
+  const BANK_TX = [
+    btx('t1', -2, 'SPEND', 120),
+    btx('t2', -3, 'SPEND-TRANSFER', 1000),                            // to Savings: no cash out, but the balance moves
+    btx('t3', -3, 'RECEIVE-TRANSFER', 1000, 'a-sav'),                 // into an account switched off here
+    btx('t4', -1, 'RECEIVE', 50, 'a-sav'),
+    btx('t5', -4, 'SPEND', 777, 'a-op', { status: 'DELETED' }),
+    btx('t6', -6, 'SPEND', 64, 'a-op', { status: 'VOIDED' }),
+  ];
+  const past = (over = {}) => build({
+    bank, bankAccounts: list, bankOptions: { 'a-sav': { included: false } },
+    payments: _paymentsOf(PAYMENTS), bankTransactions: _bankTransactionsOf(BANK_TX), ...over,
+  });
+
+  test('thirty days before today, oldest first, from past payments and bank transactions; transfers, deleted ones and excluded accounts left out', () => {
+    const cm = past();
+    expect(ACTUAL_DAYS).toBe(30);
+    expect(cm.actualsAvailable).toBe(true);
+    expect(cm.actuals).toHaveLength(30);
+    expect(cm.actuals[0].date).toBe(day(-30));
+    expect(cm.actuals[29].date).toBe(day(-1));
+    const on = n => cm.actuals.find(d => d.date === day(n));
+    expect(on(-5)).toMatchObject({ in: 57000, out: 300, net: 56700 });
+    expect(on(-3)).toMatchObject({ in: 0, out: 0, net: 0 });       // the transfer is no bar
+    expect(on(-2)).toMatchObject({ in: 0, out: 120, net: -120 });
+    expect(on(-1)).toMatchObject({ in: 0, out: 0 });               // Savings is switched off
+    expect(cm.actualItems).toEqual([
+      { key: 'actual:payment:p1', direction: 'in', date: day(-5), amount: 57000, source: 'payment', contactName: 'Acme', number: 'INV-p1', reference: '' },
+      { key: 'actual:payment:p2', direction: 'out', date: day(-5), amount: 300, source: 'payment', contactName: 'Acme', number: 'INV-p2', reference: '' },
+      { key: 'actual:banktransaction:t1', direction: 'out', date: day(-2), amount: 120, source: 'banktransaction', contactName: 'Shop', number: '', reference: 'ref t1' },
+    ]);
+    // The same read's payment ahead is projected; today's and the past ones are not.
+    expect(cm.items.filter(i => i.source === 'payment').map(i => i.key)).toEqual(['payment:p4']);
+    expect(onDay(cm, day(3)).in).toBe(250);
+    expect(cm.tiles.today).toEqual({ in: 0, out: 0, net: 0 });
+  });
+
+  test('the balance is worked back from today\'s: less today\'s, then less each later day\'s, the transfer out included', () => {
+    const cm = past();
+    const bal = n => cm.actuals.find(d => d.date === day(n)).balance;
+    expect(cm.bank.balance).toBe(60000);
+    expect(bal(-1)).toBe(59960);    // 60,000 less the 40 received today
+    expect(bal(-2)).toBe(59960);
+    expect(bal(-3)).toBe(60080);    // before the 120 spent on day −2
+    expect(bal(-4)).toBe(61080);    // before the 1,000 moved to Savings
+    expect(bal(-5)).toBe(61080);
+    expect(bal(-6)).toBe(4380);     // before the 57,000 in and 300 out
+    expect(bal(-30)).toBe(4380);
+    expect(build({ bank: null, payments: [], bankTransactions: [] }).actuals.every(d => d.balance === null)).toBe(true);
+  });
+
+  test('either read failing leaves no actuals, says so, and the projection stands', () => {
+    for (const over of [{ payments: null, paymentsFailure: 'error' }, { bankTransactions: null, bankTransactionsFailure: 'error' }]) {
+      const cm = past(over);
+      expect(cm).toMatchObject({ actualsAvailable: false, actuals: [], actualItems: [], actualsCheck: null });
+      expect(cm.notes.join(' ')).toMatch(/Past cash could not be read from Xero just now, so the last 30 days are not shown/);
+      expect(cm.series).toHaveLength(91);
+    }
+    expect(past({ bankTransactions: null, bankTransactionsFailure: 'scope' }).notes.join(' '))
+      .toMatch(/Past cash could not be read: the Xero connection does not allow/);
+  });
+
+  test('checked against the Bank Summary over its own window: agreement is silent, a difference of a cent is a note', () => {
+    // Operating received 57,139 (57,000 + 40 today + 99 on day −31) and spent
+    // 1,420, of which 1,000 was the transfer to Savings.
+    const agrees = past();
+    expect(agrees.actualsCheck).toEqual({
+      from: day(-31), to: TODAY,
+      records: { in: 57139, out: 420 }, bank: { in: 57139, out: 420 }, transfers: { in: 0, out: 1000 }, agrees: true,
+    });
+    expect(agrees.notes.join(' ')).not.toMatch(/does not tie/);
+
+    const off = past({ bank: { accounts: [{ ...bank.accounts[0], cashReceived: 57139.01 }, bank.accounts[1]] } });
+    expect(off.actualsCheck).toMatchObject({ agrees: false, bank: { in: 57139.01, out: 420 } });
+    expect(off.notes.join(' ')).toMatch(new RegExp(`Past cash does not tie to Xero's Bank Summary for ${day(-31)} to ${TODAY}: `
+      + 'the payments and bank transactions come to 57139\\.00 in and 420\\.00 out, the Bank Summary to 57139\\.01 in and 420\\.00 out'));
+    expect(past({ bank: null }).actualsCheck).toBeNull();
   });
 });
 
@@ -403,7 +506,7 @@ describe('entries made here', () => {
   });
 
   test('daily, weekly and fortnightly from their start, earlier dates taken as happened', () => {
-    expect(_manualDates(e({ frequency: 'daily', date: day(-3) }), TODAY, HORIZON_END)).toHaveLength(90);
+    expect(_manualDates(e({ frequency: 'daily', date: day(-3) }), TODAY, HORIZON_END)).toHaveLength(91);
     expect(_manualDates(e({ frequency: 'weekly', date: day(-10) }), TODAY, day(30))).toEqual([day(4), day(11), day(18), day(25)]);
     expect(_manualDates(e({ frequency: 'fortnightly', date: day(2), endDate: day(40) }), TODAY, HORIZON_END)).toEqual([day(2), day(16), day(30)]);
   });
@@ -440,13 +543,13 @@ describe('overrides', () => {
     expect(cm.items.map(i => i.excluded)).toEqual([true, true]);
     expect(cm.tiles.overdue).toEqual({ in: 0, out: 0, net: 0 });
     expect(cm.series.every(d => d.in === 0)).toBe(true);
-    expect(cm.series[89].balance).toBe(1000);
+    expect(cm.series[90].balance).toBe(1000);
   });
 
   test('every kind of item can be changed by its key', () => {
     const cm = build({
       templates: [{ repeatingInvoiceId: 'r1', type: 'ACCREC', contactName: 'A', total: 10, currencyCode: '', schedule: { period: 1, unit: 'WEEKLY', nextScheduledDate: day(1), dueDateType: 'DAYSAFTERINVOICEDATE', dueDate: 0 } }],
-      payments: _futurePaymentsOf([{ paymentID: 'p1', paymentType: 'ACCRECPAYMENT', status: 'AUTHORISED', date: day(2), amount: 5 }]),
+      payments: _paymentsOf([{ paymentID: 'p1', paymentType: 'ACCRECPAYMENT', status: 'AUTHORISED', date: day(2), amount: 5 }]),
       entries: [{ id: 'e1', direction: 'in', description: 'Grant', amountCents: 100, date: day(3), frequency: 'once' }],
       overrides: {
         [`repeating:r1:${day(1)}`]: { date: day(6) },
@@ -476,20 +579,22 @@ describe('overrides', () => {
 // ── Days, tiles, runway ─────────────────────────────────────────────────────
 
 describe('the series, the tiles and the runway', () => {
-  test('ninety consecutive days from today, the balance running from the opening balance, in cents', () => {
+  test('today and the ninety days after it, as Xero counts "90 days", the balance running from the opening balance, in cents', () => {
     const cm = build({ entries: [
       { id: 'a', direction: 'in',  description: 'x', amountCents: 10, date: TODAY, frequency: 'once' },
       { id: 'b', direction: 'in',  description: 'x', amountCents: 20, date: TODAY, frequency: 'once' },
       { id: 'c', direction: 'out', description: 'x', amountCents: 7,  date: day(1), frequency: 'once' },
     ] });
     expect(cm.horizonDays).toBe(HORIZON_DAYS);
-    expect(cm.series).toHaveLength(90);
+    expect(HORIZON_DAYS).toBe(91);
+    expect(cm.series).toHaveLength(91);
     expect(cm.series[0].date).toBe(TODAY);
-    expect(cm.series[89].date).toBe(HORIZON_END);
+    expect(cm.series[90].date).toBe(HORIZON_END);
+    expect(cm.horizonEnd).toBe('2027-01-10');
     expect(cm.series.every((d, i) => i === 0 || d.date === day(1, cm.series[i - 1].date))).toBe(true);
     expect(cm.series[0]).toEqual({ date: TODAY, in: 0.3, out: 0, net: 0.3, balance: 1000.3 });   // not 0.30000000000000004
     expect(cm.series[1]).toEqual({ date: day(1), in: 0, out: 0.07, net: -0.07, balance: 1000.23 });
-    expect(cm.series[89].balance).toBe(1000.23);
+    expect(cm.series[90].balance).toBe(1000.23);
   });
 
   test('the tiles: today, the next 7 days, days 8 to 30, overdue; day 31 is in none', () => {
@@ -611,23 +716,27 @@ describe('getCashManager — Xero calls', () => {
     expect(jest.isMockFunction(api.getRepeatingInvoices)).toBe(true);
   });
 
-  test('cold: seven reads, each asked for as Xero expects, and only reads', async () => {
+  test('cold: eight reads, each asked for as Xero expects, and only reads', async () => {
     const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
     expect(calls()).toEqual({
       getOrganisations: 1, getInvoices: 1, getCreditNotes: 1, getReportBankSummary: 1,
-      getAccounts: 1, getRepeatingInvoices: 1, getPayments: 1,
+      getAccounts: 1, getRepeatingInvoices: 1, getPayments: 1, getBankTransactions: 1,
     });
     expect(api.getRepeatingInvoices.mock.calls[0]).toEqual([T, 'Status=="AUTHORISED"']);
-    expect(api.getPayments.mock.calls[0]).toEqual([T, undefined, 'Date > DateTime(2026,10,12) && Status=="AUTHORISED"', 'Date ASC', 1]);
+    // One read of payments for both sides of today, from the Bank Summary
+    // window's first day; one of bank transactions over that same window.
+    expect(api.getPayments.mock.calls[0]).toEqual([T, undefined, 'Date >= DateTime(2026,9,11) && Status=="AUTHORISED"', 'Date ASC', 1]);
+    expect(api.getBankTransactions.mock.calls[0]).toEqual([T, undefined, 'Date >= DateTime(2026,9,11) && Date < DateTime(2026,10,13) && Status=="AUTHORISED"', 'Date ASC', 1]);
     // The Overview's own balance window, so a Dashboard already open has it.
     expect(api.getReportBankSummary.mock.calls[0]).toEqual([T, '2026-09-11', TODAY]);
     expect(_todayBalanceWindow({ year: 2026, month: 10, day: 12 })).toEqual({ from: '2026-09-11', to: TODAY });
     for (const name of Object.keys(calls())) expect(name).toMatch(/^get/);
 
     expect(cm).toMatchObject({
-      organisation: { name: 'Org Pte Ltd', currency: 'SGD' }, today: TODAY, horizonDays: 90, cached: false,
-      bank: { available: true, balance: 1000 },
+      organisation: { name: 'Org Pte Ltd', currency: 'SGD' }, today: TODAY, horizonDays: 91, cached: false,
+      bank: { available: true, balance: 1000 }, actualsAvailable: true,
     });
+    expect(cm.actuals).toHaveLength(30);
     expect(typeof cm.fetchedAt).toBe('number');
     // Acme's history, from the same fetch, dates its invoice ten days late.
     expect(cm.items.find(i => i.source === 'invoice')).toMatchObject({ date: day(15), dateBasis: 'predicted', amount: 300 });
@@ -643,7 +752,7 @@ describe('getCashManager — Xero calls', () => {
     expect(again.cached).toBe(true);
   });
 
-  test('warm, with the Dashboard loaded (summary, Overview, an ageing view): two new calls, the templates and the future payments', async () => {
+  test('warm, with the Dashboard loaded (summary, Overview, an ageing view): three new calls, the templates, the payments and the bank transactions', async () => {
     await reports.getSummary(U, T, { force: false });
     await reports.getPerformance(U, T, { timezone: 'UTC', period: { preset: 'fy-ytd' } });
     await reports.getAgeing(U, T, { side: 'receivables', timezone: 'UTC' });
@@ -651,14 +760,17 @@ describe('getCashManager — Xero calls', () => {
     await reports.getCashManager(U, T, { timezone: 'UTC' });
     const after = calls();
     const added = Object.fromEntries(Object.keys(after).map(k => [k, after[k] - (before[k] || 0)]).filter(([, c]) => c > 0));
-    expect(added).toEqual({ getRepeatingInvoices: 1, getPayments: 1 });
+    expect(added).toEqual({ getRepeatingInvoices: 1, getPayments: 1, getBankTransactions: 1 });
   });
 
-  test('warm with only the summary loaded: the bank, the credit notes, the templates and the payments', async () => {
+  test('warm with only the summary loaded: the bank, its account list, the templates, the payments and the bank transactions', async () => {
     await reports.getSummary(U, T, { force: false });
-    const before = total();
+    const before = calls();
     await reports.getCashManager(U, T, { timezone: 'UTC' });
-    expect(total() - before).toBe(5);
+    const after = calls();
+    expect(Object.fromEntries(Object.keys(after).map(k => [k, after[k] - (before[k] || 0)]).filter(([, c]) => c > 0))).toEqual({
+      getReportBankSummary: 1, getAccounts: 1, getRepeatingInvoices: 1, getPayments: 1, getBankTransactions: 1,
+    });
     expect(api.getInvoices).toHaveBeenCalledTimes(1);
     expect(api.getOrganisations).toHaveBeenCalledTimes(1);
   });
@@ -694,6 +806,35 @@ describe('getCashManager — Xero calls', () => {
     expect(cm.bank.available).toBe(false);
     expect(cm.notes.join(' ')).toMatch(/Payments dated after today could not be read from Xero just now/);
     expect(cm.notes.join(' ')).toMatch(/Bank balances could not be read/);
+  });
+
+  test('a failed read of the bank transactions costs the actuals only, and is asked for again next time', async () => {
+    api.getBankTransactions.mockRejectedValueOnce(new Error('rate limited'));
+    const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
+    expect(cm).toMatchObject({ actualsAvailable: false, actuals: [], bank: { available: true } });
+    expect(cm.items.length).toBeGreaterThan(0);
+    const again = await reports.getCashManager(U, T, { timezone: 'UTC' });
+    expect(again.actualsAvailable).toBe(true);
+    expect(api.getBankTransactions).toHaveBeenCalledTimes(2);
+    expect(api.getPayments).toHaveBeenCalledTimes(1);
+  });
+
+  test('past payments and bank transactions from Xero reach the actuals, from the one payments read', async () => {
+    api.getPayments.mockResolvedValue({ body: { payments: [
+      { paymentID: 'old', paymentType: 'ACCRECPAYMENT', status: 'AUTHORISED', date: new Date(Date.UTC(2026, 9, 7)), amount: 57000, account: { accountID: 'a-op' }, invoice: { invoiceNumber: 'INV-7', contact: { name: 'Acme' } } },
+      { paymentID: 'new', paymentType: 'ACCRECPAYMENT', status: 'AUTHORISED', date: new Date(Date.UTC(2026, 9, 20)), amount: 90, account: { accountID: 'a-op' }, invoice: { invoiceNumber: 'INV-8', contact: { name: 'Acme' } } },
+    ] } });
+    api.getBankTransactions.mockResolvedValue({ body: { bankTransactions: [
+      { bankTransactionID: 'b1', type: 'SPEND', status: 'AUTHORISED', date: new Date(Date.UTC(2026, 9, 9)), total: 45, bankAccount: { accountID: 'a-op' }, contact: { name: 'Shop' } },
+      { bankTransactionID: 'b2', type: 'SPEND', status: 'AUTHORISED', date: new Date(Date.UTC(2026, 9, 9)), total: 500, bankAccount: { accountID: 'a-usd' } },
+    ] } });
+    const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
+    expect(cm.actuals.find(d => d.date === '2026-10-07')).toMatchObject({ in: 57000, out: 0 });
+    // The USD account is not in the balance, so its spending is not either.
+    expect(cm.actuals.find(d => d.date === '2026-10-09')).toMatchObject({ in: 0, out: 45 });
+    expect(cm.actualItems.map(i => [i.key, i.source])).toEqual([['actual:payment:old', 'payment'], ['actual:banktransaction:b1', 'banktransaction']]);
+    expect(cm.items.find(i => i.key === 'payment:new')).toMatchObject({ date: '2026-10-20', amount: 90 });
+    expect(api.getPayments).toHaveBeenCalledTimes(1);
   });
 
   test('templates and future payments from Xero reach the projection', async () => {

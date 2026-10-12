@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fmtCell } from '../../utils/format';
 import {
-  axisTicks, balanceColour, basisHint, basisLabel, calendarMonths, chartBars, compactAmount, contactOf,
+  actualDaysFor, actualWindow, axisTicks, balanceColour, basisHint, basisLabel, calendarMonths, chartBars, compactAmount, contactOf,
   currencySymbol, daySummary, itemTitle, signColour, tableRows, weekdayLabels,
 } from './cash-manager';
 
@@ -107,64 +107,103 @@ function Tooltip({ summary, x, width }) {
           {summary.more > 0 && <div style={{ color: 'var(--text-muted)' }}>and {summary.more} more · click to see all</div>}
         </div>
       )}
-      {summary.count === 0 && <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>Nothing expected.</div>}
+      {summary.count === 0 && (
+        <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>{summary.actual ? 'Nothing moved in or out.' : 'Nothing expected.'}</div>
+      )}
     </div>
   );
 }
 
+// How light the days before today are drawn: the same green and red, muted,
+// so what happened reads as apart from what is expected.
+const ACTUAL_OPACITY = 0.45;
+
 // The chart. Bars from today, one slot a day: cash in above zero and cash out
 // below it, or a single net bar, with the Overdue pair standing apart left of
-// a dashed line at today. Under "Bank balance" it is the projected balance as
-// a line, coloured by how far below zero it runs. Hovering a day shows its
-// figures; clicking one opens its items under the chart.
+// a dashed line at today. Left of all that, behind a solid line, the days
+// before today as they happened, muted: thirty of them, or the last week on a
+// phone. Under "Bank balance" it is the balance as a line, worked back over
+// the days before today and projected from it, coloured by how far below zero
+// it runs. Hovering a day shows its figures; clicking one opens its items
+// under the chart.
 export function CashChart({ payload, days, mode, currency, selected, onSelect }) {
   const [boxRef, measured] = useWidth(760);
   const [hover, setHover] = useState(null);
   const W = Math.max(280, measured);
   const H = 260, padL = 50, padR = 10, padT = 20, padB = 26;
   const maxLabels = Math.max(2, Math.floor((W - padL - padR) / 64));
-  const c = chartBars(payload, days, mode, { maxLabels });
+  const c = chartBars(payload, days, mode, { maxLabels, actualDays: actualDaysFor(W) });
   const axis = axisTicks(c.min, c.max, { count: 4, symbol: currencySymbol(currency) });
   const plotH = H - padT - padB;
   const y = v => padT + plotH * (1 - (v - axis.min) / ((axis.max - axis.min) || 1));
   const base = y(0);
 
   const bars = c.mode !== 'balance';
-  // The Overdue pair gets a slot wide enough for its label, apart from the
-  // days, whatever the window: at ninety days a day's slot is a few pixels.
+  // Left to right: the days before today, a solid line, the Overdue pair (bars
+  // only), the dashed line at today, the days ahead. Every day gets the same
+  // slot, so the time axis reads evenly across today, except that the days
+  // before today keep room for their "Actual" label on a phone. The Overdue
+  // pair gets a slot wide enough for its label whatever the window: at ninety
+  // days a day's slot is a few pixels.
+  const A = c.actual.length;
+  const DIV = A ? 12 : 0, ACT_MIN = 46;
   const OD_W = bars ? 46 : 0, GAP = bars ? 12 : 0;
-  const plotL = padL + OD_W + GAP;
+  const room = W - padL - padR - DIV - OD_W - GAP;
   const n = Math.max(1, c.points.length);
-  const slot = (W - padR - plotL) / n;
+  let slot = room / (A + n), aSlot = slot;
+  if (A && aSlot * A < ACT_MIN) { aSlot = ACT_MIN / A; slot = (room - ACT_MIN) / n; }
+  const actW = aSlot * A;
+  const odL = padL + actW + DIV;
+  const plotL = odL + OD_W + GAP;
   const bw = Math.max(1.5, Math.min(18, slot * 0.66));
+  const abw = Math.max(1.5, Math.min(18, aSlot * 0.66));
   const cx = i => plotL + slot * i + slot / 2;
-  const odX = padL + OD_W / 2;
-  const todayX = bars ? padL + OD_W + GAP / 2 : cx(0);
+  const ax = i => padL + aSlot * i + aSlot / 2;
+  const odX = odL + OD_W / 2;
+  const divX = padL + actW + DIV / 2;
+  const todayX = bars ? plotL - GAP / 2 : cx(0);
 
   const index = new Map(c.points.map((p, i) => [p.date, i]));
-  const xOf = date => (date === 'overdue' ? odX : cx(index.get(date) ?? 0));
-  const shown = hover !== null && (hover === 'overdue' ? bars : index.has(hover));
-  const slotRect = date => (date === 'overdue'
-    ? { x: padL, width: OD_W }
+  const pastIndex = new Map(c.actual.map((p, i) => [p.date, i]));
+  const onChart = date => (date === 'overdue' ? bars : index.has(date) || pastIndex.has(date));
+  const xOf = date => (date === 'overdue' ? odX : pastIndex.has(date) ? ax(pastIndex.get(date)) : cx(index.get(date) ?? 0));
+  const shown = hover !== null && onChart(hover);
+  const slotRect = date => (date === 'overdue' ? { x: odL, width: OD_W }
+    : pastIndex.has(date) ? { x: padL + aSlot * pastIndex.get(date), width: aSlot }
     : { x: plotL + slot * (index.get(date) ?? 0), width: slot });
+  // The balance under the pointer, wherever it is, for the dot on the line.
+  const hoverBalance = !shown || hover === 'overdue' ? null
+    : pastIndex.has(hover) ? c.actual[pastIndex.get(hover)].balance : c.points[index.get(hover)].balance;
 
-  const bar = (key, xc, v, colour, opacity = 1) => {
-    const d = barPath(xc - bw / 2, bw, base, barEnd(y, v));
+  const bar = (key, xc, v, colour, opacity = 1, width = bw) => {
+    const d = barPath(xc - width / 2, width, base, barEnd(y, v));
     return d ? <path key={key} d={d} fill={colour} opacity={opacity} /> : null;
   };
 
-  const drawBars = (p, xc, key, opacity) => (c.mode === 'net'
-    ? bar(`${key}n`, xc, p.net, p.net < 0 ? 'var(--danger)' : 'var(--success)', opacity)
-    : [bar(`${key}i`, xc, p.in, 'var(--success)', opacity), bar(`${key}o`, xc, -p.out, 'var(--danger)', opacity)]);
+  const drawBars = (p, xc, key, opacity, width = bw) => (c.mode === 'net'
+    ? bar(`${key}n`, xc, p.net, p.net < 0 ? 'var(--danger)' : 'var(--success)', opacity, width)
+    : [bar(`${key}i`, xc, p.in, 'var(--success)', opacity, width), bar(`${key}o`, xc, -p.out, 'var(--danger)', opacity, width)]);
+
+  // A line through consecutive days, each step coloured by the lower end.
+  // A day with no balance (none today to work it back from) breaks it.
+  const line = (pts, xAt, key, opacity) => pts.slice(1).map((p, k) => {
+    const a = pts[k];
+    if (a.balance === null || p.balance === null) return null;
+    return (
+      <line key={`${key}${p.date}`} x1={xAt(k)} y1={y(a.balance)} x2={xAt(k + 1)} y2={y(p.balance)} strokeOpacity={opacity}
+            stroke={balanceColour(Math.min(a.balance, p.balance), c.overdraft)} strokeWidth="2" strokeLinecap="round" />
+    );
+  });
 
   return (
     <div>
       <ChartLegend mode={c.mode} overdraft={c.overdraft} />
+      {c.actualNote && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{c.actualNote}</div>}
       <div ref={boxRef} style={{ position: 'relative', marginTop: 8 }} onMouseLeave={() => setHover(null)}>
         <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ display: 'block', width: '100%', height: H }}
-             role="img" aria-label={`${c.mode === 'balance' ? 'Projected bank balance' : c.mode === 'net' ? 'Net movement' : 'Cash in and cash out'} by day`}>
+             role="img" aria-label={`${c.mode === 'balance' ? 'Bank balance' : c.mode === 'net' ? 'Net movement' : 'Cash in and cash out'} by day${A ? `, the last ${A} days actual and the rest projected` : ''}`}>
           {/* The hovered and the opened day, behind everything. */}
-          {selected && (selected === 'overdue' ? bars : index.has(selected)) && (
+          {selected && onChart(selected) && (
             <rect {...slotRect(selected)} y={padT} height={plotH} fill="var(--accent-subtle)" stroke="var(--accent)" strokeWidth="1" rx="3" />
           )}
           {shown && hover !== selected && <rect {...slotRect(hover)} y={padT} height={plotH} fill="var(--bg-hover)" rx="3" />}
@@ -190,6 +229,20 @@ export function CashChart({ payload, days, mode, currency, selected, onSelect })
           <line x1={todayX} x2={todayX} y1={padT - 4} y2={H - padB} stroke="var(--text-muted)" strokeDasharray="3 3" />
           <text x={todayX + 4} y={padT - 8} fontSize="10" fill="var(--text-muted)">Today</text>
 
+          {/* What happened, apart from what is expected: a solid line, where
+              today's is dashed, and the days before it muted. */}
+          {A > 0 && (
+            <g>
+              <line x1={divX} x2={divX} y1={padT - 4} y2={H - padB} stroke="var(--text-muted)" strokeOpacity="0.7" />
+              <text x={padL + actW / 2} y={H - 8} textAnchor="middle" fontSize="10" fill="var(--text-secondary)" fontWeight="600">Actual</text>
+              {bars && c.actual.map((p, i) => <g key={p.date}>{drawBars(p, ax(i), `a${p.date}`, ACTUAL_OPACITY, abw)}</g>)}
+              {!bars && line(c.actual, ax, 'a', 0.55)}
+              {!bars && A === 1 && c.actual[0].balance !== null && (
+                <circle cx={ax(0)} cy={y(c.actual[0].balance)} r="3" opacity="0.55" fill={balanceColour(c.actual[0].balance, c.overdraft)} />
+              )}
+            </g>
+          )}
+
           {bars && c.overdue && (
             <g>
               {drawBars(c.overdue, odX, 'od', 0.85)}
@@ -199,19 +252,13 @@ export function CashChart({ payload, days, mode, currency, selected, onSelect })
 
           {bars && c.points.map((p, i) => <g key={p.date}>{drawBars(p, cx(i), p.date, 1)}</g>)}
 
-          {!bars && c.points.length > 1 && c.points.slice(1).map((p, k) => {
-            const a = c.points[k];
-            return (
-              <line key={p.date} x1={cx(k)} y1={y(a.balance)} x2={cx(k + 1)} y2={y(p.balance)}
-                    stroke={balanceColour(Math.min(a.balance, p.balance), c.overdraft)} strokeWidth="2" strokeLinecap="round" />
-            );
-          })}
+          {!bars && line(c.points, cx, 'p', 1)}
           {!bars && c.points.length === 1 && (
             <circle cx={cx(0)} cy={y(c.points[0].balance)} r="4" fill={balanceColour(c.points[0].balance, c.overdraft)} />
           )}
-          {!bars && shown && (
-            <circle cx={cx(index.get(hover))} cy={y(c.points[index.get(hover)].balance)} r="4.5"
-                    fill={balanceColour(c.points[index.get(hover)].balance, c.overdraft)} stroke="var(--bg-card)" strokeWidth="2" />
+          {!bars && hoverBalance !== null && (
+            <circle cx={xOf(hover)} cy={y(hoverBalance)} r="4.5"
+                    fill={balanceColour(hoverBalance, c.overdraft)} stroke="var(--bg-card)" strokeWidth="2" />
           )}
 
           {c.points.map((p, i) => {
@@ -226,8 +273,12 @@ export function CashChart({ payload, days, mode, currency, selected, onSelect })
 
           {/* What the pointer and a tap land on: the whole height of each
               slot, wider than any bar, on top of everything. */}
+          {c.actual.map((p, i) => (
+            <rect key={`a${p.date}`} x={padL + aSlot * i} y={padT} width={aSlot} height={plotH} fill="transparent" style={{ cursor: 'pointer' }}
+                  onMouseEnter={() => setHover(p.date)} onClick={() => onSelect?.(p.date)} />
+          ))}
           {bars && c.overdue && (
-            <rect x={padL} y={padT} width={OD_W} height={plotH} fill="transparent" style={{ cursor: 'pointer' }}
+            <rect x={odL} y={padT} width={OD_W} height={plotH} fill="transparent" style={{ cursor: 'pointer' }}
                   onMouseEnter={() => setHover('overdue')} onClick={() => onSelect?.('overdue')} />
           )}
           {c.points.map((p, i) => (
@@ -248,10 +299,12 @@ export function CashChart({ payload, days, mode, currency, selected, onSelect })
 }
 
 // The table: a row a day with what comes in, goes out, the net and the
-// balance at the end of it, the Overdue row first. Scrolls inside its own box
-// both ways, the date column and the headings pinned, as the budget grid.
+// balance at the end of it — the days before today first, each marked
+// Actual and muted, then the Overdue row, then the days ahead. Scrolls inside
+// its own box both ways, the date column and the headings pinned, as the
+// budget grid.
 export function CashTable({ payload, days, selected, onSelect }) {
-  const { rows, total } = tableRows(payload, days);
+  const { rows, total, actualNote, days: ahead } = tableRows(payload, days);
   const overdraft = payload?.bank?.overdraft || 0;
   const head = { padding: '7px 10px', textAlign: 'right', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap',
                  position: 'sticky', top: 0, background: 'var(--bg-card)', zIndex: 1, borderBottom: '1px solid var(--border)' };
@@ -270,17 +323,24 @@ export function CashTable({ payload, days, selected, onSelect }) {
           </tr>
         </thead>
         <tbody>
+          {actualNote && (
+            <tr style={{ borderBottom: '1px solid var(--border)' }}>
+              <td colSpan={5} style={{ padding: '6px 0', color: 'var(--text-muted)' }}>{actualNote}</td>
+            </tr>
+          )}
           {rows.map(r => {
             const on = selected === r.date;
-            const bg = on ? 'var(--accent-subtle)' : r.key === 'overdue' ? 'var(--warning-subtle)' : 'var(--bg-card)';
+            const bg = on ? 'var(--accent-subtle)' : r.key === 'overdue' ? 'var(--warning-subtle)' : r.actual ? 'var(--bg-secondary)' : 'var(--bg-card)';
             return (
-              <tr key={r.key} onClick={() => onSelect?.(r.date)} style={{ cursor: 'pointer', borderBottom: '1px solid var(--border)', background: bg }}>
+              <tr key={r.key} onClick={() => onSelect?.(r.date)}
+                  style={{ cursor: 'pointer', borderBottom: '1px solid var(--border)', background: bg, color: r.actual ? 'var(--text-secondary)' : undefined }}>
                 <td style={dateCell({ background: bg, fontWeight: r.today || r.key === 'overdue' ? 700 : 400 })}>
                   {/* A real button inside the row, so the keyboard reaches
                       each day as the pointer does. */}
                   <button type="button" onClick={e => { e.stopPropagation(); onSelect?.(r.date); }}
                           style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'inherit', cursor: 'pointer' }}>
                     {r.label}{r.today ? ' · Today' : ''}
+                    {r.actual && <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}> · Actual</span>}
                   </button>
                 </td>
                 <td style={num()}>{fmtCell(r.in)}</td>
@@ -295,7 +355,7 @@ export function CashTable({ payload, days, selected, onSelect }) {
         </tbody>
         <tfoot>
           <tr style={{ borderTop: '2px solid var(--border)', fontWeight: 700 }}>
-            <td style={dateCell({ fontWeight: 700 })}>Total, {rows.length - 1} days</td>
+            <td style={dateCell({ fontWeight: 700 })}>Total, {ahead} days</td>
             <td style={num()}>{fmtCell(total.in)}</td>
             <td style={num()}>{fmtCell(total.out)}</td>
             <td style={num({ color: signColour(total.net) })}>{fmtCell(total.net)}</td>
@@ -307,20 +367,32 @@ export function CashTable({ payload, days, selected, onSelect }) {
   );
 }
 
-// The calendar: a month grid for each month the window touches, each day of
-// the window showing its net movement, coloured. Clicking one opens its
-// items; Overdue, which is no day, has its own button above.
+// The calendar: a month grid for each month the window and the days before
+// today touch, each day showing its net movement, coloured. The days before
+// today are what actually moved, shaded and marked Actual. Clicking one opens
+// its items; Overdue, which is no day, has its own button above.
 export function CashCalendar({ payload, days, currency, selected, onSelect }) {
   const months = calendarMonths(payload, days);
   const overdue = daySummary(payload, 'overdue', 0);
   const symbol = currencySymbol(currency);
+  const past = months.some(m => m.weeks.some(w => w.some(cell => cell?.actual)));
+  const { note: actualNote } = actualWindow(payload);
   return (
     <div style={{ marginTop: 4 }}>
-      <button type="button" className="btn btn-outline btn-sm" onClick={() => onSelect?.('overdue')}
-              aria-pressed={selected === 'overdue'}
-              style={{ marginBottom: 12, ...(selected === 'overdue' ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : {}) }}>
-        Overdue: {fmtCell(overdue.net)} net · {overdue.count} item{overdue.count === 1 ? '' : 's'}
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+        <button type="button" className="btn btn-outline btn-sm" onClick={() => onSelect?.('overdue')}
+                aria-pressed={selected === 'overdue'}
+                style={selected === 'overdue' ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : undefined}>
+          Overdue: {fmtCell(overdue.net)} net · {overdue.count} item{overdue.count === 1 ? '' : 's'}
+        </button>
+        {past && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-muted)' }}>
+            <span aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 3, border: '1px dashed var(--border)', background: 'var(--bg-secondary)', display: 'inline-block' }} />
+            Actual: what moved in Xero before today
+          </span>
+        )}
+        {actualNote && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{actualNote}</span>}
+      </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18 }}>
         {months.map(m => (
           <div key={m.key} style={{ flex: '1 1 280px', minWidth: 0, maxWidth: 420 }}>
@@ -338,14 +410,17 @@ export function CashCalendar({ payload, days, currency, selected, onSelect }) {
                 }
                 const on = selected === cell.date;
                 const nil = Math.round(cell.net * 100) === 0 && Math.round(cell.in * 100) === 0 && Math.round(cell.out * 100) === 0;
+                const title = [cell.actual ? 'Actual' : '', `In ${fmtCell(cell.in)}`, `Out ${fmtCell(cell.out)}`,
+                  cell.balance === null ? '' : `Balance ${fmtCell(cell.balance)}`].filter(Boolean).join(' · ');
                 return (
                   <button key={cell.date} type="button" onClick={() => onSelect?.(cell.date)} aria-pressed={on}
-                          title={`In ${fmtCell(cell.in)} · Out ${fmtCell(cell.out)} · Balance ${fmtCell(cell.balance)}`}
+                          title={title} aria-label={`${cell.day}: ${title}`}
                           style={{
                             minHeight: 44, padding: '4px 5px', textAlign: 'left', cursor: 'pointer', borderRadius: 6,
                             display: 'flex', flexDirection: 'column', justifyContent: 'space-between', minWidth: 0,
-                            border: `1px solid ${cell.today ? 'var(--accent)' : 'var(--border)'}`,
-                            background: on ? 'var(--accent-subtle)' : 'var(--bg-card)', color: 'var(--text-primary)',
+                            border: `1px ${cell.actual ? 'dashed' : 'solid'} ${cell.today ? 'var(--accent)' : 'var(--border)'}`,
+                            background: on ? 'var(--accent-subtle)' : cell.actual ? 'var(--bg-secondary)' : 'var(--bg-card)',
+                            color: cell.actual ? 'var(--text-secondary)' : 'var(--text-primary)',
                           }}>
                     <span style={{ fontSize: 10.5, fontWeight: cell.today ? 700 : 500 }}>{cell.day}</span>
                     <span style={{ fontSize: 10, fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: nil ? 'var(--text-muted)' : signColour(cell.net),
@@ -382,7 +457,7 @@ export function DayPanel({ payload, date, onClose, onEdit }) {
       </div>
       {s.count === 0 ? (
         <div style={{ fontSize: 12.5, color: 'var(--text-muted)', marginTop: 10 }}>
-          {date === 'overdue' ? 'Nothing is overdue.' : 'Nothing is expected in or out on this day.'}
+          {date === 'overdue' ? 'Nothing is overdue.' : s.actual ? 'Nothing moved in or out on this day.' : 'Nothing is expected in or out on this day.'}
         </div>
       ) : (
         <div style={{ overflowX: 'auto', marginTop: 8 }}>
@@ -404,7 +479,9 @@ export function DayPanel({ payload, date, onClose, onEdit }) {
                     <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
                       {item.direction === 'out' ? '−' : '+'}{fmtCell(item.amount)}
                     </td>
-                    {onEdit && (
+                    {/* What actually moved is Xero's record, not an item of
+                        the forecast, so there is nothing here to change. */}
+                    {onEdit && !item.actual && (
                       <td style={{ ...cell, paddingRight: 0, textAlign: 'right' }}>
                         <button type="button" className="btn btn-outline btn-sm" style={{ padding: '2px 8px' }}
                                 aria-label={item.source === 'manual' ? 'Edit entry' : 'Change date or amount'}

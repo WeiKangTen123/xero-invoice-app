@@ -7,7 +7,8 @@
 // manager route, and both cut it to the same span (cashSpan) and the same item
 // lists (itemLists). A projection printed for 60 days whose lists ran to 90, or
 // a spreadsheet that kept an item the PDF had dropped, is two documents telling
-// different stories about one forecast.
+// different stories about one forecast. Both lead with the days before today
+// as they happened (actualRows), as the screen's chart does.
 
 const doc    = require('./budget-doc');
 const render = require('./budget-render');
@@ -95,17 +96,36 @@ const positive = v => {
   return n > 0 ? n : 0;
 };
 
-// The span both files print: the days asked for, or the payload's own horizon,
-// and never more days than the series has — a title saying "90 days" over a
-// table of 60 would be claiming a projection nobody made. The last day is read
-// from the series, so the title names the same day the table ends on.
+// The span both files print: today and the days asked for after it, or the
+// payload's own horizon, and never more days than the series has — a title
+// saying "90 days" over a table of 60 would be claiming a projection nobody
+// made. Xero's "60 days" runs from today to the day sixty days on (6 Oct to
+// 5 Dec), so 60 days is 61 rows, and the payload's horizon counts today too.
+// The last day is read from the series, so the title names the same day the
+// table ends on.
 function cashSpan(payload, days) {
   const series = Array.isArray(payload?.series) ? payload.series : [];
-  let n = positive(days) || positive(payload?.horizonDays) || series.length;
-  if (series.length && n > series.length) n = series.length;
-  const rows = series.slice(0, n);
+  const most = Math.max(0, series.length - 1);
+  let n = positive(days) || Math.max(0, positive(payload?.horizonDays) - 1) || most;
+  if (n > most) n = most;
+  const rows = series.slice(0, series.length ? n + 1 : 0);
   return { days: n, rows, end: rows.length ? String(rows[rows.length - 1]?.date || '') : '' };
 }
+
+// The days before today as they happened, oldest first, as the payload has
+// them. Unavailable when the server could not read them, so the file says so
+// rather than printing thirty days of nothing; null for a payload that
+// carries none, which prints no section at all.
+function actualRows(payload) {
+  if (payload?.actualsAvailable === false) {
+    return { available: false, rows: [], days: positive(payload?.actualDays) || 30 };
+  }
+  const rows = Array.isArray(payload?.actuals) ? payload.actuals.filter(Boolean) : [];
+  return rows.length ? { available: true, rows, days: rows.length } : null;
+}
+
+const actualHeading = actual => `Actual (last ${actual.days} day${actual.days === 1 ? '' : 's'})`;
+const ACTUAL_UNAVAILABLE = 'Past cash could not be read from Xero, so the days before today are not shown.';
 
 // Under the title and over every sheet: how far the projection runs and the
 // currency, as the Balance Sheet export puts its day and currency there.
@@ -239,7 +259,9 @@ function dailyTable(span) {
   const money = v => ({ text: cell(v), style: 'account', alignment: 'right' });
   for (const r of span.rows) {
     if (isWeekend(r?.date)) weekend.add(body.length);
-    const balance = money(r?.balance);
+    // A past day's balance is blank when there was no balance today to work
+    // it back from: a dash would read as nil.
+    const balance = r?.balance === null ? { text: '', style: 'account' } : money(r?.balance);
     if (num(r?.balance) < 0) balance.color = NEGATIVE;
     body.push([{ text: dayText(r?.date), style: 'account' }, money(r?.in), money(r?.out), money(r?.net), balance]);
   }
@@ -304,6 +326,7 @@ function cashManagerDefinition(payload, opts = {}) {
   const generated = opts.generatedAt ?? Date.now();
   const span      = cashSpan(payload, opts.days);
   const lists     = itemLists(payload, span);
+  const actual    = actualRows(payload);
   const ahead     = `in the ${span.days} day${span.days === 1 ? '' : 's'} projected`;
 
   const { counted, left } = bankAccounts(payload);
@@ -337,6 +360,10 @@ function cashManagerDefinition(payload, opts = {}) {
     content: [
       tileTable(payload),
       ...(bankNote ? [{ text: bankNote, style: 'aside', margin: [0, 4, 0, 0] }] : []),
+      ...(actual ? [
+        heading(actualHeading(actual)),
+        actual.available ? dailyTable(actual) : { text: ACTUAL_UNAVAILABLE, style: 'note' },
+      ] : []),
       heading('Day by day'),
       dailyTable(span),
       heading('Cash in'),
@@ -412,21 +439,37 @@ function summarySheet(wb, payload, subtitle, opts, currency) {
   closeSheet(sheet, currency, payload?.notes || []);
 }
 
-function dailySheet(wb, payload, subtitle, opts, currency, span) {
-  const columns = [
-    { label: 'Date', width: 18, date: DAY_FMT },
-    { ...MONEY(15), label: 'Cash in' },
-    { ...MONEY(15), label: 'Cash out' },
-    { ...MONEY(15), label: 'Net movement' },
-    { ...MONEY(15), label: 'Bank balance' },
-  ];
-  const sheet = addSheet(wb, 'Daily', payload, subtitle, opts, columns);
-  for (const r of span.rows) {
-    const row = addRow(sheet, columns, [sheetDate(r?.date), num(r?.in), num(r?.out), num(r?.net), num(r?.balance)]);
-    if (isWeekend(r?.date)) for (let c = 1; c <= columns.length; c++) row.getCell(c).fill = WEEKEND_FILL;
+const DAY_COLUMNS = [
+  { label: 'Date', width: 18, date: DAY_FMT },
+  { ...MONEY(15), label: 'Cash in' },
+  { ...MONEY(15), label: 'Cash out' },
+  { ...MONEY(15), label: 'Net movement' },
+  { ...MONEY(15), label: 'Bank balance' },
+];
+
+// A row a day, as the PDF's table. A balance that could not be worked back is
+// an empty cell, not a nil one.
+function dayRows(sheet, rows) {
+  for (const r of rows) {
+    const balance = r?.balance === null ? null : num(r?.balance);
+    const row = addRow(sheet, DAY_COLUMNS, [sheetDate(r?.date), num(r?.in), num(r?.out), num(r?.net), balance]);
+    if (isWeekend(r?.date)) for (let c = 1; c <= DAY_COLUMNS.length; c++) row.getCell(c).fill = WEEKEND_FILL;
     if (num(r?.balance) < 0) row.getCell(5).font = { color: { argb: ARGB.negative } };
   }
+}
+
+function dailySheet(wb, payload, subtitle, opts, currency, span) {
+  const sheet = addSheet(wb, 'Daily', payload, subtitle, opts, DAY_COLUMNS);
+  dayRows(sheet, span.rows);
   closeSheet(sheet, currency);
+}
+
+// The days before today, on a sheet ahead of the projection's, as the PDF
+// prints them ahead of it.
+function actualSheet(wb, payload, subtitle, opts, currency, actual) {
+  const sheet = addSheet(wb, actualHeading(actual), payload, subtitle, opts, DAY_COLUMNS);
+  if (actual.available) dayRows(sheet, actual.rows);
+  closeSheet(sheet, currency, actual.available ? [] : [ACTUAL_UNAVAILABLE]);
 }
 
 // An excluded item, struck through and muted as in the PDF, with its status
@@ -485,11 +528,13 @@ function cashManagerWorkbook(payload, opts = {}) {
   const generated = opts.generatedAt ?? Date.now();
   const span      = cashSpan(payload, opts.days);
   const lists     = itemLists(payload, span);
+  const actual    = actualRows(payload);
   const subtitle  = cashSubtitle(payload, span);
   const o         = { ...opts, generatedAt: generated };
 
   const wb = _workbook(generated);
   summarySheet(wb, payload, subtitle, o, currency);
+  if (actual) actualSheet(wb, payload, subtitle, o, currency, actual);
   dailySheet(wb, payload, subtitle, o, currency, span);
   itemSheet(wb, 'Cash in', lists.in, payload, subtitle, o, currency);
   itemSheet(wb, 'Cash out', lists.out, payload, subtitle, o, currency);
@@ -521,6 +566,7 @@ module.exports = {
   cashManagerFilename,
   cashSpan,
   cashSubtitle,
+  actualRows,
   itemLists,
   basisText,
   BASIS,

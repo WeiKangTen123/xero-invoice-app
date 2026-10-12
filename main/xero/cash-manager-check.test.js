@@ -10,6 +10,7 @@ jest.mock('xero-node', () => {
     getAccounts:          jest.fn(),
     getRepeatingInvoices: jest.fn(),
     getPayments:          jest.fn(),
+    getBankTransactions:  jest.fn(),
   };
   return { AccountingApi: jest.fn(() => api), __api: api };
 });
@@ -63,6 +64,7 @@ beforeEach(() => {
   ] } });
   api.getRepeatingInvoices.mockResolvedValue({ body: { repeatingInvoices: [] } });
   api.getPayments.mockResolvedValue({ body: { payments: [] } });
+  api.getBankTransactions.mockResolvedValue({ body: { bankTransactions: [] } });
 });
 afterEach(() => jest.useRealTimers());
 

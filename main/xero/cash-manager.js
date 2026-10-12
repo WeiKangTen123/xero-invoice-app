@@ -4,7 +4,7 @@ const { _cacheGet, _cacheSet, _dedupe } = require('./report-cache');
 const { _apiFor, _allPages, _getOrganisation } = require('./report-fetch');
 const { _getOutstanding, _contactKey } = require('./summary');
 const { getBankSummary, _bankAccountList } = require('./bank');
-const { _bankByCurrency, _isLive, _isReceiptPayment } = require('./cash-flow');
+const { _bankByCurrency, _isLive, _isReceiptPayment, _isTransfer } = require('./cash-flow');
 const { _getCreditNotes, _daysBetween } = require('./ageing');
 const { _xeroDay } = require('./performance');
 const { _toBase, _foreignCurrency } = require('./currency');
@@ -12,15 +12,19 @@ const { _addDays, _fmtISODate, _fmtXeroDate, _lastDayOfMonth, _parseISODate, _to
 
 // The Cash Flow Manager: the bank balance today, then every day of the next
 // ninety with what is expected to come in and go out, the way Xero Analytics'
-// Cash flow manager lays it out.
+// Cash flow manager lays it out, and the thirty days before today with what
+// actually did.
 //
 // Built from what Xero already says and what the person has added here:
 //   * the closing balance of each bank account today (the Bank Summary);
+//   * the payments and bank transactions of the last thirty days, for what
+//     actually moved;
 //   * the sales invoices and bills still owed, from the Dashboard summary's own
 //     fetch (see summary.js#_getOutstanding), each dated by when it is likely
 //     to be paid, and with unallocated credit notes netted off;
 //   * the invoices and bills approved repeating templates will raise;
-//   * payments already recorded in Xero with a date after today;
+//   * payments already recorded in Xero with a date after today (the same
+//     read as the last thirty days' payments);
 //   * entries, changes to single items, and bank account options kept in this
 //     app's database (utils/cash-manager-store.js), never written to Xero.
 //
@@ -28,11 +32,18 @@ const { _addDays, _fmtISODate, _fmtXeroDate, _lastDayOfMonth, _parseISODate, _to
 // an edit made here shows on the very next load, and the day it is built for
 // turns at midnight in the user's timezone. Every Xero call is a GET.
 
-const HORIZON_DAYS = 90;
+// Today and the ninety days after it. Xero's "60 days" runs from today to the
+// day sixty days on (6 Oct to 5 Dec), so a window of N days is N + 1 days of
+// series, and the longest, 90, needs 91.
+const HORIZON_DAYS = 91;
+// The days before today shown as what actually moved, as Xero's chart shows
+// the receipts left of today.
+const ACTUAL_DAYS = 30;
 // Templates change rarely and are read whole, with no paging, in one call.
 const REPEATING_TTL_MS = 60 * 60 * 1000;
-// Payments dated after today are what someone has just scheduled, so they are
-// read again sooner than the templates.
+// Payments dated after today are what someone has just scheduled, and the last
+// days' records are still being reconciled, so both are read again sooner
+// than the templates.
 const PAYMENTS_TTL_MS = 10 * 60 * 1000;
 // The balance is read over the same window the Dashboard's Overview reads it
 // (performance.js: the last 31 days to today). The closing balance does not
@@ -137,14 +148,15 @@ function _repeatingDue(dateISO, schedule) {
   }
 }
 
-// ── Payments dated after today ──────────────────────────────────────────────
+// ── Payments, before and after today ────────────────────────────────────────
 
-// Pure. A payment recorded with a future date has already taken the invoice's
-// AmountDue down, so the invoice no longer brings that money in; without the
-// payment itself on its date, the cash would vanish from the projection.
-// Which way it moves money is cash-flow.js#_isReceiptPayment's rule, the one
-// every cash figure here uses.
-function _futurePaymentsOf(list = []) {
+// Pure. One read serves both sides of today. A payment recorded with a future
+// date has already taken the invoice's AmountDue down, so the invoice no
+// longer brings that money in; without the payment itself on its date, the
+// cash would vanish from the projection. One dated before today is money that
+// has moved, for the actuals. Which way it moves money is
+// cash-flow.js#_isReceiptPayment's rule, the one every cash figure here uses.
+function _paymentsOf(list = []) {
   return (list || []).filter(p => p && _isLive(p)).map(p => ({
     paymentId:    p.paymentID || null,
     status:       p.status ? String(p.status) : '',
@@ -160,6 +172,132 @@ function _futurePaymentsOf(list = []) {
     number:       p.invoice?.invoiceNumber || p.creditNote?.creditNoteNumber || '',
     reference:    p.reference || '',
   }));
+}
+
+// Pure. The bank transactions of the last days, cut down to what the actuals
+// need: money spent or received with no invoice behind it, which no payment
+// record shows. A transfer between the org's own accounts is marked rather
+// than dropped here, since it moves the balance of the account it leaves even
+// though no money came into or left the business.
+function _bankTransactionsOf(list = []) {
+  return (list || []).filter(t => t && _isLive(t)).map(t => ({
+    bankTransactionId: t.bankTransactionID || null,
+    status:       t.status ? String(t.status) : '',
+    type:         t.type ? String(t.type) : '',
+    receipt:      /^RECEIVE/i.test(String(t.type || '')),
+    transfer:     _isTransfer(t),
+    date:         _xeroDay(t.date),
+    amount:       Number(t.total || 0),
+    currencyRate: t.currencyRate ?? null,
+    currencyCode: t.currencyCode ? String(t.currencyCode) : '',
+    accountId:    t.bankAccount?.accountID || null,
+    contactName:  t.contact?.name || '',
+    reference:    t.reference || '',
+  }));
+}
+
+// ── What actually moved ─────────────────────────────────────────────────────
+
+// Pure. The ACTUAL_DAYS days before today as they happened, oldest first: cash
+// in and out each day from the payments and bank transactions recorded in
+// Xero, and the balance at the end of each, worked back from today's.
+//
+// `payments` and `bankTransactions` are the reads above, null when one could
+// not be read. Half of the records drawn as the whole would show days with
+// nothing in or out that had both, so then there are no actuals at all.
+// Records through an account the balance leaves out (another currency, or
+// switched off here) are left out with it. A transfer between the org's own
+// accounts is no cash in or out, as on the Cash Flow tab, but it does move
+// the balance of the account it leaves, so it counts in the balance worked
+// back and in no bar.
+//
+// Both reads reach back to the first day of the Bank Summary window read for
+// today's balance (_todayBalanceWindow), so the records of that window, today
+// included, can be set against the Bank Summary's cash received and spent:
+// the same days on both sides, with the transfers taken off the bank's
+// figures as the Cash Flow tab takes them off. Compared over the thirty days
+// shown instead, every record dated today or 31 days ago would read as a
+// difference. `bankLines` are the Bank Summary lines counted in the balance;
+// null skips the check.
+function _buildActuals({
+  todayISO, base = '', payments = null, bankTransactions = null, leftOut = new Set(),
+  balanceCents = null, bankLines = null, days = ACTUAL_DAYS,
+} = {}) {
+  const available = payments !== null && bankTransactions !== null;
+  if (!available) return { available, actuals: [], actualItems: [], check: null };
+
+  const first     = addDaysISO(todayISO, -days);
+  const checkFrom = addDaysISO(todayISO, -BALANCE_WINDOW_DAYS);
+  const dates = Array.from({ length: days }, (_, i) => addDaysISO(first, i));
+  const byDay = new Map(dates.map(d => [d, { in: 0, out: 0, move: 0 }]));
+  const whole = { in: 0, out: 0, transfersIn: 0, transfersOut: 0 };   // the check's window, today included
+  const items = [];
+  let todayMove = 0;
+
+  const take = (r, source, key) => {
+    if (!r?.date || !_isLive(r) || r.date < checkFrom || r.date > todayISO) return;
+    if (r.accountId && leftOut.has(r.accountId)) return;
+    const cents = Math.abs(toCents(_toBase(r, r.amount, base)));
+    if (!cents) return;
+    const dir = r.receipt ? 'in' : 'out';
+    const signed = r.receipt ? cents : -cents;
+    if (r.transfer) whole[r.receipt ? 'transfersIn' : 'transfersOut'] += cents;
+    else whole[dir] += cents;
+    // Today's records are in today's balance already, which the projection
+    // starts from on its first day; they serve the check and the step back
+    // to yesterday's balance only.
+    if (r.date === todayISO) { todayMove += signed; return; }
+    const day = byDay.get(r.date);
+    if (!day) return;   // the Bank Summary window's first day, before the days shown
+    day.move += signed;
+    if (r.transfer) return;
+    day[dir] += cents;
+    items.push({
+      key, direction: dir, date: r.date, cents, source,
+      contactName: r.contactName || '', number: r.number || '', reference: r.reference || '',
+    });
+  };
+  for (const p of payments) take(p, 'payment', `actual:payment:${p.paymentId}`);
+  for (const t of bankTransactions) take(t, 'banktransaction', `actual:banktransaction:${t.bankTransactionId}`);
+
+  // The balance at the end of each day: today's, less what moved today, is
+  // yesterday's; less what moved yesterday, the day before's; and so on.
+  // From a balance that could not be read there is nothing to work back from.
+  const actuals = dates.map(date => ({ date, ...byDay.get(date), balance: null }));
+  if (balanceCents !== null) {
+    let running = balanceCents - todayMove;
+    for (let i = actuals.length - 1; i >= 0; i--) {
+      actuals[i].balance = running;
+      running -= actuals[i].move;
+    }
+  }
+
+  let check = null;
+  if (bankLines) {
+    const sum = field => bankLines.reduce((s, a) => s + toCents(a[field]), 0);
+    const bankIn  = sum('cashReceived') - whole.transfersIn;
+    const bankOut = sum('cashSpent') - whole.transfersOut;
+    check = {
+      from: checkFrom, to: todayISO,
+      records:   { in: fromCents(whole.in), out: fromCents(whole.out) },
+      bank:      { in: fromCents(bankIn),    out: fromCents(bankOut) },
+      transfers: { in: fromCents(whole.transfersIn), out: fromCents(whole.transfersOut) },
+      agrees: whole.in === bankIn && whole.out === bankOut,
+    };
+  }
+
+  const order = { in: 0, out: 1 };
+  items.sort((a, b) => a.date.localeCompare(b.date) || order[a.direction] - order[b.direction]
+    || b.cents - a.cents || a.key.localeCompare(b.key));
+  return {
+    available,
+    actuals: actuals.map(d => ({
+      date: d.date, in: fromCents(d.in), out: fromCents(d.out), net: fromCents(d.in - d.out),
+      balance: d.balance === null ? null : fromCents(d.balance),
+    })),
+    actualItems: items.map(({ cents, ...it }) => ({ ...it, amount: fromCents(cents) })),
+    check,
+  };
 }
 
 // ── Entries kept here ───────────────────────────────────────────────────────
@@ -213,9 +351,11 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 //
 // `outstanding` is summary.js#_outstandingOf's records and `lateness` its
 // map of how late each contact pays. `credits` (ageing.js#_creditsOf),
-// `bank` (a Bank Summary), `templates` and `payments` are null when they could
-// not be read; `repeatingFailure` and `paymentsFailure` say why ('scope' or
-// 'error'). `entries`, `overrides` and `bankOptions` are the store's.
+// `bank` (a Bank Summary), `templates`, `payments` (_paymentsOf, either side
+// of today) and `bankTransactions` (_bankTransactionsOf) are null when they
+// could not be read; `repeatingFailure`, `paymentsFailure` and
+// `bankTransactionsFailure` say why ('scope' or 'error'). `entries`,
+// `overrides` and `bankOptions` are the store's.
 //
 // How an item is dated, first match wins: a date set here ('override'); the
 // expected (sales) or planned (bills) payment date set in Xero ('expected',
@@ -232,6 +372,7 @@ function _buildCashManager({
   credits = null, bank = null, bankAccounts = [], bankOptions = {},
   templates = null, repeatingFailure = null,
   payments = null, paymentsFailure = null,
+  bankTransactions = null, bankTransactionsFailure = null,
   entries = [], overrides = {},
 }) {
   const base = baseCurrency || '';
@@ -247,6 +388,7 @@ function _buildCashManager({
   const byCur = bank ? _bankByCurrency(bank, bankAccounts, base) : null;
   const accounts = [];
   const leftOutAccounts = new Set();
+  const countedLines = [];
   let balanceCents = 0, overdraftCents = 0, included = 0;
   if (byCur) {
     for (const a of [...byCur.accounts, ...byCur.foreignAccounts]) {
@@ -259,6 +401,7 @@ function _buildCashManager({
         included: counts, openingAdjustment: fromCents(adjustment), overdraft: fromCents(overdraft), foreign: a.foreign,
       });
       if (counts) {
+        countedLines.push(a);
         balanceCents += toCents(a.closingBalance) + adjustment;
         overdraftCents += overdraft;
         included++;
@@ -325,10 +468,12 @@ function _buildCashManager({
 
   // ── Payments dated after today. One into an account the opening balance
   // leaves out (another currency, or switched off here) would move money the
-  // projection does not hold, so it is left out with it.
+  // projection does not hold, so it is left out with it. The read reaches
+  // back before today for the actuals; those, and today's, which are in
+  // today's balance already, are not projected.
   let paymentCount = 0, paymentsLeftOut = 0;
   for (const p of payments || []) {
-    if (!p.date || !_isLive(p)) continue;
+    if (!p.date || !_isLive(p) || p.date <= todayISO) continue;
     if (p.accountId && leftOutAccounts.has(p.accountId)) { paymentsLeftOut++; continue; }
     const cents = Math.abs(toCents(_toBase(p, p.amount, base)));
     if (!cents) continue;
@@ -428,6 +573,11 @@ function _buildCashManager({
   // overdraft" is an artefact of starting at nothing, not a warning.
   if (!byCur) runwayDays = null;
 
+  const past = _buildActuals({
+    todayISO, base, payments, bankTransactions, leftOut: leftOutAccounts,
+    balanceCents: byCur ? balanceCents : null, bankLines: byCur ? countedLines : null,
+  });
+
   const order = { in: 0, out: 1 };
   shown.sort((a, b) => a.date.localeCompare(b.date) || order[a.direction] - order[b.direction]
     || a.contactName.localeCompare(b.contactName) || a.key.localeCompare(b.key));
@@ -477,6 +627,24 @@ function _buildCashManager({
     notes.push(`${plural(paymentCount, 'payment', 'payments')} recorded in Xero with a date after today ${paymentCount === 1 ? 'is' : 'are'} on that date.`);
   }
   if (paymentsLeftOut) notes.push(`${plural(paymentsLeftOut, 'future payment goes', 'future payments go')} through a bank account left out of the balance, so ${paymentsLeftOut === 1 ? 'it is' : 'they are'} left out too.`);
+  if (past.available) {
+    notes.push(`The ${ACTUAL_DAYS} days before today are what actually moved: the payments and bank transactions recorded in `
+      + `Xero from ${addDaysISO(todayISO, -ACTUAL_DAYS)} to ${addDaysISO(todayISO, -1)}, without transfers between your own `
+      + 'accounts or accounts left out of the balance. '
+      + (byCur ? 'The balance on each is worked back from today\'s.' : 'With no bank balance to work back from, no balance is given for them.'));
+  } else {
+    const scope = paymentsFailure === 'scope' || bankTransactionsFailure === 'scope';
+    notes.push(scope
+      ? 'Past cash could not be read: the Xero connection does not allow reading payments or bank transactions. Reconnect in Setup to include it.'
+      : `Past cash could not be read from Xero just now, so the last ${ACTUAL_DAYS} days are not shown.`);
+  }
+  if (past.check && !past.check.agrees) {
+    const c = past.check;
+    notes.push(`Past cash does not tie to Xero's Bank Summary for ${c.from} to ${c.to}: the payments and bank transactions `
+      + `come to ${c.records.in.toFixed(2)} in and ${c.records.out.toFixed(2)} out, the Bank Summary to ${c.bank.in.toFixed(2)} in `
+      + `and ${c.bank.out.toFixed(2)} out, transfers between your own accounts left out of both. Usually a payment posted to `
+      + 'an account that is not a bank account, or an entry posted straight to a bank account, such as a manual journal.');
+  }
   if (!byCur) {
     notes.push('Bank balances could not be read from Xero just now, so the projection starts from zero and no runway is given.');
   } else {
@@ -487,7 +655,7 @@ function _buildCashManager({
         + `in another currency, listed in ${byCur.foreignAccounts.length === 1 ? 'its' : 'their'} own and left out of the balance.`);
     }
   }
-  if (beyond) notes.push(`${plural(beyond, 'item falls', 'items fall')} after ${horizonEnd}, beyond the ${horizonDays} days shown.`);
+  if (beyond) notes.push(`${plural(beyond, 'item falls', 'items fall')} after ${horizonEnd}, the last day projected.`);
   const currency = _foreignCurrency((outstanding || []).filter(i => Number(i?.amountDue) > 0), base);
   if (currency.mixed) {
     notes.push(`Amounts in ${currency.currencies.join(', ')} are converted to ${base || 'base currency'} at the rate Xero `
@@ -512,6 +680,14 @@ function _buildCashManager({
     },
     runwayDays,
     series,
+    // The days before today, oldest first, and what moved on them. Empty, with
+    // actualsAvailable false, when either read failed. actualsCheck is the
+    // records against the Bank Summary over its own window, null without one.
+    actualDays: ACTUAL_DAYS,
+    actualsAvailable: past.available,
+    actuals: past.actuals,
+    actualItems: past.actualItems,
+    actualsCheck: past.check,
     items: shown.map(it => ({
       key: it.key, direction: it.direction, source: it.source,
       date: it.date, dueDate: it.dueDate || null, dateBasis: it.dateBasis,
@@ -550,21 +726,40 @@ async function _getRepeatingRaw(userId, tenantId, { force = false } = {}) {
 }
 const _getRepeatingInvoices = _dedupe('_getRepeatingInvoices', _getRepeatingRaw, { force: false });
 
-// Approved payments dated after today, paged like every list (normally one
-// page). Keyed by the day, since "after today" is a different question
-// tomorrow.
-async function _getFuturePaymentsRaw(userId, tenantId, { todayISO, force = false } = {}) {
-  const key    = `futurepay:${userId}:${tenantId}:${todayISO}`;
+// Approved payments from the first day of today's Bank Summary window on,
+// paged like every list (normally one page): one read for both the actuals
+// before today and the payments dated after it. Keyed by the day, since the
+// window moves with it.
+async function _getPaymentsRaw(userId, tenantId, { todayISO, force = false } = {}) {
+  const key    = `cmpayments:${userId}:${tenantId}:${todayISO}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
   const tokenCache = require('../utils/token-cache').forUser(userId);
   const api   = _apiFor(await tokenCache.getValidToken(tenantId));
-  const where = `Date > ${_fmtXeroDate(_parseISODate(todayISO))} && Status=="AUTHORISED"`;
+  const where = `Date >= ${_fmtXeroDate(_parseISODate(addDaysISO(todayISO, -BALANCE_WINDOW_DAYS)))} && Status=="AUTHORISED"`;
   const list  = await _allPages(page => api.getPayments(tenantId, undefined, where, 'Date ASC', page),
     'payments', { what: 'Payment', tenantId });
-  return _cacheSet(key, { payments: _futurePaymentsOf(list) }, PAYMENTS_TTL_MS);
+  return _cacheSet(key, { payments: _paymentsOf(list) }, PAYMENTS_TTL_MS);
 }
-const _getFuturePayments = _dedupe('_getFuturePayments', _getFuturePaymentsRaw, { force: false });
+const _getPayments = _dedupe('_getCashManagerPayments', _getPaymentsRaw, { force: false });
+
+// Approved bank transactions over today's Bank Summary window, reconciled or
+// not (the Bank Summary counts both), paged. The one call the actuals add:
+// their payments come from the read above.
+async function _getRecentBankTransactionsRaw(userId, tenantId, { todayISO, force = false } = {}) {
+  const key    = `cmbanktx:${userId}:${tenantId}:${todayISO}`;
+  const cached = _cacheGet(key, force);
+  if (cached) return cached;
+  const tokenCache = require('../utils/token-cache').forUser(userId);
+  const api   = _apiFor(await tokenCache.getValidToken(tenantId));
+  const from  = _parseISODate(addDaysISO(todayISO, -BALANCE_WINDOW_DAYS));
+  const to    = _parseISODate(addDaysISO(todayISO, 1));   // Xero's upper bound is exclusive
+  const where = `Date >= ${_fmtXeroDate(from)} && Date < ${_fmtXeroDate(to)} && Status=="AUTHORISED"`;
+  const list  = await _allPages(page => api.getBankTransactions(tenantId, undefined, where, 'Date ASC', page),
+    'bankTransactions', { what: 'Bank transaction', tenantId });
+  return _cacheSet(key, { bankTransactions: _bankTransactionsOf(list) }, PAYMENTS_TTL_MS);
+}
+const _getRecentBankTransactions = _dedupe('_getRecentBankTransactions', _getRecentBankTransactionsRaw, { force: false });
 
 // A part that could not be read costs what it adds, not the projection: the
 // notes say what is missing. The open invoices and the organisation are the
@@ -580,14 +775,15 @@ async function _getCashManagerRaw(userId, tenantId, { timezone = 'UTC', force = 
   const todayParts = _todayPartsInTz(timezone);
   const todayISO   = _fmtISODate(todayParts);
   const ctx = { userId, tenantId };
-  const [outstanding, org, credits, bank, bankAccounts, repeating, payments] = await Promise.all([
+  const [outstanding, org, credits, bank, bankAccounts, repeating, payments, bankTx] = await Promise.all([
     _getOutstanding(userId, tenantId, { force }),
     _getOrganisation(userId, tenantId, force),
     _soft('credit notes', _getCreditNotes(userId, tenantId, { force }), ctx),
     _soft('bank summary', getBankSummary(userId, tenantId, { ..._todayBalanceWindow(todayParts), force }), ctx),
     _bankAccountList(userId, tenantId, force),
     _soft('repeating invoices', _getRepeatingInvoices(userId, tenantId, { force }), ctx),
-    _soft('future payments', _getFuturePayments(userId, tenantId, { todayISO, force }), ctx),
+    _soft('payments', _getPayments(userId, tenantId, { todayISO, force }), ctx),
+    _soft('bank transactions', _getRecentBankTransactions(userId, tenantId, { todayISO, force }), ctx),
   ]);
 
   // Required here: the store opens the database, which no other report needs.
@@ -600,10 +796,11 @@ async function _getCashManagerRaw(userId, tenantId, { timezone = 'UTC', force = 
     bank: bank.value || null, bankAccounts, bankOptions: store.bankOptions(),
     templates: repeating.value ? repeating.value.templates : null, repeatingFailure: repeating.failure || null,
     payments: payments.value ? payments.value.payments : null, paymentsFailure: payments.failure || null,
+    bankTransactions: bankTx.value ? bankTx.value.bankTransactions : null, bankTransactionsFailure: bankTx.failure || null,
     entries: store.listEntries(), overrides: store.overrides(),
   });
 
-  const reads  = [outstanding, credits.value, bank.value, repeating.value, payments.value].filter(Boolean);
+  const reads  = [outstanding, credits.value, bank.value, repeating.value, payments.value, bankTx.value].filter(Boolean);
   const stamps = reads.map(r => r.fetchedAt).filter(Number.isFinite);
   return {
     ...data,
@@ -617,7 +814,7 @@ async function _getCashManagerRaw(userId, tenantId, { timezone = 'UTC', force = 
 const getCashManager = _dedupe('getCashManager', _getCashManagerRaw, { timezone: 'UTC', force: false });
 
 module.exports = {
-  getCashManager, _buildCashManager, _templatesOf, _repeatingDates, _repeatingDue, _futurePaymentsOf, _manualDates,
-  _todayBalanceWindow, _monthDay,
-  HORIZON_DAYS, REPEATING_TTL_MS, PAYMENTS_TTL_MS, BALANCE_WINDOW_DAYS,
+  getCashManager, _buildCashManager, _templatesOf, _repeatingDates, _repeatingDue, _paymentsOf, _bankTransactionsOf,
+  _buildActuals, _manualDates, _todayBalanceWindow, _monthDay,
+  HORIZON_DAYS, ACTUAL_DAYS, REPEATING_TTL_MS, PAYMENTS_TTL_MS, BALANCE_WINDOW_DAYS,
 };

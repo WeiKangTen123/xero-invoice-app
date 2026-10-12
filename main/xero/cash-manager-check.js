@@ -86,7 +86,7 @@ async function _openCheck(userId, tenantId, cm, side, { timezone, force }) {
     key: side, label: spec.label, skipped: false, ok: cmp.differences.length === 0,
     ...cmp, onlyInXero: [], onlyInApp: [], calls: ageing.cached === false ? 1 : 0,
     proves: `Every approved ${spec.docs.replace(/s$/, '')} with an amount due that the projection read (${mine.count}, `
-      + `${_cents(mine.amount).toFixed(2)} before credit notes and changes made here, past the ${cm.horizonDays} days too) `
+      + `${_cents(mine.amount).toFixed(2)} before credit notes and changes made here, past the last day projected too) `
       + `against the ageing's total before credit notes, which is the Dashboard's ${spec.headline}. Agreement means no open `
       + `${spec.docs.replace(/s$/, '')} was lost or counted twice on the way to a date.`,
   };
