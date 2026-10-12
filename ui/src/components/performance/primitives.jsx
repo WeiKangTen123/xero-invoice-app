@@ -333,6 +333,82 @@ export function useRangeTotals(d, from, to) {
   }, [d, from, to]);
 }
 
+// The recurring run-rate: recurring revenue over the closed months of the
+// range, a month's worth of it, times twelve. It divided by every month of the
+// range, reached or not, so a financial year read in its fourth month was a
+// third of the real rate; and the month in progress is part-booked. Null when
+// no month has closed or nothing recurring was booked in them.
+//
+// No React, so a test can lift it out of this file and run it with the two
+// helpers it calls; the same goes for the plain functions after it.
+export function recurringRunRate(d, from, to) {
+  const span = closedSpan(d, from, to);
+  const total = closedSum(d?.split?.recurring?.actual, span);
+  return { months: span.months, total, annual: span.months > 0 && total !== 0 ? (total / span.months) * 12 : null };
+}
+
+// The Recurring revenue tile. With no account classed as recurring it showed
+// "SGD 0.00" and "0% of revenue", as though recurring work had stopped; it
+// says why there is none instead.
+export function recurringTile(lines, recurring, mix, currency) {
+  if (!(lines || []).some(l => l.recurring)) {
+    return { value: '—', meter: null, footLeft: 'No account is classed as recurring' };
+  }
+  return {
+    value: fmtMoney(recurring, currency),
+    meter: mix === null ? null : mix * 100,
+    footLeft: mix === null ? 'No revenue yet' : `${fmtPct(mix, 0)} of revenue`,
+  };
+}
+
+// The state of one of the Revenue tab's extras (top customers, quotes):
+// 'ready', 'failed' when the read of Xero failed, or 'hidden' when the report
+// on screen never asked for it — the page is asking again (see
+// perf-requests.js), and the card appears when it lands.
+export function extrasState(x) {
+  if (x?.available === true) return 'ready';
+  return x?.reason === 'failed' ? 'failed' : 'hidden';
+}
+
+// The quote card: whether it shows, and the sentence it shows instead of the
+// pipeline when there is none. It used to vanish both when the quotes could
+// not be read and when there were simply none open, so neither could be told
+// from a tab with no such card. `state` is 'hidden', 'failed', 'none' (no
+// quote dated in the window, or every one expired, which it counts) or
+// 'some'.
+export function quoteCard(q, currency) {
+  const s = extrasState(q);
+  if (s === 'hidden') return { state: 'hidden', message: null };
+  if (s === 'failed') return { state: 'failed', message: 'Couldn\'t read quotes from Xero — Refresh to try again.' };
+  if (q.total > 0) return { state: 'some', message: null };
+  const since = q.fromISO ? ` dated from ${q.fromISO}` : '';
+  const n = q.expired?.count || 0;
+  const expired = n > 0
+    ? ` ${n} sent quote${n === 1 ? ' has' : 's have'} passed ${n === 1 ? 'its' : 'their'} expiry date (${fmtMoney(q.expired.total, currency)}).`
+    : '';
+  return { state: 'none', message: `No open quotes${since}.${expired}` };
+}
+
+// The foot of Profitability's Gross profit tile. With nothing booked to cost
+// of sales it read "after SGD 0.00 of costs" whenever a cost of sales account
+// was budgeted; it says nothing was booked, and how much was budgeted for the
+// closed months, where a missing cost is a sign of bills not yet entered.
+export function grossProfitFoot(cogs, budgetedCogs, currency) {
+  const cents = v => Math.round(Number(v || 0) * 100);
+  if (cents(cogs) !== 0) return `after ${fmtMoney(cogs, currency)} of costs`;
+  return cents(budgetedCogs) !== 0
+    ? `no cost of sales booked (${fmtMoney(budgetedCogs, currency)} budgeted)`
+    : 'no cost of sales booked';
+}
+
+// A service line's Budget cell on the Revenue tab: the closed months' budget,
+// or "not budgeted" for a line with no budget in the range at all, which read
+// as a budget of SGD 0.00.
+export function lineBudgetText(budget, from, to, closedBudget, currency) {
+  const any = (budget || []).slice(from, to + 1).some(v => Number(v || 0) !== 0);
+  return any ? fmtMoney(closedBudget, currency) : 'not budgeted';
+}
+
 export function rangeLabel(months, from, to) {
   if (!months?.length) return '';
   return from === to ? months[from].label : `${months[from].label} – ${months[to].label}`;

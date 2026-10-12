@@ -1,6 +1,6 @@
 import { fmtMoney, fmtPct } from '../../utils/format';
 import { GroupedMonthlyBars, PriorYearBars, Waterfall } from './charts';
-import { BudgetLine, Empty, Legend, Metric, Surface, closedCaption, closedSpan, closedSum, priorYearReason, rangeLabel, slice, sliceSum, useRangeTotals } from './primitives';
+import { BudgetLine, Empty, Legend, Metric, Surface, closedCaption, closedSpan, closedSum, grossProfitFoot, priorYearReason, rangeLabel, slice, sliceSum, useRangeTotals } from './primitives';
 
 // ── Profitability ────────────────────────────────────────────────────────────────
 // Xero has no cash-flow-statement endpoint, so every figure here is constructed
@@ -260,7 +260,7 @@ export function ProfitabilityPanel({ data, from, to }) {
                 meter={T.grossMargin === null ? null : Math.max(0, Math.min(100, T.grossMargin * 100))}
                 tone={T.grossProfit < 0 ? 'var(--danger)' : 'var(--success)'}
                 footLeft={T.grossMargin === null ? 'No revenue' : `${fmtPct(T.grossMargin, 1)} margin`}
-                footRight={cogsLines.length ? `after ${fmtMoney(T.cogs, cur)} of costs` : 'no cost of sales booked'} />
+                footRight={grossProfitFoot(T.cogs, T.budgetClosed.cogs, cur)} />
         <Metric label="Net profit" value={fmtMoney(T.netProfit, cur)} meter={null}
                 tone={T.netProfit < 0 ? 'var(--danger)' : 'var(--success)'}
                 footLeft={T.netMargin === null ? 'No revenue' : `${fmtPct(T.netMargin, 1)} margin`}

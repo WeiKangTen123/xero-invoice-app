@@ -417,9 +417,10 @@ async function _getRevenueExtrasRaw(userId, tenantId, { fromKey, toKey, baseCurr
   } catch (err) {
     // One card out of many: the customers are still shown. Nothing is cached,
     // so the next visit asks for the quotes again rather than showing the card
-    // blank for the life of an entry.
+    // blank for the life of an entry. Marked as a failed read, so the card can
+    // say so rather than vanish as though there were no quotes.
     logger.warn('Performance: quotes unavailable', { userId, tenantId, error: err.message });
-    return { customerRevenue, quotePipeline: _noQuotePipeline() };
+    return { customerRevenue, quotePipeline: _noQuotePipeline(FAILED) };
   }
   const quotePipeline = { ..._buildQuotePipeline(quotes, baseCurrency, { todayISO: today }), fromISO };
   logger.info('Performance: top customers and quotes fetched', {
@@ -429,9 +430,16 @@ async function _getRevenueExtrasRaw(userId, tenantId, { fromKey, toKey, baseCurr
 }
 
 // What the Revenue tab shows while a figure is missing: the same shape, so
-// the screen never has to check for it.
-const _noCustomerRevenue = () => ({ customers: [], total: 0, count: 0, average: null, available: false });
-const _noQuotePipeline   = () => ({ sent: 0, accepted: 0, total: 0, counts: { sent: 0, accepted: 0 }, expired: { count: 0, total: 0 }, available: false });
+// the screen never has to check for it, and why it is missing. A read of Xero
+// that failed and a report that never asked are both available:false, and
+// the screen used to hide the card for either; it says so for the first, and
+// asks again for the second (the Overview's report, reused on the Revenue
+// tab, never asked). Genuinely none is not missing: available, with nothing in
+// it.
+const FAILED    = 'failed';
+const NOT_ASKED = 'not-asked';
+const _noCustomerRevenue = (reason = NOT_ASKED) => ({ customers: [], total: 0, count: 0, average: null, available: false, reason });
+const _noQuotePipeline   = (reason = NOT_ASKED) => ({ sent: 0, accepted: 0, total: 0, counts: { sent: 0, accepted: 0 }, expired: { count: 0, total: 0 }, available: false, reason });
 
 // Bound through the one in-flight map, so two requests for the same period's
 // extras share one read of Xero whatever else they ask for (the Revenue tab
@@ -675,8 +683,11 @@ async function _getPerformanceRaw(userId, tenantId, { timezone = 'UTC', force = 
         fromKey: bv.period.fromKey, toKey: bv.period.toKey, baseCurrency, timezone, force,
       }));
     } catch (err) {
-      // One card out of many — a failure here must not blank the tab.
+      // One card out of many — a failure here must not blank the tab. The
+      // quotes are never read when the invoices fail, so both cards say so.
       logger.warn('Performance: customer revenue unavailable', { userId, tenantId, error: err.message });
+      customerRevenue = _noCustomerRevenue(FAILED);
+      quotePipeline   = _noQuotePipeline(FAILED);
     }
   }
 

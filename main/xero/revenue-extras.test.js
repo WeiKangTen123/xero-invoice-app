@@ -160,6 +160,36 @@ describe('the Revenue tab\'s extras are cached, per period, for as long as the p
     expect(perf.months).toHaveLength(3);
     expect(reports._cache.has(extrasKey(T, PAST))).toBe(false);
   });
+
+  // The Revenue tab hid both cards whenever they were unavailable, so a read
+  // of Xero that failed looked the same as a report that never asked for them
+  // (the Overview's, reused on the tab) and as a period with no quotes at all.
+  // Each is now told apart: the screen says a failed read failed, asks again
+  // for a report that never asked, and shows none as none.
+  test('a failed read is told apart from a report that never asked, and from genuinely none', async () => {
+    const overview = await reports.getPerformance(U, T, { period: PAST });
+    expect(overview.customerRevenue).toMatchObject({ available: false, reason: 'not-asked' });
+    expect(overview.quotePipeline).toMatchObject({ available: false, reason: 'not-asked' });
+
+    api.getQuotes.mockRejectedValueOnce(new Error('rate limited'));
+    const quotesFailed = await revenue(T, PAST);
+    expect(quotesFailed.customerRevenue).toMatchObject({ available: true });
+    expect(quotesFailed.customerRevenue.reason).toBeUndefined();
+    expect(quotesFailed.quotePipeline).toMatchObject({ available: false, reason: 'failed' });
+
+    api.getInvoices.mockImplementation((tenant, since, where) =>
+      (/ACCREC/.test(where || '') ? Promise.reject(new Error('rate limited')) : Promise.resolve({ body: { invoices: INVOICES } })));
+    const invoicesFailed = await revenue(`${T}-b`, PAST);
+    expect(invoicesFailed.customerRevenue).toMatchObject({ available: false, reason: 'failed' });
+    expect(invoicesFailed.quotePipeline).toMatchObject({ available: false, reason: 'failed' });
+
+    api.getInvoices.mockResolvedValue({ body: { invoices: [] } });
+    api.getQuotes.mockResolvedValue({ body: { quotes: [] } });
+    const none = await revenue(`${T}-c`, PAST);
+    expect(none.customerRevenue).toMatchObject({ available: true, count: 0, customers: [] });
+    expect(none.quotePipeline).toMatchObject({ available: true, total: 0, fromISO: '2025-01-01' });
+    expect(none.quotePipeline.reason).toBeUndefined();
+  });
 });
 
 describe('a cold Dashboard load reads the organisation once', () => {

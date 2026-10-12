@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../../api/client';
 import { fmtMoney, fmtMoneyShort, fmtPct } from '../../utils/format';
 import { BarList, GroupedMonthlyBars, MonthlyBars } from './charts';
-import { CurrencyNote, Empty, Legend, Metric, Rows, Surface, closedAttainment, closedCaption, closedSpan, closedSum, closedVarianceItems, rangeLabel, slice, sliceSum, sum, useRangeTotals } from './primitives';
+import { CurrencyNote, Empty, Legend, Metric, Rows, Surface, closedAttainment, closedCaption, closedSpan, closedSum, closedVarianceItems, extrasState, lineBudgetText, quoteCard, rangeLabel, recurringRunRate, recurringTile, slice, sliceSum, sum, useRangeTotals } from './primitives';
 
 // Labels are matched as the server matches them: case and spacing ignored.
 const labelKey = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -63,10 +63,15 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
   const biggest = lineVariances[0] || null;
   const offsetting = lineVariances.length > 1 && Math.abs(totalC - totalBC) < Math.abs(biggest?.v ?? 0);
 
-  // Annualised run-rate from the recurring lines. Derived, not a Xero figure —
-  // labelled as such, and meaningless with no closed months to annualise from.
-  const monthsInPeriod = Math.max(1, to - from + 1);
-  const runRate = T.recurring !== 0 ? (T.recurring / monthsInPeriod) * 12 : null;
+  // Annualised run-rate from the recurring lines over the closed months (see
+  // recurringRunRate). Derived, not a Xero figure — labelled as such, and
+  // meaningless with no closed months to annualise from.
+  const run = recurringRunRate(data, from, to);
+  const recurringT = recurringTile(lines, T.recurring, T.recurringMix, cur);
+  // The Revenue tab's extras, which may still be on their way (the page asks
+  // again for a report that never asked for them), or may have failed.
+  const quotes = quoteCard(data.quotePipeline, cur);
+  const customersState = extrasState(data.customerRevenue);
 
   const waterfall = [
     ...lines.map(l => ({ label: l.label, value: sliceSum(l.actual, from, to), tag: l.recurring ? 'recurring' : null })),
@@ -123,14 +128,16 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
                 footLeft={T.openMonthLabel ? `incl. ${T.openMonthLabel} so far` : rangeLabel(data.months, from, to)}
                 footRight={att.ratio !== null ? `${fmtPct(att.ratio, 0)} of budget to ${att.throughLabel}`
                          : !compared ? 'No closed month yet' : 'No budget set'} />
-        <Metric label="Recurring revenue" value={fmtMoney(T.recurring, cur)}
-                meter={T.recurringMix === null ? null : T.recurringMix * 100}
-                footLeft={T.recurringMix === null ? 'No revenue yet' : `${fmtPct(T.recurringMix, 0)} of revenue`}
+        <Metric label="Recurring revenue" value={recurringT.value}
+                meter={recurringT.meter}
+                footLeft={recurringT.footLeft}
                 footRight={markedCount === 0 ? 'Name-inferred'
                          : markedCount === lines.length ? 'Set by you' : 'Partly set by you'} />
-        <Metric label="Recurring run-rate" value={runRate === null ? '—' : fmtMoney(runRate, cur)}
+        <Metric label="Recurring run-rate" value={run.annual === null ? '—' : fmtMoney(run.annual, cur)}
                 meter={null}
-                footLeft={runRate === null ? 'No recurring revenue' : `${fmtMoney(T.recurring, cur)} over ${monthsInPeriod}mo`}
+                footLeft={run.months === 0 ? 'No closed month yet'
+                        : run.annual === null ? 'No recurring revenue'
+                        : `${fmtMoney(run.total, cur)} over ${run.months} closed month${run.months === 1 ? '' : 's'}`}
                 footRight="Annualised · derived" />
         <Metric label="Largest variance"
                 value={biggest ? `${biggest.v > 0 ? '+' : ''}${fmtMoney(biggest.v, cur)}` : '—'}
@@ -184,7 +191,14 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
         </Surface>
       </div>
 
-      {data.quotePipeline?.available && data.quotePipeline.total > 0 && (
+      {/* Shown whenever the quotes were asked for: a failed read and a
+          period with none open say so, where the card used to vanish. */}
+      {quotes.state !== 'hidden' && quotes.state !== 'some' && (
+        <Surface title="Quoted, not yet invoiced" right="sales pipeline">
+          <Empty>{quotes.message}</Empty>
+        </Surface>
+      )}
+      {quotes.state === 'some' && (
         <Surface title="Quoted, not yet invoiced" right="sales pipeline">
           <BarList currency={cur} items={[
             { label: `Accepted (${data.quotePipeline.counts.accepted})`, value: data.quotePipeline.accepted, color: 'var(--success)' },
@@ -202,7 +216,14 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
         </Surface>
       )}
 
-      {data.customerRevenue?.available && (
+      {customersState === 'failed' && (
+        <div style={{ marginTop: 16, marginBottom: 16 }}>
+          <Surface title="Top customers">
+            <Empty>Couldn&apos;t read invoices from Xero — Refresh to try again.</Empty>
+          </Surface>
+        </div>
+      )}
+      {customersState === 'ready' && (
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 16, marginBottom: 16 }}>
           <Surface title="Top customers" right={`${data.customerRevenue.count} invoiced`} flex={7} minWidth={380}>
             {data.customerRevenue.customers.length === 0
@@ -283,7 +304,7 @@ export function RevenuePanel({ data: given, from, to, selectedLine, onSelectLine
                       </select>
                     </td>
                     <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: a < 0 ? 'var(--danger)' : undefined }}>{fmtMoney(a, cur)}</td>
-                    <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-muted)' }}>{compared ? fmtMoney(b, cur) : '—'}</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--text-muted)' }}>{compared ? lineBudgetText(l.budget, from, to, b, cur) : '—'}</td>
                     <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 700, color: !v ? undefined : v > 0 ? 'var(--success)' : 'var(--danger)' }}>
                       {!v ? <span style={{ color: 'var(--text-muted)' }}>-</span> : `${v > 0 ? '+' : ''}${fmtMoney(v, cur)}`}
                     </td>

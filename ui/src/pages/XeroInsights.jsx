@@ -13,6 +13,8 @@ import { balancesByName } from './xero-insights/balances';
 import { KpiCard, LiveStatus, lastLoaded } from './xero-insights/bits';
 import { hasChanged, shouldRefetchTab, oldestRead, liveLabel } from './xero-insights/live';
 import { defaultControls, queryFor } from './xero-insights/balance';
+import { perfExtras, shouldReaskCustomers, shouldReaskCashFlow, analysedAt } from './xero-insights/perf-requests';
+import { awaitingLine, overdueLine, creditLine } from './xero-insights/headline';
 import BankingTab from './xero-insights/BankingTab';
 import BalanceSheetTab from './xero-insights/BalanceSheetTab';
 import CashManagerTab from './xero-insights/CashManagerTab';
@@ -213,6 +215,10 @@ export default function XeroInsights() {
   // Fetched separately from the figures so an LLM outage or a missing API key
   // can never delay or blank the dashboard itself.
   const [insights, setInsights] = useState(null);
+  // Whether the variance-insights request itself failed. Without it, a missing
+  // `insights` reads as still loading, and the Analysis tab's checklist said
+  // "Loading…" for good after a failed request.
+  const [insightsError, setInsightsError] = useState(false);
   // Arrives after the figures, like insights — an LLM outage must never delay
   // or blank the numbers.
   const [narrative, setNarrative] = useState(null);
@@ -492,6 +498,19 @@ export default function XeroInsights() {
     fetchPerf({ figuresOnly: true });
   }, [tab, perf.status, perf.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // The same for the two parts only one tab asks for. Revenue reached from
+  // Overview reused a report with no top customers or quotes, and hid both
+  // cards; Banking reused one whose cash in and out were the last 31 days,
+  // and showed them under the period's label. Each is asked for again,
+  // quietly, so the figures stay up until the reply lands; a reply to a
+  // request that already asked is never asked again (see perf-requests.js).
+  const customersReply = useRef(null);
+  const cashFlowReply  = useRef(null);
+  useEffect(() => {
+    if (shouldReaskCustomers(tab, perf, customersReply.current)
+        || shouldReaskCashFlow(tab, perf, cashFlowReply.current)) fetchPerf({ quiet: true });
+  }, [tab, perf.status, perf.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // `quiet` (a re-read after a change seen in Xero) keeps the list on screen
   // while it reloads, and keeps it on a failure too. The read's stamp is kept
   // with the list, to tell one read before a change from one read after.
@@ -591,10 +610,13 @@ export default function XeroInsights() {
     if (opts.force) params.set('force', 'true');
     // Only Banking renders cash in/out. Asking for it elsewhere would make
     // getBankSummary split a long period into 365-day windows for a number
-    // nothing displays.
-    if (tab === 'banking') params.set('cashFlow', 'true');
-    // Top customers needs an invoice fetch, so only the Revenue tab asks for it.
-    if (tab === 'revenue') params.set('customers', 'true');
+    // nothing displays. Top customers needs an invoice fetch, so only the
+    // Revenue tab asks for it. A re-ask of the figures on screen — for last
+    // year's months, or after a change seen in Xero — keeps either when they
+    // already had it, so neither tab finds it gone (see perfExtras).
+    const extras = perfExtras(tab, opts.figuresOnly || opts.quiet ? perf.data : null);
+    if (extras.cashFlow)  params.set('cashFlow', 'true');
+    if (extras.customers) params.set('customers', 'true');
     // Last year's same months are a second report, so only the tabs that show
     // them ask for them.
     if (COMPARE_TABS.includes(tab)) params.set('compare', 'prior-year');
@@ -602,6 +624,8 @@ export default function XeroInsights() {
       .then(d => {
         if (n !== seq.current.perf) return;
         if (params.has('compare')) compareReply.current = d;
+        if (params.has('customers')) customersReply.current = d;
+        if (params.has('cashFlow')) cashFlowReply.current = d;
         setPerf({ status: 'done', data: d, error: '' });
         // The server already resolved exactly which months this period covers,
         // so the panels span all of them. Narrowing further is done by changing
@@ -777,10 +801,17 @@ export default function XeroInsights() {
       q.delete('preset');
       q.delete('window');
     }
+    // Stamped only when the variance insights came back from the model: a
+    // failed request, or the computed fallback (its `failed`, handed to the
+    // Analysis tab as it came, says why), was stamped "up to date" as well.
+    // The stamp is cleared then, as it described the commentary this replaces.
+    if (fresh()) setInsightsError(false);
     return Promise.allSettled([
-      api.get(`/xero-reports/variance-insights?${q.toString()}`).then(d => { if (fresh()) setInsights(d); }),
+      api.get(`/xero-reports/variance-insights?${q.toString()}`)
+        .then(d => { if (fresh()) setInsights(d); return d; })
+        .catch(err => { if (fresh()) setInsightsError(true); throw err; }),
       api.get(`/xero-reports/narrative?${q.toString()}`).then(d => { if (fresh()) setNarrative(d); }),
-    ]).then(() => { if (fresh()) setLastAnalysedAt(new Date().toISOString()); });
+    ]).then(([insightsOutcome]) => { if (fresh()) setLastAnalysedAt(analysedAt(insightsOutcome, new Date().toISOString())); });
   }
 
   async function reanalyse() {
@@ -832,6 +863,10 @@ export default function XeroInsights() {
 
   const { organisation, kpis, tenants } = data;
   const currency = organisation.currency !== '—' ? organisation.currency : '';
+  // The headline cards' amounts, abbreviated on a phone as their totals are,
+  // and a card's second line (a note about credit notes) under its first.
+  const money = v => (isMobile ? fmtMoneyShort(v, currency) : fmtMoney(v, currency));
+  const withNote = (line, note) => (note ? <>{line}<span style={{ display: 'block' }}>{note}</span></> : line);
 
   // When Xero was read for each report on screen: the summary always, the open
   // tab's report while its figures are showing, and the open ageing side. The
@@ -931,9 +966,7 @@ export default function XeroInsights() {
           onClick={() => setAgeingSide(ageingSide === 'receivables' ? null : 'receivables')}
           active={ageingSide === 'receivables'} controls="dashboard-ageing" actionLabel="Receivables by age and customer"
           value={isMobile ? fmtMoneyShort(kpis.totalReceivables, currency) : fmtMoney(kpis.totalReceivables, currency)}
-          sub={isMobile
-            ? `${kpis.receivablesCount} invoice${kpis.receivablesCount !== 1 ? 's' : ''}`
-            : `${kpis.receivablesCount} sales invoice${kpis.receivablesCount !== 1 ? 's' : ''} awaiting payment`}
+          sub={withNote(awaitingLine('receivables', kpis.receivablesCount, isMobile), creditLine(kpis, 'receivables', money, isMobile))}
         />
         <KpiCard
           icon="▣" tone="danger"
@@ -941,9 +974,7 @@ export default function XeroInsights() {
           onClick={() => setAgeingSide(ageingSide === 'payables' ? null : 'payables')}
           active={ageingSide === 'payables'} controls="dashboard-ageing" actionLabel="Payables by age and supplier"
           value={isMobile ? fmtMoneyShort(kpis.totalPayables, currency) : fmtMoney(kpis.totalPayables, currency)}
-          sub={isMobile
-            ? `${kpis.payablesCount} bill${kpis.payablesCount !== 1 ? 's' : ''}`
-            : `${kpis.payablesCount} bill${kpis.payablesCount !== 1 ? 's' : ''} awaiting payment`}
+          sub={withNote(awaitingLine('payables', kpis.payablesCount, isMobile), creditLine(kpis, 'payables', money, isMobile))}
         />
         {/* Two figures, never one sum. This card used to add bills you are late
             paying to invoices customers are late paying, which netted two
@@ -965,9 +996,7 @@ export default function XeroInsights() {
               <span>{isMobile ? fmtMoneyShort(kpis.overduePayables, currency) : fmtMoney(kpis.overduePayables, currency)}</span>
             </span>
           )}
-          sub={isMobile
-            ? `${kpis.overdueReceivablesCount} inv · ${kpis.overduePayablesCount} bill${kpis.overduePayablesCount !== 1 ? 's' : ''}`
-            : `${kpis.overdueReceivablesCount} invoice${kpis.overdueReceivablesCount !== 1 ? 's' : ''} and ${kpis.overduePayablesCount} bill${kpis.overduePayablesCount !== 1 ? 's' : ''} past due`}
+          sub={overdueLine(kpis.overdueReceivablesCount, kpis.overduePayablesCount, isMobile)}
         />
       </div>
 
@@ -1104,7 +1133,7 @@ export default function XeroInsights() {
           {perf.data && !perf.error && (
             <AnalysisPanel
               data={perf.data} from={monthFrom} to={monthTo}
-              insights={insights} narrative={narrative}
+              insights={insights} insightsError={insightsError} narrative={narrative}
               onReanalyse={reanalyse} reanalysing={reanalysing} lastAnalysedAt={lastAnalysedAt}
             />
           )}
