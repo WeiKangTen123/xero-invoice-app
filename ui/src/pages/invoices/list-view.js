@@ -67,17 +67,79 @@ export function overdueDays(inv, today) {
   return Math.max(0, now - due);
 }
 
+// In Xero, but what became of it there has not been read back yet (the
+// status check has not reached it). It is still counted as unpaid, since
+// nothing says otherwise, but it may have been paid in Xero meanwhile.
+export function xeroStatusUnknown(inv) {
+  return !!inv && !!inv.xeroInvoiceId && !inv.xeroStatus;
+}
+
 // What the Due column shows, or null for an expense claim, which shows
 // nothing. { date, label, overdue }: label is the date itself, "Due today",
-// or "Overdue 12 days" (shown in red).
+// or "Overdue 12 days" (shown in red). An overdue record whose Xero status is
+// not known yet also has note: 'status unknown' and noteTitle, so the screen
+// does not call a bill overdue that Xero may already have paid.
 export function dueInfo(inv, today) {
   if (!hasDueDate(inv)) return null;
   const date = dayNumber(inv.dueDate) === null ? null : String(inv.dueDate).slice(0, 10);
   if (!date) return { date: null, label: '—', overdue: false };
   const days = overdueDays(inv, today);
-  if (days > 0) return { date, label: `Overdue ${days} day${days === 1 ? '' : 's'}`, overdue: true };
+  if (days > 0) {
+    const label = `Overdue ${days} day${days === 1 ? '' : 's'}`;
+    if (!xeroStatusUnknown(inv)) return { date, label, overdue: true };
+    return { date, label, overdue: true, note: 'status unknown',
+             noteTitle: 'Not checked in Xero yet, so it may already have been paid there. Counted as unpaid until Xero is asked.' };
+  }
   if (date === today && isUnpaid(inv) && inv.status !== 'duplicate') return { date, label: 'Due today', overdue: false };
   return { date, label: date, overdue: false };
+}
+
+// ── Received ────────────────────────────────────────────────────────────────
+// When the record arrived here (the email's date, or when it was scanned), as
+// the Received pills filter it. Not the date printed on the document.
+
+export function receivedAt(inv) {
+  const v = inv && (inv.receivedAt || inv.processedAt);
+  if (!v) return null;
+  const at = new Date(v);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+// Inclusive lower bound for a preset, or null for "all time".
+export function receivedCutoff(preset, now = new Date()) {
+  switch (preset) {
+    case 'today': { const d = new Date(now); d.setHours(0, 0, 0, 0); return d; }
+    case '7d':    return new Date(now.getTime() - 7  * 86400000);
+    case '30d':   return new Date(now.getTime() - 30 * 86400000);
+    case 'month': return new Date(now.getFullYear(), now.getMonth(), 1);
+    default:      return null;
+  }
+}
+
+// Whether a record arrived within a Received filter. 'custom' is the range
+// typed into the two date boxes ({ from, to }, YYYY-MM-DD, either may be
+// blank), whole days on this device's calendar.
+export function receivedIn(inv, filter, { from = '', to = '' } = {}, now = new Date()) {
+  if (!filter || filter === 'all') return true;
+  const at = receivedAt(inv);
+  if (!at) return false;
+  if (filter === 'custom') {
+    if (from && at < new Date(`${from}T00:00:00`)) return false;
+    if (to   && at > new Date(`${to}T23:59:59`))   return false;
+    return true;
+  }
+  const cutoff = receivedCutoff(filter, now);
+  return !cutoff || at >= cutoff;
+}
+
+// The count on a Received pill, over the rows of the open tab only, as the
+// Status pills count; undefined shows no count. All time shows none (the tab
+// already says how many), and Custom shows one only once a range is typed:
+// it counted nothing at all before, which read as "nothing arrived".
+export function receivedCount(rows, filter, range = {}, now = new Date()) {
+  if (!filter || filter === 'all') return undefined;
+  if (filter === 'custom' && !range.from && !range.to) return undefined;
+  return (rows || []).filter(inv => receivedIn(inv, filter, range, now)).length;
 }
 
 // ── Sorting ─────────────────────────────────────────────────────────────────

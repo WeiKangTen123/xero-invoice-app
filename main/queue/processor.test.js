@@ -33,7 +33,7 @@ test('posts inline and returns the Xero id and its org even when REDIS_URL is se
   process.env.REDIS_URL = 'redis://localhost:1';
   try {
     const sent = await enqueueInvoice('u1', { invoiceNumber: 'INV-1', vendorName: 'Acme', totalAmount: 10 });
-    expect(sent).toEqual({ xeroInvoiceId: 'xero-1', tenantId: 't-1' });
+    expect(sent).toMatchObject({ xeroInvoiceId: 'xero-1', tenantId: 't-1' });
     expect(createDraftInvoice).toHaveBeenCalledWith('u1', 't-1', expect.objectContaining({ invoiceNumber: 'INV-1' }));
   } finally {
     delete process.env.REDIS_URL;
@@ -60,7 +60,7 @@ test('no connected org: nothing is sent and null comes back', async () => {
 
 test('a failed notification after the bill is in Xero is not a failed send', async () => {
   notifyInvoiceCreated.mockRejectedValueOnce(new Error('slack down'));
-  await expect(enqueueInvoice('u1', { invoiceNumber: 'INV-1' })).resolves.toEqual({ xeroInvoiceId: 'xero-1', tenantId: 't-1' });
+  await expect(enqueueInvoice('u1', { invoiceNumber: 'INV-1' })).resolves.toMatchObject({ xeroInvoiceId: 'xero-1', tenantId: 't-1' });
 });
 
 // Every connected org used to get its own copy of every bill, and only the
@@ -79,7 +79,7 @@ describe('one Xero company per invoice', () => {
     mockTenants = TWO;
     mockDefaultTenantId = 't-2';
     const sent = await enqueueInvoice('u1', { invoiceNumber: 'INV-1' });
-    expect(sent).toEqual({ xeroInvoiceId: 'xero-1', tenantId: 't-2' });
+    expect(sent).toMatchObject({ xeroInvoiceId: 'xero-1', tenantId: 't-2' });
     expect(createDraftInvoice).toHaveBeenCalledTimes(1);
     expect(createDraftInvoice).toHaveBeenCalledWith('u1', 't-2', expect.anything());
   });
@@ -101,7 +101,7 @@ describe('one Xero company per invoice', () => {
     mockTenants = TWO;
     mockDefaultTenantId = 't-1';
     const sent = await enqueueInvoice('u1', { invoiceNumber: 'INV-1', xeroInvoiceId: 'xero-2', xeroTenantId: 't-2' });
-    expect(sent).toEqual({ xeroInvoiceId: 'xero-2', tenantId: 't-2' });
+    expect(sent).toMatchObject({ xeroInvoiceId: 'xero-2', tenantId: 't-2' });
     expect(updateDraftInvoice).toHaveBeenCalledTimes(1);
     expect(updateDraftInvoice).toHaveBeenCalledWith('u1', 't-2', 'xero-2', expect.anything());
     expect(createDraftInvoice).not.toHaveBeenCalled();

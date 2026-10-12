@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { usePipeline } from '../../context/PipelineContext';
 import { useViewMode } from '../../context/ViewModeContext';
+import { pipelineSummary, xeroPipeline } from '../../pages/automation';
 
 const NAV = [
   { to: '/dashboard',  label: 'Dashboard',  icon: '▦',  desc: 'Financial reports' },
@@ -113,11 +114,10 @@ function PipelineWidget({ isDark }) {
   const xero  = status?.xero;
 
   const emailActive = queue && (queue.processing > 0 || queue.pending > 0 || queue.dead > 0);
-  const total       = xero ? (xero.pending + xero.submitting + xero.posted + xero.error) : 0;
-  const pctPosted   = total > 0 ? (xero.posted     / total) * 100 : 0;
-  const pctActive   = total > 0 ? (xero.submitting / total) * 100 : 0;
-  const pctFailed   = total > 0 ? (xero.error      / total) * 100 : 0;
-  const allPosted   = total > 0 && xero.posted === total;
+  // The same figures as the Automation page (pages/automation.js), review-
+  // needed and reviewed included: without them it read "All posted" over
+  // bills still waiting on a person.
+  const { total, pctPosted, pctActive, pctFailed, allPosted, error } = xeroPipeline(xero);
 
   const borderColor = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)';
   const muted       = isDark ? 'rgba(255,255,255,0.3)' : '#9399b0';
@@ -157,8 +157,8 @@ function PipelineWidget({ isDark }) {
       {/* Xero row + mini bar */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: total > 0 ? 5 : 0 }}>
         <span style={{ fontSize: 11, color: muted }}>Xero</span>
-        <span style={{ fontSize: 11, color: allPosted ? 'var(--success)' : xero?.error > 0 ? 'var(--danger)' : muted }}>
-          {total === 0 ? 'No invoices' : allPosted ? 'All posted' : `${xero.posted}/${total} posted`}
+        <span style={{ fontSize: 11, color: allPosted ? 'var(--success)' : error > 0 ? 'var(--danger)' : muted }}>
+          {pipelineSummary(xero, status?.invoiceCount)}
         </span>
       </div>
       {total > 0 && (

@@ -5,6 +5,8 @@ import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { staggerIn } from '../../utils/stagger';
 import { receivedLabel, totalsLabel } from './helpers';
 import { SORT_FIELDS, dueInfo } from './list-view';
+import { sourceBadge } from './source';
+import { xeroStatusNote } from './xero-status';
 import { claimKindLabel, claimSourceBadge } from '../../components/receipts/allowance';
 
 // Reset so the group heading's button looks like the row it always was; the
@@ -101,6 +103,9 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                   const needsAttention = ATTENTION_STATUSES.includes(inv.status);
                   const isDup         = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
                   const due           = showDue ? dueInfo(inv, today) : null;
+                  // A mileage or per diem claim by its kind; anything else by
+                  // where it came from (source.js).
+                  const src           = claimSourceBadge(inv) || sourceBadge(inv);
                   return (
                     <tr
                       key={inv.id}
@@ -181,6 +186,9 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                           {due && (due.overdue ? (
                             <span style={{ display: 'flex', flexDirection: 'column' }}>
                               <span style={{ color: 'var(--danger)', fontWeight: 700 }}>{due.label}</span>
+                              {due.note && (
+                                <span style={{ color: 'var(--text-muted)', fontSize: 11, cursor: 'help' }} title={due.noteTitle}>{due.note}</span>
+                              )}
                               <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{due.date}</span>
                             </span>
                           ) : (
@@ -199,15 +207,7 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                         {receivedLabel(inv.receivedAt || inv.processedAt)}
                       </td>
                       <td>
-                        {claimSourceBadge(inv)
-                          ? <span className={claimSourceBadge(inv).className} title={claimSourceBadge(inv).title}>{claimSourceBadge(inv).text}</span>
-                          : inv.receiptFile
-                          ? <span className="badge badge-yellow" title={inv.source === 'phone' ? 'Captured with phone' : 'Receipt photo'}>
-                              {inv.source === 'phone' ? '📱 Phone' : '🧾 Receipt'}
-                            </span>
-                          : inv.hasPdf
-                            ? <span className="badge badge-green">📄 PDF</span>
-                            : <span className="badge badge-gray">✉ Email</span>}
+                        <span className={src.className} title={src.title}>{src.text}</span>
                       </td>
                       <td>
                         {isDup && inv.status !== 'duplicate' ? (
@@ -215,9 +215,10 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                             ⚠ Suspected Dup
                           </span>
                         ) : (
-                          <span className={`badge ${cls}`}>{label}</span>
+                          <span className={`badge ${cls}`} title={xeroStatusNote(inv) || undefined}>{label}</span>
                         )}
-                        {/* What became of it in Xero, under the app's own status. */}
+                        {/* What became of it in Xero, under the app's own status;
+                            until Xero has been asked, the badge above says so. */}
                         <XeroStatusBadge invoice={inv} style={{ display: 'flex', marginTop: 4 }} />
                       </td>
                       <td onClick={e => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>

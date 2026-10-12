@@ -21,9 +21,9 @@ import { FilterPill } from './invoices/FilterPill';
 import MobileList from './invoices/MobileList';
 import MobileSelectionBar from './invoices/MobileSelectionBar';
 import BulkResultsPanel from './invoices/BulkResultsPanel';
-import { DEFAULT_TAB, TABS, countOf, currencyTotals, receivedBucket, receivedCutoff, scannedNote, tabByKey } from './invoices/helpers';
+import { DEFAULT_TAB, TABS, countOf, currencyTotals, receivedBucket, scannedNote, tabByKey } from './invoices/helpers';
 import { XERO_STATUS_META, repostBlockedReason, syncSummary, xeroStatusKey } from './invoices/xero-status';
-import { SORT_FIELDS, formatSort, nextSort, overdueDays, parseSort, sortLabel, sortRows, todayIn } from './invoices/list-view';
+import { SORT_FIELDS, formatSort, nextSort, overdueDays, parseSort, receivedCount, receivedIn, sortLabel, sortRows, todayIn } from './invoices/list-view';
 import { csvFilename, invoiceCsv } from './invoices/csv';
 import { BULK_MAX, bulkConfirm, stillSelected, summarise } from './invoices/bulk';
 import { DEFAULT_TIMEZONE } from '../utils/formatDate';
@@ -412,17 +412,7 @@ export default function Invoices() {
       return false;
     }
     // Filters on WHEN IT ARRIVED, not the date on the document.
-    if (receivedFilter !== 'all') {
-      const at = (inv.receivedAt || inv.processedAt) ? new Date(inv.receivedAt || inv.processedAt) : null;
-      if (!at || Number.isNaN(at.getTime())) return false;
-      if (receivedFilter === 'custom') {
-        if (customFrom && at < new Date(`${customFrom}T00:00:00`)) return false;
-        if (customTo   && at > new Date(`${customTo}T23:59:59`))   return false;
-      } else {
-        const cutoff = receivedCutoff(receivedFilter);
-        if (cutoff && at < cutoff) return false;
-      }
-    }
+    if (!receivedIn(inv, receivedFilter, { from: customFrom, to: customTo })) return false;
 
     if (!filter) return true;
     const q = filter.toLowerCase();
@@ -766,18 +756,14 @@ export default function Invoices() {
           { key: 'month',  label: 'This month' },
           { key: 'custom', label: 'Custom' },
         ].map(t => (
+          // Counted over the open tab, as the Status pills are; over the
+          // whole list, the Bills tab's counts took in invoices and claims.
           <FilterPill
             key={t.key}
             active={receivedFilter === t.key}
             onClick={() => setReceivedFilter(t.key)}
             label={t.label}
-            count={t.key === 'all' ? undefined : invoices.filter(i => {
-              const at = (i.receivedAt || i.processedAt) ? new Date(i.receivedAt || i.processedAt) : null;
-              if (!at || Number.isNaN(at.getTime())) return false;
-              if (t.key === 'custom') return false;
-              const c = receivedCutoff(t.key);
-              return !c || at >= c;
-            }).length}
+            count={receivedCount(tabRows, t.key, { from: customFrom, to: customTo })}
           />
         ))}
 
@@ -807,7 +793,7 @@ export default function Invoices() {
             />
           </div>
           <span style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-            {filtered.length} of {invoices.length}
+            {filtered.length} of {tabRows.length}
           </span>
           {/* Refreshes behind the table: the rows stay put and only this
               button shows that a fetch is out. */}

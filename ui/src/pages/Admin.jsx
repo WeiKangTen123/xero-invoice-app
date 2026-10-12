@@ -659,6 +659,9 @@ function MonitoringPanel({ timezone, onViewLogs }) {
   const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
   const [daily,   setDaily]   = useState(null);
+  // The timezone the server counted the chart's days in (its answer's
+  // timeZone), named under the chart's title.
+  const [dailyZone, setDailyZone] = useState(null);
   const [busy,    setBusy]    = useState(null);   // `key:userId` while a control is in flight
   const [actionError, setActionError] = useState('');
   // A failed first load used to render nothing at all — not even a heading.
@@ -696,9 +699,16 @@ function MonitoringPanel({ timezone, onViewLogs }) {
   }
 
   // `false` for a failed load, so the chart can say so rather than draw an
-  // empty month as if nothing had been processed.
+  // empty month as if nothing had been processed. The server counts the days
+  // in this admin's own account timezone, the one every time on this page is
+  // shown in; they were UTC days, which put a Singapore morning on the day
+  // before.
   async function fetchDaily() {
-    try { setDaily((await api.get('/admin/stats/daily?days=30')).days); }
+    try {
+      const d = await api.get('/admin/stats/daily?days=30');
+      setDaily(d.days);
+      setDailyZone(d.timeZone || null);
+    }
     catch (_) { setDaily(false); }
   }
 
@@ -746,7 +756,9 @@ function MonitoringPanel({ timezone, onViewLogs }) {
       {/* Invoice volume trend */}
       <div className="card">
         <div className="card-title" style={{ marginBottom: 2 }}>Invoice Volume — Last 30 Days</div>
-        <div className="card-subtitle">Every user combined, by day processed</div>
+        <div className="card-subtitle">
+          Every user combined, by day processed{dailyZone ? ` (${dailyZone === 'UTC' ? 'UTC days' : `days in ${dailyZone}`})` : ''}
+        </div>
         {daily === null ? (
           <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>Loading…</div>
         ) : daily === false ? (
@@ -772,8 +784,8 @@ function MonitoringPanel({ timezone, onViewLogs }) {
                 <th style={{ padding: '6px 10px' }}>Xero</th>
                 <th style={{ padding: '6px 10px' }}>IMAP</th>
                 <th style={{ padding: '6px 10px' }}>Queue (pend/proc/dead)</th>
-                <th style={{ padding: '6px 10px' }}>Invoices (pend/posted/err)</th>
-                <th style={{ padding: '6px 10px' }}>Last Activity</th>
+                <th style={{ padding: '6px 10px' }}>Invoices (pend/review/posted/err)</th>
+                <th style={{ padding: '6px 10px' }} title="When the newest record arrived for this account">Last Activity</th>
                 <th style={{ padding: '6px 10px' }}>Last Seen</th>
               </tr>
             </thead>
@@ -833,8 +845,10 @@ function MonitoringPanel({ timezone, onViewLogs }) {
                   <td style={{ padding: '8px 10px' }}>
                     {u.queue.pending} / {u.queue.processing} / {u.queue.dead}
                   </td>
+                  {/* Review-needed is the one that waits on a person; the
+                      server always sent it and the column left it out. */}
                   <td style={{ padding: '8px 10px' }}>
-                    {u.invoices.pending} / {u.invoices.posted} / {u.invoices.error}
+                    {u.invoices.pending} / {u.invoices.reviewNeeded ?? 0} / {u.invoices.posted} / {u.invoices.error}
                   </td>
                   <td style={{ padding: '8px 10px', color: 'var(--text-muted)' }}>
                     {formatDateTime(u.lastActivity, timezone)}

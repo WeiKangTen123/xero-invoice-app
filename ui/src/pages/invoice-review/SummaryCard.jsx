@@ -2,6 +2,7 @@ import { fmtMoney } from '../../utils/format';
 import AccountCodeSelect from '../../components/AccountCodeSelect';
 import { ALLOWANCE_KINDS, isAllowanceClaim } from '../../components/receipts/allowance';
 import { AccountMiniField, MiniField, PrefillNote, accountFallbackText } from './bits';
+import { sourceLine } from '../invoices/source';
 
 export default function SummaryCard({ id, inv, editing, form, updateField, isExpense, typeLabel, navigate, xeroCompany }) {
   // Mileage and per diem have no receipt, so no receipt date; the date is the
@@ -129,14 +130,9 @@ export default function SummaryCard({ id, inv, editing, form, updateField, isExp
                     )}
                   </div>
                   <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
-                    Source: {
-                      allowance ? `${ALLOWANCE_KINDS[inv.claimKind].long} (typed in, no receipt)` :
-                      inv.source === 'claim' ? 'Expense Claim (Imported)' :
-                      inv.source === 'phone' ? 'Mobile Camera Upload' :
-                      inv.source === 'upload' ? 'Direct Receipt Upload' :
-                      inv.source === 'pdf' ? 'PDF Attachment' :
-                      (inv.receiptFile ? 'Receipt Upload' : 'Email Body')
-                    }
+                    {/* By the record's own source: an invoice typed into the
+                        form or imported from a spreadsheet read "Email Body". */}
+                    Source: {allowance ? `${ALLOWANCE_KINDS[inv.claimKind].long} (typed in, no receipt)` : sourceLine(inv)}
                   </div>
                 </>
               )}

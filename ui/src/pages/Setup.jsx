@@ -9,6 +9,7 @@ import { useConfirm } from '../context/ConfirmContext';
 import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
 import { useUnsavedChanges } from '../utils/useUnsavedChanges';
 import { boxState, defaultBoxes, extrasParam, optionalBoxes } from './setup/connect';
+import { companiesView, companyBadge } from './setup/company-status';
 
 const HELP = {
   XERO_CLIENT_ID:        'Your Xero Custom Connection client ID. Found in developer.xero.com → My Apps → your app.',
@@ -403,6 +404,11 @@ function DefaultTenantPicker({ tenants }) {
 function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs, onTest, onConnectionChange }) {
   const confirm = useConfirm();
   const [tenants, setTenants]       = useState(null); // null = loading
+  // Whether the last read of the companies, or of the connection's state,
+  // failed: the rows then say "Couldn't check" rather than pass a failed
+  // read off as no companies, or as a live connection.
+  const [tenantsFailed, setTenantsFailed]       = useState(false);
+  const [connectionFailed, setConnectionFailed] = useState(false);
   const [connectionType, setConnectionType] = useState('custom');
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -422,10 +428,12 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
     try {
       const c = await api.get(`/xero/connection${force ? '?force=true' : ''}`);
       setConnection(c);
+      setConnectionFailed(false);
       setBoxes(defaultBoxes(c.optional));
     } catch (_) {
       // A failed check is not news about Xero: the last answer stands, and
       // with none, Connect leaves the choice of permissions to the server.
+      setConnectionFailed(true);
     }
   }
 
@@ -449,8 +457,10 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
       const d = await api.get('/xero/tenants');
       setConnectionType(d.connectionType || 'custom');
       setTenants(d.tenants || []);
+      setTenantsFailed(false);
     } catch (_) {
       setTenants([]);
+      setTenantsFailed(true);
     } finally {
       // Anything else on this page reading Xero data has to be told the
       // connection moved. Without this, disconnecting left the previous
@@ -573,9 +583,23 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
 
       <div style={{ height: 1, background: 'var(--border)', marginBottom: 20 }} />
 
-      {tenants === null ? (
+      {/* Each company is "● Live" only while /xero/connection says the
+          connection works; it said Live whatever the connection's state
+          (setup/company-status.js). */}
+      {companiesView(tenants, tenantsFailed) === 'loading' ? (
         <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>Checking connection…</div>
-      ) : tenants.length > 0 ? (
+      ) : companiesView(tenants, tenantsFailed) === 'failed' ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, marginBottom: 16, flexWrap: 'wrap' }}>
+          <span className="badge badge-gray">Couldn’t check</span>
+          <span style={{ color: 'var(--text-muted)' }}>Could not read which Xero companies are connected.</span>
+          <button type="button" className="btn btn-outline btn-sm" onClick={fetchTenants}>Try again</button>
+        </div>
+      ) : companiesView(tenants, tenantsFailed) === 'none' ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, marginBottom: 16 }}>
+          <span className="badge badge-gray">Not connected</span>
+          <span style={{ color: 'var(--text-muted)' }}>No Xero company is connected yet.</span>
+        </div>
+      ) : (
         <div style={{ marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
             <span style={{ fontSize: 13, fontWeight: 600 }}>
@@ -589,16 +613,19 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
             )}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {tenants.map(t => (
-              <div key={t.tenantId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', fontSize: 13 }}>
-                <span className="badge badge-green">● Live</span>
-                {t.tenantName}
-              </div>
-            ))}
+            {tenants.map(t => {
+              const badge = companyBadge(connection, connectionFailed);
+              return (
+                <div key={t.tenantId} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', fontSize: 13 }}>
+                  <span className={badge.className} title={badge.title}>{badge.text}</span>
+                  {t.tenantName}
+                </div>
+              );
+            })}
           </div>
           {tenants.length >= 2 && <DefaultTenantPicker tenants={tenants} />}
         </div>
-      ) : null}
+      )}
 
       <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 10 }}>
         Option A — Custom Connection

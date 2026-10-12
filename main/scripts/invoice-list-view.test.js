@@ -19,7 +19,8 @@ function load(rel) {
 const view = load('pages/invoices/list-view.js');
 const csv  = load('pages/invoices/csv.js');
 const bulk = load('pages/invoices/bulk.js');
-const { repostBlockedReason } = load('pages/invoices/xero-status.js');
+const xeroStatus = load('pages/invoices/xero-status.js');
+const { repostBlockedReason } = xeroStatus;
 
 const bill = extra => ({ id: 'b', invoiceType: 'ACCPAY', status: 'posted', dueDate: '2026-10-08', ...extra });
 
@@ -220,8 +221,9 @@ describe('CSV export', () => {
     const lines = csv.invoiceCsv(rows, { xeroStatusLabel: label }).slice(1).split('\r\n');
     expect(lines[0]).toBe('Date,Due,Type,Supplier/Customer,Number,Currency,Subtotal,Tax,Total,Status,Xero status,Amount due,Paid on,Account code');
     expect(lines[1]).toBe('2026-09-01,2026-10-01,Bill,"Acme, Ltd",\'=cmd,SGD,100.00,9.00,109.00,Posted,Part-paid,100.00,,400');
-    // A claim has no due date, as on screen.
-    expect(lines[2]).toBe('2026-09-02,,Expense claim,Grab,,SGD,,,12.30,Needs review,,,,');
+    // A claim has no due date, as on screen; never sent, and no account of
+    // its own (see "before Xero has been asked" below).
+    expect(lines[2]).toBe('2026-09-02,,Expense claim,Grab,,SGD,,,12.30,Needs review,Not in Xero,,,Contact or Setup default');
     expect(lines[3]).toBe('');
     expect(lines).toHaveLength(4);
   });
@@ -323,6 +325,77 @@ describe('the page uses them', () => {
 
   test('the Overdue pill counts the open tab only', () => {
     expect(page()).toMatch(/const overdue\s*=\s*tabRows\.filter/);
+  });
+});
+
+// A record just posted, or posted before the status check could reach it,
+// has no Xero status. The list showed nothing and still called it overdue,
+// and the export's Xero cell was blank whether it had been sent or not.
+describe('before Xero has been asked', () => {
+  test('the badge, the Due column and the CSV say the status is not known; a record never sent says so', () => {
+    const unchecked = bill({ xeroInvoiceId: 'x-1', xeroStatus: null });
+    const draft     = bill({ xeroInvoiceId: 'x-2', xeroStatus: 'DRAFT' });
+    const unsent    = bill({ status: 'pending' });
+
+    // The tooltip on the app's own status badge.
+    expect(xeroStatus.xeroStatusNote(unchecked)).toBe('Not checked in Xero yet');
+    expect(xeroStatus.xeroStatusNote(draft)).toBeNull();
+    expect(xeroStatus.xeroStatusNote(unsent)).toBeNull();
+
+    // Still counted as unpaid, but the Due column says it is not known.
+    expect(view.overdueDays(unchecked, '2026-10-20')).toBe(12);
+    expect(view.dueInfo(unchecked, '2026-10-20')).toMatchObject({ label: 'Overdue 12 days', overdue: true, note: 'status unknown' });
+    expect(view.dueInfo(unchecked, '2026-10-20').noteTitle).toMatch(/^Not checked in Xero yet/);
+    expect(view.dueInfo(draft, '2026-10-20')).toEqual({ date: '2026-10-08', label: 'Overdue 12 days', overdue: true });
+    expect(view.dueInfo(unsent, '2026-10-20')).toEqual({ date: '2026-10-08', label: 'Overdue 12 days', overdue: true });
+
+    // The export, with the label the page passes in.
+    const label = inv => { const k = xeroStatus.xeroStatusKey(inv); return k ? xeroStatus.XERO_STATUS_META[k].label : ''; };
+    const cells = inv => {
+      const row = csv.invoiceCsvRow(inv, { xeroStatusLabel: label });
+      return [row[csv.CSV_COLUMNS.indexOf('Xero status')], row[csv.CSV_COLUMNS.indexOf('Account code')]];
+    };
+    expect(cells(unchecked)).toEqual([xeroStatus.NOT_CHECKED, 'Contact or Setup default']);
+    expect(cells(draft)).toEqual(['Draft in Xero', 'Contact or Setup default']);
+    expect(cells({ ...unsent, accountCode: ' 429 ' })).toEqual(['Not in Xero', '429']);
+    expect(cells({ ...unsent, accountCode: '  ' })[1]).toBe('Contact or Setup default');
+
+    // And the page wires the tooltip onto both lists.
+    for (const f of ['pages/invoices/DesktopTable.jsx', 'pages/invoices/MobileList.jsx']) {
+      expect(read(f)).toContain('title={xeroStatusNote(inv) || undefined}');
+      expect(read(f)).toMatch(/due\.note/);
+    }
+  });
+});
+
+// The Received pills counted every record, whichever tab was open, and
+// Custom always read 0; "N of M" took M from every record too.
+describe('Received pills', () => {
+  test('count the open tab\'s rows; Custom counts only once a range is typed; "N of M" is out of the tab', () => {
+    const now = new Date(2026, 9, 12, 15, 0);          // 12 Oct 2026, 3pm on this device
+    const at  = (d, h = 9) => new Date(2026, 9, d, h).toISOString();
+    const rows = [
+      { id: 'a', receivedAt: at(12) },                  // today
+      { id: 'b', receivedAt: at(9) },                   // this week
+      { id: 'c', processedAt: at(1) },                  // this month, no received date
+      { id: 'd', receivedAt: null, processedAt: null }, // undated: only All time
+      { id: 'e', receivedAt: 'not a date' },
+    ];
+    expect(view.receivedCount(rows, 'all')).toBeUndefined();
+    expect(view.receivedCount(rows, 'today', {}, now)).toBe(1);
+    expect(view.receivedCount(rows, '7d', {}, now)).toBe(2);
+    expect(view.receivedCount(rows, 'month', {}, now)).toBe(3);
+    expect(view.receivedCount(rows, 'custom', {}, now)).toBeUndefined();
+    expect(view.receivedCount(rows, 'custom', { from: '2026-10-02', to: '2026-10-09' }, now)).toBe(1);
+    expect(view.receivedCount(rows, 'custom', { from: '2026-10-09' }, now)).toBe(2);
+    // The filter and the count agree row by row.
+    expect(rows.filter(r => view.receivedIn(r, '7d', {}, now)).map(r => r.id)).toEqual(['a', 'b']);
+    expect(view.receivedIn(rows[3], 'all')).toBe(true);
+
+    const page = read('pages/Invoices.jsx');
+    expect(page).toContain('count={receivedCount(tabRows, t.key, { from: customFrom, to: customTo })}');
+    expect(page).toContain('{filtered.length} of {tabRows.length}');
+    expect(page).toContain('receivedIn(inv, receivedFilter, { from: customFrom, to: customTo })');
   });
 });
 

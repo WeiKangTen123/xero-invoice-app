@@ -17,6 +17,7 @@ const tokenCache          = require('./token-cache');
 const processState        = require('./process-state');
 const invoiceEvents       = require('./invoice-events');
 const auditLog            = require('./audit-log');
+const statusSync          = require('../xero/status-sync');
 
 const XERO_SUBMIT_DELAY_MS = 1500;
 
@@ -377,6 +378,7 @@ async function submitInvoiceToXero(userId, invoiceId, { allowDuplicate = false }
     }
 
     await invStore.update(invoiceId, patch);
+    if (sent) _recordXeroAnswer(invStore, invoiceId, sent, sent.answer, userId);
     // Said here, not by the store: only this knows whether it was a new
     // draft or a correction, and which company took it.
     auditLog.safely(() => {
@@ -396,6 +398,25 @@ async function submitInvoiceToXero(userId, invoiceId, { allowDuplicate = false }
     await invStore.update(invoiceId, { status: inXero ? 'posted' : 'error', errorMsg: errMsg });
     auditLog.safely(() => invoiceEvents.xeroFailed(userId, invoiceId, { reason: errMsg, inXero }));
     throw err;
+  }
+}
+
+// What Xero answered for the document just sent (a new one is a DRAFT with
+// its whole amount still due), stored as its first known Xero status through
+// the same path the status check uses (status-sync.js fromXero, then the
+// store's recordXeroStatus), with the company it went to. Before this a new
+// post had no Xero status until the 3-hourly check, so the list could not
+// tell it from one never asked about, and the export's Xero columns were
+// blank. The document is in Xero whatever happens here: a failure to record
+// it is logged and the send still counts as sent, and the next check fills
+// the status in.
+function _recordXeroAnswer(invStore, invoiceId, sent, answer, userId) {
+  try {
+    const seen = answer ? statusSync.fromXero(answer) : null;
+    if (!seen) return;
+    invStore.recordXeroStatus(invoiceId, sent.xeroInvoiceId, { ...seen, tenantId: sent.tenantId });
+  } catch (err) {
+    logger.warn('Sent to Xero, but its Xero status could not be recorded', { invoiceId, userId, error: err?.message || String(err) });
   }
 }
 

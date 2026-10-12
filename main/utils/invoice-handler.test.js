@@ -186,6 +186,39 @@ describe('sending to Xero', () => {
     expect(xero.createDraftInvoice.mock.calls[0][2]._invoiceStoreId).toBe(result.id);
     expect(store.getById(result.id)).toMatchObject({ status: 'posted', xeroInvoiceId: 'xero-new-1', xeroTenantId: 't-1' });
   });
+
+  // A new post had no Xero status until the 3-hourly check, so a bill just
+  // sent could not be told from one never asked about, and the export's Xero
+  // columns were blank. The invoice Xero sends back carries its status and
+  // amounts; queue/processor.js hands them up as `answer`.
+  test('what Xero answered is stored as the first Xero status, and failing to store it does not fail the send', async () => {
+    const answering = id => async () => ({ invoiceID: id, status: 'DRAFT', amountDue: 120, amountPaid: 0, total: 120 });
+    tokenCache._state.tenants = TWO;
+    settings.forUser(userId).set({ defaultTenantId: 't-2' });
+    xero.createDraftInvoice.mockImplementationOnce(answering('xero-answered'));
+    row('answered');
+    await expect(handlerMod.submitInvoiceToXero(userId, 'answered')).resolves.toBe('xero-answered');
+    const saved = store.getById('answered');
+    expect(saved).toMatchObject({
+      status: 'posted', xeroInvoiceId: 'xero-answered', xeroTenantId: 't-2',
+      xeroStatus: 'DRAFT', xeroAmountDue: 120, xeroAmountPaid: 0, xeroPaidOn: null,
+    });
+    expect(Date.parse(saved.xeroSyncedAt)).toBeGreaterThan(Date.now() - 60 * 1000);
+
+    // The bill is in Xero either way: a store that cannot take the status
+    // leaves the row posted with its Xero ID, and the send resolves.
+    const realForUser = invoiceStore.forUser;
+    const spy = jest.spyOn(invoiceStore, 'forUser').mockImplementation(id => ({
+      ...realForUser(id),
+      recordXeroStatus: () => { throw new Error('database is locked'); },
+    }));
+    try {
+      xero.createDraftInvoice.mockImplementationOnce(answering('xero-unrecorded'));
+      row('unrecorded', { invoiceNumber: 'A-2' });
+      await expect(handlerMod.submitInvoiceToXero(userId, 'unrecorded')).resolves.toBe('xero-unrecorded');
+    } finally { spy.mockRestore(); }
+    expect(store.getById('unrecorded')).toMatchObject({ status: 'posted', xeroInvoiceId: 'xero-unrecorded', errorMsg: null, xeroStatus: null });
+  });
 });
 
 // ── What the reader found holds the bill, alongside the row's own holds ─────

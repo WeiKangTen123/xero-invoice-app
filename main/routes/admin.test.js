@@ -180,6 +180,41 @@ describe('admin routes', () => {
     expect(found.lastSeenAt).toBeNull();
   });
 
+  // Last Activity was process-state's in-memory value, so every restart
+  // blanked it, and the volume chart's days were UTC days: in Singapore a
+  // record processed at 4am showed on the day before.
+  test('per-user Last Activity is the newest record, and the daily chart counts days in the viewer\'s timezone', async () => {
+    const owner = await users.createUser('busy@test.com', 'password123', 'user');
+    const insert = require('../db').prepare('INSERT INTO invoices (id, user_id, status, processed_at) VALUES (?, ?, ?, ?)');
+    // 20:00 UTC yesterday: still yesterday in UTC, already 04:00 today in Singapore.
+    const now = new Date();
+    const late = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1, 20)).toISOString();
+    insert.run('busy-1', owner.id, 'review-needed', '2026-01-05T08:00:00.000Z');
+    insert.run('busy-2', owner.id, 'posted', late);
+
+    const mon = await request(serverFor(app)).get('/api/admin/monitoring').set('Authorization', `Bearer ${tokenFor(adminUser)}`).expect(200);
+    const row = mon.body.users.find(u => u.id === owner.id);
+    expect(row.lastActivity).toBe(late);
+    expect(row.invoices).toMatchObject({ reviewNeeded: 1, posted: 1 });
+    expect(mon.body.users.find(u => u.id === adminUser.id).lastActivity).toBeNull();
+
+    const dayIn = tz => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(late));
+    expect(dayIn('Asia/Singapore')).not.toBe(dayIn('UTC'));
+    const daily = async q => (await request(serverFor(app)).get(`/api/admin/stats/daily?days=3&userId=${owner.id}${q}`)
+      .set('Authorization', `Bearer ${tokenFor(adminUser)}`).expect(200)).body;
+    const postedOn = body => body.days.filter(x => x.posted).map(x => x.day);
+
+    const sg = await daily('&tz=Asia/Singapore');
+    expect(sg.timeZone).toBe('Asia/Singapore');
+    expect(postedOn(sg)).toEqual([dayIn('Asia/Singapore')]);
+    const utc = await daily('&tz=UTC');
+    expect(utc.timeZone).toBe('UTC');
+    expect(postedOn(utc)).toEqual([dayIn('UTC')]);
+    // Without one, the admin's own account timezone (Asia/Singapore by default).
+    expect((await daily('')).timeZone).toBe('Asia/Singapore');
+    await request(serverFor(app)).get('/api/admin/stats/daily?tz=Not/AZone').set('Authorization', `Bearer ${tokenFor(adminUser)}`).expect(400);
+  });
+
   describe('GET /stats/daily', () => {
     test('requires authentication', async () => {
       await request(serverFor(app)).get('/api/admin/stats/daily').expect(401);

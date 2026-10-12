@@ -36,6 +36,20 @@ describe('routes/invoices workflow & batching', () => {
       expect(row).toHaveProperty('duplicateOf');
     });
 
+    // DesktopTable and MobileList show "Check this" from the row's confidence,
+    // which the list left out, so the badge never showed anywhere.
+    test('the list carries the reader\'s confidence, in both forms of the list', async () => {
+      const store = invoiceStore.forUser(testUser.id);
+      store.add({ id: `c1_${Date.now()}`, status: 'pending', vendorName: 'Unsure Co', totalAmount: 5, confidence: 'low', processedAt: new Date().toISOString() });
+      store.add({ id: `c2_${Date.now()}`, status: 'pending', vendorName: 'Sure Co', totalAmount: 5, processedAt: new Date().toISOString() });
+      for (const q of ['', '?recent=10']) {
+        const res = await request(serverFor(app)).get(`/api/invoices${q}`).set('Authorization', auth()).expect(200);
+        const byName = Object.fromEntries(res.body.invoices.map(r => [r.vendorName, r]));
+        expect(byName['Unsure Co'].confidence).toBe('low');
+        expect(byName['Sure Co'].confidence ?? null).toBeNull();
+      }
+    });
+
     // The Automation page polls this every 15 s for the ten rows it shows.
     describe('?recent=N', () => {
       const addMany = n => {

@@ -50,6 +50,20 @@ const money = v => (v === null || v === undefined || v === '' || !Number.isFinit
 // in the list (components/receipts/allowance.js claimKindLabel).
 const CLAIM_KIND_WORDS = { mileage: 'Mileage claim', per_diem: 'Per diem claim' };
 
+// The Xero status cell is never blank: a blank read as "nothing to say"
+// whether the record had never gone to Xero or had gone and not been checked
+// since, and a bookkeeper filtering the sheet needs to tell those apart. The
+// words for "not checked" are the screen's (xero-status.js NOT_CHECKED).
+function xeroStatusCell(inv, xeroStatusLabel) {
+  if (!inv.xeroInvoiceId) return 'Not in Xero';
+  return (xeroStatusLabel ? xeroStatusLabel(inv) : inv.xeroStatus) || 'Not checked in Xero yet';
+}
+
+// A record with no account code of its own is posted to the account the Xero
+// contact carries as its default, or failing that Setup's (xero/invoices.js),
+// so a blank cell would hide where it went.
+const DEFAULT_ACCOUNT_WORDS = 'Contact or Setup default';
+
 export function invoiceCsvRow(inv, { xeroStatusLabel } = {}) {
   return [
     inv.invoiceDate || '',
@@ -63,10 +77,10 @@ export function invoiceCsvRow(inv, { xeroStatusLabel } = {}) {
     money(inv.taxAmount),
     money(inv.totalAmount),
     STATUS_WORDS[inv.status] || inv.status || '',
-    (xeroStatusLabel ? xeroStatusLabel(inv) : inv.xeroStatus) || '',
+    xeroStatusCell(inv, xeroStatusLabel),
     money(inv.xeroAmountDue),
     inv.xeroPaidOn || '',
-    inv.accountCode || '',
+    String(inv.accountCode || '').trim() || DEFAULT_ACCOUNT_WORDS,
   ];
 }
 

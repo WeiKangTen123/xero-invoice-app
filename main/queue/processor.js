@@ -62,9 +62,11 @@ function chooseTenant(userId, invoiceData, tenants) {
   throw _tenantError(CHOOSE_TENANT_MSG, 'XERO_TENANT_CHOICE');
 }
 
-// Returns { xeroInvoiceId, tenantId } — the caller stores both — or null when no
-// org is connected and nothing was sent. A Xero failure, or an invoice with no
-// org to go to, is thrown.
+// Returns { xeroInvoiceId, tenantId, answer } — the caller stores the first two,
+// and `answer` is what Xero said the document is now (status and amounts, from
+// the invoice Xero sent back), which the caller records as its first known
+// Xero status — or null when no org is connected and nothing was sent. A Xero
+// failure, or an invoice with no org to go to, is thrown.
 async function enqueueInvoice(userId, invoiceData) {
   const tokenCache = require('../utils/token-cache').forUser(userId);
   const tenants    = await tokenCache.getAllTenants();
@@ -105,7 +107,17 @@ async function enqueueInvoice(userId, invoiceData) {
     logger.warn('Invoice notification failed', { error: err?.message || String(err), userId });
   }
 
-  return { xeroInvoiceId: xeroInvoice.invoiceID, tenantId };
+  return {
+    xeroInvoiceId: xeroInvoice.invoiceID,
+    tenantId,
+    answer: {
+      status:         xeroInvoice.status,
+      amountDue:      xeroInvoice.amountDue,
+      amountPaid:     xeroInvoice.amountPaid,
+      amountCredited: xeroInvoice.amountCredited,
+      total:          xeroInvoice.total,
+    },
+  };
 }
 
 module.exports = { enqueueInvoice, chooseTenant, CHOOSE_TENANT_MSG, TENANT_GONE_MSG };

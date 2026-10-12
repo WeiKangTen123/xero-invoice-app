@@ -239,6 +239,9 @@ const _listRow = inv => ({
   receiptPage:   inv.receiptPage,
   duplicateOf:   inv.duplicateOf,
   description:   inv.description,
+  // The reader's doubt about what it read ('low' / 'medium'): the list's
+  // "Check this" badge reads it, and without it here the badge never showed.
+  confidence:    inv.confidence,
   reportCount:   (inv.reports || []).length,
   // What Xero says about it now, as last read back (xero/status-sync.js):
   // status, amounts in dollars, the day it was paid in full, and when Xero

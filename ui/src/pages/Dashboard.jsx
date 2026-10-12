@@ -8,6 +8,7 @@ import { formatDate, formatTime } from '../utils/formatDate';
 import { useVisiblePolling } from '../utils/useVisiblePolling';
 import ProcessToggle from '../components/ProcessToggle';
 import InvoiceTable from '../components/InvoiceTable';
+import { pipelineEmptyText, xeroPipeline } from './automation';
 
 function StatCard({ label, value, sub, icon, iconBg, color, delay = 0 }) {
   return (
@@ -163,9 +164,14 @@ function Chip({ label, count, color, bg, border }) {
   );
 }
 
-function PipelinePanel({ queue, xero }) {
+// recordCount is every record the account has (status.invoiceCount), so the
+// Xero row says "No invoices yet" only when there truly are none.
+function PipelinePanel({ queue, xero: rawXero, recordCount }) {
   const emailActive = queue && (queue.processing > 0 || queue.pending > 0 || queue.dead > 0);
-  const xeroActive  = xero  && (xero.pending > 0 || xero.error > 0);
+  // Counts review-needed and reviewed too (automation.js): without them a
+  // pile of bills waiting on a person read "All invoices posted to Xero".
+  const xero      = xeroPipeline(rawXero);
+  const emptyText = xero.total === 0 ? pipelineEmptyText(recordCount) : null;
 
   return (
     <div className="card" style={{ marginBottom: 20 }}>
@@ -201,21 +207,20 @@ function PipelinePanel({ queue, xero }) {
             Xero submission
           </span>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-            {xero?.submitting > 0 && <Chip label="submitting" count={xero.submitting} color="var(--accent)"   bg="rgba(99,102,241,0.12)"  border="rgba(99,102,241,0.2)" />}
-            {xero?.pending    > 0 && <Chip label="pending"    count={xero.pending}    color="var(--warning)"  bg="rgba(245,158,11,0.08)"  border="rgba(245,158,11,0.2)" />}
-            {xero?.posted     > 0 && <Chip label="posted"     count={xero.posted}     color="var(--success)"  bg="rgba(16,185,129,0.08)"  border="rgba(16,185,129,0.2)" />}
-            {xero?.error      > 0 && <Chip label="failed"     count={xero.error}      color="var(--danger)"   bg="rgba(239,68,68,0.08)"   border="rgba(239,68,68,0.2)" />}
-            {!xeroActive && !xero?.posted && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>No invoices yet</span>}
+            {xero.submitting   > 0 && <Chip label="submitting"    count={xero.submitting}   color="var(--accent)"   bg="rgba(99,102,241,0.12)"  border="rgba(99,102,241,0.2)" />}
+            {xero.reviewNeeded > 0 && <Chip label="need review"   count={xero.reviewNeeded} color="var(--warning)"  bg="rgba(245,158,11,0.08)"  border="rgba(245,158,11,0.2)" />}
+            {xero.reviewed     > 0 && <Chip label="ready to post" count={xero.reviewed}     color="var(--info)"     bg="var(--info-subtle)"     border="rgba(59,130,246,0.3)" />}
+            {xero.pending      > 0 && <Chip label="pending"       count={xero.pending}      color="var(--warning)"  bg="rgba(245,158,11,0.08)"  border="rgba(245,158,11,0.2)" />}
+            {xero.posted       > 0 && <Chip label="posted"        count={xero.posted}       color="var(--success)"  bg="rgba(16,185,129,0.08)"  border="rgba(16,185,129,0.2)" />}
+            {xero.error        > 0 && <Chip label="failed"        count={xero.error}        color="var(--danger)"   bg="rgba(239,68,68,0.08)"   border="rgba(239,68,68,0.2)" />}
+            {emptyText && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{emptyText}</span>}
           </div>
         </div>
 
         {/* Progress bar — only when there are invoices to track */}
-        {xero && (xero.pending + xero.submitting + xero.posted + xero.error) > 0 && (() => {
-          const total      = xero.pending + xero.submitting + xero.posted + xero.error;
-          const pctPosted  = (xero.posted     / total) * 100;
-          const pctActive  = (xero.submitting / total) * 100;
-          const pctFailed  = (xero.error      / total) * 100;
-          const isComplete = xero.posted === total;
+        {xero.total > 0 && (() => {
+          const { total, pctPosted, pctActive, pctFailed } = xero;
+          const isComplete = xero.allPosted;
           return (
             <div>
               <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-hover)', overflow: 'hidden', position: 'relative' }}>
@@ -374,13 +379,16 @@ export default function Dashboard() {
           sub={running ? 'Polling every 60 sec' : 'Not monitoring emails'}
           delay={0}
         />
+        {/* Every record in the account, the same count as "latest 10 of N"
+            below. It was a counter in the server's memory that a restart
+            reset, so it disagreed with the list after every deploy. */}
         <StatCard
           icon="📄"
           iconBg="rgba(99,102,241,0.12)"
-          label="Invoices processed"
-          value={status?.invoiceCount ?? 0}
+          label="Total records"
+          value={status?.invoiceCount ?? invoiceTotal}
           color="var(--accent)"
-          sub="since last server restart"
+          sub="Bills, invoices and claims"
           delay={60}
         />
         <StatCard
@@ -395,7 +403,7 @@ export default function Dashboard() {
       </div>
 
       {/* Pipeline status — always visible */}
-      <PipelinePanel queue={status?.queue} xero={status?.xero} />
+      <PipelinePanel queue={status?.queue} xero={status?.xero} recordCount={status?.invoiceCount} />
 
       <div className="grid-2" style={{ marginBottom: 20 }}>
 

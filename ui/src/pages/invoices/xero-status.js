@@ -35,6 +35,16 @@ export function xeroStatusKey(inv) {
   return isPartPaid(inv) ? 'PART_PAID' : inv.xeroStatus;
 }
 
+// What a record in Xero shows while its status there is not known yet: the
+// status badge shows nothing then (an unknown status is not a draft), so the
+// app's own badge carries this as its tooltip instead. Null for a record not
+// in Xero, or one whose status is known. The CSV export says the same words
+// (csv.js).
+export const NOT_CHECKED = 'Not checked in Xero yet';
+export function xeroStatusNote(inv) {
+  return inv && inv.xeroInvoiceId && !xeroStatusKey(inv) ? NOT_CHECKED : null;
+}
+
 // Why a correction can no longer be sent from here, or null while it can.
 // Re-posting updates the Xero bill in place, which Xero refuses once the bill
 // has left DRAFT, and sending a submitted one back as a draft would pull it

@@ -6,7 +6,7 @@ const { requireAdmin } = require('../middleware/auth-middleware');
 const asyncHandler     = require('../middleware/async-handler');
 const {
   getAllUsers, createUser, updateUserRole, deleteUser, readUsers, findById, getSetupStatus, isOnline,
-  passwordProblem, setPassword, invalidateSessions, setDisabled,
+  passwordProblem, setPassword, invalidateSessions, setDisabled, getUserDefaults, isKnownTimezone,
 } = require('../utils/users');
 const invoiceStore     = require('../utils/invoice-store');
 const settingsStore    = require('../utils/settings-store');
@@ -352,6 +352,15 @@ router.get('/monitoring', requireAdmin, (_req, res) => {
   const mem = process.memoryUsage();
   let totalInvoices = 0;
 
+  // When each account last took in a document, from the records themselves,
+  // in one query for every account. It was the in-memory value process-state
+  // keeps, which every restart cleared, so after a deploy the column read
+  // "—" for everyone however busy they had been.
+  const lastProcessed = new Map(
+    db.prepare('SELECT user_id, MAX(processed_at) AS at FROM invoices GROUP BY user_id').all()
+      .map(r => [String(r.user_id), r.at]),
+  );
+
   const userStats = users.map(u => {
     const invoices = invoiceStore.forUser(u.id).getAll();
     totalInvoices += invoices.length;
@@ -374,7 +383,7 @@ router.get('/monitoring', requireAdmin, (_req, res) => {
         error:        byStatus('error'),
         reviewNeeded: byStatus('review-needed'),
       },
-      lastActivity:   processState.forUser(u.id).getStatus(watcherRegistry.isRunning(u.id)).lastActivity,
+      lastActivity:   lastProcessed.get(String(u.id)) || null,
       xeroConnected:  tenants.length > 0,
       imapConfigured: setup.imap.configured,
       // Real browser presence (an authenticated request landed recently) — distinct
@@ -408,42 +417,50 @@ router.get('/monitoring', requireAdmin, (_req, res) => {
 // it to one user (used by the admin's per-user drill-down); omitted, it's every
 // user combined. Always returns one entry per day in the range, zero-filled, so the
 // chart's x-axis doesn't skip days with no activity.
+//
+// Days are calendar days in ?tz= (an IANA zone such as Asia/Singapore), or in
+// the viewing admin's own account timezone without one, and the answer names
+// the zone it used: { days, timeZone }. They were UTC days, so in Singapore
+// everything processed before 8am was drawn on the day before.
 router.get('/stats/daily', requireAdmin, (req, res) => {
   const days   = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 90);
   const userId = (req.query.userId || '').trim();
+  const asked  = String(req.query.tz || '').trim();
+  if (asked && !isKnownTimezone(asked)) return res.status(400).json({ error: 'tz must be a timezone such as Asia/Singapore' });
+  const timeZone = asked || getUserDefaults(req.user.id).timezone;
 
-  const params = [`-${days} days`];
-  let sql = `
-    SELECT date(processed_at) AS day, status, COUNT(*) AS count
-    FROM invoices
-    WHERE date(processed_at) >= date('now', ?)
-  `;
+  // Calendar arithmetic on the day itself, so a daylight-saving change cannot
+  // skip or repeat a day.
+  const fmt   = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const dayOf = at => {
+    const p = Object.fromEntries(fmt.formatToParts(at).map(x => [x.type, x.value]));
+    return `${p.year}-${p.month}-${p.day}`;
+  };
+  const [y, m, d] = dayOf(new Date()).split('-').map(Number);
+  const keys = [];
+  for (let i = days - 1; i >= 0; i--) keys.push(new Date(Date.UTC(y, m - 1, d - i)).toISOString().slice(0, 10));
+
+  // Every record that could fall on one of those days: from 14 hours before
+  // the first of them in UTC, the furthest any zone is ahead. Each is then
+  // placed on its day in the zone, and anything outside the range dropped.
+  const from   = new Date(Date.UTC(y, m - 1, d - (days - 1)) - 14 * 3600 * 1000).toISOString();
+  const params = [from];
+  let sql = 'SELECT processed_at AS at, status FROM invoices WHERE julianday(processed_at) >= julianday(?)';
   if (userId) { sql += ' AND user_id = ?'; params.push(userId); }
-  sql += ' GROUP BY day, status ORDER BY day';
 
-  const rows = db.prepare(sql).all(...params);
-
-  const byDay = new Map();
-  for (const r of rows) {
-    if (!byDay.has(r.day)) byDay.set(r.day, { day: r.day, posted: 0, error: 0, pending: 0, other: 0 });
-    const bucket = byDay.get(r.day);
-    if (r.status === 'posted')                                  bucket.posted += r.count;
-    else if (r.status === 'error')                               bucket.error  += r.count;
-    else if (r.status === 'pending' || r.status === 'submitting') bucket.pending += r.count;
-    else                                                          bucket.other  += r.count;
+  const byDay = new Map(keys.map(day => [day, { day, posted: 0, error: 0, pending: 0, other: 0 }]));
+  for (const r of db.prepare(sql).all(...params)) {
+    const at = new Date(r.at);
+    if (Number.isNaN(at.getTime())) continue;
+    const bucket = byDay.get(dayOf(at));
+    if (!bucket) continue;
+    if (r.status === 'posted')                                  bucket.posted++;
+    else if (r.status === 'error')                               bucket.error++;
+    else if (r.status === 'pending' || r.status === 'submitting') bucket.pending++;
+    else                                                          bucket.other++;
   }
 
-  // Zero-fill every day in the range, even ones with no rows at all.
-  const out = [];
-  const today = new Date();
-  for (let i = days - 1; i >= 0; i--) {
-    const d   = new Date(today);
-    d.setUTCDate(d.getUTCDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    out.push(byDay.get(key) || { day: key, posted: 0, error: 0, pending: 0, other: 0 });
-  }
-
-  res.json({ days: out });
+  res.json({ days: keys.map(day => byDay.get(day)), timeZone });
 });
 
 // GET /api/admin/logs — tail the active combined/error log for on-call debugging

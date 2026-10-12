@@ -3,6 +3,8 @@ import { typeMeta } from '../utils/badges';
 import { fmtMoney } from '../utils/format';
 import { formatDateTime } from '../utils/formatDate';
 import { staggerIn } from '../utils/stagger';
+import { claimKindLabel } from './receipts/allowance';
+import { sourceWords } from '../pages/invoices/source';
 
 export default function InvoiceTable({ invoices, timezone }) {
   if (!invoices?.length) {
@@ -32,6 +34,9 @@ export default function InvoiceTable({ invoices, timezone }) {
         <tbody>
           {invoices.map((inv, i) => {
             const { label, cls } = typeMeta(inv.invoiceType);
+            // A mileage or per diem claim has no merchant; it is named by its
+            // kind, as on the AR & AP list, rather than shown as "—".
+            const name = inv.vendorName || claimKindLabel(inv);
             return (
               <tr key={inv.id} style={{ animation: staggerIn(i, 30) }}>
                 <td>
@@ -42,9 +47,9 @@ export default function InvoiceTable({ invoices, timezone }) {
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       fontSize: 11, fontWeight: 700, color: 'var(--accent)',
                     }}>
-                      {(inv.vendorName || '?').slice(0, 2).toUpperCase()}
+                      {(name || '?').slice(0, 2).toUpperCase()}
                     </div>
-                    <span style={{ fontWeight: 500 }}>{inv.vendorName || '—'}</span>
+                    <span style={{ fontWeight: 500 }}>{name || '—'}</span>
                   </div>
                 </td>
                 <td>
@@ -58,8 +63,9 @@ export default function InvoiceTable({ invoices, timezone }) {
                     : '—'}
                 </td>
                 <td><span className={`badge ${cls}`}>{label}</span></td>
-                <td className="truncate" style={{ maxWidth: 140, fontSize: 12, color: 'var(--text-muted)' }} title={inv.source}>
-                  {inv.source || '—'}
+                {/* Words, not the stored code ("pdf", "email-image"). */}
+                <td className="truncate" style={{ maxWidth: 140, fontSize: 12, color: 'var(--text-muted)' }}>
+                  {sourceWords(inv.source)}
                 </td>
                 <td style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                   {formatDateTime(inv.processedAt, timezone)}

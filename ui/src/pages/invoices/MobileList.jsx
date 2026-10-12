@@ -3,6 +3,8 @@ import { TypeBadge, ConfidenceBadge, XeroStatusBadge } from '../../components/Ba
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { totalsLabel } from './helpers';
 import { dueInfo } from './list-view';
+import { sourceBadge } from './source';
+import { xeroStatusNote } from './xero-status';
 import { claimKindLabel, claimSourceBadge } from '../../components/receipts/allowance';
 
 // sortValue is the URL form of the sort ('' for the list grouped by arrival)
@@ -73,6 +75,10 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                   const isDup = inv.status === 'duplicate' || !!inv.duplicateOf || (!!inv.errorMsg && /duplicate/i.test(inv.errorMsg));
                   // Null for an expense claim, which has no due date to show.
                   const due = dueInfo(inv, today);
+                  const allowanceSrc = claimSourceBadge(inv);
+                  const src = allowanceSrc
+                    ? { ...allowanceSrc, short: allowanceSrc.text.split(' ')[0] }
+                    : sourceBadge(inv);
 
                   return (
                     <div
@@ -138,6 +144,11 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                               {due.overdue || due.label === 'Due today' ? due.label : `Due ${due.date}`}
                             </div>
                           )}
+                          {due && due.note && (
+                            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 1, whiteSpace: 'nowrap' }} title={due.noteTitle}>
+                              {due.note}
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -164,17 +175,11 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <TypeBadge type={inv.invoiceType} />
                           <ConfidenceBadge confidence={inv.confidence} />
-                          {claimSourceBadge(inv)
-                            ? <span className={claimSourceBadge(inv).className} title={claimSourceBadge(inv).title}>{claimSourceBadge(inv).text.split(' ')[0]}</span>
-                            : inv.receiptFile
-                            ? <span className="badge badge-yellow">{inv.source === 'phone' ? '📱' : '🧾'}</span>
-                            : inv.hasPdf
-                              ? <span className="badge badge-green">📄</span>
-                              : <span className="badge badge-gray">✉</span>}
+                          <span className={src.className} title={src.title} aria-label={src.title}>{src.short}</span>
                           {isDup && inv.status !== 'duplicate' ? (
                             <span className="badge badge-purple">⚠ Suspected Dup</span>
                           ) : (
-                            <span className={`badge ${cls}`}>{label}</span>
+                            <span className={`badge ${cls}`} title={xeroStatusNote(inv) || undefined}>{label}</span>
                           )}
                           <XeroStatusBadge invoice={inv} />
                         </div>

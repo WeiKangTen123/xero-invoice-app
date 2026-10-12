@@ -13,17 +13,13 @@ const settingsStore    = require('../utils/settings-store');
 const tokenCache       = require('../utils/token-cache');
 const processState     = require('../utils/process-state');
 const idleSweeper      = require('../email/idle-sweeper');
+const db               = require('../db');
 const logger           = require('../utils/logger');
 
 // Gap between watchers resumed at boot. Every mailbox reconnecting in the same
 // instant is a burst of TLS handshakes and logins from one address, which is
 // what providers throttle, and every first scan then hits the queue together.
 const RESUME_STAGGER_MS = 2000;
-
-// Track which users have had their in-memory invoice count synced from disk.
-// We sync once per server lifetime per user so the dashboard shows the real count
-// after a restart, without reading the JSON file on every status poll.
-const _synced = new Set();
 
 // Rescan rate-limited to once per 30 s per user
 const rescanLimiter = rateLimit({
@@ -35,32 +31,44 @@ const rescanLimiter = rateLimit({
   legacyHeaders:   false,
 });
 
+// When this account last took in a document, from the records themselves:
+// the newest processed_at, or null when there are none.
+function _lastProcessedAt(userId) {
+  return db.prepare('SELECT MAX(processed_at) AS at FROM invoices WHERE user_id = ?').get(userId).at || null;
+}
+
 // GET /api/process/status
 router.get('/status', requireAuth, (req, res, next) => {
   try {
     const userId  = req.user.id;
     const state   = processState.forUser(userId);
-
-    // Sync invoice count from disk once per server lifetime per user
-    if (!_synced.has(userId)) {
-      _synced.add(userId);
-      state.syncCount(invoiceStore.forUser(userId).count());
-    }
+    const store   = invoiceStore.forUser(userId);
 
     const running  = watcherRegistry.isRunning(userId);
     const setup    = getSetupStatus(userId);
     const queue    = emailQueue.getStats(userId);
     // One GROUP BY. This poll runs every few seconds per open dashboard, and
     // it used to load every invoice with its line items and reports to count.
-    const byStatus = invoiceStore.forUser(userId).countByStatus();
+    const byStatus = store.countByStatus();
+    // reviewNeeded and reviewed wait on a person before they can go. Left
+    // out, the pipeline read "All posted" over bills nobody had looked at.
     const xero     = {
-      pending:    byStatus.pending    || 0,
-      submitting: byStatus.submitting || 0,
-      posted:     byStatus.posted     || 0,
-      error:      byStatus.error      || 0,
+      pending:      byStatus.pending           || 0,
+      submitting:   byStatus.submitting        || 0,
+      posted:       byStatus.posted            || 0,
+      error:        byStatus.error             || 0,
+      reviewNeeded: byStatus['review-needed']  || 0,
+      reviewed:     byStatus.reviewed          || 0,
     };
     res.json({
       ...state.getStatus(running),
+      // Both from the database. They were an in-memory counter and clock,
+      // which a restart reset: the count was synced from disk once and then
+      // only ever went up (a deleted record stayed counted), and the last
+      // activity read "No activity yet" after every deploy. The count is the
+      // same COUNT the recent list's "latest 10 of N" uses.
+      invoiceCount: store.count(),
+      lastActivity: _lastProcessedAt(userId),
       setupRequired: !setup.ready,
       missingConfig: setup.missingConfig,
       queue,

@@ -72,19 +72,6 @@ export function currencyTotals(rows) {
 }
 export const totalsLabel = totals => totals.map(t => fmtMoney(t.amount, t.currency)).join(' · ');
 
-// Inclusive lower bound for a preset, or null for "all time".
-export function receivedCutoff(preset) {
-  const now = new Date();
-  switch (preset) {
-    case 'today': { const d = new Date(now); d.setHours(0, 0, 0, 0); return d; }
-    case '7d':    return new Date(now.getTime() - 7  * 86400000);
-    case '30d':   return new Date(now.getTime() - 30 * 86400000);
-    case 'month': return new Date(now.getFullYear(), now.getMonth(), 1);
-    default:      return null;
-  }
-}
-
-
 // Buckets for the grouped list. Named days for recent arrivals, calendar months
 // for history — that is how you would describe them out loud. Deliberately NOT
 // "last 7 / 30 days": those already exist as filters directly above, and

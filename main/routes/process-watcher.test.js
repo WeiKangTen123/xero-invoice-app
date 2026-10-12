@@ -207,7 +207,7 @@ describe('routes/process — the watcher survives a restart, and says why it sto
           'invoiceCount', 'lastActivity', 'lastScan', 'missingConfig', 'queue', 'running',
           'setupRequired', 'startedAt', 'watcher', 'xero',
         ]);
-        expect(res.body.xero).toEqual({ pending: 2, submitting: 1, posted: 3, error: 1 });
+        expect(res.body.xero).toEqual({ pending: 2, submitting: 1, posted: 3, error: 1, reviewNeeded: 1, reviewed: 0 });
         expect(res.body).toMatchObject({ running: false, setupRequired: false, invoiceCount: 9 });
         expect(res.body.queue).toEqual({ pending: 0, processing: 0, dead: 0, jobs: [] });
       } finally { spy.mockRestore(); }
@@ -215,7 +215,31 @@ describe('routes/process — the watcher survives a restart, and says why it sto
 
     test('an account with no invoices reports zeros', async () => {
       const u = await makeUser();
-      expect((await status(u).expect(200)).body.xero).toEqual({ pending: 0, submitting: 0, posted: 0, error: 0 });
+      expect((await status(u).expect(200)).body.xero).toEqual({ pending: 0, submitting: 0, posted: 0, error: 0, reviewNeeded: 0, reviewed: 0 });
+    });
+
+    // The Automation page's "Total records" and "Last activity" were an
+    // in-memory counter and clock: synced from disk once, then only ever
+    // counting up (a deleted record stayed counted), and blank after every
+    // restart. Both are now read from the records on each poll.
+    test('the record count and the last activity come from the database, every time', async () => {
+      const u = await makeUser();
+      const insert = db.prepare('INSERT INTO invoices (id, user_id, status, processed_at) VALUES (?, ?, ?, ?)');
+      insert.run(`${u.id}-a`, u.id, 'posted',        '2026-09-01T02:00:00.000Z');
+      insert.run(`${u.id}-b`, u.id, 'reviewed',      '2026-10-01T09:30:00.000Z');
+      insert.run(`${u.id}-c`, u.id, 'review-needed', '2026-09-15T00:00:00.000Z');
+
+      const first = (await status(u).expect(200)).body;
+      expect(first).toMatchObject({ invoiceCount: 3, lastActivity: '2026-10-01T09:30:00.000Z' });
+      expect(first.xero).toMatchObject({ posted: 1, reviewed: 1, reviewNeeded: 1 });
+
+      db.prepare('DELETE FROM invoices WHERE id = ?').run(`${u.id}-b`);
+      const second = (await status(u).expect(200)).body;
+      expect(second).toMatchObject({ invoiceCount: 2, lastActivity: '2026-09-15T00:00:00.000Z' });
+      expect(second.invoiceCount).toBe(require('../utils/invoice-store').forUser(u.id).count());
+
+      const none = await makeUser();
+      expect((await status(none).expect(200)).body).toMatchObject({ invoiceCount: 0, lastActivity: null });
     });
 
     test('says what the watcher is doing and why it stopped', async () => {
