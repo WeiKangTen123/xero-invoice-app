@@ -106,11 +106,16 @@ function serverRoutes() {
   const index  = fs.readFileSync(path.join(MAIN, 'index.js'), 'utf8');
   const files  = {};
   for (const m of index.matchAll(/const\s+(\w+)\s*=\s*require\('\.\/routes\/([\w-]+)'\)/g)) files[m[1]] = m[2];
-  const routes = [];
+  // A router is mounted either by a name required above or by requiring it
+  // in place — app.use('/api/cash-manager', require('./routes/cash-manager'))
+  // — and a route mounted the second way must not read as missing.
+  const mounts = [];
   for (const m of index.matchAll(/app\.use\('(\/api\/[\w-]+)',\s*(\w+)\)/g)) {
-    const [, mount, variable] = m;
-    const file = files[variable];
-    if (!file) continue;
+    if (files[m[2]]) mounts.push([m[1], files[m[2]]]);
+  }
+  for (const m of index.matchAll(/app\.use\('(\/api\/[\w-]+)',\s*require\('\.\/routes\/([\w-]+)'\)\)/g)) mounts.push([m[1], m[2]]);
+  const routes = [];
+  for (const [mount, file] of mounts) {
     const src = fs.readFileSync(path.join(MAIN, 'routes', `${file}.js`), 'utf8');
     for (const r of src.matchAll(/router\.(get|post|patch|put|delete|all)\(\s*'([^']*)'/g)) {
       routes.push({ verb: r[1], path: (mount + (r[2] === '/' ? '' : r[2])).replace(/^\/api/, '') });
@@ -166,6 +171,9 @@ describe('every literal API path the UI calls exists on the server', () => {
   test('the server routes were actually read', () => {
     expect(routes.length).toBeGreaterThan(40);
     expect(routes).toContainEqual({ verb: 'get', path: '/invoices/:id' });
+    // Mounted by requiring the router in place, which the first reading of
+    // index.js did not see.
+    expect(routes).toContainEqual({ verb: 'put', path: '/cash-manager/overrides' });
   });
 
   test('each call resolves to a route with the same verb', () => {

@@ -15,6 +15,7 @@ import { hasChanged, shouldRefetchTab, oldestRead, liveLabel } from './xero-insi
 import { defaultControls, queryFor } from './xero-insights/balance';
 import BankingTab from './xero-insights/BankingTab';
 import BalanceSheetTab from './xero-insights/BalanceSheetTab';
+import CashManagerTab from './xero-insights/CashManagerTab';
 import BudgetTab from './xero-insights/BudgetTab';
 import VarianceTab from './xero-insights/VarianceTab';
 import AgeingSection from './xero-insights/AgeingSection';
@@ -30,6 +31,7 @@ const COMPARE_TABS = ['overview', 'profit'];
 const AGEING_SIDES = ['receivables', 'payables'];
 const AGEING_IDLE = { status: 'idle', data: null, error: '' };
 const BALANCE_IDLE = { status: 'idle', data: null, error: '' };
+const CASH_MANAGER_IDLE = { status: 'idle', data: null, error: '' };
 // How often the page asks the server whether Xero changed, while it is in
 // view. The server does the watching (xero-reports/version); this only asks
 // what it saw, so a minute costs nothing against the Xero allowance.
@@ -44,6 +46,10 @@ const TABS = [
   { key: 'analysis', label: 'Analysis' },
   { key: 'revenue',  label: 'Revenue' },
   { key: 'cashflow', label: 'Cash Flow' },
+  // What is expected in and out over the next weeks, after Xero Analytics'
+  // cash flow manager. Beside Cash Flow, which is the same money looked at
+  // backwards; not a performance tab, as it reads no period.
+  { key: 'cashmanager', label: 'Cash Flow Manager' },
   { key: 'profit',   label: 'Profitability' },
   { key: 'banking',  label: 'Banking' },
   // A position, not a period: assets, liabilities and equity as at a date.
@@ -167,13 +173,18 @@ export default function XeroInsights() {
   const [balance, setBalance] = useState(BALANCE_IDLE);
   const [balanceControls, setBalanceControls] = useState(defaultControls);
 
+  // Cash Flow Manager — lazily loaded like the Balance Sheet. The window, the
+  // view and the chart mode are the tab's own: the server always sends ninety
+  // days, so none of them is a new request.
+  const [cashManager, setCashManager] = useState(CASH_MANAGER_IDLE);
+
   // One counter per report. A response is applied only if no newer request for
   // that report was made since — two quick period changes could otherwise let
   // the slower, older answer land last and sit under the newer period's label.
   // The summary, the bank account list, a bank statement and the version read
   // are counted the same way, as a switch of organisation can leave any of
   // them in flight.
-  const seq = useRef({ perf: 0, cashflow: 0, budget: 0, balance: 0, analysis: 0, summary: 0, banking: 0, statement: 0, ageingReceivables: 0, ageingPayables: 0, version: 0 });
+  const seq = useRef({ perf: 0, cashflow: 0, budget: 0, balance: 0, cashManager: 0, analysis: 0, summary: 0, banking: 0, statement: 0, ageingReceivables: 0, ageingPayables: 0, version: 0 });
 
   // Performance overview — feeds BOTH the Overview and Revenue tabs from one
   // fetch. monthFrom/monthTo index into data.months, so changing the range
@@ -301,6 +312,7 @@ export default function XeroInsights() {
     if (tab === 'cashflow')                     jobs.push(fetchCashflow({ quiet: true }));
     if (tab === 'budget' || tab === 'variance') jobs.push(fetchBudget({ quiet: true }));
     if (tab === 'balance')                      jobs.push(fetchBalance({ quiet: true }));
+    if (tab === 'cashmanager')                  jobs.push(fetchCashManager({ quiet: true }));
     if (tab === 'banking')                      jobs.push(fetchBanking({ quiet: true }));
     if (ageingSide)                             jobs.push(fetchAgeing(ageingSide, { quiet: true }));
     await Promise.allSettled(jobs);
@@ -360,6 +372,10 @@ export default function XeroInsights() {
     // the next organisation opens on the same date and comparison.
     if (tab === 'balance') { setBalance(BALANCE_IDLE); fetchBalance(); }
     else { seq.current.balance++; setBalance(BALANCE_IDLE); }
+    // So is the cash flow forecast: its bank accounts, its invoices and bills,
+    // and the entries and changes made on the tab all belong to one company.
+    if (tab === 'cashmanager') { setCashManager(CASH_MANAGER_IDLE); fetchCashManager(); }
+    else { seq.current.cashManager++; setCashManager(CASH_MANAGER_IDLE); }
     // Cash flow is listed too: its period bar is drawn from the performance
     // months, and the bar vanished on a switch made from the Cash Flow tab.
     // Cleared first for the same reason as the budget above.
@@ -446,6 +462,10 @@ export default function XeroInsights() {
     if (tab === 'balance') {
       if (balance.status === 'idle') fetchBalance();
       else if (staleOnOpen('balance', balance.data?.fetchedAt)) fetchBalance({ quiet: true });
+    }
+    if (tab === 'cashmanager') {
+      if (cashManager.status === 'idle') fetchCashManager();
+      else if (staleOnOpen('cashmanager', cashManager.data?.fetchedAt)) fetchCashManager({ quiet: true });
     }
     if (PERF_TABS.includes(tab)) {
       if (perf.status === 'idle') fetchPerf();
@@ -691,6 +711,33 @@ export default function XeroInsights() {
     fetchBalance({ controls: next });
   }
 
+  // The cash flow forecast for the organisation. `quiet` is a re-read after a
+  // change seen in Xero, or after a change made on the tab itself (an entry
+  // added, a date moved): the forecast stays on screen while it reloads, and
+  // a failure keeps it. A Refresh keeps it too, as the tab shows the last
+  // forecast through a load; a switch of organisation clears it first. The
+  // promise answers whether the new forecast landed, so the tab can say when
+  // a change it saved is not on screen yet.
+  function fetchCashManager(opts = {}) {
+    const n = ++seq.current.cashManager;
+    if (!opts.quiet) setCashManager(s => ({ ...s, status: 'loading', error: '' }));
+    const params = new URLSearchParams();
+    if (activeTenantId) params.set('tenantId', activeTenantId);
+    if (opts.force) params.set('force', 'true');
+    return api.get(`/xero-reports/cash-manager?${params.toString()}`)
+      .then(d => {
+        if (n !== seq.current.cashManager) return false;
+        setCashManager({ status: 'done', data: d, error: '' });
+        return true;
+      })
+      .catch(err => {
+        if (n !== seq.current.cashManager) return false;
+        if (opts.quiet) setCashManager(s => (s.status === 'done' ? s : { ...s, status: 'done' }));
+        else setCashManager(s => ({ status: 'done', data: s.data, error: err.message || 'Could not load the cash flow forecast' }));
+        return false;
+      });
+  }
+
   // Counted so that a quick second click, or a switch of organisation, can't
   // let an older account's statement land under the newer heading.
   function viewStatement(account) {
@@ -796,6 +843,7 @@ export default function XeroInsights() {
     if (tab === 'cashflow' && !cashflow.error)                       reads.push(cashflow.data?.fetchedAt);
     if ((tab === 'budget' || tab === 'variance') && !budget.error)   reads.push(budget.data?.fetchedAt);
     if (tab === 'balance' && !balance.error)                         reads.push(balance.data?.fetchedAt);
+    if (tab === 'cashmanager' && !cashManager.error)                 reads.push(cashManager.data?.fetchedAt);
     if (tab === 'banking' && !banking.error)                         reads.push(banking.fetchedAt);
     if (ageingSide && !ageing[ageingSide].error)                     reads.push(ageing[ageingSide].data?.fetchedAt);
     return reads;
@@ -840,6 +888,7 @@ export default function XeroInsights() {
             if (tab === 'cashflow') fetchCashflow({ force: true });
             if (tab === 'budget' || tab === 'variance') fetchBudget({ force: true });
             if (tab === 'balance') fetchBalance({ force: true });
+            if (tab === 'cashmanager') fetchCashManager({ force: true });
             // The open side is re-read; the other is dropped and reloads from
             // the refreshed cache when it is next opened.
             if (ageingSide) {
@@ -1102,6 +1151,14 @@ export default function XeroInsights() {
           )}
           {cashflow.data && !cashflow.error && <CashFlowPanel data={cashflow.data} onOpenAgeing={openAgeingFromBelow} />}
         </>
+      )}
+
+      {/* Keyed on the organisation, so a switch also drops the open day, the
+          open dialog and the sub-tab chosen for the one before. */}
+      {tab === 'cashmanager' && (
+        <CashManagerTab key={activeTenantId || ''} cash={cashManager} fetchCashManager={fetchCashManager}
+                        tenantId={activeTenantId || ''} currency={currency} orgName={organisation.name}
+                        timezone={user?.timezone} />
       )}
 
 

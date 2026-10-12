@@ -31,10 +31,15 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 // "agrees" is read against the right proof. The budget grid is asked for
 // again without the comparison periods its columns are matched off; the
 // Balance Sheet is read a second way, from the Trial Balance, which carries
-// the same closing balances with no layout to get wrong.
+// the same closing balances with no layout to get wrong. The cash flow
+// forecast starts from figures Xero also reports on its own — the bank
+// balances, and what is owed each way — so those are what it is held to.
 export function checkIntro(endpoint) {
   if (endpoint === 'balance-check') {
     return 'The sheet checked against Xero\'s Trial Balance, read separately, account by account. Read-only.';
+  }
+  if (endpoint === 'cash-manager-check') {
+    return 'The forecast\'s starting figures (bank balances, and the invoices and bills it counts) checked against Xero, read separately. Read-only.';
   }
   return 'The grid asked for again without comparison periods, line by line. Read-only; up to three Xero calls.';
 }
@@ -109,4 +114,20 @@ export function balanceHowTo(d) {
     lines.push(`Date = ${dates.slice(1).map(isoDay).join(' or ')} matches the comparison column of that date.`);
   }
   return lines;
+}
+
+// The same for the Cash Flow Manager. A forecast has no report in Xero to
+// set beside it (Xero's own manager sits under Analytics, which not every
+// plan includes), so the steps name the reports that hold what it starts from:
+// each bank account's balance, and what customers owe and what is owed to
+// suppliers, aged by due date. What was entered or changed in this app is
+// said last, since Xero cannot show it and the figures differ by exactly that.
+export function cashManagerHowTo(d) {
+  const day = isoDay(d?.today || d?.asAt?.iso || '');
+  const on  = day ? ` (date ${day})` : '';
+  return [
+    'In Xero: Accounting → Bank accounts. Each account\'s balance there is the app\'s before any opening adjustment made here.',
+    `Reports → Aged Receivables Summary and Aged Payables Summary${on}, aged by due date: their totals are what the forecast's invoices and bills add up to.`,
+    'Entries added here, and dates, amounts or exclusions changed here, stay in this app, so Xero does not show them.',
+  ];
 }

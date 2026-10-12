@@ -36,7 +36,9 @@ export function XeroCheckPanel({ query, onClose, endpoint = 'budget-check', howT
     // routes (ui-api-paths.test.js) can see both.
     const req = endpoint === 'balance-check'
       ? api.get(`/xero-reports/balance-check?${params.toString()}`)
-      : api.get(`/xero-reports/budget-check?${params.toString()}`);
+      : endpoint === 'cash-manager-check'
+        ? api.get(`/xero-reports/cash-manager-check?${params.toString()}`)
+        : api.get(`/xero-reports/budget-check?${params.toString()}`);
     req
       .then(d => { if (n === seq.current) setState({ status: 'done', data: d, error: '' }); })
       // The last verdict is not kept under an error: a stale "agrees" over a
