@@ -303,6 +303,59 @@ CREATE TABLE IF NOT EXISTS xero_tenants (
   PRIMARY KEY (user_id, tenant_id)
 );
 
+-- Cash Flow Manager (xero/cash-manager.js): what a person adds to or changes
+-- in the projection, kept per Xero organisation. Nothing here is ever sent to
+-- Xero; the projection is rebuilt from Xero's figures and these rows on every
+-- read, so an edit shows at once.
+--
+-- A cash movement Xero does not know about yet (a loan repayment, a tax bill,
+-- rent paid by direct debit): once, or repeating from `date` until `end_date`
+-- (NULL = for as long as the projection looks ahead). Amounts in cents of the
+-- organisation's base currency, like every money column here.
+CREATE TABLE IF NOT EXISTS cash_manager_entries (
+  id               TEXT PRIMARY KEY,
+  user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tenant_id        TEXT NOT NULL,
+  direction        TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+  description      TEXT NOT NULL,
+  amount_cents     INTEGER NOT NULL,
+  date             TEXT NOT NULL,
+  frequency        TEXT NOT NULL,
+  end_date         TEXT,
+  created_by_email TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cash_manager_entries_tenant ON cash_manager_entries(user_id, tenant_id);
+
+-- One line of the projection moved, re-valued or left out, by its item key
+-- (invoice:<id>, repeating:<id>:<date>, manual:<id>:<date>, payment:<id>).
+-- A key whose item has gone (the invoice was paid) is simply never matched.
+CREATE TABLE IF NOT EXISTS cash_manager_overrides (
+  user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tenant_id        TEXT NOT NULL,
+  item_key         TEXT NOT NULL,
+  date             TEXT,
+  amount_cents     INTEGER,
+  excluded         INTEGER NOT NULL DEFAULT 0,
+  updated_by_email TEXT,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (user_id, tenant_id, item_key)
+);
+
+-- Per bank account: whether it counts towards the opening balance, an
+-- adjustment to its balance, and its overdraft limit (a positive figure).
+-- No row is the defaults: included, no adjustment, no overdraft.
+CREATE TABLE IF NOT EXISTS cash_manager_bank_options (
+  user_id                  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tenant_id                TEXT NOT NULL,
+  account_id               TEXT NOT NULL,
+  included                 INTEGER NOT NULL DEFAULT 1,
+  opening_adjustment_cents INTEGER NOT NULL DEFAULT 0,
+  overdraft_cents          INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, tenant_id, account_id)
+);
+
 -- 1:many — a user can add multiple Gemini API keys. gemini-client.js rotates
 -- through every model on the first key before moving to the next key, so adding
 -- a key is a real way to add quota headroom, not just a backup. api_key is

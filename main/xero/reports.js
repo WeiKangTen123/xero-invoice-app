@@ -19,6 +19,8 @@
 //   ./balance-check      the balance sheet checked against itself and the bank
 //   ./performance        the dashboard figures
 //   ./ageing             receivables and payables by age and by contact
+//   ./cash-manager       the Cash Flow Manager: today's balance, ninety days on
+//   ./cash-manager-check the cash manager checked against the bank and ageing
 //   ./cash-flow-report   the Cash Flow tab, fetched (./cash-flow does the sums)
 //   ./ai-commentary      variance reasons and the financial narrative
 //
@@ -52,6 +54,8 @@ const {
   _isRecurringName, _buildPerformance, _buildWatchList, _recurringFor, _xeroDay,
 } = require('./performance');
 const { getAgeing, _buildAgeing, _creditsOf } = require('./ageing');
+const { getCashManager, _buildCashManager } = require('./cash-manager');
+const { getCashManagerCheck } = require('./cash-manager-check');
 const { getCashFlow, _buildInvoiceHygiene } = require('./cash-flow-report');
 const {
   getVarianceInsights, getFinancialNarrative, _narrateFrom, INSIGHT_CACHE_TTL_MS,
@@ -126,6 +130,7 @@ module.exports = {
   getBankTransactions, getBankSummary, getBudgetVariance, getBudgetCheck, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
   getBalanceSheet, getBalanceCheck, _balanceQueryFromParams, _resolveAsAt, _columnDates, _buildBalanceSheet,
   getAgeing, _buildAgeing, _creditsOf,
+  getCashManager, getCashManagerCheck, _buildCashManager,
   _buildSummary, _buildAccounts, _buildBankAccounts, _buildContacts,
   _buildBankTransactions, _buildPayments, _buildBankSummary,
   _splitIntoReportWindows, _clampReportFrom,

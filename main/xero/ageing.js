@@ -356,6 +356,6 @@ async function _getAgeingRaw(userId, tenantId, { side, timezone = 'UTC', force =
 const getAgeing = _dedupe('getAgeing', _getAgeingRaw, { timezone: 'UTC', force: false });
 
 module.exports = {
-  getAgeing, _buildAgeing, _creditsOf, _bucketOf, _daysBetween, _asOf,
+  getAgeing, _buildAgeing, _creditsOf, _bucketOf, _daysBetween, _asOf, _getCreditNotes,
   AGEING_SIDES: Object.keys(SIDES), AGEING_BUCKETS: BUCKETS, CONTACT_LIMIT, INVOICE_LIMIT,
 };

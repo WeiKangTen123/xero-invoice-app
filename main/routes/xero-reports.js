@@ -155,6 +155,21 @@ const AGEING_SIDES = new Set(['receivables', 'payables']);
 router.get('/ageing', requireAuth, report('Ageing',
   (req, t) => reports.getAgeing(req.user.id, t, { side: req.query.side, timezone: tz(req), force: force(req) }),
   { check: req => (AGEING_SIDES.has(req.query.side) ? null : 'side must be receivables or payables') }));
+// GET /api/xero-reports/cash-manager
+// The Cash Flow Manager (xero/cash-manager.js): today's bank balance and the
+// next ninety days of money in and out, from the summary's open invoices, the
+// Bank Summary, unallocated credit notes, approved repeating templates and
+// payments dated after today, plus the entries and changes kept in this app
+// (routes/cash-manager.js). Rebuilt on every request from cached reads, so an
+// edit there shows here at once. Takes no period: it starts today, in the
+// user's timezone.
+router.get('/cash-manager', requireAuth, report('Cash manager',
+  (req, t) => reports.getCashManager(req.user.id, t, { timezone: tz(req), force: force(req) })));
+// The above checked: the opening balance against the Bank Summary per account,
+// and the open invoices and bills against the ageing (xero/cash-manager-
+// check.js). Reads what the tab has just read, so no Xero call of its own.
+router.get('/cash-manager-check', requireAuth, report('Cash manager check',
+  (req, t) => reports.getCashManagerCheck(req.user.id, t, { timezone: tz(req), force: force(req) })));
 // Xero has no cash-flow-statement endpoint, so this is built from Bank Summary,
 // Payments, Bank Transactions and Invoices. Every one of those is a read.
 router.get('/cash-flow', requireAuth, report('Cash flow',
@@ -215,10 +230,13 @@ router.get('/narrative', requireAuth, asyncHandler(async (req, res) => {
 // than leaving them in the query where they could be edited to point at another
 // organisation's figures after the token was issued.
 const EXPORT_TOKEN_TTL = '5m';
-// 'balance' is the Balance Sheet tab's export; it rides on these two routes
-// so the browser has one way of opening a signed report file.
-const EXPORT_KINDS   = new Set(['grid', 'variance', 'balance']);
+// 'balance' is the Balance Sheet tab's export and 'cashmanager' the Cash Flow
+// Manager's; they ride on these two routes so the browser has one way of
+// opening a signed report file.
+const EXPORT_KINDS   = new Set(['grid', 'variance', 'balance', 'cashmanager']);
 const EXPORT_FORMATS = new Set(['pdf', 'xlsx']);
+// How far ahead a cash manager export reaches: the tab's three views.
+const CASH_MANAGER_DAYS = new Set([30, 60, 90]);
 // The answer to an export of a month that has not started. The screen cannot
 // ask for one (its buttons are disabled), so this is for a link made by hand
 // or signed before the check existed.
@@ -251,8 +269,18 @@ router.get('/budget/export-url', requireAuth, asyncHandler(async (req, res) => {
 
     const kind   = String(req.query.kind || 'grid');
     const format = String(req.query.format || 'pdf');
-    if (!EXPORT_KINDS.has(kind))     return res.status(400).json({ error: 'kind must be grid, variance or balance' });
+    if (!EXPORT_KINDS.has(kind))     return res.status(400).json({ error: 'kind must be cashmanager, grid, variance or balance' });
     if (!EXPORT_FORMATS.has(format)) return res.status(400).json({ error: 'format must be pdf or xlsx' });
+
+    // The cash manager takes no period, only how far ahead to show. Nothing
+    // else to check before signing: the file is built from the same payload
+    // the tab shows, for the day it is opened.
+    if (kind === 'cashmanager') {
+      const days = Number(req.query.days || 90);
+      if (!CASH_MANAGER_DAYS.has(days)) return res.status(400).json({ error: 'days must be 30, 60 or 90' });
+      const token = issueExportToken(req.user.id, { tenantId, kind, format, days });
+      return res.json({ url: `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`, expiresIn: EXPORT_TOKEN_TTL });
+    }
 
     // The Balance Sheet's query is its own (a date, a comparison, a basis),
     // checked by its own gate; and the as-at date is checked against today
@@ -320,6 +348,28 @@ router.get('/budget/export', asyncHandler(async (req, res) => {
       res.setHeader('Content-Type', 'application/pdf');
       setDownloadName(res, base, 'pdf');
       return budgetRender.streamPdf(balanceSheetDefinition(sheet, opts), res);
+    }
+
+    if (spec.kind === 'cashmanager') {
+      // Required here, as the Balance Sheet's is: the document module is the
+      // cash manager's own, and if it is missing only this branch fails.
+      const { cashManagerDefinition, cashManagerWorkbook, cashManagerFilename } = require('../reports/cash-manager-doc');
+      // The payload the tab renders, rebuilt from the same cached reads, so
+      // the file and the screen agree and the export costs no Xero call.
+      const payload = await reports.getCashManager(spec.userId, spec.tenantId, { timezone });
+      const days = CASH_MANAGER_DAYS.has(Number(spec.days)) ? Number(spec.days) : 90;
+      const opts = { timezone, days };
+      const base = String(cashManagerFilename(payload, spec.format, days) || 'Cash Flow Manager').replace(new RegExp(`\\.${spec.format}$`, 'i'), '');
+      if (spec.format === 'xlsx') {
+        const wb = cashManagerWorkbook(payload, opts);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        setDownloadName(res, base, 'xlsx');
+        await wb.xlsx.write(res);
+        return res.end();
+      }
+      res.setHeader('Content-Type', 'application/pdf');
+      setDownloadName(res, base, 'pdf');
+      return budgetRender.streamPdf(cashManagerDefinition(payload, opts), res);
     }
 
     // Reads the same cached payload the screen renders, so an exported figure

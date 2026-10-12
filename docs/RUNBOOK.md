@@ -288,6 +288,50 @@ in Xero's flat list, not from a list of expected titles. The export rides on
   under the bank check's `excluded`. `logs/combined.log` has `Balance Sheet
   fetched` with the date, comparison and basis of every read.
 
+## Cash Flow Manager
+
+The Dashboard's Cash Flow Manager (`main/xero/cash-manager.js`, behind
+`GET /api/xero-reports/cash-manager`) shows today's bank balance and the next
+90 days of money in and out, in the user's timezone. It is rebuilt on every
+request from cached Xero reads plus this app's own rows, so the payload itself
+is never cached and an edit shows on the next load. Every Xero call is a GET.
+
+- **What it reads.** The open invoices and bills, with each contact's paid
+  history (the Dashboard summary's own fetch, `outstanding:<user>:<tenant>`);
+  the Bank Summary over the Overview's window (today − 31 days to today, so
+  with the Overview loaded it is not a call); the bank account list;
+  unallocated credit notes (shared with the ageing); approved repeating
+  templates (`GET /RepeatingInvoices`, one call, cached an hour,
+  `repeating:<user>:<tenant>`); and approved payments dated after today
+  (`GET /Payments`, cached ten minutes). Cold that is seven calls; with the
+  Dashboard's summary, Overview and an ageing view loaded, two. A part that
+  cannot be read (a missing scope on the templates, a failed payments or bank
+  read) is said in `notes`, never a failed report.
+- **Its own rows.** `cash_manager_entries`, `cash_manager_overrides` and
+  `cash_manager_bank_options`, per user and organisation, edited through
+  `/api/cash-manager` (`main/routes/cash-manager.js`; every request names a
+  tenant the user has connected). Nothing there is ever sent to Xero, and no
+  edit clears the report cache. They go when the user is deleted.
+- **How an item is dated.** A date set here, then Xero's expected (sales) or
+  planned (bills) payment date, then the due date moved by the contact's
+  average days late over the last year (at least two paid invoices, held to
+  0–60 days), then the due date. Before today is overdue: totalled, on no day.
+  Xero may leave the expected and planned dates out of a list read; the notes
+  say when none came back.
+- **The Cash Flow tab's forecast** opens on today's balance (the same Bank
+  Summary window) whatever period is on screen; `forecast.openingAsOf` says
+  which date it opened on, and is the period end when today's balance could
+  not be read.
+- **Is it working?** `GET /api/xero-reports/cash-manager-check` as the user:
+  `ok` true and three checks — `balance` (each counted account against the
+  Bank Summary's closing balance today, and the total less adjustments made
+  here), `receivables` and `payables` (every open invoice and bill read,
+  before credit notes and changes, against the ageing's gross total). It reads
+  what the tab has just read, so `calls` is 0 with the tab loaded.
+  `logs/combined.log` has `Repeating invoices fetched` on each template read
+  and `Cash manager: … unavailable` for any part left out. The export rides
+  on `/budget/export-url?kind=cashmanager&format=pdf|xlsx&days=30|60|90`.
+
 ## Keys
 
 - Rotate `JWT_SECRET`: change it in `.env`, `pm2 restart`; everyone logs in

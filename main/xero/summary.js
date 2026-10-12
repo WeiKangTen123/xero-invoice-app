@@ -3,6 +3,12 @@ const { _cacheGet, _cacheSet, _dedupe } = require('./report-cache');
 const { _apiFor, _allInvoices, _getOrganisation, LIST_PAGE_SIZE, LIST_MAX_PAGES } = require('./report-fetch');
 const { _toBase, _foreignCurrency } = require('./currency');
 const { _raisedByMonth } = require('./cash-flow');
+const { _addDays, _dateFromParts, _fmtISODate, _parseISODate, _partsFromDate } = require('./periods');
+
+// The calendar day of a Xero date (see performance.js#_xeroDay). Required when
+// first used rather than at load: performance.js reads the summary, so the two
+// would otherwise require each other and one would see the other half-built.
+const _day = v => require('./performance')._xeroDay(v);
 
 // What is owed each way right now: receivables, payables, what is overdue, how
 // it ages, and the most recent invoices. It takes no period, and getPerformance
@@ -121,7 +127,10 @@ function _buildSummary(org, invoices) {
 // count the part already paid. Drafts, invoices awaiting approval and voided
 // ones are left out, as in Xero's own Aged Receivables and Payables reports.
 // The two dates are kept as Xero sent them; ./ageing reads them as calendar
-// days.
+// days. The expected (sales) and planned (bills) payment dates a person can set
+// in Xero are kept as calendar days, for the cash manager (./cash-manager),
+// which dates an item by them first. Xero may leave both out of a list read,
+// in which case they are null and the cash manager falls back.
 function _outstandingOf(invoices = []) {
   const out = [];
   for (const inv of invoices) {
@@ -143,7 +152,65 @@ function _outstandingOf(invoices = []) {
       // records exactly as they read the invoices themselves.
       currencyCode: inv.currencyCode ? String(inv.currencyCode) : '',
       currencyRate: inv.currencyRate ?? null,
+      expectedPaymentDate: _day(inv.expectedPaymentDate),
+      plannedPaymentDate:  _day(inv.plannedPaymentDate),
     });
+  }
+  return out;
+}
+
+// How late each contact pays, or is paid, read from the PAID invoices the
+// summary's fetch already returns, so the cash manager can date an open
+// invoice by when that customer actually tends to pay rather than by a due
+// date they routinely miss. No call of its own.
+//
+// Per direction as well as per contact: a business that is both customer and
+// supplier pays its bills on its own habits and is paid on ours, and the two
+// say nothing about each other. Measured over invoices fully paid in the last
+// year, so a customer who used to be slow and no longer is stops being
+// predicted slow; at least two of them, because one late payment is an
+// incident, not a habit. The average is rounded to whole days and held
+// between 0 and 60: paying early does not bring cash in before the due date
+// anyone plans around, and beyond two months the debt is a collection
+// problem that a date shift would only hide.
+const LATENESS_LOOKBACK_DAYS = 365;
+const LATENESS_MIN_PAID      = 2;
+const LATENESS_MAX_DAYS      = 60;
+
+// One contact on one side, as both the map below and the cash manager key it.
+// A record with no contact id, which Xero should never send, falls back to its
+// name, as the ageing groups it.
+function _contactKey(type, contactId, contactName) {
+  return `${type}:${contactId || `name:${contactName || ''}`}`;
+}
+
+// Pure. { "<type>:<contact>": { days, count, average } } for every contact
+// with enough paid history; `todayISO` is the end of the year looked back over.
+function _latenessOf(invoices = [], todayISO = new Date().toISOString().slice(0, 10)) {
+  const today = _parseISODate(todayISO);
+  const since = today ? _fmtISODate(_addDays(today, -LATENESS_LOOKBACK_DAYS)) : null;
+  const sums  = new Map();
+  for (const inv of invoices || []) {
+    if (!inv || inv.status !== 'PAID') continue;
+    if (inv.type !== 'ACCREC' && inv.type !== 'ACCPAY') continue;
+    const due = _day(inv.dueDate), paid = _day(inv.fullyPaidOnDate);
+    if (!due || !paid) continue;
+    if (since && (paid < since || paid > todayISO)) continue;
+    const late = Math.round((_dateFromParts(_parseISODate(paid)) - _dateFromParts(_parseISODate(due))) / 86400000);
+    const key = _contactKey(inv.type, inv.contact?.contactID, inv.contact?.name);
+    const s = sums.get(key) || { total: 0, count: 0 };
+    s.total += late; s.count++;
+    sums.set(key, s);
+  }
+  const out = {};
+  for (const [key, s] of sums) {
+    if (s.count < LATENESS_MIN_PAID) continue;
+    const average = s.total / s.count;
+    out[key] = {
+      days: Math.min(LATENESS_MAX_DAYS, Math.max(0, Math.round(average))),
+      count: s.count,
+      average: Math.round(average * 10) / 10,
+    };
   }
   return out;
 }
@@ -179,6 +246,9 @@ async function _getSummaryRaw(userId, tenantId, { force = false } = {}) {
     // past it loses its OLDEST invoices — exactly the ones ageing is about. Said
     // rather than shown as a clean ledger.
     capped: invoices.length >= LIST_PAGE_SIZE * LIST_MAX_PAGES,
+    // In the same entry as the open invoices it dates, so the two are always
+    // from one fetch: the cash manager never predicts from a stale history.
+    lateness: _latenessOf(invoices, _fmtISODate(_partsFromDate(new Date()))),
   });
   logger.info('Insights summary fetched', { userId, tenantId, invoiceCount: data.invoices.length });
   return _cacheSet(key, data);
@@ -209,4 +279,7 @@ async function _getOutstanding(userId, tenantId, { force = false } = {}) {
   return { ...filled, cached: summary.cached !== false };
 }
 
-module.exports = { getSummary, _buildSummary, _outstandingOf, _getOutstanding };
+module.exports = {
+  getSummary, _buildSummary, _outstandingOf, _getOutstanding, _latenessOf, _contactKey,
+  LATENESS_LOOKBACK_DAYS, LATENESS_MIN_PAID, LATENESS_MAX_DAYS,
+};

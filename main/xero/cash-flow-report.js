@@ -4,7 +4,8 @@ const { _apiFor, _allInvoices, _allPages } = require('./report-fetch');
 const { getBankSummary, _bankAccountList } = require('./bank');
 const { getPerformance } = require('./performance');
 const { _foreignCurrency } = require('./currency');
-const { _addDays, _fmtXeroDate, _parseISODate, _todayPartsInTz } = require('./periods');
+const { _todayBalanceWindow } = require('./cash-manager');
+const { _addDays, _fmtISODate, _fmtXeroDate, _parseISODate, _todayPartsInTz } = require('./periods');
 const {
   _buildAlerts,
   _buildCashForecast,
@@ -124,12 +125,19 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
 
   // Every call here is a GET. Nothing in this path writes to Xero. Payments and
   // bank transactions are paged (see _allPages).
-  const [bank, bankAccounts, payments, bankTransactions, invRes] = await Promise.all([
+  const [bank, bankAccounts, todayBank, payments, bankTransactions, invRes] = await Promise.all([
     getBankSummary(userId, tenantId, { from: first, to: last, force }).catch(err => {
       logger.warn('Cash flow: bank summary unavailable', { userId, error: err.message });
       return null;
     }),
     _bankAccountList(userId, tenantId, force),
+    // The balance today, which the forecast starts from (see below). Asked
+    // for over the window the Overview and the cash manager read it over, so
+    // with either loaded this is their cached read, not a call.
+    getBankSummary(userId, tenantId, { ..._todayBalanceWindow(today), force }).catch(err => {
+      logger.warn('Cash flow: bank balance today unavailable; the forecast starts from the period end', { userId, error: err.message });
+      return null;
+    }),
     _allPages(page => api.getPayments(tenantId, undefined, dateWhere, 'Date DESC', page), 'payments', { what: 'Payment', tenantId })
       .catch(err => { logger.warn('Cash flow: payments unavailable', { userId, error: err.message }); return []; }),
     _allPages(page => api.getBankTransactions(tenantId, undefined, dateWhere, 'Date DESC', page), 'bankTransactions', { what: 'Bank transaction', tenantId })
@@ -191,7 +199,17 @@ async function _getCashFlowRaw(userId, tenantId, { timezone = 'UTC', force = fal
   // terms as the movement figures it sits beside and is checked against.
   const bankIn   = byCur ? byCur.cashIn  - banked.transfers.in  : 0;
   const bankOut  = byCur ? byCur.cashOut - banked.transfers.out : 0;
-  const forecast = _buildCashForecast({ invoices, openingBalance: closing, today, baseCurrency });
+  // The forecast looks forward from today, so it starts from the balance
+  // today, whatever period is on screen. It started from the period's closing
+  // balance, which for last quarter or last year was a balance months old
+  // carried forward as though nothing had been paid since. The period's own
+  // figures above still close at the period's end. Should today's balance not
+  // be readable, the period's is used and openingAsOf says which it is.
+  const todayByCur = todayBank ? _bankByCurrency(todayBank, bankAccounts, baseCurrency) : null;
+  const forecast = {
+    ..._buildCashForecast({ invoices, openingBalance: todayByCur ? todayByCur.closing : closing, today, baseCurrency }),
+    openingAsOf: todayByCur ? _fmtISODate(today) : last,
+  };
   const runway   = _buildRunway({ months, monthly: movement.monthly, closing, today });
   const waterfall = _buildCashWaterfall({ opening, closing, movement: banked });
 

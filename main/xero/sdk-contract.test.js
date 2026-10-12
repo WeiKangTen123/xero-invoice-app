@@ -40,9 +40,13 @@ const USED = {
   // reports: order and page (3, 5) with summaryOnly (7)
   getContacts: ['xeroTenantId', 'ifModifiedSince', 'where', 'order', 'iDs', 'page',
     'includeArchived', 'summaryOnly', 'searchTerm'],
-  // reports: where, order and page (2, 3, 4)
+  // reports: where, order and page (2, 3, 4); the cash manager's payments
+  // dated after today use the same three
   getPayments:         ['xeroTenantId', 'ifModifiedSince', 'where', 'order', 'page'],
   getBankTransactions: ['xeroTenantId', 'ifModifiedSince', 'where', 'order', 'page'],
+  // cash manager: approved templates by where (1); the endpoint takes no
+  // ifModifiedSince and no page, so where sits second, not third
+  getRepeatingInvoices: ['xeroTenantId', 'where', 'order'],
   // ageing: unallocated credit notes by where, order and page (2, 3, 4)
   getCreditNotes:      ['xeroTenantId', 'ifModifiedSince', 'where', 'order', 'page'],
   // reports: P&L by month, standardLayout=true (9) on every call
