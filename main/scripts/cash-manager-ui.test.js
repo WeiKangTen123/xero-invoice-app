@@ -150,7 +150,7 @@ describe('the window and what is remembered', () => {
     expect(h.modeOptions().map(o => o.label)).toEqual(['Cash in & cash out', 'Bank balance', 'Net movement']);
     expect(h.filterOptions().map(o => o.label)).toEqual(['Current', 'Overdue', 'Excluded', 'All']);
     expect(h.groupOptions().map(o => o.label)).toEqual(['None', 'Contact', 'Due date']);
-    expect(h.repeatOptions().map(o => o.label)).toEqual(['Once', 'Daily', 'Weekly', 'Fortnightly', 'Monthly', 'Yearly']);
+    expect(h.repeatOptions().map(o => o.label)).toEqual(['Once', 'Daily', 'Weekly', 'Fortnightly', 'Monthly', 'Quarterly', 'Yearly']);
   });
 });
 

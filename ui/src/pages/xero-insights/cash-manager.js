@@ -22,7 +22,8 @@ const VIEWS = ['chart', 'table', 'calendar'];
 const MODES = ['inout', 'balance', 'net'];
 const FILTERS = ['current', 'overdue', 'excluded', 'all'];
 const GROUPS = ['none', 'contact', 'due'];
-const FREQUENCIES = ['once', 'daily', 'weekly', 'fortnightly', 'monthly', 'yearly'];
+// Quarterly is for GST and BAS, which are paid every three months.
+const FREQUENCIES = ['once', 'daily', 'weekly', 'fortnightly', 'monthly', 'quarterly', 'yearly'];
 // What the tab opens on the first time: two months ahead, as a chart of what
 // comes in and goes out — Xero's own default view.
 const DEFAULT_PREFS = { days: 60, view: 'chart', mode: 'inout' };
@@ -84,6 +85,7 @@ export function repeatOptions() {
     { key: 'weekly',      label: 'Weekly' },
     { key: 'fortnightly', label: 'Fortnightly' },
     { key: 'monthly',     label: 'Monthly' },
+    { key: 'quarterly',   label: 'Quarterly' },
     { key: 'yearly',      label: 'Yearly' },
   ];
 }

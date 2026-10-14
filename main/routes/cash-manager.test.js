@@ -106,7 +106,7 @@ describe('routes/cash-manager and the cash manager report routes', () => {
         [{ amount: 2e9 },                /1,000,000,000/],
         [{ amount: 1.001 },              /two decimal places/],
         [{ date: '2026-11-31' },         /date must be a date/],
-        [{ frequency: 'quarterly' },     /frequency must be one of/],
+        [{ frequency: 'hourly' },        /frequency must be one of/],
         [{ frequency: 'weekly', endDate: '2026-01-01' }, /endDate cannot be before date/],
       ];
       for (const [bad, re] of cases) {

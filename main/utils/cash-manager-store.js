@@ -12,7 +12,8 @@ const { newId } = require('./ids');
 // the organisation's base currency.
 
 const DIRECTIONS  = new Set(['in', 'out']);
-const FREQUENCIES = ['once', 'daily', 'weekly', 'fortnightly', 'monthly', 'yearly'];
+// Quarterly is there for GST and BAS returns, which are paid every three months.
+const FREQUENCIES = ['once', 'daily', 'weekly', 'fortnightly', 'monthly', 'quarterly', 'yearly'];
 const MAX_AMOUNT  = 1e9;
 const MAX_DESCRIPTION = 120;
 // Ceilings, not expectations: a projection with thousands of hand entries is a

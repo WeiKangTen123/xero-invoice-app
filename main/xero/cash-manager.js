@@ -53,6 +53,11 @@ const BALANCE_WINDOW_DAYS = 31;
 // A ceiling on any one schedule's occurrences, against a template whose
 // period Xero sent as nothing.
 const MAX_OCCURRENCES = 400;
+// The longest horizon anyone may ask for: the monthly forecast
+// (cash-monthly.js) reaches to the end of the twelfth month after this one,
+// at most 397 days. Held to the occurrence ceiling, so a daily entry still
+// lands on every day of it.
+const MAX_HORIZON_DAYS = MAX_OCCURRENCES;
 
 // Money is added in whole cents, as in the ageing, so the days, the tiles and
 // the running balance agree to the last cent.
@@ -303,7 +308,8 @@ function _buildActuals({
 // ── Entries kept here ───────────────────────────────────────────────────────
 
 const STEP_DAYS   = { daily: 1, weekly: 7, fortnightly: 14 };
-const STEP_MONTHS = { monthly: 1, yearly: 12 };
+// Quarterly is for GST and BAS, which fall due every three months.
+const STEP_MONTHS = { monthly: 1, quarterly: 3, yearly: 12 };
 
 // Pure. The days an entry falls on between today and `untilISO`. A repeating
 // entry that started before today has already happened on its earlier dates,
@@ -771,7 +777,12 @@ function _soft(what, promise, ctx) {
   });
 }
 
-async function _getCashManagerRaw(userId, tenantId, { timezone = 'UTC', force = false } = {}) {
+// `horizonDays` is the tab's ninety days unless a longer view asks for more
+// (the monthly forecast, up to MAX_HORIZON_DAYS): the same reads, the same
+// items, only placed further ahead. Never shorter, so nothing that asks for
+// the tab's view can get less of it.
+async function _getCashManagerRaw(userId, tenantId, { timezone = 'UTC', force = false, horizonDays = HORIZON_DAYS } = {}) {
+  const horizon = Math.min(MAX_HORIZON_DAYS, Math.max(HORIZON_DAYS, Math.floor(Number(horizonDays)) || HORIZON_DAYS));
   const todayParts = _todayPartsInTz(timezone);
   const todayISO   = _fmtISODate(todayParts);
   const ctx = { userId, tenantId };
@@ -789,7 +800,7 @@ async function _getCashManagerRaw(userId, tenantId, { timezone = 'UTC', force = 
   // Required here: the store opens the database, which no other report needs.
   const store = require('../utils/cash-manager-store').forTenant(userId, tenantId);
   const data = _buildCashManager({
-    todayISO, timezone,
+    todayISO, timezone, horizonDays: horizon,
     organisation: org, baseCurrency: outstanding.baseCurrency || org?.baseCurrency || '',
     outstanding: outstanding.invoices, lateness: outstanding.lateness || {}, incomplete: outstanding.capped,
     credits: credits.value ? credits.value.creditNotes : null,
@@ -811,10 +822,10 @@ async function _getCashManagerRaw(userId, tenantId, { timezone = 'UTC', force = 
     fetchedAt: stamps.length ? Math.min(...stamps) : Date.now(),
   };
 }
-const getCashManager = _dedupe('getCashManager', _getCashManagerRaw, { timezone: 'UTC', force: false });
+const getCashManager = _dedupe('getCashManager', _getCashManagerRaw, { timezone: 'UTC', force: false, horizonDays: HORIZON_DAYS });
 
 module.exports = {
   getCashManager, _buildCashManager, _templatesOf, _repeatingDates, _repeatingDue, _paymentsOf, _bankTransactionsOf,
   _buildActuals, _manualDates, _todayBalanceWindow, _monthDay,
-  HORIZON_DAYS, ACTUAL_DAYS, REPEATING_TTL_MS, PAYMENTS_TTL_MS, BALANCE_WINDOW_DAYS,
+  HORIZON_DAYS, MAX_HORIZON_DAYS, ACTUAL_DAYS, REPEATING_TTL_MS, PAYMENTS_TTL_MS, BALANCE_WINDOW_DAYS,
 };

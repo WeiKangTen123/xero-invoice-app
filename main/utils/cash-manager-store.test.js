@@ -59,7 +59,7 @@ describe('entries', () => {
     [{ amount: Infinity },                  /must be a number/],
     [{ date: '2026-02-30' },                /date must be a date/],
     [{ date: '01/11/2026' },                /date must be a date/],
-    [{ frequency: 'hourly' },               /frequency must be one of once, daily, weekly, fortnightly, monthly, yearly/],
+    [{ frequency: 'hourly' },               /frequency must be one of once, daily, weekly, fortnightly, monthly, quarterly, yearly/],
     [{ endDate: '2026-10-01' },             /endDate cannot be before date/],
     [{ endDate: 'soon' },                   /endDate must be a date/],
   ])('%o is refused', (bad, re) => {

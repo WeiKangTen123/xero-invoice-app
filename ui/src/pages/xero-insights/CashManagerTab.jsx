@@ -12,6 +12,7 @@ import { cashManagerHowTo } from './xero-check';
 import { CashCalendar, CashChart, CashTable, DayPanel } from './CashManagerChart';
 import { CashList } from './CashManagerLists';
 import { BankOptionsModal, EntryModal, OverrideModal } from './CashManagerModals';
+import CashMonthly from './CashMonthly';
 import { daysOptions, exportQueryFor, modeOptions, readPrefs, tileFigures, viewOptions, windowOf } from './cash-manager';
 
 // The Cash Flow Manager, after Xero Analytics' own: what the bank balance is
@@ -30,10 +31,13 @@ import { daysOptions, exportQueryFor, modeOptions, readPrefs, tileFigures, viewO
 
 const PREFS_KEY = 'cashManagerPrefs';
 const NOTE_KEY = 'cashManagerNoteDismissed';
+// Monthly is the same forecast by the month, with the months before this one
+// as they happened (CashMonthly.jsx); it asks for its own figures.
 const SECTIONS = [
   { key: 'overview', label: 'Overview' },
   { key: 'in',       label: 'Manage cash in' },
   { key: 'out',      label: 'Manage cash out' },
+  { key: 'monthly',  label: 'Monthly' },
 ];
 
 // Storage can be missing or refuse a write (a private window, a full quota);
@@ -270,9 +274,16 @@ export default function CashManagerTab({ cash, fetchCashManager, tenantId, curre
         </>
       )}
 
-      {ready && section !== 'overview' && (
+      {ready && (section === 'in' || section === 'out') && (
         <CashList payload={d} direction={section} busyKey={busyKey} onEdit={edit} onToggleExclude={toggleExclude}
                   onDelete={deleteEntry} onAdd={direction => setModal({ kind: 'entry', direction })} />
+      )}
+
+      {/* Its own request, so it is not held up by the day-by-day forecast;
+          that forecast being read again from Xero (a Refresh, a live update)
+          is what tells it to ask again. */}
+      {section === 'monthly' && tid && (
+        <CashMonthly tenantId={tid} refreshedAt={d?.fetchedAt} currency={cur} />
       )}
 
       {modal?.kind === 'bank' && d && (
