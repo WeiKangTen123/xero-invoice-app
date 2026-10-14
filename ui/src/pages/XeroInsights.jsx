@@ -12,7 +12,7 @@ import { MonthRange, OverviewPanel, RevenuePanel, CashFlowPanel, ProfitabilityPa
 import { balancesByName } from './xero-insights/balances';
 import { KpiCard, LiveStatus, lastLoaded } from './xero-insights/bits';
 import { hasChanged, shouldRefetchTab, oldestRead, liveLabel } from './xero-insights/live';
-import { defaultControls, queryFor } from './xero-insights/balance';
+import { defaultControls, queryFor, openOnToday, fallBackFromToday } from './xero-insights/balance';
 import { perfExtras, shouldReaskCustomers, shouldReaskCashFlow, analysedAt } from './xero-insights/perf-requests';
 import { awaitingLine, overdueLine, creditLine } from './xero-insights/headline';
 import BankingTab from './xero-insights/BankingTab';
@@ -157,6 +157,9 @@ export default function XeroInsights() {
   // Banking tab's statement drill-down — which account, and its transactions.
   const [selectedBankAccount, setSelectedBankAccount] = useState(null);
   const [statement, setStatement] = useState({ status: 'idle', data: [], error: '' });
+  // Set when a statement is opened from a Balance Sheet line, so Banking
+  // scrolls to it: it sits under the account list, out of view on arrival.
+  const scrollToStatement = useRef(false);
 
   // Budget vs Actual — lazily loaded like the Banking tab. `data` stays null
   // until loaded (unlike that, it's an object not a list, so there's nothing
@@ -735,6 +738,28 @@ export default function XeroInsights() {
     fetchBalance({ controls: next });
   }
 
+  // Exact dates are known to be available only once a sheet has loaded and
+  // says so, so the tab opens on the last month end and then — if the reader
+  // has not picked a date — moves to today; and if today then cannot be read,
+  // back to the month end, once (balance.js#openOnToday, #fallBackFromToday).
+  useEffect(() => {
+    const next = openOnToday(balanceControls, balance.data) || fallBackFromToday(balanceControls, balance);
+    if (next) changeBalanceControls(next);
+  }, [balance]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // From a Balance Sheet line to what makes up its figure: a bank account's
+  // statement on the Banking tab, scrolled into view once it is there.
+  function openBankAccount(accountId, name) {
+    scrollToStatement.current = true;
+    viewStatement({ accountId, name });
+    setTab('banking');
+  }
+  useEffect(() => {
+    if (tab !== 'banking' || !selectedBankAccount || !scrollToStatement.current) return;
+    scrollToStatement.current = false;
+    document.getElementById('banking-statement')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [tab, selectedBankAccount]);
+
   // The cash flow forecast for the organisation. `quiet` is a re-read after a
   // change seen in Xero, or after a change made on the tab itself (an entry
   // added, a date moved): the forecast stays on screen while it reloads, and
@@ -1204,7 +1229,8 @@ export default function XeroInsights() {
       {tab === 'balance' && (
         <BalanceSheetTab balance={balance} controls={balanceControls} onControls={changeBalanceControls}
                          fetchBalance={fetchBalance} currency={currency} orgName={organisation.name}
-                         exportQuery={balanceQuery()} />
+                         exportQuery={balanceQuery()}
+                         onOpenBankAccount={openBankAccount} onOpenAgeing={openAgeingFromBelow} />
       )}
 
       {tab === 'budget' && <BudgetTab budget={budget} fetchBudget={fetchBudget} currency={currency} exportQuery={budgetQuery()} />}

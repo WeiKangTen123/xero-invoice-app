@@ -70,6 +70,11 @@ describe('routes/xero-reports — the Balance Sheet', () => {
     'periods that is not a number': 'compare=quarter&periods=two',
     'an unknown basis':             'basis=modified',
     'a repeated parameter':         'preset=this-month&preset=last-month-end',
+    'an exact date without a date': 'preset=date',
+    'an exact date badly written':  'preset=date&date=14-10-2026',
+    'an exact date that is no day': 'preset=date&date=2026-02-30',
+    'an exact date before 1990':    'preset=date&date=1989-06-30',
+    'today against five dates':     'preset=today&compare=month&periods=5',
   };
 
   for (const route of ['balance-sheet', 'balance-check']) {
@@ -123,6 +128,22 @@ describe('routes/xero-reports — the Balance Sheet', () => {
           expect(fetcher()).not.toHaveBeenCalled();
         });
 
+        test('today, and an exact date with its comparison, are passed through as asked', async () => {
+          await get(route, 'preset=today').expect(200);
+          expect(fetcher()).toHaveBeenLastCalledWith(testUser.id, 't1', expect.objectContaining({ preset: 'today', date: undefined, compare: 'none' }));
+          await get(route, 'preset=date&date=2026-10-01&compare=year&periods=4').expect(200);
+          expect(fetcher()).toHaveBeenLastCalledWith(testUser.id, 't1', {
+            timezone: expect.any(String), force: false, preset: 'date', month: undefined, date: '2026-10-01', compare: 'year', periods: 4, basis: 'accrual',
+          });
+        });
+
+        test('a date after today, refused by the report itself, is a 400', async () => {
+          const { PeriodError } = require('../xero/periods');
+          fetcher().mockRejectedValue(new PeriodError('15 October 2026 is after today'));
+          const res = await get(route, 'preset=date&date=2026-10-15').expect(400);
+          expect(res.body.error).toBe('15 October 2026 is after today');
+        });
+
         test('a month after this one, refused by the report itself, is a 400 too', async () => {
           const { PeriodError } = require('../xero/periods');
           fetcher().mockRejectedValue(new PeriodError('November 2026 has not started yet'));
@@ -139,6 +160,30 @@ describe('routes/xero-reports — the Balance Sheet', () => {
       });
     });
   }
+
+  describe('which report a sheet came from', () => {
+    beforeEach(() => tokenCache.getPersistedTenants.mockReturnValue([{ tenantId: 't1', tenantName: 'Org One' }]));
+
+    test('the payload says so, and the route passes it on untouched', async () => {
+      const exact = { ...SHEET, asAt: { iso: '2026-10-14', label: '14 October 2026', preset: 'today', inProgress: true, source: 'trial-balance' },
+                      exactDates: { ok: true, reason: 'ok', at: '2026-09-30' } };
+      reports.getBalanceSheet.mockResolvedValue(exact);
+      const res = await get('balance-sheet', 'preset=today').expect(200);
+      expect(res.body.asAt.source).toBe('trial-balance');
+      expect(res.body.exactDates).toEqual({ ok: true, reason: 'ok', at: '2026-09-30' });
+      reports.getBalanceSheet.mockResolvedValue({ ...SHEET, asAt: { ...SHEET.asAt, source: 'balance-sheet' } });
+      expect((await get('balance-sheet').expect(200)).body.asAt.source).toBe('balance-sheet');
+    });
+
+    test('an exact date the gate refuses is a 400 in its words; a missing Trial Balance scope the reconnect prompt', async () => {
+      const { PeriodError } = require('../xero/periods');
+      const words = "Exact dates unavailable: Xero's Trial Balance does not reconcile with its Balance Sheet (difference SGD 12.50 on Accounts Receivable)";
+      reports.getBalanceSheet.mockRejectedValue(new PeriodError(words));
+      expect((await get('balance-sheet', 'preset=today').expect(400)).body.error).toBe(words);
+      reports.getBalanceSheet.mockRejectedValue(Object.assign(new Error('Exact dates unavailable'), { statusCode: 403 }));
+      expect((await get('balance-sheet', 'preset=today').expect(403)).body.error).toMatch(/reconnect in Setup/);
+    });
+  });
 
   describe('the balance export', () => {
     beforeEach(() => {
@@ -163,6 +208,25 @@ describe('routes/xero-reports — the Balance Sheet', () => {
     test('defaults travel too, and the budget period gate is not applied to a balance link', async () => {
       const res = await exportUrl('kind=balance').expect(200);
       expect(tokenOf(res)).toMatchObject({ kind: 'balance', format: 'pdf', balance: { preset: 'last-month-end', compare: 'none', basis: 'accrual' } });
+      // The tab's own defaults: no codes, no zero rows, two decimals, no change.
+      expect(tokenOf(res).view).toEqual({ codes: false, zeroRows: false, decimals: true, change: false });
+    });
+
+    test('the view on screen travels with the link, and an exact date with its query', async () => {
+      const res = await exportUrl('kind=balance&format=pdf&preset=date&date=2026-10-01&compare=month&periods=2&codes=true&zeroRows=true&decimals=false&change=true').expect(200);
+      expect(tokenOf(res)).toMatchObject({
+        balance: { preset: 'date', date: '2026-10-01', compare: 'month', periods: 2, basis: 'accrual' },
+        view:    { codes: true, zeroRows: true, decimals: false, change: true },
+      });
+    });
+
+    test('a view flag that is not true or false is refused before a link is signed', async () => {
+      for (const qs of ['codes=yes', 'decimals=0', 'change=TRUE', 'zeroRows=true&zeroRows=false']) {
+        const res = await exportUrl(`kind=balance&${qs}`);
+        expect({ qs, status: res.status }).toEqual({ qs, status: 400 });
+        expect(res.body.url).toBeUndefined();
+      }
+      expect(reports.getBalanceSheet).not.toHaveBeenCalled();
     });
 
     test('no link is signed for a query the sheet route would refuse, nor for a month the report refuses', async () => {
@@ -188,10 +252,13 @@ describe('routes/xero-reports — the Balance Sheet', () => {
     const download = spec => request(serverFor(app)).get(`/api/xero-reports/budget/export?token=${encodeURIComponent(signed(spec))}`);
     const BALANCE = { preset: 'last-month-end', compare: 'none', basis: 'accrual' };
 
+    const DEFAULT_VIEW = { codes: false, zeroRows: false, decimals: true, change: false };
+
     test('a PDF export reads the sheet the link names and streams the document module\'s definition', async () => {
       const res = await download({ format: 'pdf', balance: BALANCE }).expect(200);
       expect(reports.getBalanceSheet).toHaveBeenCalledWith(testUser.id, 't1', { timezone: expect.any(String), ...BALANCE });
-      expect(balanceDoc.balanceSheetDefinition).toHaveBeenCalledWith(SHEET, { timezone: expect.any(String) });
+      // A link signed before the view travelled is laid out the tab's default way.
+      expect(balanceDoc.balanceSheetDefinition).toHaveBeenCalledWith(SHEET, { timezone: expect.any(String), ...DEFAULT_VIEW });
       expect(balanceDoc.balanceFilename).toHaveBeenCalledWith(SHEET, 'pdf');
       expect(budgetRender.streamPdf).toHaveBeenCalledWith({ content: ['balance sheet'] }, expect.anything());
       expect(res.headers['content-type']).toMatch(/application\/pdf/);
@@ -200,9 +267,17 @@ describe('routes/xero-reports — the Balance Sheet', () => {
       expect(res.headers['content-disposition']).not.toContain('.pdf.pdf');
     });
 
+    test('the view the link carries reaches the document module, in both formats', async () => {
+      const view = { codes: true, zeroRows: true, decimals: false, change: true };
+      await download({ format: 'pdf', balance: BALANCE, view }).expect(200);
+      expect(balanceDoc.balanceSheetDefinition).toHaveBeenCalledWith(SHEET, { timezone: expect.any(String), ...view });
+      await download({ format: 'xlsx', balance: BALANCE, view: { ...view, codes: false } }).expect(200);
+      expect(balanceDoc.balanceSheetWorkbook).toHaveBeenCalledWith(SHEET, { timezone: expect.any(String), ...view, codes: false });
+    });
+
     test('an xlsx export writes the document module\'s workbook', async () => {
       const res = await download({ format: 'xlsx', balance: BALANCE }).expect(200);
-      expect(balanceDoc.balanceSheetWorkbook).toHaveBeenCalledWith(SHEET, { timezone: expect.any(String) });
+      expect(balanceDoc.balanceSheetWorkbook).toHaveBeenCalledWith(SHEET, { timezone: expect.any(String), ...DEFAULT_VIEW });
       expect(balanceDoc.balanceSheetDefinition).not.toHaveBeenCalled();
       expect(res.headers['content-type']).toMatch(/spreadsheetml/);
       expect(res.headers['content-disposition']).toContain('filename="Balance Sheet - Flovon Pte Ltd - 2026-09-30.xlsx"');

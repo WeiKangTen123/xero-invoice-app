@@ -249,6 +249,118 @@ describe('reports/balance-doc — account codes', () => {
   });
 });
 
+describe('reports/balance-doc — zero-balance rows', () => {
+  // Petty cash with nothing in any column, beside an account that is nil in
+  // one column only.
+  const withNil = () => {
+    const p = payload();
+    p.groups[0].subgroups[0].rows.push({ label: 'Petty Cash', code: '091', values: [0, 0, 0.004] });
+    return p;
+  };
+
+  test('are left out unless asked for, as on screen; an account nil in one column only stays, and totals always print', () => {
+    expect(balance.balanceLines(withNil()).map(l => l.label)).not.toContain('Petty Cash');
+    expect(balance.balanceLines(withNil()).map(l => l.label)).toContain('Accounts Receivable');
+    expect(balance.balanceLines(withNil(), { zeroRows: true }).map(l => l.label)).toContain('Petty Cash');
+    const totals = { groups: [{ key: 'assets', title: 'Assets', subgroups: [
+      { title: 'Bank', rows: [{ label: 'Petty Cash', values: [0] }], total: { label: 'Total Bank', values: [0] } },
+    ], total: { label: 'Total Assets', values: [0] } }] };
+    expect(balance.balanceLines(totals).map(l => `${l.kind}:${l.label}`)).toEqual(['group:ASSETS', 'subgroup:Bank', 'subtotal:Total Bank', 'total:Total Assets']);
+  });
+
+  test('in both files', () => {
+    expect(rowOf(balance.balanceSheetDefinition(withNil(), SGT), 'Petty Cash')).toBeUndefined();
+    expect(rowOf(balance.balanceSheetDefinition(withNil(), { ...SGT, zeroRows: true }), 'Petty Cash')).toBeDefined();
+    expect(sheetRow(balance.balanceSheetWorkbook(withNil(), SGT), 'Petty Cash')).toBeNull();
+    expect(sheetRow(balance.balanceSheetWorkbook(withNil(), { ...SGT, zeroRows: true }), 'Petty Cash')).not.toBeNull();
+  });
+});
+
+describe('reports/balance-doc — whole numbers', () => {
+  const p = () => {
+    const x = payload();
+    x.groups[0].subgroups[0].rows[0].values = [135490.5, -2.5, 0.4];
+    return x;
+  };
+
+  test('the PDF prints whole units, rounding half away from zero, a nil as a dash, and says how totals were rounded', () => {
+    const d = balance.balanceSheetDefinition(p(), { ...SGT, decimals: false });
+    expect(rowOf(d, 'Aspire SGD account').slice(1).map(c => c.text)).toEqual(['135,491', '(3)', '-']);
+    expect(rowOf(d, 'Total Assets').slice(1).map(c => c.text)).toEqual(['135,491', '132,250', '118,900']);
+    expect(d.content.filter(c => c.style === 'note').map(c => c.text)).toContainEqual(expect.stringMatching(/^Figures are rounded to whole units/));
+    // Decimals on is the default, and prints cents as before.
+    expect(rowOf(balance.balanceSheetDefinition(p(), SGT), 'Aspire SGD account').slice(1).map(c => c.text)).toEqual(['135,490.50', '(2.50)', '0.40']);
+  });
+
+  test('the workbook writes whole numbers in a format without cents, so a cell holds what it shows', () => {
+    const row = sheetRow(balance.balanceSheetWorkbook(p(), { ...SGT, decimals: false }), 'Aspire SGD account');
+    expect([2, 3, 4].map(c => row.getCell(c).value)).toEqual([135491, -3, 0]);
+    expect([2, 3, 4].map(c => row.getCell(c).numFmt)).toEqual(new Array(3).fill(balance.WHOLE_FMT));
+    expect(balance.WHOLE_FMT).toBe('#,##0;(#,##0);"-"');
+  });
+});
+
+describe('reports/balance-doc — Change and %', () => {
+  const opts = { ...SGT, change: true };
+
+  test('sit right after the first two columns, as on screen', () => {
+    const d = balance.balanceSheetDefinition(payload(), opts);
+    expect(bodyOf(d)[0].map(c => c.text)).toEqual(['Account', '30 Sep 2026', '31 Aug 2026', 'Change', '%', '31 Jul 2026']);
+    expect(sheetRow(balance.balanceSheetWorkbook(payload(), opts), 'Account').values.slice(1))
+      .toEqual(['Account', '30 Sep 2026', '31 Aug 2026', 'Change', '%', '31 Jul 2026']);
+  });
+
+  test('change is the first column less the second, % that over the second\'s size, on every line with totals and Net Assets', () => {
+    const d = balance.balanceSheetDefinition(payload(), opts);
+    // 135,491 against 120,250: up 15,241, or 12.7%.
+    expect(rowOf(d, 'Aspire SGD account').slice(1).map(c => c.text)).toEqual(['135,491.00', '120,250.00', '15,241.00', '12.7%', '118,900.00']);
+    // 0 against 12,000: down all of it.
+    expect(rowOf(d, 'Accounts Receivable').slice(1).map(c => c.text)).toEqual(['-', '12,000.00', '(12,000.00)', '-100.0%', '-']);
+    expect(rowOf(d, 'NET ASSETS').slice(1).map(c => c.text)).toEqual(['135,491.00', '128,781.00', '6,710.00', '5.2%', '118,900.00']);
+    expect(rowOf(d, 'Total Liabilities').slice(1, 5).map(c => c.text)).toEqual(['-', '3,469.00', '(3,469.00)', '-100.0%']);
+    expect(d.content.filter(c => c.style === 'note').map(c => c.text)).toContainEqual(expect.stringMatching(/^Change is the first column less the second/));
+  });
+
+  test('a nil second column has no percentage: a dash, not a division by nothing', () => {
+    const p = payload();
+    p.groups[0].subgroups[0].rows[0].values = [500, 0, 0];
+    expect(balance.changeOf([500, 0])).toEqual({ change: 500, pct: null });
+    expect(balance.changeOf([-50, -200])).toEqual({ change: 150, pct: 0.75 });
+    expect(balance.changeOf([1])).toBeNull();
+    expect(rowOf(balance.balanceSheetDefinition(p, opts), 'Aspire SGD account').slice(3, 5).map(c => c.text)).toEqual(['500.00', '—']);
+    const row = sheetRow(balance.balanceSheetWorkbook(p, opts), 'Aspire SGD account');
+    expect([4, 5].map(c => row.getCell(c).value)).toEqual([500, '—']);
+  });
+
+  test('the workbook writes the change in money and % as a fraction in a percentage format', () => {
+    const row = sheetRow(balance.balanceSheetWorkbook(payload(), opts), 'Aspire SGD account');
+    expect([2, 3, 4, 5, 6].map(c => row.getCell(c).value)).toEqual([135491, 120250, 15241, 0.1267, 118900]);
+    expect(row.getCell(4).numFmt).toBe(render.MONEY_FMT);
+    expect(row.getCell(5).numFmt).toBe(balance.PCT_FMT);
+  });
+
+  test('are not added to a sheet with one column, and a long comparison with them goes landscape', () => {
+    const one = payload({ columns: payload().columns.slice(0, 1), compare: null });
+    expect(bodyOf(balance.balanceSheetDefinition(one, opts))[0].map(c => c.text)).toEqual(['Account', '30 Sep 2026']);
+    expect(balance.balanceSheetDefinition(payload(), opts).pageOrientation).toBe('landscape');
+  });
+});
+
+describe('reports/balance-doc — a sheet built from the Trial Balance', () => {
+  const exact = payload({
+    asAt: { iso: '2026-10-14', label: '14 October 2026', preset: 'today', inProgress: true, source: 'trial-balance' },
+    exactDates: { ok: true, at: '2026-09-30', atLabel: '30 Sep 2026' },
+  });
+
+  test('says how it was built, and that today can still move, not that a month is in progress', () => {
+    expect(balance.inProgressNote(exact.asAt)).toBe('14 Oct 2026 — today: includes everything dated up to today as Xero holds it, and can still change before the day ends');
+    const notes = balance.balanceSheetDefinition(exact, SGT).content.filter(c => c.style === 'note').map(c => c.text);
+    expect(notes).toContainEqual("Built from Xero's Trial Balance as at each date, since Xero's Balance Sheet report can only be as at a month end. Built the same way at 30 Sep 2026, it agreed with Xero's Balance Sheet account by account.");
+    expect(sheetText(balance.balanceSheetWorkbook(exact, SGT))).toContain("Built from Xero's Trial Balance as at each date");
+    expect(textOf(balance.balanceSheetDefinition(payload(), SGT))).not.toContain('Trial Balance');
+  });
+});
+
 describe('reports/balance-doc — the workbook', () => {
   const wb = balance.balanceSheetWorkbook(payload(), SGT);
 

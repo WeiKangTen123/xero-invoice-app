@@ -84,7 +84,7 @@ describe('the month ends offered', () => {
 
 describe('the query the controls make', () => {
   test('opens on the last month end, alone, on the accrual basis', () => {
-    expect(h.defaultControls()).toEqual({ preset: 'last-month-end', month: '', compare: 'none', periods: 1, basis: 'accrual' });
+    expect(h.defaultControls()).toEqual({ preset: 'last-month-end', month: '', date: '', compare: 'none', periods: 1, basis: 'accrual', chosen: false });
     expect(h.queryFor({ ...h.defaultControls(), tenantId: 't1' })).toEqual({ preset: 'last-month-end', basis: 'accrual', tenantId: 't1' });
     expect(h.queryFor(h.defaultControls())).toEqual({ preset: 'last-month-end', basis: 'accrual' });
   });
@@ -210,7 +210,7 @@ describe('the sheet as lines to print', () => {
 
   test('an account line carries its values, code, id and indent; a title line none', () => {
     const rows = h.sheetRows(sheet);
-    expect(rows[2]).toEqual({ kind: 'account', label: 'Aspire SGD account', values: [135491, 120250, 118900], depth: 2, code: '090', accountId: 'a1' });
+    expect(rows[2]).toEqual({ kind: 'account', label: 'Aspire SGD account', values: [135491, 120250, 118900], depth: 2, code: '090', accountId: 'a1', subgroup: 'Bank' });
     expect(rows[0]).toEqual({ kind: 'section', label: 'Assets', values: [], depth: 0 });
     expect(rows[1].depth).toBe(1);
     expect(rows.find(r => r.kind === 'subtotal').depth).toBe(1);
@@ -268,7 +268,7 @@ describe('what a failed load says', () => {
 
 describe('the check panel\'s wording for the sheet', () => {
   test('says what the check does for each report, the budget by default', () => {
-    expect(check.checkIntro('balance-check')).toBe('The sheet checked against Xero\'s Trial Balance, read separately, account by account. Read-only.');
+    expect(check.checkIntro('balance-check')).toBe('Net Assets and every total against the lines they add up from. At a month end, each account against Xero\'s Trial Balance and each bank line against its Bank Summary for that day; at an exact date, the last month end\'s Trial Balance against Xero\'s Balance Sheet. Read-only.');
     expect(check.checkIntro('budget-check')).toBe('The grid asked for again without comparison periods, line by line. Read-only; up to three Xero calls.');
     expect(check.checkIntro(undefined)).toBe(check.checkIntro('budget-check'));
   });
@@ -287,6 +287,176 @@ describe('the check panel\'s wording for the sheet', () => {
   });
 });
 
+describe('exact dates in the Date menu', () => {
+  const gateOk       = { ok: true, reason: 'ok', at: '2026-09-30', atLabel: '30 Sep 2026', differences: [] };
+  const gateMismatch = { ok: false, reason: 'mismatch', at: '2026-09-30', atLabel: '30 Sep 2026',
+    differences: [{ label: 'Accounts Receivable', diff: 12.5, kind: 'account' }, { label: 'Total Assets', diff: 13, kind: 'total' }] };
+  const gateScope    = { ok: false, reason: 'scope', differences: [] };
+  const gateError    = { ok: false, reason: 'error', differences: [] };
+  const keys = list => list.map(p => (p.disabled ? `(${p.key})` : p.key));
+
+  test('before any sheet has loaded nothing is known, and only the month ends are offered', () => {
+    const state = h.exactDatesState(undefined);
+    expect(state).toEqual({ known: false, available: false, reason: 'unknown', note: '', reconnect: false });
+    expect(keys(h.datePresets(state))).toEqual(['last-month-end', 'last-quarter-end', 'last-fy-end', 'this-month', 'month']);
+    // Unless the sheet asked for is an exact one, which stays listed.
+    expect(keys(h.datePresets(state, 'today'))).toEqual(['(today)', 'last-month-end', 'last-quarter-end', 'last-fy-end', 'this-month', 'month', '(date)']);
+  });
+
+  test('when the gate passes, Today leads and Exact date… closes the list, and today becomes the default', () => {
+    const state = h.exactDatesState(gateOk, 'SGD');
+    expect(state).toEqual({ known: true, available: true, reason: 'ok', note: '', reconnect: false });
+    expect(keys(h.datePresets(state))).toEqual(['today', 'last-month-end', 'last-quarter-end', 'last-fy-end', 'this-month', 'month', 'date']);
+    expect(h.datePresets(state).map(p => p.label)).toEqual(['Today', 'End of last month', 'End of last quarter', 'End of last financial year', 'This month so far', 'Month end…', 'Exact date…']);
+    expect(h.defaultControls(state).preset).toBe('today');
+  });
+
+  test('when the Trial Balance does not reconcile, both are disabled with the worst account and its difference', () => {
+    const state = h.exactDatesState(gateMismatch, 'SGD');
+    expect(state).toMatchObject({ known: true, available: false, reason: 'mismatch', reconnect: false });
+    expect(state.note).toBe("Exact dates unavailable: Xero's Trial Balance does not reconcile with its Balance Sheet (difference SGD 12.50 on Accounts Receivable)");
+    expect(keys(h.datePresets(state))).toEqual(['(today)', 'last-month-end', 'last-quarter-end', 'last-fy-end', 'this-month', 'month', '(date)']);
+    expect(h.defaultControls(state).preset).toBe('last-month-end');
+    expect(h.exactDatesState({ ...gateMismatch, differences: [{ label: 'GST', diff: -1234.5 }] }, '').note).toMatch(/\(difference 1,234\.50 on GST\)$/);
+  });
+
+  test('a connection made before the Trial Balance scope was asked for: disabled, with the way to Setup', () => {
+    const state = h.exactDatesState(gateScope, 'SGD');
+    expect(state).toEqual({ known: true, available: false, reason: 'scope', reconnect: true,
+      note: 'Exact dates unavailable: Reconnect Xero in Setup with Balance Sheet ticked.' });
+    expect(keys(h.datePresets(state))).toContain('(today)');
+    expect(h.exactDatesState(gateError).note).toMatch(/could not be read just now\. Refresh to try again\.$/);
+  });
+
+  test('the page moves an untouched last month end to today once the gate passes, and back once if today fails', () => {
+    const controls = h.defaultControls();
+    const monthEnd = { asAt: { source: 'balance-sheet' }, exactDates: gateOk };
+    expect(h.openOnToday(controls, monthEnd)).toEqual({ ...controls, preset: 'today' });
+    expect(h.openOnToday(controls, { ...monthEnd, exactDates: gateMismatch })).toBeNull();
+    expect(h.openOnToday({ ...controls, chosen: true }, monthEnd)).toBeNull();
+    expect(h.openOnToday({ ...controls, preset: 'last-fy-end' }, monthEnd)).toBeNull();
+    expect(h.openOnToday(controls, null)).toBeNull();
+
+    const onToday = { ...controls, preset: 'today' };
+    expect(h.fallBackFromToday(onToday, { error: 'Exact dates unavailable: …', errorStatus: 400 })).toEqual({ ...controls, preset: 'last-month-end', chosen: true });
+    expect(h.fallBackFromToday(onToday, { error: '' })).toBeNull();
+    // A date the reader picked is theirs: the error is shown, nothing moves.
+    expect(h.fallBackFromToday({ ...onToday, chosen: true }, { error: 'x' })).toBeNull();
+  });
+
+  test('an exact date is sent with its day, and compares with at most four earlier dates, which the menu says', () => {
+    expect(h.queryFor({ preset: 'date', date: '2026-10-01', compare: 'month', periods: 9, basis: 'accrual' }))
+      .toEqual({ preset: 'date', date: '2026-10-01', compare: 'month', periods: '4', basis: 'accrual' });
+    expect(h.queryFor({ preset: 'today', date: '2026-10-01', basis: 'accrual' })).toEqual({ preset: 'today', basis: 'accrual' });
+    expect(h.queryFor({ preset: 'last-month-end', compare: 'month', periods: 9 }).periods).toBe('9');
+    expect([h.maxPeriods('today'), h.maxPeriods('date'), h.maxPeriods('month')]).toEqual([4, 4, 11]);
+    expect(h.clampPeriods(7, { max: 4 })).toBe(4);
+    expect(h.compareOptions(true).map(c => c.label)).toEqual([
+      'None', 'Same day, previous months (up to 4)', 'Same day, previous quarters (up to 4)', 'Same day, previous years (up to 4)',
+    ]);
+    expect(h.compareOptions(false).map(c => c.label)).toEqual(['None', 'Previous months', 'Previous quarters', 'Previous years']);
+    expect(h.todayISO(new Date(2026, 9, 4))).toBe('2026-10-04');
+  });
+
+  test('a sheet built from the Trial Balance is captioned, headed and sourced as such', () => {
+    const today = { ...sheet, asAt: { iso: '2026-10-14', label: '14 October 2026', preset: 'today', inProgress: true, source: 'trial-balance' },
+                    columns: [{ iso: '2026-10-14' }, { iso: '2026-09-14' }], exactDates: gateOk };
+    expect(h.captionFor(today)).toBe('As at 14 October 2026 (today) · Accrual basis');
+    expect(h.columnLabels(today)).toEqual(['14 Oct 2026 (today)', '14 Sep 2026']);
+    expect(h.sourceLabel(today)).toBe('Xero Trial Balance report');
+    expect(h.sourceLabel(sheet)).toBe('Xero Balance Sheet report');
+    expect(h.sourceNote(today)).toBe("Balances as at each date, built from Xero's Trial Balance, since Xero's Balance Sheet report can only be as at a month end. Built the same way at 30 Sep 2026, it agreed with Xero's Balance Sheet account by account.");
+    expect(h.sourceNote(sheet)).toBe('');
+  });
+});
+
+describe('Change and %, and whole numbers', () => {
+  test('change is the first column less the second, and % that over the second\'s size', () => {
+    expect(h.changeOf([135491, 120250, 118900])).toEqual({ change: 15241, pct: 15241 / 120250 });
+    expect(h.changeOf([-50, -200])).toEqual({ change: 150, pct: 0.75 });
+    expect(h.changeOf([0.1, 0.3]).change).toBe(-0.2);
+    expect(h.changeOf([1])).toBeNull();
+    expect(h.changeOf(undefined)).toBeNull();
+  });
+
+  test('a nil second column has no percentage, and prints a dash', () => {
+    expect(h.changeOf([500, 0])).toEqual({ change: 500, pct: null });
+    expect(h.changeOf([500, 0.004]).pct).toBeNull();
+    expect(h.pctText(null)).toBe('—');
+    expect(h.pctText(15241 / 120250)).toBe('12.7%');
+    expect(h.pctText(-1)).toBe('-100.0%');
+    expect(h.pctText(-0.00001)).toBe('0.0%');
+  });
+
+  test('the columns sit right after the first two, only with two dates to compare', () => {
+    expect(h.canShowChange(sheet)).toBe(true);
+    expect(h.canShowChange({ columns: [{ iso: '2026-09-30' }] })).toBe(false);
+    expect(h.displayColumns(sheet, { change: true }).map(c => c.label)).toEqual(['30 Sep 2026', '31 Aug 2026', 'Change', '%', '31 Jul 2026']);
+    expect(h.displayColumns(sheet).map(c => c.label)).toEqual(['30 Sep 2026', '31 Aug 2026', '31 Jul 2026']);
+    expect(h.displayColumns({ ...sheet, columns: sheet.columns.slice(0, 1) }, { change: true }).map(c => c.kind)).toEqual(['value']);
+  });
+
+  test('every line has them, totals and Net Assets included', () => {
+    const cols = h.displayColumns(sheet, { change: true });
+    const net  = h.sheetRows(sheet).find(r => r.kind === 'net');
+    expect(cols.map(c => h.cellValue(net, c))).toEqual([137191, 120250, 16941, 16941 / 120250, 118900]);
+    const ap = h.sheetRows(sheet).find(r => r.label === 'Accounts Payable');
+    expect(cols.map(c => h.cellValue(ap, c))).toEqual([-500, 0, -500, null, 0]);
+  });
+
+  test('figures print with two places, or rounded to whole units when decimals are off', () => {
+    expect(h.figureText(135491)).toBe('135,491.00');
+    expect(h.figureText(-1234.5)).toBe('(1,234.50)');
+    expect(h.figureText(0.004)).toBe('-');
+    expect(h.figureText(135490.5, false)).toBe('135,491');
+    expect(h.figureText(-2.5, false)).toBe('(3)');
+    expect(h.figureText(0.4, false)).toBe('-');
+    expect(h.figureText(-0.4, false)).toBe('-');
+    expect(h.figureText(undefined, false)).toBe('-');
+  });
+
+  test('the view travels to the export as words', () => {
+    expect(h.viewQuery()).toEqual({ codes: 'false', zeroRows: 'false', decimals: 'true', change: 'false' });
+    expect(h.viewQuery({ codes: true, zeroRows: true, decimals: false, change: true })).toEqual({ codes: 'true', zeroRows: 'true', decimals: 'false', change: 'true' });
+  });
+});
+
+describe('where a line leads', () => {
+  const rows = h.sheetRows(sheet, { zeroRows: true });
+  const target = label => h.drillTarget(rows.find(r => r.label === label));
+
+  test('a bank account opens its statement on Banking', () => {
+    expect(target('Aspire SGD account')).toEqual({ kind: 'bank', accountId: 'a1', name: 'Aspire SGD account', title: 'Open the statement for Aspire SGD account on Banking' });
+    expect(target('Petty cash')).toMatchObject({ kind: 'bank', accountId: 'a2' });
+    // A bank line Xero printed without an AccountID has no statement to open.
+    expect(h.drillTarget({ kind: 'account', label: 'Cash', subgroup: 'Bank', accountId: '' })).toBeNull();
+  });
+
+  test('receivables and payables open their ageing, as at today', () => {
+    expect(target('Accounts Receivable')).toEqual({ kind: 'ageing', side: 'receivables', title: 'Open what customers owe, by age, as at today' });
+    expect(target('Accounts Payable')).toEqual({ kind: 'ageing', side: 'payables', title: 'Open what is owed to suppliers, by age, as at today' });
+  });
+
+  test('every other line, and every total, stays plain', () => {
+    expect(target('Owner A Share Capital')).toBeNull();
+    expect(target('Current Year Earnings')).toBeNull();
+    expect(target('Total Bank')).toBeNull();
+    expect(h.drillTarget(rows.find(r => r.kind === 'net'))).toBeNull();
+    expect(h.drillTarget(null)).toBeNull();
+  });
+});
+
+describe('the check panel\'s steps for an exact date', () => {
+  test('lead to the Trial Balance, and say which columns hold the balances', () => {
+    const d = { basis: 'accrual', asAt: { iso: '2026-10-14', source: 'trial-balance' }, columns: [{ iso: '2026-10-14' }] };
+    expect(check.balanceHowTo(d)).toEqual([
+      'In Xero: Reports → Trial Balance. Accounting basis: accrual.',
+      'Date = 14 Oct 2026 matches the app\'s first column.',
+      'Each account\'s balance is its YTD Debit less its YTD Credit (the other way round for liabilities and equity); Current Year Earnings is the revenue less the expenses there.',
+    ]);
+  });
+});
+
 describe('the page is wired to the tab', () => {
   const page = read('pages/XeroInsights.jsx');
 
@@ -294,7 +464,7 @@ describe('the page is wired to the tab', () => {
     expect(page).toMatch(/\{ key: 'banking',\s+label: 'Banking' \},[\s\S]*?\{ key: 'balance',\s+label: 'Balance Sheet' \},[\s\S]*?\{ key: 'budget',\s+label: 'Budget vs Actual' \}/);
     expect(page).toMatch(/const PERF_TABS = \['overview', 'revenue', 'banking', 'profit', 'analysis', 'cashflow'\];/);
     expect(page).toMatch(/import BalanceSheetTab from '\.\/xero-insights\/BalanceSheetTab';/);
-    expect(page).toMatch(/import \{ defaultControls, queryFor \} from '\.\/xero-insights\/balance';/);
+    expect(page).toMatch(/import \{ defaultControls, queryFor, openOnToday, fallBackFromToday \} from '\.\/xero-insights\/balance';/);
   });
 
   test('it has its own state, counter and fetch, with the query from the controls and the organisation', () => {
@@ -322,6 +492,24 @@ describe('the page is wired to the tab', () => {
     expect(page).toMatch(/setBalance\(s => \(\{ status: 'done', data: s\.data, error: err\.message, errorStatus: err\.status \}\)\)/);
   });
 
+  test('exact dates: today once the gate passes, back to the month end once if today fails', () => {
+    expect(page).toMatch(/const next = openOnToday\(balanceControls, balance\.data\) \|\| fallBackFromToday\(balanceControls, balance\);\s+if \(next\) changeBalanceControls\(next\);/);
+  });
+
+  test('a bank line opens its statement on Banking, scrolled to; receivables and payables their ageing', () => {
+    expect(page).toMatch(/onOpenBankAccount=\{openBankAccount\} onOpenAgeing=\{openAgeingFromBelow\}/);
+    expect(page).toMatch(/function openBankAccount\(accountId, name\) \{\s+scrollToStatement\.current = true;\s+viewStatement\(\{ accountId, name \}\);\s+setTab\('banking'\);/);
+    expect(page).toMatch(/document\.getElementById\('banking-statement'\)\?\.scrollIntoView/);
+    const banking = read('pages/xero-insights/BankingTab.jsx');
+    expect(banking).toMatch(/<div className="card" id="banking-statement">/);
+    // One opened with only an id and a name is read from the list once loaded.
+    expect(banking).toMatch(/banking\.data\.find\(a => a\.accountId === selectedBankAccount\.accountId\) \|\| selectedBankAccount/);
+    expect(banking).toMatch(/fmtMoney\(t\.total, openAccount\.currency \|\| currency\)/);
+    const tab = read('pages/xero-insights/BalanceSheetTab.jsx');
+    expect(tab).toMatch(/const target = drillTarget\(r\);/);
+    expect(tab).toMatch(/if \(target\.kind === 'bank'\) onOpenBankAccount\?\.\(target\.accountId, target\.name\);\s+else onOpenAgeing\?\.\(target\.side\);/);
+  });
+
   test('the status line counts the sheet among the reads on screen, and the tab gets the export query', () => {
     expect(page).toMatch(/if \(tab === 'balance' && !balance\.error\)\s+reads\.push\(balance\.data\?\.fetchedAt\);/);
     expect(page).toMatch(/<BalanceSheetTab balance=\{balance\} controls=\{balanceControls\} onControls=\{changeBalanceControls\}[\s\S]*?exportQuery=\{balanceQuery\(\)\}/);
@@ -334,11 +522,11 @@ describe('the tab, the panel and the banner are wired to these helpers', () => {
   const banner = read('components/layout/XeroConnectionBanner.jsx');
 
   test('the tab lays out the helpers\' decisions and offers every control', () => {
-    for (const name of ['captionFor', 'columnLabels', 'sheetRows', 'hiddenRowCount', 'monthOptions', 'queryFor|datePresets', 'errorNotice', 'clampPeriods']) {
+    for (const name of ['captionFor', 'displayColumns', 'sheetRows', 'hiddenRowCount', 'monthOptions', 'queryFor|datePresets', 'errorNotice', 'clampPeriods']) {
       expect(tab).toMatch(new RegExp(`import \\{[^}]*\\b(${name})\\b[^}]*\\} from '\\./balance'`, 's'));
     }
-    expect(tab).toMatch(/datePresets\(\)\.map/);
-    expect(tab).toMatch(/compareOptions\(\)\.map/);
+    expect(tab).toMatch(/datePresets\(exact, controls\.preset\)\.map/);
+    expect(tab).toMatch(/compareOptions\(isExact\)\.map/);
     expect(tab).toMatch(/basisOptions\(\)\.map/);
     expect(tab).toMatch(/controls\.compare !== 'none' &&/);
     expect(tab).toMatch(/controls\.preset === 'month' &&/);
@@ -352,7 +540,10 @@ describe('the tab, the panel and the banner are wired to these helpers', () => {
   });
 
   test('the tab exports, checks and words a failure as the helpers say', () => {
-    expect(tab).toMatch(/<BudgetExport kind="balance" query=\{exportQuery\} disabled=\{!ready\} \/>/);
+    expect(tab).toMatch(/<BudgetExport kind="balance" query=\{fileQuery\} disabled=\{!ready\} \/>/);
+    // The file is laid out as the screen is: the view travels with the
+    // export, and not with the check, which reads Xero the same either way.
+    expect(tab).toMatch(/const fileQuery = \{ \.\.\.exportQuery, \.\.\.viewQuery\(\{ codes, zeroRows, decimals, change: showChange \}\) \};/);
     expect(tab).toMatch(/<XeroCheckPanel key=\{JSON\.stringify\(exportQuery\)\} query=\{exportQuery\} endpoint="balance-check" howTo=\{balanceHowTo\}/);
     expect(tab).toMatch(/Check against Xero/);
     expect(tab).toMatch(/const notice = errorNotice\(balance, connection\);/);

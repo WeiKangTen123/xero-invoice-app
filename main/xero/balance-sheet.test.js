@@ -9,6 +9,7 @@ jest.mock('xero-node', () => {
   const api = {
     getOrganisations:      jest.fn(),
     getReportBalanceSheet: jest.fn(),
+    getReportTrialBalance: jest.fn(),
     getAccounts:           jest.fn(),
   };
   return { AccountingApi: jest.fn(() => api), __api: api };
@@ -124,6 +125,10 @@ beforeEach(() => {
   api.getOrganisations.mockResolvedValue({ body: { organisations: [ORG] } });
   // Two columns with no comparison, as the live endpoint answers.
   api.getReportBalanceSheet.mockImplementation(async (_t, _date, periods) => answer(treeOf(periods ? periods + 1 : 2)));
+  // The Trial Balance is the exact-date gate's (trial-balance.test.js); here
+  // the connection lacks its scope, so the gate stops at that one call and
+  // the Balance Sheet calls counted below are only the sheet's own.
+  api.getReportTrialBalance.mockRejectedValue(new Error(JSON.stringify({ response: { statusCode: 403 }, body: { Detail: 'AuthorizationUnsuccessful' } })));
   api.getAccounts.mockResolvedValue({ body: { accounts: Object.entries(ACCOUNTS)
     .filter(([, a]) => a.id).map(([name, a]) => ({ accountID: a.id, code: a.code, name, type: 'OTHER' })) } });
 });
@@ -170,7 +175,9 @@ describe('the as-at date each preset names', () => {
   });
 
   test('every preset the query gate accepts resolves', () => {
-    for (const p of BALANCE_PRESETS) expect(resolve(p, TODAY, DEC, '2026-09').iso).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    for (const p of BALANCE_PRESETS) {
+      expect(_resolveAsAt({ preset: p, month: '2026-09', date: '2026-10-02' }, TODAY, DEC).iso).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
     expect(() => resolve('last-year')).toThrow(PeriodError);
   });
 
@@ -221,6 +228,43 @@ describe('the query gate', () => {
       expect({ why, thrown: err instanceof PeriodError, status: err?.status }).toEqual({ why, thrown: true, status: 400 });
       expect(typeof err.message).toBe('string');
     }
+  });
+
+  test('today and an exact date: the date only under preset=date, and at most four earlier dates beside it', () => {
+    expect(_balanceQueryFromParams({ preset: 'today' })).toEqual({ preset: 'today', month: undefined, date: undefined, compare: 'none', periods: undefined, basis: 'accrual' });
+    expect(_balanceQueryFromParams({ preset: 'date', date: '2024-02-29', compare: 'year', periods: '4', basis: 'cash' }))
+      .toEqual({ preset: 'date', month: undefined, date: '2024-02-29', compare: 'year', periods: 4, basis: 'cash' });
+    expect(_balanceQueryFromParams({ preset: 'today', date: '2026-01-01' }).date).toBeUndefined();
+    // A month end still compares with up to eleven.
+    expect(_balanceQueryFromParams({ compare: 'month', periods: '11' }).periods).toBe(11);
+  });
+
+  test('refuses an exact date that is not a real day, is before 1990, is missing, or compares with more than four', () => {
+    const INVALID = {
+      'no date':                 { preset: 'date' },
+      'a month, not a day':      { preset: 'date', date: '2026-09' },
+      'a day that does not exist': { preset: 'date', date: '2026-02-29' },
+      'month 13':                { preset: 'date', date: '2026-13-01' },
+      'day zero':                { preset: 'date', date: '2026-09-00' },
+      'not a date at all':       { preset: 'date', date: 'yesterday' },
+      'before 1990':             { preset: 'date', date: '1989-12-31' },
+      'a date given twice':      { preset: 'date', date: ['2026-09-01', '2026-09-02'] },
+      'five earlier dates':      { preset: 'today', compare: 'month', periods: '5' },
+    };
+    for (const [why, q] of Object.entries(INVALID)) {
+      let err = null;
+      try { _balanceQueryFromParams(q); } catch (e) { err = e; }
+      expect({ why, thrown: err instanceof PeriodError, status: err?.status }).toEqual({ why, thrown: true, status: 400 });
+    }
+    expect(() => _balanceQueryFromParams({ preset: 'date', date: '1989-12-31' })).toThrow(/between 1990 and 2100/);
+    expect(() => _balanceQueryFromParams({ preset: 'today', compare: 'month', periods: '5' })).toThrow(/1 to 4 earlier dates/);
+  });
+
+  test('today and a given day resolve to themselves; a day after today is refused', () => {
+    expect(_resolveAsAt({ preset: 'today' }, TODAY, DEC)).toEqual({ iso: '2026-10-11', label: '11 October 2026', preset: 'today', inProgress: true });
+    expect(_resolveAsAt({ preset: 'date', date: '2026-10-11' }, TODAY, DEC).inProgress).toBe(true);
+    expect(_resolveAsAt({ preset: 'date', date: '2026-03-14' }, TODAY, DEC)).toEqual({ iso: '2026-03-14', label: '14 March 2026', preset: 'date', inProgress: false });
+    expect(() => _resolveAsAt({ preset: 'date', date: '2026-10-12' }, TODAY, DEC)).toThrow('12 October 2026 is after today');
   });
 });
 
@@ -274,7 +318,7 @@ describe('the payload', () => {
   test('the tree is read into assets, liabilities and equity, with every figure as Xero printed it', async () => {
     const out = await get();
     expect(out.organisation).toEqual({ name: 'Flovon Pte Ltd', currency: 'SGD' });
-    expect(out.asAt).toEqual({ iso: '2026-09-30', label: '30 September 2026', preset: 'last-month-end', inProgress: false });
+    expect(out.asAt).toEqual({ iso: '2026-09-30', label: '30 September 2026', preset: 'last-month-end', inProgress: false, source: 'balance-sheet' });
     expect(out.basis).toBe('accrual');
     expect(out.groups.map(g => [g.key, g.title])).toEqual([['assets', 'Assets'], ['liabilities', 'Liabilities'], ['equity', 'Equity']]);
 
@@ -433,8 +477,8 @@ describe('the cache', () => {
     const a = await get({ preset: 'this-month' });
     const b = await get({ preset: 'month', month: '2026-10' });
     expect(api.getReportBalanceSheet).toHaveBeenCalledTimes(1);
-    expect(a.asAt).toEqual({ iso: '2026-10-31', label: '31 October 2026', preset: 'this-month', inProgress: true });
-    expect(b.asAt).toEqual({ iso: '2026-10-31', label: '31 October 2026', preset: 'month', inProgress: true });
+    expect(a.asAt).toEqual({ iso: '2026-10-31', label: '31 October 2026', preset: 'this-month', inProgress: true, source: 'balance-sheet' });
+    expect(b.asAt).toEqual({ iso: '2026-10-31', label: '31 October 2026', preset: 'month', inProgress: true, source: 'balance-sheet' });
     expect(b.cached).toBe(true);
   });
 

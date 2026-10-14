@@ -45,6 +45,11 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
   const foreignBalances = balancesByName(foreign);
   const card = cashCard(perf.data?.cash, currency);
   const muted = { color: 'var(--text-muted)' };
+  // The account whose statement is open. One opened from a Balance Sheet line
+  // arrives with only its id and name, so the list's own record is used once
+  // it is loaded: the statement's amounts are in the account's currency.
+  const openAccount = selectedBankAccount
+    && (banking.data.find(a => a.accountId === selectedBankAccount.accountId) || selectedBankAccount);
   return (
         <>
           {/* Moved from Overview: cash movement belongs with the accounts it
@@ -198,10 +203,10 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
             )}
           </div>
 
-          {selectedBankAccount && (
-            <div className="card">
+          {openAccount && (
+            <div className="card" id="banking-statement">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
-                <div className="card-title" style={{ marginBottom: 0 }}>Statement — {selectedBankAccount.name}</div>
+                <div className="card-title" style={{ marginBottom: 0 }}>Statement — {openAccount.name}</div>
                 <button type="button" className="btn btn-sm" style={{ background: 'none', color: 'var(--text-muted)', border: 'none' }} onClick={() => setSelectedBankAccount(null)}>✕ Close</button>
               </div>
               <div className="card-subtitle" style={{ marginBottom: 2 }}>Most recent transactions for this account</div>
@@ -260,7 +265,7 @@ export default function BankingTab({ user, isMobile, banking, selectedBankAccoun
                         <td style={{ padding: '9px 10px', textAlign: 'right', fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: t.type === 'Money In' ? 'var(--success)' : 'var(--danger)' }}>
                           {/* In the account's own currency, which is what a
                               bank transaction or payment on it is recorded in. */}
-                          {t.type === 'Money In' ? '+' : '−'}{fmtMoney(t.total, selectedBankAccount.currency || currency)}
+                          {t.type === 'Money In' ? '+' : '−'}{fmtMoney(t.total, openAccount.currency || currency)}
                         </td>
                       </tr>
                     ))}</tbody>

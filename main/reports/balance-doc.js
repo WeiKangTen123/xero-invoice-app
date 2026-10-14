@@ -9,6 +9,12 @@
 // And both read the payload the screen renders, straight from the balance
 // sheet route: a second query shaped slightly differently is how a report and
 // its export start telling different stories.
+//
+// The reader's view of the tab travels with the request as options, so the
+// file is laid out as the screen is: `codes` (account codes after the
+// names), `zeroRows` (accounts with nothing in any column, left out unless
+// asked for, as on screen), `decimals` (false prints whole units) and
+// `change` (Change and % after the first two columns).
 
 const doc    = require('./budget-doc');
 const render = require('./budget-render');
@@ -19,6 +25,10 @@ const { RULE, BAND, AMBER } = doc._colours;
 const { MONEY_FMT, ARGB, _workbook, _sheetHeader, _num: num } = render;
 
 const RIGHT = { horizontal: 'right' };
+// The money format without the cents, for whole units, and one place of
+// percentage, as the tab prints both.
+const WHOLE_FMT = '#,##0;(#,##0);"-"';
+const PCT_FMT   = '0.0%';
 
 const MONTH_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -36,9 +46,13 @@ function baseCurrency(organisation) {
 // invoice dated the 25th is in it on the 8th — so "as at 8 Oct" read as the
 // 1st to the 8th, which it never was. Said the way the budget exports say it
 // of their month in progress.
+//
+// A sheet as at today (built from the Trial Balance) is not a month end at
+// all: it holds what is dated up to today, and only today can still move.
 function inProgressNote(asAt) {
   if (!asAt?.inProgress) return '';
   const day = dayLabel(asAt.iso) || String(asAt.label || '');
+  if (asAt.source === 'trial-balance') return `${day} — today: includes everything dated up to today as Xero holds it, and can still change before the day ends`;
   const m   = /^\d{4}-(\d{2})/.exec(String(asAt.iso || ''));
   const month = m ? MONTH_FULL[Number(m[1]) - 1] : '';
   return `${day} — month in progress: includes everything dated in ${month || 'the month'} as Xero holds it`;
@@ -74,7 +88,10 @@ function balanceSubtitle(payload) {
 // equity group wherever it sits, or last when there is none — as Xero lays it
 // out. A subgroup with no title (equity, in Xero's standard layout) prints
 // its accounts straight under the group, and one with no total prints none.
-function balanceLines(payload) {
+//
+// An account with nothing in any column is left out unless `zeroRows` asks
+// for it, as on screen; totals always print, so the sheet still adds up.
+function balanceLines(payload, { zeroRows = false } = {}) {
   const lines  = [];
   const groups = payload?.groups || [];
   const net    = payload?.netAssets;
@@ -90,7 +107,7 @@ function balanceLines(payload) {
       // prints its total inside the section); one heading, not two.
       const sameAsGroup = String(sg?.title || '').trim().toLowerCase() === String(g?.title || '').trim().toLowerCase();
       if (sg?.title && !sameAsGroup) push('subgroup', sg.title);
-      for (const r of sg?.rows || []) push('account', r?.label, r);
+      for (const r of sg?.rows || []) if (zeroRows || !isZeroRow(r)) push('account', r?.label, r);
       if (sg?.total) push('subtotal', sg.total.label, sg.total);
     }
     if (g?.total) push('total', g.total.label, g.total);
@@ -106,6 +123,78 @@ function lineLabel(line, codes) {
   return codes && line.code ? `${line.label} · ${line.code}` : line.label;
 }
 
+const isNil     = v => Math.round(Number(v || 0) * 100) === 0;
+const isZeroRow = r => (Array.isArray(r?.values) ? r.values : []).every(isNil);
+
+// A figure rounded to the places printed: cents, or whole units when the
+// reader turned decimals off. Half a unit rounds away from zero, as an
+// accountant rounds, whichever side of zero it is on.
+function rounded(v, decimals = true) {
+  const n = Number(v || 0);
+  const r = decimals ? Math.round(Math.abs(n) * 100) / 100 : Math.round(Math.abs(n));
+  return r === 0 ? 0 : Math.sign(n) * r;
+}
+
+// A figure as the PDF prints it: as the budget exports print one (a dash for
+// nil, brackets for a negative), to the places asked for.
+function figure(v, decimals = true) {
+  if (decimals) return cell(v);
+  const r = rounded(v, false);
+  if (r === 0) return '-';
+  const abs = Math.abs(r).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return r < 0 ? `(${abs})` : abs;
+}
+
+// The change between the first two columns of a line, and that change as a
+// fraction of the second column's size: null when the second column is nil,
+// where no percentage means anything. The same sums as the tab's
+// (balance.js#changeOf), so the file and the screen agree.
+function changeOf(values) {
+  if (!Array.isArray(values) || values.length < 2) return null;
+  const a = Number(values[0] || 0), b = Number(values[1] || 0);
+  const change = Math.round((a - b) * 100) / 100 || 0;
+  return { change, pct: isNil(b) ? null : change / Math.abs(b) };
+}
+
+// '12.5%' from 0.125, one place as on the tab; no percentage is a dash.
+function pctText(fraction) {
+  if (fraction === null || fraction === undefined || !Number.isFinite(Number(fraction))) return '—';
+  const s = (Number(fraction) * 100).toFixed(1);
+  return `${s === '-0.0' ? '0.0' : s}%`;
+}
+
+// The figure columns as both files print them: one per date, and — when the
+// reader asked for them and there are two dates to set side by side — Change
+// and % straight after the first two, where the tab puts them.
+function figureColumns(payload, opts = {}) {
+  const dates = (payload?.columns || []).map((c, i) => ({ kind: 'money', label: c?.label ?? '', value: l => l.values?.[i] }));
+  if (!opts.change || dates.length < 2) return dates;
+  return [
+    dates[0], dates[1],
+    { kind: 'money', label: 'Change', value: l => changeOf(l.values)?.change },
+    { kind: 'pct',   label: '%',      value: l => changeOf(l.values)?.pct ?? null },
+    ...dates.slice(2),
+  ];
+}
+
+// What the file says under the figures beyond the payload's own notes: how a
+// sheet for an exact date was built, what Change and % are, and that whole
+// units are rounded line by line.
+function viewNotes(payload, opts = {}) {
+  const out = [];
+  if (payload?.asAt?.source === 'trial-balance') {
+    const gate = payload.exactDates;
+    out.push(`Built from Xero's Trial Balance as at each date, since Xero's Balance Sheet report can only be as at a month end.${gate?.ok && gate.atLabel ? ` Built the same way at ${gate.atLabel}, it agreed with Xero's Balance Sheet account by account.` : ''}`);
+  }
+  if (opts.change && (payload?.columns || []).length >= 2) {
+    out.push('Change is the first column less the second; % is that change over the second column\'s balance, and "—" where that balance is nil.');
+  }
+  if (opts.decimals === false) {
+    out.push('Figures are rounded to whole units. Each total is rounded from its exact figure, so it can differ from the sum of the rounded lines above it by a unit or two.');
+  }
+  return out;
+}
+
 const isTitle = l => l.kind === 'group' || l.kind === 'subgroup';
 const blanks  = n => Array.from({ length: n }, () => ({ text: '' }));
 
@@ -115,16 +204,18 @@ const blanks  = n => Array.from({ length: n }, () => ({ text: '' }));
 // page rather than being cut off at the right-hand edge, which is what pdfmake
 // does to a table wider than its page.
 function balanceSheetDefinition(payload, opts = {}) {
-  const { organisation = {}, columns = [] } = payload || {};
+  const { organisation = {} } = payload || {};
   const currency  = baseCurrency(organisation);
   const generated = opts.generatedAt ?? Date.now();
-  const lines     = balanceLines(payload);
+  const lines     = balanceLines(payload, { zeroRows: opts.zeroRows });
+  const columns   = figureColumns(payload, opts);
+  const decimals  = opts.decimals !== false;
   const width     = 1 + columns.length;
   const labels    = lines.map(l => ({ label: lineLabel(l, opts.codes) }));
 
   const head = [
     { text: 'Account', style: 'colHead' },
-    ...columns.map(c => ({ text: latin1(c?.label), style: 'colHead', alignment: 'right' })),
+    ...columns.map(c => ({ text: latin1(c.label), style: 'colHead', alignment: 'right' })),
   ];
   const body = [head];
   // Rules and banding need to know what each row is, and the only place that
@@ -156,12 +247,16 @@ function balanceSheetDefinition(payload, opts = {}) {
     if (banded) bandedRows.add(body.length);
     const style = strong ? 'strong' : 'account';
     const cells = [{ text: label, style, margin: [strong ? 0 : 8, 0, 0, 0] }];
-    columns.forEach((_, c) => cells.push({ text: cell(l.values?.[c]), style, alignment: 'right' }));
+    for (const c of columns) {
+      const v = c.value(l);
+      cells.push({ text: latin1(c.kind === 'pct' ? pctText(v) : figure(v, decimals)), style, alignment: 'right' });
+    }
     body.push(cells);
   });
 
   const progress = inProgressNote(payload?.asAt);
-  const notes = (payload?.notes || []).map((n, i) => ({ text: latin1(n), style: 'note', margin: [0, i === 0 ? 8 : 3, 0, 0] }));
+  const notes = [...(payload?.notes || []), ...viewNotes(payload, opts)]
+    .map((n, i) => ({ text: latin1(n), style: 'note', margin: [0, i === 0 ? 8 : 3, 0, 0] }));
   if (hasFolded(labels)) notes.push({ text: FOLDED_NOTE, style: 'aside', margin: [0, 6, 0, 0] });
 
   return {
@@ -208,11 +303,16 @@ function balanceSheetDefinition(payload, opts = {}) {
 // Numbers as numbers with the budget exports' display format, never as
 // preformatted strings: an export that arrives as text is one an accountant
 // cannot sum, which defeats the point of offering a spreadsheet beside the PDF.
+// Whole units are written as whole numbers rather than formatted to hide the
+// cents, so a cell holds what it shows and a sum in the sheet adds what the
+// PDF prints. % is a fraction in a percentage format; none is a dash.
 function balanceSheetWorkbook(payload, opts = {}) {
-  const { organisation = {}, columns = [] } = payload || {};
+  const { organisation = {} } = payload || {};
   const currency  = baseCurrency(organisation);
   const generated = opts.generatedAt ?? Date.now();
-  const lines     = balanceLines(payload);
+  const lines     = balanceLines(payload, { zeroRows: opts.zeroRows });
+  const columns   = figureColumns(payload, opts);
+  const decimals  = opts.decimals !== false;
   const width     = 1 + columns.length;
 
   const wb    = _workbook(generated);
@@ -230,7 +330,7 @@ function balanceSheetWorkbook(payload, opts = {}) {
   }
 
   const header = sheet.getRow(headRow);
-  header.values = ['Account', ...columns.map(c => c?.label ?? '')];
+  header.values = ['Account', ...columns.map(c => c.label)];
   header.font   = { bold: true, size: 10 };
   for (let c = 2; c <= width; c++) header.getCell(c).alignment = RIGHT;
 
@@ -240,10 +340,22 @@ function balanceSheetWorkbook(payload, opts = {}) {
       sheet.addRow([label]).font = { bold: true };
       continue;
     }
-    const row = sheet.addRow([label, ...columns.map((_, c) => num(l.values?.[c]))]);
+    const values = columns.map(c => {
+      const v = c.value(l);
+      if (c.kind === 'pct') return v === null || v === undefined ? '—' : Math.round(Number(v) * 10000) / 10000;
+      return decimals ? num(v) : rounded(v, false);
+    });
+    const row = sheet.addRow([label, ...values]);
     if (l.kind === 'account') row.getCell(1).alignment = { indent: 1 };
     else row.font = { bold: true };
-    for (let c = 2; c <= width; c++) row.getCell(c).numFmt = MONEY_FMT;
+    columns.forEach((c, i) => {
+      const cellRef = row.getCell(i + 2);
+      if (c.kind === 'pct') {
+        if (typeof cellRef.value === 'number') cellRef.numFmt = PCT_FMT; else cellRef.alignment = RIGHT;
+      } else {
+        cellRef.numFmt = decimals ? MONEY_FMT : WHOLE_FMT;
+      }
+    });
   }
 
   sheet.getColumn(1).width = 38;
@@ -251,7 +363,7 @@ function balanceSheetWorkbook(payload, opts = {}) {
   sheet.views = [{ state: 'frozen', xSplit: 1, ySplit: headRow }];
 
   sheet.addRow([]);
-  for (const n of payload?.notes || []) sheet.addRow([String(n)]).font = { size: 9, italic: true };
+  for (const n of [...(payload?.notes || []), ...viewNotes(payload, opts)]) sheet.addRow([String(n)]).font = { size: 9, italic: true };
   sheet.addRow([currencyNote(currency)]).font = { size: 8, italic: true, color: { argb: ARGB.muted } };
   return wb;
 }
@@ -281,4 +393,8 @@ module.exports = {
   balanceLines,
   balanceSubtitle,
   inProgressNote,
+  figureColumns,
+  changeOf,
+  WHOLE_FMT,
+  PCT_FMT,
 };

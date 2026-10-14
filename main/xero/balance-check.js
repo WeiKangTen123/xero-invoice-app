@@ -1,17 +1,20 @@
 const logger = require('../utils/logger');
 const { _cacheGet, _cacheSet, _dedupe } = require('./report-cache');
 const { getBalanceSheet }  = require('./balance-sheet');
+const { getTrialBalanceSheet, _compareSheets } = require('./trial-balance');
 const { getBankSummary, _bankAccountList } = require('./bank');
 const { _cents, _norm }    = require('./budget-variance');
 const { _addDays, _fmtISODate, _parseISODate } = require('./periods');
+const { isScopeError }     = require('./xero-utils');
 
 // Check against Xero: proof that the Balance Sheet tab is what Xero holds.
 //
-// The tab (./balance-sheet) reads a flat list of sections by position and
-// keeps every figure as Xero printed it, so the places it could go wrong are
-// a section landing under the wrong group, a total read as a row, or a column
-// sliding. Each of those shows up in one of three checks, the same shape as
-// the Budget vs Actual check (./budget-check):
+// A month-end sheet (./balance-sheet) is Xero's Balance Sheet report read as
+// a flat list of sections by position, every figure kept as Xero printed it,
+// so the places it could go wrong are a section landing under the wrong
+// group, a total read as a row, or a column sliding. Each of those shows up
+// in one of four checks, the same shape as the Budget vs Actual check
+// (./budget-check):
 //
 //   1. identity — Net Assets equals Total Assets less Total Liabilities, and
 //      equals Total Equity, in every column, from the payload alone;
@@ -19,13 +22,27 @@ const { _addDays, _fmtISODate, _parseISODate } = require('./periods');
 //      group's total the sum of its subgroups, again from the payload alone;
 //   3. bank — each line of the Bank section against the closing balance the
 //      Bank Summary report gives that account at the same date: one
-//      read-only call, over the month to the as-at date, cached.
+//      read-only call, over the month to the as-at date, cached;
+//   4. trialbalance — every account against its balance in Xero's Trial
+//      Balance for the same date, with the totals rebuilt from those
+//      balances (./trial-balance): one read-only call, cached, and usually
+//      already made by the exact-dates gate.
 //
 // The first two cost nothing and prove the tree was read right — a row
 // misplaced or a total doubled breaks the arithmetic Xero's own figures obey.
-// The third asks Xero a different question and proves the figures are the
-// account balances it holds. Cached ten minutes; a failure to reach Xero is
-// a failure, never an "agrees".
+// The last two ask Xero a different question and prove the figures are the
+// account balances it holds.
+//
+// A sheet for an exact date is not Xero's report at all: it is built from
+// the Trial Balance, so setting it against the Trial Balance would prove
+// nothing. It gets the two arithmetic checks, and in place of the other two
+// the gate's own verdict — the same construction set against Xero's Balance
+// Sheet at the last month end — which is what licenses the construction.
+//
+// Cached ten minutes; a failure to reach Xero is a failure, never an
+// "agrees". The one exception is a connection without the Trial Balance
+// scope, which skips that check and says how to add it, since the other
+// three still stand.
 
 const CHECK_TTL_MS = 10 * 60 * 1000;
 // The Bank Summary is a movement report with a closing balance, so it is read
@@ -168,25 +185,65 @@ async function _bankCheck(userId, tenantId, sheet, force) {
   };
 }
 
+const TB_LABEL = 'accounts against the Trial Balance';
+async function _trialBalanceCheck(userId, tenantId, sheet, force, timezone) {
+  const column = sheet.columns[0];
+  let tb;
+  try {
+    tb = await getTrialBalanceSheet(userId, tenantId, { dates: [sheet.asAt.iso], basis: sheet.basis, force, timezone });
+  } catch (err) {
+    if (!isScopeError(err)) throw err;
+    return _skip('trialbalance', TB_LABEL, "The Xero connection does not include the Trial Balance, so the accounts could not be read a second way. Reconnect Xero in Setup with Balance Sheet ticked to add it.");
+  }
+  // The sheet on screen is the app's side; the Trial Balance is Xero's.
+  const cmp = _compareSheets(sheet, tb);
+  return {
+    key: 'trialbalance', label: TB_LABEL, skipped: false, ok: cmp.differences.length === 0,
+    ...cmp, onlyInXero: [], onlyInApp: [], calls: tb.calls,
+    proves: `Every account at ${column.label} against its balance in Xero's Trial Balance for the same day (YTD Debit less YTD Credit, or the other way for liabilities and equity), with Total Assets, Total Liabilities, Total Equity, Net Assets and each section total rebuilt from those balances (${cmp.lines} lines). Agreement means each figure is the balance Xero's ledger holds for that account on that day, under the heading it belongs to.`,
+  };
+}
+
+const GATE_LABEL = 'the Trial Balance against the Balance Sheet';
+function _gateCheck(sheet) {
+  const g = sheet.exactDates;
+  if (!g || !g.at) return _skip('gate', GATE_LABEL, "There is no record of the Trial Balance having been set against Xero's Balance Sheet for this organisation.");
+  return {
+    key: 'gate', label: `${GATE_LABEL} at ${g.atLabel}`, skipped: false, ok: !!g.ok,
+    lines: g.lines || 0, matched: g.matched || 0, differences: g.differences || [], onlyInXero: [], onlyInApp: [],
+    // The sheet was only served because this passed, and it was read then.
+    calls: 0,
+    proves: `This sheet is built from Xero's Trial Balance, since Xero's Balance Sheet report can only be as at a month end. The same construction at ${g.atLabel}, the last month end, was set against Xero's Balance Sheet for that day account by account, with every total (${g.lines || 0} lines). Agreement means the construction gives Xero's own figures.`,
+  };
+}
+
 async function _getBalanceCheckRaw(userId, tenantId, {
-  force = false, timezone = 'UTC', preset = 'last-month-end', month, compare = 'none', periods, basis = 'accrual',
+  force = false, timezone = 'UTC', preset = 'last-month-end', month, date, compare = 'none', periods, basis = 'accrual',
 } = {}) {
   // The tab under check, through its own cache and in-flight sharing: the
   // screen behind the button has just loaded it, so this costs nothing new.
-  const sheet = await getBalanceSheet(userId, tenantId, { timezone, preset, month, compare, periods, basis, force });
+  const sheet = await getBalanceSheet(userId, tenantId, { timezone, preset, month, date, compare, periods, basis, force });
+  const exact = sheet.asAt.source === 'trial-balance';
 
-  const key    = `balcheck:${userId}:${tenantId}:${sheet.asAt.iso}:${sheet.compare.periods || 0}:${sheet.compare.type}:${sheet.basis}`;
+  const key    = `balcheck:${userId}:${tenantId}:${sheet.asAt.source || 'balance-sheet'}:${sheet.asAt.iso}:${sheet.compare.periods || 0}:${sheet.compare.type}:${sheet.basis}`;
   const cached = _cacheGet(key, force);
   if (cached) return cached;
 
-  // A rejection from the bank call is the caller's answer — nothing is cached.
-  const checks = [_identityCheck(sheet), _subtotalsCheck(sheet), await _bankCheck(userId, tenantId, sheet, force)];
+  // A rejection from a Xero call is the caller's answer — nothing is cached.
+  const checks = exact
+    ? [_identityCheck(sheet), _subtotalsCheck(sheet), _gateCheck(sheet)]
+    : [_identityCheck(sheet), _subtotalsCheck(sheet), ...await Promise.all([
+      _bankCheck(userId, tenantId, sheet, force),
+      _trialBalanceCheck(userId, tenantId, sheet, force, timezone),
+    ])];
   const ran    = checks.filter(c => !c.skipped);
   // Agreement needs something to have been checked.
   const ok     = ran.length > 0 && ran.every(c => c.ok);
   const notes  = [
     ...checks.map(c => (c.skipped ? c.reason : c.proves)),
-    `These checks read Xero's standard layout on the ${sheet.basis} basis, as the tab does. The bank check compares the as-at column only, and none of them checks a custom report layout or whether what Xero holds is itself complete.`,
+    exact
+      ? `These checks read the ${sheet.basis} basis, as the tab does. None of them checks whether what Xero holds is itself complete.`
+      : `These checks read Xero's standard layout on the ${sheet.basis} basis, as the tab does. The bank and Trial Balance checks compare the as-at column only, and none of them checks a custom report layout or whether what Xero holds is itself complete.`,
   ];
   const end = _parseISODate(sheet.asAt.iso);
 
@@ -202,6 +259,11 @@ async function _getBalanceCheckRaw(userId, tenantId, {
     checks,
     notes,
     currency:  sheet.organisation?.currency || '',
+    // The sheet's own date, columns and basis, echoed for the steps to see
+    // the same figures in Xero (xero-check.js#balanceHowTo).
+    basis:     sheet.basis,
+    asAt:      sheet.asAt,
+    columns:   sheet.columns,
     period: {
       asAtLabel: sheet.asAt.label,
       asAtISO:   sheet.asAt.iso,
@@ -220,4 +282,4 @@ async function _getBalanceCheckRaw(userId, tenantId, {
 const getBalanceCheck = _dedupe('getBalanceCheck', _getBalanceCheckRaw,
   { force: false, timezone: 'UTC', preset: 'last-month-end', compare: 'none', basis: 'accrual' });
 
-module.exports = { getBalanceCheck, CHECK_TTL_MS, BANK_WINDOW_DAYS, _identityCheck, _subtotalsCheck, _groupTotal, _compareLines };
+module.exports = { getBalanceCheck, CHECK_TTL_MS, BANK_WINDOW_DAYS, _identityCheck, _subtotalsCheck, _gateCheck, _groupTotal, _compareLines };

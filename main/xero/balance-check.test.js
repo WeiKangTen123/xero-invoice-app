@@ -13,6 +13,7 @@ jest.mock('xero-node', () => {
     getOrganisations:      jest.fn(),
     getReportBalanceSheet: jest.fn(),
     getReportBankSummary:  jest.fn(),
+    getReportTrialBalance: jest.fn(),
     getAccounts:           jest.fn(),
   };
   return { AccountingApi: jest.fn(() => api), __api: api };
@@ -23,7 +24,7 @@ jest.mock('../utils/token-cache', () => ({
 }));
 
 const { AccountingApi, __api: api } = require('xero-node');
-const { getBalanceCheck, _identityCheck, _subtotalsCheck, _groupTotal } = require('./balance-check');
+const { getBalanceCheck, _identityCheck, _subtotalsCheck, _gateCheck, _groupTotal } = require('./balance-check');
 const { _buildBalanceSheet } = require('./balance-sheet');
 const { _cache } = require('./report-cache');
 
@@ -75,6 +76,29 @@ function bankSummaryRows(accounts = BANK, closing = a => a.values[0]) {
     section('', accounts.map(a => ({ rowType: 'Row', cells: [cell(a.name), cell(money(a.values[1])), cell('100.00'), cell('50.00'), cell(money(closing(a)))] }))),
   ];
 }
+// The chart of accounts, with the types the Trial Balance sheet is placed by.
+const CHART = [
+  ...BANK.map(b => ({ accountID: b.id, code: '09x', name: b.name, type: 'BANK', currencyCode: b.currency })),
+  { accountID: 'acc-ar',    code: '610', name: 'Accounts Receivable', type: 'CURRENT' },
+  { accountID: 'acc-ap',    code: '800', name: 'Accounts Payable',    type: 'CURRLIAB' },
+  { accountID: 'acc-re',    code: '960', name: 'Retained Earnings',   type: 'EQUITY' },
+  { accountID: 'acc-sales', code: '200', name: 'Sales',               type: 'REVENUE' },
+];
+// The Trial Balance for the first column's balances, as Xero writes it: the
+// balance in YTD Debit or YTD Credit, "Name (Code)", the AccountID on every
+// cell. The year's sales are the Current Year Earnings. `bend` sets an
+// account's balance by id.
+function tbRows({ bend = {} } = {}) {
+  const r = (id, name, debit, credit) => ({ rowType: 'Row', cells: [name, '', '', debit, credit].map(v => cell(v, id)) });
+  const v = (id, x) => (bend[id] ?? x).toFixed(2);
+  return [
+    { rowType: 'Header', cells: ['Account', 'Debit', 'Credit', 'YTD Debit', 'YTD Credit'].map(h => cell(h)) },
+    section('Revenue', [r('acc-sales', 'Sales (200)', '', v('acc-sales', CYE[0]))]),
+    section('Assets', [...BANK.map(b => r(b.id, `${b.name} (09x)`, v(b.id, b.values[0]), '')), r('acc-ar', 'Accounts Receivable (610)', v('acc-ar', AR[0]), '')]),
+    section('Liabilities', [r('acc-ap', 'Accounts Payable (800)', '', v('acc-ap', AP[0]))]),
+    section('Equity', [r('acc-re', 'Retained Earnings (960)', '', v('acc-re', RE[0]))]),
+  ];
+}
 const answer = rows => ({ body: { reports: [{ rows }] } });
 const sheetOf = (opts = {}) => _buildBalanceSheet(sheetRows(opts), { columns: ['2026-09-30', '2026-08-31'] });
 const COLS = sheetOf().columns;
@@ -98,9 +122,10 @@ beforeEach(() => {
   api.getOrganisations.mockResolvedValue({ body: { organisations: [ORG] } });
   api.getReportBalanceSheet.mockResolvedValue(answer(sheetRows()));
   api.getReportBankSummary.mockResolvedValue(answer(bankSummaryRows()));
+  api.getReportTrialBalance.mockResolvedValue(answer(tbRows()));
   api.getAccounts.mockImplementation(async (_t, _since, where) => ({ body: { accounts: /BANK/.test(where || '')
     ? BANK.map(b => ({ accountID: b.id, code: '09x', name: b.name, type: 'BANK', currencyCode: b.currency }))
-    : [{ accountID: 'acc-ar', code: '610', name: 'Accounts Receivable', type: 'CURRENT' }] } }));
+    : CHART } }));
 });
 afterEach(() => jest.useRealTimers());
 
@@ -187,13 +212,19 @@ describe('the bank check against the Bank Summary', () => {
     expect(bank.proves).toMatch(/1 line left out/);
 
     expect(out.ok).toBe(true);
+    // The Trial Balance the fourth check reads was read for the exact-dates
+    // gate as the sheet loaded, so the bank is the one call of the check's own.
     expect(out.calls).toBe(1);
-    expect(out.checks.map(c => c.key)).toEqual(['identity', 'subtotals', 'bank']);
+    expect(out.checks.map(c => c.key)).toEqual(['identity', 'subtotals', 'bank', 'trialbalance']);
     expect(out.checkedAt).toBe(new Date(NOW).toISOString());
     expect(out.currency).toBe('SGD');
     expect(out.period).toEqual({ asAtLabel: '30 September 2026', asAtISO: '2026-09-30', basis: 'accrual', compare: { type: 'month', periods: 1 }, current: null });
-    expect(out.notes).toHaveLength(4);
-    expect(out.notes[3]).toMatch(/accrual basis/);
+    // The sheet's own date, columns and basis, for the steps to repeat it in Xero.
+    expect(out.basis).toBe('accrual');
+    expect(out.asAt).toMatchObject({ iso: '2026-09-30', source: 'balance-sheet' });
+    expect(out.columns.map(c => c.iso)).toEqual(['2026-09-30', '2026-08-31']);
+    expect(out.notes).toHaveLength(5);
+    expect(out.notes[4]).toMatch(/accrual basis/);
   });
 
   test('a bank line Xero holds a different balance for is a difference, and the verdict is not ok', async () => {
@@ -245,6 +276,62 @@ describe('the bank check against the Bank Summary', () => {
   });
 });
 
+describe('the accounts against the Trial Balance', () => {
+  test('every account, the totals and Net Assets agree with the Trial Balance for the same day', async () => {
+    const out = await check();
+    const tb  = find(out, 'trialbalance');
+    // Seven lines (five accounts, Retained Earnings, Current Year Earnings),
+    // three group totals, Net Assets and three section totals.
+    expect(tb).toMatchObject({ key: 'trialbalance', skipped: false, ok: true, lines: 14, matched: 14, differences: [], calls: 0 });
+    expect(tb.proves).toMatch(/^Every account at 30 Sep 2026 against its balance in Xero's Trial Balance for the same day/);
+    expect(api.getReportTrialBalance.mock.calls).toEqual([[T, '2026-09-30', undefined]]);
+  });
+
+  test('an account the Trial Balance holds differently is a difference, with the sheet\'s figure as the app\'s', async () => {
+    api.getReportTrialBalance.mockResolvedValue(answer(tbRows({ bend: { 'acc-ar': 18262.5 } })));
+    const out = await check();
+    const tb  = find(out, 'trialbalance');
+    expect(tb.ok).toBe(false);
+    expect(tb.differences[0]).toEqual({ label: 'Accounts Receivable', column: '30 Sep 2026', app: 18250, xero: 18262.5, diff: -12.5, kind: 'account' });
+    expect(tb.differences.map(d => d.label)).toEqual(['Accounts Receivable', 'Total Assets', 'Net Assets', 'Total Current Assets']);
+    expect(out.ok).toBe(false);
+  });
+
+  test('a connection without the Trial Balance scope skips it and says how to add it; the rest still stands', async () => {
+    api.getReportTrialBalance.mockRejectedValue(new Error(JSON.stringify({ response: { statusCode: 403 }, body: { Detail: 'AuthorizationUnsuccessful' } })));
+    const out = await check();
+    expect(find(out, 'trialbalance')).toMatchObject({ skipped: true, reason: expect.stringMatching(/Reconnect Xero in Setup with Balance Sheet ticked/) });
+    expect(out.ok).toBe(true);
+  });
+
+  test('any other failure to read it is a failure of the check', async () => {
+    api.getReportTrialBalance.mockRejectedValue(new Error('Xero rate limit exceeded — try again in a minute'));
+    await expect(check()).rejects.toThrow(/rate limit/);
+  });
+});
+
+describe('a sheet as at an exact date', () => {
+  test('gets the arithmetic and the gate\'s verdict, not the bank or the Trial Balance it was built from', async () => {
+    const out = await check({ preset: 'today', compare: 'none' });
+    expect(out.checks.map(c => c.key)).toEqual(['identity', 'subtotals', 'gate']);
+    expect(find(out, 'gate')).toMatchObject({
+      label: 'the Trial Balance against the Balance Sheet at 30 Sep 2026', skipped: false, ok: true, lines: 14, matched: 14, calls: 0,
+    });
+    expect(find(out, 'gate').proves).toMatch(/built from Xero's Trial Balance, since Xero's Balance Sheet report can only be as at a month end/);
+    expect(out.ok).toBe(true);
+    expect(api.getReportBankSummary).not.toHaveBeenCalled();
+    expect(out.asAt).toMatchObject({ iso: '2026-10-11', source: 'trial-balance' });
+    expect(out.notes[out.notes.length - 1]).toMatch(/^These checks read the accrual basis/);
+    expect([..._cache.keys()].filter(k => k.startsWith('balcheck:'))).toEqual([`balcheck:${U}:${T}:trial-balance:2026-10-11:0:none:accrual`]);
+  });
+
+  test('the gate\'s verdict, recorded or not, is what the third check says', () => {
+    const sheet = { exactDates: { ok: false, at: '2026-09-30', atLabel: '30 Sep 2026', lines: 14, matched: 13, differences: [{ label: 'GST', diff: 1 }] } };
+    expect(_gateCheck(sheet)).toMatchObject({ key: 'gate', ok: false, matched: 13, differences: [{ label: 'GST', diff: 1 }] });
+    expect(_gateCheck({})).toMatchObject({ key: 'gate', skipped: true });
+  });
+});
+
 describe('the verdict as a whole', () => {
   test('is cached ten minutes under its own key, and the month in progress is named', async () => {
     const out = await check({ preset: 'this-month', compare: 'none' });
@@ -252,7 +339,7 @@ describe('the verdict as a whole', () => {
     const again = await check({ preset: 'this-month', compare: 'none' });
     expect(again.cached).toBe(true);
     expect(api.getReportBankSummary).toHaveBeenCalledTimes(1);
-    expect([..._cache.keys()].filter(k => k.startsWith('balcheck:'))).toEqual([`balcheck:${U}:${T}:2026-10-31:0:none:accrual`]);
+    expect([..._cache.keys()].filter(k => k.startsWith('balcheck:'))).toEqual([`balcheck:${U}:${T}:balance-sheet:2026-10-31:0:none:accrual`]);
   });
 
   test('a broken sheet fails on the arithmetic even when the bank agrees', async () => {

@@ -119,18 +119,26 @@ router.get('/budget-variance', requireAuth, report('Budget vs Actual',
 // here, never an "agrees".
 router.get('/budget-check', requireAuth, report('Budget check',
   (req, t) => reports.getBudgetCheck(req.user.id, t, { timezone: tz(req), force: force(req), period: _budgetPeriodFromQuery(req) })));
-// GET /api/xero-reports/balance-sheet?preset=&month=&compare=&periods=&basis=
-// The Balance Sheet as at a month end (xero/balance-sheet.js). Needs
-// accounting.reports.balancesheet.read. Its query is not a period — a date
-// named by a preset, a comparison and a basis — so it has its own check,
-// which refuses anything the report cannot be asked for with a 400 before any
-// Xero call, as the period check does for the other reports.
+// GET /api/xero-reports/balance-sheet?preset=&month=&date=&compare=&periods=&basis=
+// The Balance Sheet as at a month end, from Xero's Balance Sheet report, or —
+// preset=today, or preset=date&date=YYYY-MM-DD — as at that day, built from
+// the Trial Balance once that construction has been shown to agree with the
+// report (xero/balance-sheet.js); `asAt.source` says which. Needs
+// accounting.reports.balancesheet.read, and the Trial Balance scope for exact
+// dates. Its query is not a period — a date named by a preset, a comparison
+// and a basis — so it has its own check, which refuses anything the report
+// cannot be asked for with a 400 before any Xero call, as the period check
+// does for the other reports: a malformed date, one before 1990, and (once
+// the reader's today is known) one after today.
 router.get('/balance-sheet', requireAuth, report('Balance Sheet',
   (req, t) => reports.getBalanceSheet(req.user.id, t, { timezone: tz(req), force: force(req), ..._balanceQueryFromParams(req.query) })));
 // The sheet above checked: Net Assets against the totals and every total
-// against its lines from the payload itself, and the Bank section against
-// the Bank Summary in one read-only call (see xero/balance-check.js). Same
-// query as the sheet, so what is checked is what is on screen.
+// against its lines from the payload itself, and for a month end the Bank
+// section against the Bank Summary and every account against the Trial
+// Balance, one read-only call each; an exact-date sheet carries the Trial
+// Balance's agreement with the Balance Sheet at the last month end instead
+// (see xero/balance-check.js). Same query as the sheet, so what is checked is
+// what is on screen.
 router.get('/balance-check', requireAuth, report('Balance check',
   (req, t) => reports.getBalanceCheck(req.user.id, t, { timezone: tz(req), force: force(req), ..._balanceQueryFromParams(req.query) })));
 // Powers Dashboard -> Overview and Revenue. Composed from the budget-variance
@@ -233,14 +241,57 @@ const EXPORT_TOKEN_TTL = '5m';
 // 'balance' is the Balance Sheet tab's export and 'cashmanager' the Cash Flow
 // Manager's; they ride on these two routes so the browser has one way of
 // opening a signed report file.
-const EXPORT_KINDS   = new Set(['grid', 'variance', 'balance', 'cashmanager']);
+// 'cashmonthly' is the Cash Flow Manager's Monthly view.
+const EXPORT_KINDS   = new Set(['grid', 'variance', 'balance', 'cashmanager', 'cashmonthly']);
 const EXPORT_FORMATS = new Set(['pdf', 'xlsx']);
 // How far ahead a cash manager export reaches: the tab's three views.
 const CASH_MANAGER_DAYS = new Set([30, 60, 90]);
+
+// The Monthly view's span and fill, checked the way GET /api/cash-manager/monthly
+// checks them (refused, not clamped: every past month is a Bank Summary call),
+// so a link can never carry a span the screen's own request would refuse.
+function _cashMonthlyFromQuery(query) {
+  const cashMonthly = require('../xero/cash-monthly');
+  const bounds = {
+    past:   { min: 0, max: cashMonthly.PAST_MAX,   dflt: cashMonthly.PAST_DEFAULT },
+    future: { min: 1, max: cashMonthly.FUTURE_MAX, dflt: cashMonthly.FUTURE_DEFAULT },
+  };
+  const out = {};
+  for (const [name, b] of Object.entries(bounds)) {
+    const v = query[name];
+    if (v === undefined || v === '') { out[name] = b.dflt; continue; }
+    if (typeof v !== 'string' || !/^\d{1,2}$/.test(v) || Number(v) < b.min || Number(v) > b.max) {
+      throw new PeriodError(`${name} must be a whole number from ${b.min} to ${b.max}`);
+    }
+    out[name] = Number(v);
+  }
+  const fill = query.fill === undefined || query.fill === '' ? 'budget' : query.fill;
+  if (!cashMonthly.FILLS.includes(fill)) throw new PeriodError(`fill must be one of ${cashMonthly.FILLS.join(', ')}`);
+  out.fill = fill;
+  return out;
+}
 // The answer to an export of a month that has not started. The screen cannot
 // ask for one (its buttons are disabled), so this is for a link made by hand
 // or signed before the check existed.
 const MONTH_NOT_STARTED = 'That month has not started yet';
+
+// How the reader has set the Balance Sheet out on the tab — account codes,
+// zero-balance rows, decimals, the Change and % columns — none of which
+// changes what Xero is asked for, so it travels beside the sheet's query
+// rather than in it, and the file is laid out as the screen is. The defaults
+// are the tab's. A value other than true or false is refused, as a bad value
+// is everywhere in this file, rather than read as one of them.
+const BALANCE_VIEW = Object.freeze({ codes: false, zeroRows: false, decimals: true, change: false });
+function _balanceViewFromQuery(query) {
+  const view = {};
+  for (const [name, fallback] of Object.entries(BALANCE_VIEW)) {
+    const v = query[name];
+    if (v === undefined || v === '') { view[name] = fallback; continue; }
+    if (v !== 'true' && v !== 'false') throw new PeriodError(`${name} must be true or false`);
+    view[name] = v === 'true';
+  }
+  return view;
+}
 
 function issueExportToken(userId, spec) {
   return jwt.sign({ userId, ...spec, purpose: 'budget-export' }, jwtSecret(), { expiresIn: EXPORT_TOKEN_TTL });
@@ -269,7 +320,7 @@ router.get('/budget/export-url', requireAuth, asyncHandler(async (req, res) => {
 
     const kind   = String(req.query.kind || 'grid');
     const format = String(req.query.format || 'pdf');
-    if (!EXPORT_KINDS.has(kind))     return res.status(400).json({ error: 'kind must be cashmanager, grid, variance or balance' });
+    if (!EXPORT_KINDS.has(kind))     return res.status(400).json({ error: 'kind must be cashmanager, cashmonthly, grid, variance or balance' });
     if (!EXPORT_FORMATS.has(format)) return res.status(400).json({ error: 'format must be pdf or xlsx' });
 
     // The cash manager takes no period, only how far ahead to show. Nothing
@@ -282,6 +333,13 @@ router.get('/budget/export-url', requireAuth, asyncHandler(async (req, res) => {
       return res.json({ url: `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`, expiresIn: EXPORT_TOKEN_TTL });
     }
 
+    // The Monthly view: its span and fill travel in the token, checked first.
+    if (kind === 'cashmonthly') {
+      const monthly = _cashMonthlyFromQuery(req.query);
+      const token = issueExportToken(req.user.id, { tenantId, kind, format, monthly });
+      return res.json({ url: `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`, expiresIn: EXPORT_TOKEN_TTL });
+    }
+
     // The Balance Sheet's query is its own (a date, a comparison, a basis),
     // checked by its own gate; and the as-at date is checked against today
     // by fetching the report — the one the screen has just loaded, so it is
@@ -289,8 +347,9 @@ router.get('/budget/export-url', requireAuth, asyncHandler(async (req, res) => {
     // can never carry a month the sheet route would refuse.
     if (kind === 'balance') {
       const balance = _balanceQueryFromParams(req.query);
+      const view    = _balanceViewFromQuery(req.query);
       await reports.getBalanceSheet(req.user.id, tenantId, { timezone: tz(req), ...balance });
-      const token = issueExportToken(req.user.id, { tenantId, kind, format, balance });
+      const token = issueExportToken(req.user.id, { tenantId, kind, format, balance, view });
       return res.json({ url: `/api/xero-reports/budget/export?token=${encodeURIComponent(token)}`, expiresIn: EXPORT_TOKEN_TTL });
     }
 
@@ -334,7 +393,9 @@ router.get('/budget/export', asyncHandler(async (req, res) => {
       // budget export with it.
       const { balanceSheetDefinition, balanceSheetWorkbook, balanceFilename } = require('../reports/balance-doc');
       const sheet = await reports.getBalanceSheet(spec.userId, spec.tenantId, { timezone, ...(spec.balance || {}) });
-      const opts  = { timezone };
+      // A link signed before the view travelled lays the file out the tab's
+      // default way.
+      const opts  = { timezone, ...BALANCE_VIEW, ...(spec.view || {}) };
       // The document module names the file; a name it gave with the
       // extension on is not given a second one by setDownloadName.
       const base  = String(balanceFilename(sheet, spec.format) || 'Balance Sheet').replace(new RegExp(`\\.${spec.format}$`, 'i'), '');
@@ -370,6 +431,26 @@ router.get('/budget/export', asyncHandler(async (req, res) => {
       res.setHeader('Content-Type', 'application/pdf');
       setDownloadName(res, base, 'pdf');
       return budgetRender.streamPdf(cashManagerDefinition(payload, opts), res);
+    }
+
+    if (spec.kind === 'cashmonthly') {
+      // The Monthly view's own document module, required here for the same
+      // reason as the others; the payload is the one the view renders, from
+      // the same cache, so the file and the screen agree.
+      const { cashMonthlyDefinition, cashMonthlyWorkbook, cashMonthlyFilename } = require('../reports/cash-monthly-doc');
+      const payload = await require('../xero/cash-monthly').getCashMonthly(spec.userId, spec.tenantId, { timezone, ...(spec.monthly || {}) });
+      const opts = { timezone };
+      const base = String(cashMonthlyFilename(payload, spec.format) || 'Monthly cash flow').replace(new RegExp(`\\.${spec.format}$`, 'i'), '');
+      if (spec.format === 'xlsx') {
+        const wb = cashMonthlyWorkbook(payload, opts);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        setDownloadName(res, base, 'xlsx');
+        await wb.xlsx.write(res);
+        return res.end();
+      }
+      res.setHeader('Content-Type', 'application/pdf');
+      setDownloadName(res, base, 'pdf');
+      return budgetRender.streamPdf(cashMonthlyDefinition(payload, opts), res);
     }
 
     // Reads the same cached payload the screen renders, so an exported figure

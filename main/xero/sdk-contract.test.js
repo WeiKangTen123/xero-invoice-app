@@ -58,6 +58,9 @@ const USED = {
   // cash basis; the two tracking slots between are left empty
   getReportBalanceSheet:  ['xeroTenantId', 'date', 'periods', 'timeframe',
     'trackingOptionID1', 'trackingOptionID2', 'standardLayout', 'paymentsOnly'],
+  // trial-balance: the date (1) on every call, paymentsOnly (2) on the cash
+  // basis; swapped, an exact-date sheet would be as at the wrong day
+  getReportTrialBalance:  ['xeroTenantId', 'date', 'paymentsOnly'],
   // reports: quotes from a date, paged (2, 8)
   getQuotes: ['xeroTenantId', 'ifModifiedSince', 'dateFrom', 'dateTo', 'expiryDateFrom',
     'expiryDateTo', 'contactID', 'status', 'page'],

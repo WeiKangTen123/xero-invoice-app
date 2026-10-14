@@ -15,8 +15,9 @@
 //   ./bank               bank statement, Bank Summary, bank account currencies
 //   ./budget-variance    Budget vs Actual, and the P&L rows the rest read
 //   ./budget-check       the grid checked against Xero another way
-//   ./balance-sheet      the Balance Sheet tab, as at a month end
-//   ./balance-check      the balance sheet checked against itself and the bank
+//   ./trial-balance      the Trial Balance, read into balances and laid out as a sheet
+//   ./balance-sheet      the Balance Sheet tab, as at a month end or (from the Trial Balance) any day
+//   ./balance-check      the balance sheet checked against itself, the bank and the Trial Balance
 //   ./performance        the dashboard figures
 //   ./ageing             receivables and payables by age and by contact
 //   ./cash-manager       the Cash Flow Manager: today's balance, ninety days on
@@ -46,7 +47,10 @@ const {
   _mapWithConcurrency, _variancePct, _sectionKind,
 } = require('./budget-variance');
 const { getBudgetCheck } = require('./budget-check');
-const { getBalanceSheet, _balanceQueryFromParams, _resolveAsAt, _columnDates, _buildBalanceSheet } = require('./balance-sheet');
+const {
+  getTrialBalance, getTrialBalanceSheet, _parseTrialBalance, _sheetFromTrialBalances, _exactColumnDates, _compareSheets,
+} = require('./trial-balance');
+const { getBalanceSheet, getExactDates, _balanceQueryFromParams, _resolveAsAt, _columnDates, _buildBalanceSheet } = require('./balance-sheet');
 const { getBalanceCheck } = require('./balance-check');
 const {
   getPerformance,
@@ -128,7 +132,8 @@ module.exports = {
   FORCE_GRACE_MS, DIRECTORY_TTL_MS,
   getSummary, getAccounts, getBankAccounts, getContacts,
   getBankTransactions, getBankSummary, getBudgetVariance, getBudgetCheck, getPerformance, getCashFlow, getVarianceInsights, getFinancialNarrative, clearCache,
-  getBalanceSheet, getBalanceCheck, _balanceQueryFromParams, _resolveAsAt, _columnDates, _buildBalanceSheet,
+  getBalanceSheet, getBalanceCheck, getExactDates, _balanceQueryFromParams, _resolveAsAt, _columnDates, _buildBalanceSheet,
+  getTrialBalance, getTrialBalanceSheet, _parseTrialBalance, _sheetFromTrialBalances, _exactColumnDates, _compareSheets,
   getAgeing, _buildAgeing, _creditsOf,
   getCashManager, getCashManagerCheck, _buildCashManager,
   _buildSummary, _buildAccounts, _buildBankAccounts, _buildContacts,

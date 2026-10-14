@@ -29,14 +29,18 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 // The line under the panel's title: what the check does for this report, so
 // "agrees" is read against the right proof. The budget grid is asked for
-// again without the comparison periods its columns are matched off; the
-// Balance Sheet is read a second way, from the Trial Balance, which carries
-// the same closing balances with no layout to get wrong. The cash flow
-// forecast starts from figures Xero also reports on its own — the bank
-// balances, and what is owed each way — so those are what it is held to.
+// again without the comparison periods its columns are matched off. The
+// Balance Sheet's totals are added up from its own lines, and its figures
+// read a second way: at a month end, each account from the Trial Balance for
+// that day and each bank line from the Bank Summary; at an exact date, which
+// is itself built from the Trial Balance, the proof is that the same
+// construction gave Xero's Balance Sheet figures at the last month end
+// (xero/balance-check.js). The cash flow forecast starts from figures Xero
+// also reports on its own — the bank balances, and what is owed each way —
+// so those are what it is held to.
 export function checkIntro(endpoint) {
   if (endpoint === 'balance-check') {
-    return 'The sheet checked against Xero\'s Trial Balance, read separately, account by account. Read-only.';
+    return 'Net Assets and every total against the lines they add up from. At a month end, each account against Xero\'s Trial Balance and each bank line against its Bank Summary for that day; at an exact date, the last month end\'s Trial Balance against Xero\'s Balance Sheet. Read-only.';
   }
   if (endpoint === 'cash-manager-check') {
     return 'The forecast\'s starting figures (bank balances, and the invoices and bills it counts) checked against Xero, read separately. Read-only.';
@@ -103,15 +107,23 @@ export function xeroHowTo(d) {
 // each column of the app's sheet is a date to set there; the basis is named
 // because a cash-basis sheet carries different balances under the same
 // headings. The columns are read off the check's payload (the server echoes
-// the sheet's), falling back to the as-at date alone.
+// the sheet's), falling back to the as-at date alone. A sheet for an exact
+// date has no Balance Sheet report to match, so the steps lead to the Trial
+// Balance it was built from, and say which of its columns hold the balances.
 export function balanceHowTo(d) {
   const basis = d.basis === 'cash' ? 'cash' : 'accrual';
-  const lines = [`In Xero: Reports → Balance Sheet. Accounting basis: ${basis}. Compare with: none.`];
+  const exact = d.asAt?.source === 'trial-balance';
+  const lines = [exact
+    ? `In Xero: Reports → Trial Balance. Accounting basis: ${basis}.`
+    : `In Xero: Reports → Balance Sheet. Accounting basis: ${basis}. Compare with: none.`];
   const cols  = (d.columns || []).filter(c => c?.iso);
   const dates = cols.length ? cols.map(c => c.iso) : (d.asAt?.iso ? [d.asAt.iso] : []);
   if (dates.length) lines.push(`Date = ${isoDay(dates[0])} matches the app's first column.`);
   if (dates.length > 1) {
     lines.push(`Date = ${dates.slice(1).map(isoDay).join(' or ')} matches the comparison column of that date.`);
+  }
+  if (exact) {
+    lines.push('Each account\'s balance is its YTD Debit less its YTD Credit (the other way round for liabilities and equity); Current Year Earnings is the revenue less the expenses there.');
   }
   return lines;
 }

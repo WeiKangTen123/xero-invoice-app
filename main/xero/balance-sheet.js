@@ -1,8 +1,9 @@
-const { withRetry }      = require('./xero-utils');
+const { withRetry, isScopeError, xeroErrMsg } = require('./xero-utils');
 const logger             = require('../utils/logger');
 const { _cacheGet, _cacheSet, _dedupe, _periodCacheTtl } = require('./report-cache');
 const { _apiFor, _parseReportNumber, _getOrganisation, getAccounts } = require('./report-fetch');
 const { _cents, _norm }  = require('./budget-variance');
+const { getTrialBalanceSheet, _exactColumnDates, _compareSheets, MAX_EXACT_PERIODS } = require('./trial-balance');
 const {
   _addDays, _dateFromParts, _fiscalYearStart, _fmtISODate, _lastDayOfMonth, _parseISODate, _todayPartsInTz,
   MIN_PERIOD_YEAR, MAX_PERIOD_YEAR, PeriodError,
@@ -41,8 +42,22 @@ const {
 // Needs accounting.reports.balancesheet.read, a granular scope asked for by
 // the Web app consent only (see xero-utils OAUTH_SCOPES); a connection made
 // before it was added gets the reconnect prompt, as the other reports did.
+//
+// Any other day — today, or a date the reader picks — cannot come from that
+// report, so it is built from Xero's Trial Balance (./trial-balance), which
+// takes any date. That construction is this app's, not Xero's, so it is only
+// offered once it has been shown to give Xero's own figures: the gate
+// (getExactDates) builds the sheet from the Trial Balance as at the last
+// month end and sets it against the Balance Sheet for that day, account by
+// account. Every payload carries the gate's outcome as `exactDates`, which
+// is what the tab's Date menu is drawn from, and an exact-date sheet is
+// refused while the gate does not pass. `asAt.source` says which report a
+// sheet came from.
 
-const BALANCE_PRESETS  = ['last-month-end', 'last-quarter-end', 'last-fy-end', 'this-month', 'month'];
+const BALANCE_PRESETS  = ['last-month-end', 'last-quarter-end', 'last-fy-end', 'this-month', 'month', 'today', 'date'];
+// The presets that name a day rather than a month end: built from the Trial
+// Balance, and only once the gate passes.
+const EXACT_PRESETS    = ['today', 'date'];
 // What each comparison means to Xero's `timeframe`; none sends no periods.
 const BALANCE_COMPARES = { none: null, month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' };
 const BALANCE_BASES    = ['accrual', 'cash'];
@@ -53,13 +68,15 @@ const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'Ju
 const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 // Pure. The query string of /balance-sheet and /balance-check, checked, as the
-// options getBalanceSheet takes: { preset, month, compare, periods, basis }.
-// Throws PeriodError — a 400 in the routes, before any Xero call — for
-// anything the report cannot be asked for. `month` is only read for the month
-// preset and `periods` only for a comparison, and each is left undefined
-// otherwise, so a request spelled with a stray one is the same request to the
-// in-flight sharing and the cache as one without it. A parameter given twice
-// arrives as an array and is refused rather than read as one of them.
+// options getBalanceSheet takes: { preset, month, date, compare, periods,
+// basis }. Throws PeriodError — a 400 in the routes, before any Xero call —
+// for anything the report cannot be asked for. `month` is only read for the
+// month preset, `date` only for the date preset and `periods` only for a
+// comparison, and each is left undefined otherwise, so a request spelled with
+// a stray one is the same request to the in-flight sharing and the cache as
+// one without it. A parameter given twice arrives as an array and is refused
+// rather than read as one of them. A date after today is refused later, by
+// _resolveAsAt, which knows the reader's today.
 function _balanceQueryFromParams(query) {
   const q = query || {};
   const given = v => v !== undefined && v !== null && v !== '';
@@ -83,16 +100,35 @@ function _balanceQueryFromParams(query) {
     }
   }
 
+  let date;
+  if (preset === 'date') {
+    if (!given(q.date)) throw new PeriodError('preset=date needs date=YYYY-MM-DD');
+    date = one(q.date, 'date');
+    const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+    if (!d || +d[2] < 1 || +d[2] > 12 || +d[3] < 1 || +d[3] > _lastDayOfMonth(+d[1], +d[2])) {
+      throw new PeriodError('date must be a real day, written YYYY-MM-DD');
+    }
+    if (+d[1] < MIN_PERIOD_YEAR || +d[1] > MAX_PERIOD_YEAR) {
+      throw new PeriodError(`date must be between ${MIN_PERIOD_YEAR} and ${MAX_PERIOD_YEAR}`);
+    }
+  }
+
   const compare = given(q.compare) ? one(q.compare, 'compare') : 'none';
   if (!Object.prototype.hasOwnProperty.call(BALANCE_COMPARES, compare)) {
     throw new PeriodError(`Unknown comparison "${compare.slice(0, 40)}" — use compare=none, month, quarter or year`);
   }
 
+  // An exact date's columns are a Trial Balance call each, so it compares
+  // with fewer earlier dates than Xero's own report gives in one call.
   let periods;
   if (compare !== 'none') {
-    const raw = given(q.periods) ? one(q.periods, 'periods') : '1';
-    if (!/^\d{1,2}$/.test(raw) || +raw < 1 || +raw > MAX_BALANCE_PERIODS) {
-      throw new PeriodError(`periods must be a whole number from 1 to ${MAX_BALANCE_PERIODS}`);
+    const exact = EXACT_PRESETS.includes(preset);
+    const max   = exact ? MAX_EXACT_PERIODS : MAX_BALANCE_PERIODS;
+    const raw   = given(q.periods) ? one(q.periods, 'periods') : '1';
+    if (!/^\d{1,2}$/.test(raw) || +raw < 1 || +raw > max) {
+      throw new PeriodError(exact
+        ? `An exact date compares with 1 to ${max} earlier dates`
+        : `periods must be a whole number from 1 to ${max}`);
     }
     periods = +raw;
   }
@@ -100,7 +136,7 @@ function _balanceQueryFromParams(query) {
   const basis = given(q.basis) ? one(q.basis, 'basis') : 'accrual';
   if (!BALANCE_BASES.includes(basis)) throw new PeriodError('basis must be accrual or cash');
 
-  return { preset, month, compare, periods, basis };
+  return { preset, month, date, compare, periods, basis };
 }
 
 // The last day of a month, with the month allowed to run past either end of
@@ -115,14 +151,16 @@ const _shortDate = p => `${p.day} ${MONTHS_SHORT[p.month - 1]} ${p.year}`;
 
 // Pure. The as-at date a preset names, in the reader's own calendar (`today`
 // is already in their timezone) and against the organisation's year end for
-// last-fy-end: { iso, label, preset, inProgress }. Always a month end, since
-// that is the only date the report can be as at.
+// last-fy-end: { iso, label, preset, inProgress }. A month end for every
+// preset the Balance Sheet report answers; today, or the day given, for the
+// two the Trial Balance answers.
 //
 // `inProgress` says the date has not yet passed: the balances shown for it
-// can still move. That is every this-month, and the month preset for the
-// month in progress — which is accepted; a month after it is refused, since
-// Xero would answer with balances as at a date with nothing booked to it.
-function _resolveAsAt({ preset, month } = {}, today, fiscalYearEnd) {
+// can still move. That is every this-month, the month preset for the month
+// in progress, and today — each accepted; a month or a day after them is
+// refused, since Xero would answer with balances as at a date with nothing
+// booked to it.
+function _resolveAsAt({ preset, month, date } = {}, today, fiscalYearEnd) {
   let end;
   switch (preset) {
     case 'last-month-end':   end = _monthEnd(today.year, today.month - 1); break;
@@ -139,6 +177,13 @@ function _resolveAsAt({ preset, month } = {}, today, fiscalYearEnd) {
       if (end.year * 12 + end.month > today.year * 12 + today.month) {
         throw new PeriodError(`${MONTHS_LONG[end.month - 1]} ${end.year} has not started yet`);
       }
+      break;
+    }
+    case 'today': end = { year: today.year, month: today.month, day: today.day }; break;
+    case 'date': {
+      end = _parseISODate(String(date || ''));
+      if (!end) throw new PeriodError('preset=date needs date=YYYY-MM-DD');
+      if (_dateFromParts(end) > _dateFromParts(today)) throw new PeriodError(`${_longDate(end)} is after today`);
       break;
     }
     default: throw new PeriodError(`Unknown preset "${String(preset).slice(0, 40)}"`);
@@ -310,7 +355,8 @@ function _buildBalanceSheet(reportRows, { columns = [], codes = new Map() } = {}
   };
 }
 
-async function _getBalanceSheetRaw(userId, tenantId, {
+// The sheet as at a month end, from Xero's Balance Sheet report.
+async function _getMonthEndRaw(userId, tenantId, {
   force = false, timezone = 'UTC', preset = 'last-month-end', month, compare = 'none', periods, basis = 'accrual',
 } = {}) {
   const org           = await _getOrganisation(userId, tenantId, force);
@@ -357,21 +403,159 @@ async function _getBalanceSheetRaw(userId, tenantId, {
 
   return stamp(_cacheSet(key, {
     organisation: { name: org.name || org.legalName || 'Organisation', currency: org.baseCurrency || '' },
-    asAt:         { iso: asAt.iso, label: asAt.label, preset: asAt.preset, inProgress: asAt.inProgress },
+    asAt:         { iso: asAt.iso, label: asAt.label, preset: asAt.preset, inProgress: asAt.inProgress, source: 'balance-sheet' },
     basis,
     compare:      { type: compare, periods: n || 0 },
     ...built,
   }, _periodCacheTtl([{ endISO: asAt.iso }], today)));
 }
 
+const BALANCE_DEFAULTS = { force: false, timezone: 'UTC', preset: 'last-month-end', compare: 'none', basis: 'accrual' };
+const _monthEndSheet   = _dedupe('_monthEndSheet', _getMonthEndRaw, BALANCE_DEFAULTS);
+
+// ── Exact dates ─────────────────────────────────────────────────────────────
+// A pass, or a mismatch, stands for six hours: a ledger that reconciled at
+// the last month end does not stop doing so within a day's reading. A failure
+// to ask at all (a scope the connection lacks, Xero out of reach) is kept ten
+// minutes, so a page that loads the sheet again and again does not ask Xero
+// again and again.
+const GATE_TTL_MS       = 6 * 60 * 60 * 1000;
+const GATE_RETRY_TTL_MS = 10 * 60 * 1000;
+// The differences kept with a mismatch, largest first: enough to name the
+// worst and to see the pattern, not a payload the size of the chart.
+const MAX_GATE_DIFFERENCES = 50;
+const RECONNECT_FOR_EXACT  = 'Reconnect Xero in Setup with Balance Sheet ticked';
+
+const _money = v => Math.abs(Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Pure. What the gate's outcome says to a reader — under the Date menu, and
+// as the refusal of an exact-date request — or '' when it passed. A mismatch
+// names the first difference the gate kept, the largest on an account, which
+// is the line to look at first.
+function _gateMessage(gate, currency) {
+  if (!gate || gate.ok) return '';
+  if (gate.reason === 'scope') return `Exact dates unavailable: ${RECONNECT_FOR_EXACT}.`;
+  if (gate.reason === 'mismatch') {
+    const worst = (gate.differences || [])[0];
+    const amount = worst ? [currency, _money(worst.diff)].filter(Boolean).join(' ') : '';
+    return `Exact dates unavailable: Xero's Trial Balance does not reconcile with its Balance Sheet${worst ? ` (difference ${amount} on ${worst.label})` : ''}`;
+  }
+  return "Exact dates unavailable: Xero's Trial Balance could not be read just now. Refresh to try again.";
+}
+
+// The gate: whether a sheet built from the Trial Balance (./trial-balance)
+// gives the figures Xero's Balance Sheet gives, for this organisation and
+// basis, at the most recent month end that has closed — the latest day both
+// reports can be asked for. Answers { ok, reason, at, atLabel, basis, lines,
+// matched, differences, message, checkedAt }: reason 'ok', 'mismatch',
+// 'scope' (the connection lacks the Trial Balance scope; a reconnect adds it)
+// or 'error'. Never throws: the month-end sheet carries this, and nothing
+// about exact dates may cost a reader the month end.
+//
+// `sheet` is a month-end sheet already in hand; when its first column is that
+// month end on the same basis it is the Balance Sheet compared with, so the
+// sheet the tab opens on costs the gate one Trial Balance call and nothing
+// more. A Refresh (`force`) asks again only when the last outcome was not a
+// pass.
+async function getExactDates(userId, tenantId, { timezone = 'UTC', basis = 'accrual', force = false } = {}, sheet = null) {
+  const today  = _todayPartsInTz(timezone);
+  const end    = _monthEnd(today.year, today.month - 1);
+  const at     = _fmtISODate(end);
+  const key    = `balgate:${userId}:${tenantId}:${at}:${basis}`;
+  const cached = _cacheGet(key, false);
+  if (cached && (cached.ok || !force)) return cached;
+
+  const currency = await _getOrganisation(userId, tenantId, false).then(o => o.baseCurrency || '', () => '');
+  const base = { at, atLabel: _shortDate(end), basis };
+  let outcome, ttl;
+  try {
+    const tb = await getTrialBalanceSheet(userId, tenantId, { dates: [at], basis, force, timezone });
+    const bs = sheet && sheet.basis === basis && sheet.columns?.[0]?.iso === at
+      ? sheet
+      : await _monthEndSheet(userId, tenantId, { timezone, preset: 'last-month-end', compare: 'none', basis, force });
+    const cmp = _compareSheets(tb, bs);
+    // Accounts first, each part largest first: an account is where a
+    // difference starts, and the totals only follow it.
+    const rank = d => (d.kind === 'account' ? 0 : 1);
+    const differences = [...cmp.differences]
+      .sort((a, b) => rank(a) - rank(b) || Math.abs(b.diff) - Math.abs(a.diff))
+      .slice(0, MAX_GATE_DIFFERENCES);
+    const ok = cmp.differences.length === 0;
+    outcome = { ...base, ok, reason: ok ? 'ok' : 'mismatch', lines: cmp.lines, matched: cmp.matched, differences };
+    ttl = GATE_TTL_MS;
+  } catch (err) {
+    const scope = isScopeError(err);
+    outcome = { ...base, ok: false, reason: scope ? 'scope' : 'error', lines: 0, matched: 0, differences: [] };
+    ttl = GATE_RETRY_TTL_MS;
+    logger.warn('Exact-date balance sheets unavailable: the Trial Balance could not be compared', { userId, tenantId, at, basis, scope, error: xeroErrMsg(err) });
+  }
+  outcome.message   = _gateMessage(outcome, currency);
+  outcome.checkedAt = new Date().toISOString();
+  logger.info('Trial Balance checked against the Balance Sheet', {
+    userId, tenantId, at, basis, ok: outcome.ok, reason: outcome.reason, lines: outcome.lines, differences: outcome.differences.length,
+  });
+  return _cacheSet(key, outcome, ttl);
+}
+
+// The sheet as at today or a given day, built from Trial Balances: one for
+// the date and one for each earlier date beside it. Refused while the gate
+// does not pass — a sheet this app built that is known not to agree with
+// Xero is not shown as a balance sheet. A scope the connection lacks is
+// answered as Xero answers one (a 403, which the routes word as a reconnect
+// prompt); a mismatch as a request that cannot be served (a 400 with the
+// gate's own words); a failure to read as a failure.
+async function _getExactRaw(userId, tenantId, {
+  force = false, timezone = 'UTC', preset, date, compare = 'none', periods, basis = 'accrual',
+} = {}) {
+  const org           = await _getOrganisation(userId, tenantId, force);
+  const fiscalYearEnd = { month: org.financialYearEndMonth || 12, day: org.financialYearEndDay || 31 };
+  const today         = _todayPartsInTz(timezone);
+  const asAt          = _resolveAsAt({ preset, date }, today, fiscalYearEnd);
+
+  const gate = await getExactDates(userId, tenantId, { timezone, basis, force });
+  if (!gate.ok) {
+    if (gate.reason === 'scope') throw Object.assign(new Error(gate.message), { statusCode: 403 });
+    if (gate.reason === 'mismatch') throw new PeriodError(gate.message);
+    throw new Error(gate.message);
+  }
+
+  const timeframe = BALANCE_COMPARES[compare] || null;
+  const n         = timeframe ? Math.min(periods || 1, MAX_EXACT_PERIODS) : undefined;
+  const dates     = _exactColumnDates(asAt.iso, n, timeframe);
+  const { calls, cached, fetchedAt, ...built } = await getTrialBalanceSheet(userId, tenantId, { dates, basis, force, timezone });
+  logger.info('Balance Sheet built from the Trial Balance', {
+    userId, tenantId, asAt: asAt.iso, compare, periods: n || 0, basis, calls, notes: built.notes.length,
+  });
+
+  return {
+    organisation: { name: org.name || org.legalName || 'Organisation', currency: org.baseCurrency || '' },
+    asAt:         { iso: asAt.iso, label: asAt.label, preset: asAt.preset, inProgress: asAt.inProgress, source: 'trial-balance' },
+    basis,
+    compare:      { type: compare, periods: n || 0 },
+    ...built,
+    exactDates:   gate,
+    cached,
+    fetchedAt,
+  };
+}
+
+// Either report, by the preset. A month-end sheet carries the gate's outcome
+// so the tab knows whether to offer exact dates; the gate is asked after the
+// sheet is in hand, so it can reuse it, and it cannot fail the sheet.
+async function _getBalanceSheetRaw(userId, tenantId, opts = {}) {
+  if (EXACT_PRESETS.includes(opts.preset)) return _getExactRaw(userId, tenantId, opts);
+  const sheet      = await _monthEndSheet(userId, tenantId, opts);
+  const exactDates = await getExactDates(userId, tenantId, { timezone: opts.timezone, basis: sheet.basis, force: opts.force }, sheet);
+  return { ...sheet, exactDates };
+}
+
 // Bound through the one in-flight map in ./report-cache, with the defaults
 // named so a request spelled with them and one without are one fetch (see
-// _dedupe). The check (./balance-check) asks through this too.
-const getBalanceSheet = _dedupe('getBalanceSheet', _getBalanceSheetRaw,
-  { force: false, timezone: 'UTC', preset: 'last-month-end', compare: 'none', basis: 'accrual' });
+// _dedupe). The check (./balance-check) and the exports ask through this too.
+const getBalanceSheet = _dedupe('getBalanceSheet', _getBalanceSheetRaw, BALANCE_DEFAULTS);
 
 module.exports = {
-  getBalanceSheet,
-  _balanceQueryFromParams, _resolveAsAt, _columnDates, _buildBalanceSheet, _groupOf,
-  BALANCE_PRESETS, BALANCE_COMPARES, BALANCE_BASES, MAX_BALANCE_PERIODS,
+  getBalanceSheet, getExactDates,
+  _balanceQueryFromParams, _resolveAsAt, _columnDates, _buildBalanceSheet, _groupOf, _gateMessage,
+  BALANCE_PRESETS, EXACT_PRESETS, BALANCE_COMPARES, BALANCE_BASES, MAX_BALANCE_PERIODS, GATE_TTL_MS, GATE_RETRY_TTL_MS,
 };
