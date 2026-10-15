@@ -359,10 +359,43 @@ describe('audit trail through the routes', () => {
       expect(JSON.stringify(row)).not.toContain(SECRET);
     });
 
-    test('signing in is not recorded', async () => {
-      await request(serverFor(app)).post('/api/auth/login').send({ email: owner.email, password: 'password123' }).expect(200);
-      await request(serverFor(app)).post('/api/auth/login').send({ email: owner.email, password: 'wrong-password' }).expect(401);
-      expect(adminEvents()).toEqual([]);
+    test('signing in is recorded: a success as the person\'s own, a wrong password and a lock as nobody\'s, with the address and never the password', async () => {
+      const login = (email, password) => request(serverFor(app)).post('/api/auth/login').send({ email, password });
+      await login(owner.email, 'password123').expect(200);
+      await login(owner.email, 'wrong-password').expect(401);
+      await login('nobody@test.com', 'wrong-password').expect(401);
+
+      const rows = adminEvents().map(r => ({ ...r, details: JSON.parse(r.details) }));
+      expect(rows.map(r => r.action)).toEqual(['login.success', 'login.failed', 'login.failed']);
+      expect(rows[0]).toMatchObject({ actor_id: String(owner.id), actor_email: owner.email, target_user_id: String(owner.id), target_email: owner.email, details: { ip: expect.any(String) } });
+      expect(rows[1]).toMatchObject({ actor_id: null, actor_email: null, target_user_id: String(owner.id), target_email: owner.email, details: { email: owner.email, ip: expect.any(String) } });
+      expect(rows[2]).toMatchObject({ actor_id: null, target_user_id: null, target_email: null, details: { email: 'nobody@test.com', ip: expect.any(String) } });
+      const everything = JSON.stringify(adminEvents());
+      expect(everything).not.toContain('password123');
+      expect(everything).not.toContain('wrong-password');
+      expect(users.findById(owner.id).last_login_at).toBeTruthy();
+
+      // Four more wrong passwords lock the account, and the Events tab says
+      // so in words, filterable by kind.
+      for (let i = 0; i < 3; i++) await login(owner.email, 'wrong-password').expect(401);
+      await login(owner.email, 'wrong-password').expect(423);
+      const res = await api('get', `/api/admin/events?userId=${owner.id}`, admin).expect(200);
+      expect(res.body.events.map(e => e.summary)).toEqual([
+        'Locked for 15 minutes after 5 failed attempts',
+        ...Array(5).fill(`Wrong password for ${owner.email}`),
+        'Signed in',
+      ]);
+      expect(res.body.events[0].details).toEqual({ ip: expect.any(String), lockedUntil: expect.any(String), lockMinutes: 15, failures: 5 });
+      expect(res.body.actions['login.locked']).toBe('Locked out after failed sign-ins');
+      const failed = await api('get', '/api/admin/events?action=login.failed', admin).expect(200);
+      expect(failed.body.events).toHaveLength(6);
+      expect(failed.body.events.find(e => !e.targetUserId).summary).toBe('Sign-in failed for nobody@test.com: no such account');
+
+      // An admin's unlock, against the account, by the admin.
+      await api('post', `/api/admin/users/${owner.id}/unlock`, admin).expect(200);
+      const unlocked = adminEvents().pop();
+      expect(unlocked).toMatchObject({ action: 'login.unlocked', actor_id: String(admin.id), actor_email: admin.email, target_user_id: String(owner.id), target_email: owner.email });
+      await login(owner.email, 'password123').expect(200);
     });
   });
 

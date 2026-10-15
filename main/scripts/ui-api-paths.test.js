@@ -176,6 +176,20 @@ describe('every literal API path the UI calls exists on the server', () => {
     expect(routes).toContainEqual({ verb: 'put', path: '/cash-manager/overrides' });
   });
 
+  // The routes the Account page, the login page and Admin › Users were built
+  // against (sign-in lockout, temporary passwords, admin unlock), by name:
+  // the check below only sees a call whose path is a literal in the source,
+  // and these must exist whether or not the call survives a refactor.
+  test('the account, session and unlock routes the UI calls exist', () => {
+    for (const r of [
+      { verb: 'post', path: '/auth/login' },
+      { verb: 'post', path: '/auth/change-password' },
+      { verb: 'post', path: '/auth/sign-out-everywhere' },
+      { verb: 'get',  path: '/auth/sign-ins' },
+      { verb: 'post', path: '/admin/users/:id/unlock' },
+    ]) expect(routes).toContainEqual(r);
+  });
+
   test('each call resolves to a route with the same verb', () => {
     const bad = [];
     let checked = 0;

@@ -52,14 +52,25 @@ describe('admin routes', () => {
     expect(res.body.users[0].email).toBe('admin@test.com');
   });
 
-  test('POST /users creates a new user', async () => {
+  test('POST /users creates a new user, whose password is temporary', async () => {
     const res = await request(serverFor(app))
       .post('/api/admin/users')
       .set('Authorization', `Bearer ${tokenFor(adminUser)}`)
-      .send({ email: 'new@test.com', password: 'password123', role: 'user' })
+      .send({ email: 'new@test.com', password: 'Temp-pass-2026-x', role: 'user' })
       .expect(201);
     expect(res.body.user.email).toBe('new@test.com');
     expect(res.body.user.role).toBe('user');
+    expect(res.body.user.mustChangePassword).toBe(true);
+    expect(users.findById(res.body.user.id)).toMatchObject({ must_change_password: 1, temp_password_expires_at: expect.any(String) });
+  });
+
+  test('POST /users applies the password rules, with the new account\'s own email', async () => {
+    const create = password => request(serverFor(app)).post('/api/admin/users')
+      .set('Authorization', `Bearer ${tokenFor(adminUser)}`).send({ email: 'rules@test.com', password, role: 'user' });
+    expect((await create('elevenchars').expect(400)).body.error).toBe('Password must be at least 12 characters');
+    expect((await create('RULES@test.com').expect(400)).body.error).toBe('Password must not be your email address');
+    expect((await create('qwerty123456').expect(400)).body.error).toBe('That password is too common; choose another');
+    expect(users.findByEmail('rules@test.com')).toBeNull();
   });
 
   test("DELETE /users/:id removes the user's files as well as the rows", async () => {
@@ -440,12 +451,77 @@ describe('admin account controls', () => {
       await me(fresh.body.token).expect(200);
     });
 
-    test('refuses a short password, your own account and a missing user, changing nothing', async () => {
-      const res = await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'short' }).expect(400);
-      expect(res.body.error).toMatch(/8 characters/);
+    test('refuses a short, common or own-email password, your own account and a missing user, changing nothing', async () => {
+      const reset = password => asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password });
+      const res = await reset('elevenchars').expect(400);
+      expect(res.body.error).toMatch(/12 characters/);
+      expect((await reset('qwerty123456').expect(400)).body.error).toBe('That password is too common; choose another');
+      expect((await reset('User@Test.com').expect(400)).body.error).toBe('Password must not be your email address');
       await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${admin.id}/password`)).send({ password: 'newpassword1' }).expect(400);
       await asAdmin(request(serverFor(app)).patch('/api/admin/users/nope/password')).send({ password: 'newpassword1' }).expect(404);
       await login('user@test.com', 'password123').expect(200);
+      expect(users.findById(target.id).must_change_password).toBe(0);
+    });
+
+    test('the password set is temporary: the account signs in with mustChangePassword and is held to the change', async () => {
+      const before = Date.now();
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'newpassword1' }).expect(200);
+      const row = users.findById(target.id);
+      expect(row.must_change_password).toBe(1);
+      expect(Date.parse(row.temp_password_expires_at) - before).toBeGreaterThanOrEqual(24 * 60 * 60 * 1000);
+      const fresh = await login('user@test.com', 'newpassword1').expect(200);
+      expect(fresh.body.user.mustChangePassword).toBe(true);
+      const gated = await request(serverFor(app)).get('/api/admin/users').set('Authorization', `Bearer ${fresh.body.token}`).expect(403);
+      expect(gated.body.code).toBe('password_change_required');
+      await me(fresh.body.token).expect(200);
+    });
+
+    test('a reset unlocks a locked-out account', async () => {
+      for (let i = 0; i < 5; i++) await login('user@test.com', 'wrong');
+      await login('user@test.com', 'password123').expect(423);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'newpassword1' }).expect(200);
+      expect(users.findById(target.id)).toMatchObject({ failed_logins: 0, lock_count: 0, locked_until: null, last_locked_at: null });
+      await login('user@test.com', 'newpassword1').expect(200);
+    });
+  });
+
+  describe('POST /users/:id/unlock', () => {
+    const unlock = id => asAdmin(request(serverFor(app)).post(`/api/admin/users/${id}/unlock`));
+
+    test('ends the lock and clears the count, is recorded, and the account can sign in again', async () => {
+      for (let i = 0; i < 5; i++) await login('user@test.com', 'wrong');
+      await login('user@test.com', 'password123').expect(423);
+      const res = await unlock(target.id).expect(200);
+      expect(res.body.user).toMatchObject({ id: target.id, failedLogins: 0, lockedUntil: null });
+      expect(users.findById(target.id)).toMatchObject({ failed_logins: 0, lock_count: 0, locked_until: null, last_locked_at: null });
+      await login('user@test.com', 'password123').expect(200);
+      const event = require('../db').prepare("SELECT * FROM admin_events WHERE action = 'login.unlocked'").get();
+      expect(event).toMatchObject({ actor_id: admin.id, actor_email: admin.email, target_user_id: target.id, target_email: target.email });
+    });
+
+    test('works on your own account, and a missing user is a 404', async () => {
+      for (let i = 0; i < 2; i++) await login('admin@test.com', 'wrong');
+      expect(users.findById(admin.id).failed_logins).toBe(2);
+      await unlock(admin.id).expect(200);
+      expect(users.findById(admin.id).failed_logins).toBe(0);
+      await unlock('nope').expect(404);
+      await request(serverFor(app)).post(`/api/admin/users/${target.id}/unlock`).set('Authorization', `Bearer ${tokenFor(target)}`).expect(403);
+    });
+  });
+
+  describe('GET /users', () => {
+    test('reports failedLogins, lockedUntil, mustChangePassword and lastLoginAt for each account', async () => {
+      const list = async () => (await asAdmin(request(serverFor(app)).get('/api/admin/users')).expect(200)).body.users;
+      const mine = rows => rows.find(u => u.id === target.id);
+      expect(mine(await list())).toMatchObject({ failedLogins: 0, lockedUntil: null, mustChangePassword: false, lastLoginAt: null });
+      await login('user@test.com', 'wrong'); await login('user@test.com', 'wrong');
+      expect(mine(await list())).toMatchObject({ failedLogins: 2, lockedUntil: null });
+      await login('user@test.com', 'password123').expect(200);
+      expect(mine(await list())).toMatchObject({ failedLogins: 0, lastLoginAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
+      for (let i = 0; i < 5; i++) await login('user@test.com', 'wrong');
+      expect(mine(await list())).toMatchObject({ failedLogins: 0, lockedUntil: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'newpassword1' }).expect(200);
+      expect(mine(await list())).toMatchObject({ lockedUntil: null, mustChangePassword: true });
     });
   });
 

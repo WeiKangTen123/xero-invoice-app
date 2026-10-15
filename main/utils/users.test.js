@@ -254,6 +254,155 @@ describe('users store (SQLite)', () => {
     });
   });
 
+  describe('password rules', () => {
+    test('twelve characters, not the email address, not a common password; nothing else', () => {
+      expect(users.PASSWORD_MIN_LENGTH).toBe(12);
+      const tooShort = 'Password must be at least 12 characters';
+      expect(users.passwordProblem('elevenchars')).toBe(tooShort);
+      expect(users.passwordProblem(undefined)).toBe(tooShort);
+      expect(users.passwordProblem(123456789012)).toBe(tooShort);   // not a string
+      // The account's own address, in any case, with or without the domain.
+      const isEmail = 'Password must not be your email address';
+      expect(users.passwordProblem('Jane.Doe@Example.com', 'jane.doe@example.com')).toBe(isEmail);
+      expect(users.passwordProblem('jane.doe@example.com', ' JANE.DOE@example.com ')).toBe(isEmail);
+      expect(users.passwordProblem('somebody-long', 'somebody-long@example.com')).toBe(isEmail);
+      expect(users.passwordProblem('jane.doe@example.com')).toBeNull();   // no account given: the rule has nothing to compare
+      // The published list (common-passwords.js), in any case.
+      const common = 'That password is too common; choose another';
+      expect(users.passwordProblem('qwerty123456')).toBe(common);
+      expect(users.passwordProblem('QWERTY123456', 'jane@example.com')).toBe(common);
+      // No composition rules: long and plain is fine.
+      expect(users.passwordProblem('correct horse battery staple', 'jane@example.com')).toBeNull();
+      expect(users.passwordProblem('twelve chars', 'jane@example.com')).toBeNull();
+    });
+  });
+
+  // The rule on its own, with no database: five wrong passwords lock, each
+  // lock inside a day of the last is twice as long, up to a day.
+  describe('sign-in lockout rule (lockAfterFailure)', () => {
+    const T0 = Date.parse('2026-10-16T10:00:00.000Z');
+    const MIN = 60 * 1000, HOUR = 60 * MIN, DAY = 24 * HOUR;
+    const fresh = { failed_logins: 0, locked_until: null, lock_count: 0, last_locked_at: null };
+    const fail = (row, n, at) => { let r = row; for (let i = 0; i < n; i++) r = users.lockAfterFailure(r, at); return r; };
+
+    test('four wrong passwords count; the fifth locks for 15 minutes and starts the count again', () => {
+      expect(users.LOCK_AFTER_FAILURES).toBe(5);
+      const four = fail(fresh, 4, T0);
+      expect(four).toEqual({ ...fresh, failed_logins: 4, locked: false });
+      const locked = users.lockAfterFailure(four, T0);
+      expect(locked).toEqual({
+        failed_logins: 0, locked_until: new Date(T0 + 15 * MIN).toISOString(), lock_count: 1,
+        last_locked_at: new Date(T0).toISOString(), locked: true, lockMinutes: 15,
+      });
+      // In force until the end, with the whole minutes left (never zero).
+      expect(users.lockStatus(locked, T0 + 1)).toEqual({ lockedUntil: locked.locked_until, lockMinutes: 15 });
+      expect(users.lockStatus(locked, T0 + 14 * MIN + 30 * 1000)).toEqual({ lockedUntil: locked.locked_until, lockMinutes: 1 });
+      expect(users.lockStatus(locked, T0 + 15 * MIN)).toBeNull();
+      expect(users.lockStatus(fresh, T0)).toBeNull();
+      expect(users.lockStatus(null, T0)).toBeNull();
+    });
+
+    test('each lock within 24 hours of the last is twice as long: 15, 30, 60 ... and never more than a day', () => {
+      let row = fail(fresh, 5, T0);
+      const lengths = [row.lockMinutes];
+      let at = T0;
+      for (let i = 0; i < 8; i++) {
+        at += 23 * HOUR;
+        row = fail(row, 5, at);
+        lengths.push(row.lockMinutes);
+      }
+      expect(lengths).toEqual([15, 30, 60, 120, 240, 480, 960, 1440, 1440]);
+      expect(row.lock_count).toBe(9);
+      expect(Date.parse(row.locked_until) - at).toBe(DAY);
+    });
+
+    test('a lock a full day or more after the last starts over at 15 minutes', () => {
+      const first  = fail(fresh, 5, T0);
+      expect(fail(first, 5, T0 + DAY)).toMatchObject({ lock_count: 1, lockMinutes: 15 });
+      expect(fail(first, 5, T0 + DAY - 1)).toMatchObject({ lock_count: 2, lockMinutes: 30 });
+      // The count survives a lock that has ended: the failures after it are
+      // counted from zero, the next lock still doubles.
+      const after = fail(first, 4, T0 + HOUR);
+      expect(after).toMatchObject({ failed_logins: 4, lock_count: 1, locked: false, locked_until: first.locked_until });
+    });
+  });
+
+  describe('sign-in lockout in the database', () => {
+    test('recordFailedLogin applies the rule to the row; a sign-in and an unlock clear it', async () => {
+      const u = await users.createUser('db-lock@test.com', 'password123', 'user');
+      for (let i = 0; i < 4; i++) expect(users.recordFailedLogin(u.id).locked).toBe(false);
+      expect(users.findById(u.id).failed_logins).toBe(4);
+      const fifth = users.recordFailedLogin(u.id);
+      expect(fifth.locked).toBe(true);
+      expect(users.findById(u.id)).toMatchObject({ failed_logins: 0, lock_count: 1, locked_until: fifth.locked_until, last_locked_at: fifth.last_locked_at });
+      expect(users.lockStatus(users.findById(u.id))).toMatchObject({ lockedUntil: fifth.locked_until });
+      // As the Admin page sees it.
+      expect(users.getAllUsers().find(x => x.id === u.id)).toMatchObject({ failedLogins: 0, lockedUntil: fifth.locked_until, lastLoginAt: null });
+
+      users.recordSuccessfulLogin(u.id);
+      expect(users.findById(u.id)).toMatchObject({ failed_logins: 0, lock_count: 0, locked_until: null, last_locked_at: null, last_login_at: expect.any(String) });
+      expect(users.getAllUsers().find(x => x.id === u.id).lastLoginAt).toBe(users.findById(u.id).last_login_at);
+
+      users.recordFailedLogin(u.id); users.recordFailedLogin(u.id);
+      expect(users.unlockAccount(u.id)).toMatchObject({ id: u.id, failedLogins: 0, lockedUntil: null });
+      expect(users.findById(u.id)).toMatchObject({ failed_logins: 0, lock_count: 0, locked_until: null, last_locked_at: null });
+
+      expect(users.recordFailedLogin('nope')).toBeNull();
+      expect(() => users.unlockAccount('nope')).toThrow('User not found');
+    });
+
+    test('a lock that has ended is no longer reported as lockedUntil', async () => {
+      const u = await users.createUser('ended@test.com', 'password123', 'user');
+      for (let i = 0; i < 5; i++) users.recordFailedLogin(u.id);
+      expect(users.getAllUsers().find(x => x.id === u.id).lockedUntil).toBeTruthy();
+      require('../db').prepare('UPDATE users SET locked_until = ? WHERE id = ?').run(new Date(Date.now() - 1000).toISOString(), u.id);
+      expect(users.getAllUsers().find(x => x.id === u.id).lockedUntil).toBeNull();
+      expect(users.lockStatus(users.findById(u.id))).toBeNull();
+    });
+  });
+
+  describe('temporary passwords', () => {
+    test('createUser and an admin reset mark a temporary password good for a day; the person\'s own change takes the marks off', async () => {
+      const own = await users.createUser('own@test.com', 'password123', 'user');
+      expect(own.mustChangePassword).toBe(false);
+      expect(users.findById(own.id)).toMatchObject({ must_change_password: 0, temp_password_expires_at: null });
+
+      const before = Date.now();
+      const temp = await users.createUser('temp@test.com', 'password123', 'user', { temporary: true });
+      expect(temp.mustChangePassword).toBe(true);
+      let row = users.findById(temp.id);
+      expect(row.must_change_password).toBe(1);
+      const expires = Date.parse(row.temp_password_expires_at);
+      expect(expires - before).toBeGreaterThanOrEqual(users.TEMP_PASSWORD_TTL_MS);
+      expect(expires - Date.now()).toBeLessThanOrEqual(users.TEMP_PASSWORD_TTL_MS);
+      expect(users.temporaryPasswordExpired(row)).toBe(false);
+      expect(users.temporaryPasswordExpired(row, expires)).toBe(true);
+      // A password the person chose has no expiry, however old.
+      expect(users.temporaryPasswordExpired(users.findById(own.id), Date.now() + 365 * 24 * 60 * 60 * 1000)).toBe(false);
+
+      const hash = await users.verifiedPasswordHash(temp.id, 'password123');
+      expect(await users.setPassword(temp.id, 'chosen-by-me-2026', { ifCurrentHash: hash })).toBe(true);
+      expect(users.findById(temp.id)).toMatchObject({ must_change_password: 0, temp_password_expires_at: null });
+      expect(users.getAllUsers().find(x => x.id === temp.id).mustChangePassword).toBe(false);
+
+      // An admin's reset: temporary again, and the account is unlocked.
+      for (let i = 0; i < 5; i++) users.recordFailedLogin(temp.id);
+      expect(users.lockStatus(users.findById(temp.id))).not.toBeNull();
+      await users.setPassword(temp.id, 'admin-reset-2026', { temporary: true });
+      row = users.findById(temp.id);
+      expect(row).toMatchObject({ must_change_password: 1, temp_password_expires_at: expect.any(String), failed_logins: 0, lock_count: 0, locked_until: null, last_locked_at: null });
+      expect(await users.validatePassword('temp@test.com', 'admin-reset-2026')).toMatchObject({ id: temp.id, mustChangePassword: true });
+    });
+
+    test('setPassword applies the password rules, with the email rule for that account', async () => {
+      const u = await users.createUser('rules@test.com', 'password123', 'user');
+      await expect(users.setPassword(u.id, 'rules@test.com')).rejects.toThrow('Password must not be your email address');
+      await expect(users.setPassword(u.id, 'elevenchars')).rejects.toThrow('at least 12 characters');
+      await expect(users.setPassword(u.id, 'qwerty123456')).rejects.toThrow('too common');
+      expect(await users.validatePassword('rules@test.com', 'password123')).not.toBeNull();
+    });
+  });
+
   test('deleteUser cascades to credentials/settings/invoices', async () => {
     const u = await users.createUser('cascade@test.com', 'password123', 'user');
     users.saveUserConfig(u.id, { XERO_CLIENT_ID: 'abc' });

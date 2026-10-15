@@ -4,6 +4,7 @@ import ChartOfAccounts from '../components/ChartOfAccounts';
 import HelpTooltip from '../components/HelpTooltip';
 import AccountCodeSelect from '../components/AccountCodeSelect';
 import RetryAlert from '../components/RetryAlert';
+import TestResult from '../components/ResultNote';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
@@ -217,22 +218,6 @@ function Field({ name, meta, value, onChange }) {
         )}
       </div>
     </div>
-  );
-}
-
-function TestResult({ msg }) {
-  if (!msg) return null;
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 5,
-      fontSize: 12, fontWeight: 500,
-      color: msg.ok ? 'var(--success)' : 'var(--danger)',
-      background: msg.ok ? 'var(--success-subtle)' : 'var(--danger-subtle)',
-      padding: '4px 10px', borderRadius: 6,
-      animation: 'fadeIn 0.2s ease',
-    }}>
-      {msg.ok ? '✓' : '✕'} {msg.text}
-    </span>
   );
 }
 
@@ -851,79 +836,6 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
   );
 }
 
-// The one thing on this page that is not a setting: the signed-in account's own
-// password. Its own form, so it saves separately from the credentials above. The
-// server signs out every other session this account has open; this one is kept
-// because changePassword stores the fresh token it returns.
-function ChangePasswordCard({ idx }) {
-  const { changePassword } = useAuth();
-  const [current, setCurrent] = useState('');
-  const [next,    setNext]    = useState('');
-  const [again,   setAgain]   = useState('');
-  const [show,    setShow]    = useState(false);
-  const [saving,  setSaving]  = useState(false);
-  const [msg,     setMsg]     = useState(null);
-
-  const fields = [
-    { id: 'cp-current', label: 'Current password',   value: current, set: setCurrent, autoComplete: 'current-password' },
-    { id: 'cp-next',    label: 'New password',       value: next,    set: setNext,    autoComplete: 'new-password', minLength: 8, placeholder: 'Min. 8 characters' },
-    { id: 'cp-again',   label: 'New password again', value: again,   set: setAgain,   autoComplete: 'new-password', minLength: 8 },
-  ];
-
-  async function submit(e) {
-    e.preventDefault();
-    if (next !== again) { setMsg({ ok: false, text: 'The new passwords do not match' }); return; }
-    setSaving(true); setMsg(null);
-    try {
-      await changePassword(current, next);
-      setCurrent(''); setNext(''); setAgain('');
-      setMsg({ ok: true, text: 'Password changed. Any other device you were signed in on has been signed out.' });
-    } catch (err) {
-      setMsg({ ok: false, text: err.message });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 8 }}>
-        <div style={{
-          width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: 'var(--accent-subtle)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
-        }}>🔑</div>
-        <div>
-          <div className="card-title">Account Password</div>
-          <div className="card-subtitle" style={{ marginBottom: 0 }}>Change the password you sign in with. Other devices are signed out.</div>
-        </div>
-      </div>
-      <form onSubmit={submit} style={{ marginTop: 12 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
-          {fields.map(f => (
-            <div className="form-group" key={f.id} style={{ marginBottom: 0 }}>
-              <label htmlFor={f.id} className="form-label">{f.label}</label>
-              <input
-                id={f.id} type={show ? 'text' : 'password'} className="form-input"
-                value={f.value} onChange={e => f.set(e.target.value)}
-                required minLength={f.minLength} autoComplete={f.autoComplete} placeholder={f.placeholder}
-              />
-            </div>
-          ))}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 14, flexWrap: 'wrap' }}>
-          <button type="submit" className="btn btn-primary" disabled={saving || !current || next.length < 8}>
-            {saving ? <><span className="btn-spinner" /> Saving...</> : 'Change password'}
-          </button>
-          <button type="button" className="btn btn-outline btn-sm" onClick={() => setShow(v => !v)}>
-            {show ? '🙈 Hide' : '👁 Show'}
-          </button>
-          <TestResult msg={msg} />
-        </div>
-      </form>
-    </div>
-  );
-}
-
 // The form's values, one per setting, from the server's sectioned answer.
 // TIMEZONE that has never been saved defaults to the account's current
 // effective timezone rather than showing blank.
@@ -1079,7 +991,10 @@ export default function Setup() {
         </div>
       )}
 
-      <form onSubmit={handleSave}>
+      {/* Named, so the Save bar can sit after the Chart of Accounts at the
+          page's end and still submit this form (the button's `form`
+          attribute): nothing after the bar, so Save is where a page ends. */}
+      <form id="setup-form" onSubmit={handleSave}>
         {config.xero && (
           <XeroConnectionCard
             idx={0} sectionData={config.xero}
@@ -1112,56 +1027,55 @@ export default function Setup() {
           );
         })}
 
-        {/* Save bar. With nothing to save it sits in its place after the
-            last card and covers nothing. With unsaved changes it is pinned to
-            the window's bottom as a small box on the right, not the
-            full-width dark band it was, which hid whatever field scrolled
-            behind it; the pinned strip lets clicks through everywhere but the
-            box. Pinned, it still takes its place in the page, so scrolled to
-            the end the last card sits clear above it. The right-hand room is
-            the chat launcher's corner (globals.css --fab-clearance): the
-            button is right-aligned and sat under it. */}
-        <div className="setup-save-bar" style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-          padding: '16px var(--fab-clearance) 16px 0',
-          ...(dirty ? { position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none' } : {}),
-        }}>
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 12,
-            ...(dirty ? {
-              pointerEvents: 'auto', padding: '10px 10px 10px 16px',
-              background: 'var(--bg-card)', border: '1px solid var(--border-card)',
-              borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-md)',
-            } : {}),
-          }}>
-            {dirty
-              ? <span style={{ fontSize: 12, color: 'var(--warning)', fontWeight: 600 }}>● Unsaved changes</span>
-              : <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Secrets are hidden by default — click 👁 to reveal</span>}
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={saving}
-              style={{ minWidth: 130 }}
-            >
-              {saving
-                ? <><span className="btn-spinner" /> Saving...</>
-                : '💾 Save settings'}
-            </button>
-          </div>
-        </div>
       </form>
-
-      {/* Outside the settings form: it has its own submit and its own server
-          call, and a nested form is not valid HTML. */}
-      <div style={{ marginTop: 24 }}>
-        <ChangePasswordCard idx={0} />
-      </div>
 
       {/* Reference, not a setting: nothing here is saved. It lives in Settings
           because "are my account codes right?" is a setup question, and a list
-          of codes is not something you would act on from a dashboard. */}
+          of codes is not something you would act on from a dashboard. The
+          account's own password is on the Account page (pages/Account.jsx),
+          with the rest of what belongs to the person rather than the app. */}
       <div style={{ marginTop: 24 }}>
         <ChartOfAccounts refreshKey={xeroVersion} />
+      </div>
+
+      {/* Save bar, the last thing on the page. With nothing to save it sits
+          in its place and covers nothing. With unsaved changes it is pinned
+          to the window's bottom as a small box on the right, not the
+          full-width dark band it was, which hid whatever field scrolled
+          behind it; the pinned strip lets clicks through everywhere but the
+          box. Pinned, it still takes its place in the page, so scrolled to
+          the end the last card sits clear above it. The right-hand room is
+          the chat launcher's corner (globals.css --fab-clearance): the
+          button is right-aligned and sat under it. It is outside the form,
+          after the Chart of Accounts, and submits it by name. */}
+      <div className="setup-save-bar" style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+        padding: '16px var(--fab-clearance) 16px 0',
+        ...(dirty ? { position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none' } : {}),
+      }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 12,
+          ...(dirty ? {
+            pointerEvents: 'auto', padding: '10px 10px 10px 16px',
+            background: 'var(--bg-card)', border: '1px solid var(--border-card)',
+            borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-md)',
+          } : {}),
+        }}>
+          {dirty
+            ? <span style={{ fontSize: 12, color: 'var(--warning)', fontWeight: 600 }}>● Unsaved changes</span>
+            : <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Secrets are hidden by default — click 👁 to reveal</span>}
+          <button
+            type="submit"
+            form="setup-form"
+            className="btn btn-primary"
+            disabled={saving}
+            style={{ minWidth: 130 }}
+          >
+            {saving
+              ? <><span className="btn-spinner" /> Saving...</>
+              : '💾 Save settings'}
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -74,6 +74,13 @@ export function AuthProvider({ children }) {
     if (data.token) localStorage.setItem('token', data.token);
   }
 
+  // Every other session this account holds is signed out; this one is kept
+  // the same way change-password keeps it, by storing the fresh token.
+  async function signOutEverywhere() {
+    const data = await api.post('/auth/sign-out-everywhere', {});
+    if (data.token) localStorage.setItem('token', data.token);
+  }
+
   async function register(email, password) {
     await api.post('/auth/register', { email, password });
     // Register doesn't return a token — immediately log in
@@ -85,7 +92,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, authError, checking, retrySession: checkSession, login, logout, register, refreshUser, changePassword }}>
+    <AuthContext.Provider value={{ user, loading, authError, checking, retrySession: checkSession, login, logout, register, refreshUser, changePassword, signOutEverywhere }}>
       {children}
     </AuthContext.Provider>
   );

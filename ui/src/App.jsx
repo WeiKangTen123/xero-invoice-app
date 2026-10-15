@@ -9,6 +9,7 @@ import { ToastProvider } from './context/ToastContext';
 import Layout from './components/layout/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import { returnPathFrom } from './utils/returnTo';
+import { SET_PASSWORD_PATH } from './api/client';
 // Login stays eager: it is the first paint for anyone signed out, and making it
 // wait on a chunk to render a single form trades a real delay for no saving.
 // Every other page is loaded on demand — the financial dashboard alone pulls in
@@ -21,6 +22,7 @@ const Setup         = lazy(() => import('./pages/Setup'));
 const Invoices      = lazy(() => import('./pages/Invoices'));
 const InvoiceReview = lazy(() => import('./pages/InvoiceReview'));
 const Admin         = lazy(() => import('./pages/Admin'));
+const Account       = lazy(() => import('./pages/Account'));
 // The filenames still carry the pre-rename names: pages/Dashboard.jsx is the
 // email→Xero control panel (now "Automation") and pages/XeroInsights.jsx is the
 // financial reporting page (now "Dashboard"). Aliased so the route table below
@@ -63,6 +65,11 @@ function PrivateRoute({ children, adminOnly }) {
   if (!user && authError) return <SessionRetry />;
   // The page asked for goes along, so signing in leads back to it.
   if (!user) return <Navigate to="/login" replace state={{ from: location }} />;
+  // On a temporary password from an administrator, nothing else is open until
+  // a password of their own is set: the server refuses every other request
+  // (403 password_change_required), so every other page leads to the form.
+  // The sidebar still renders around it; its links come back here.
+  if (user.mustChangePassword && !location.pathname.startsWith('/account')) return <Navigate to={SET_PASSWORD_PATH} replace />;
   if (adminOnly && user.role !== 'admin') return <Navigate to="/dashboard" replace />;
   return children;
 }
@@ -86,8 +93,9 @@ function AppRoutes() {
         <Routes>
           {/* Signing in sets `user`, which re-renders this before Login's own
               navigate runs — so both send to the same place: the page that
-              sent the user here, else the dashboard. */}
-          <Route path="/login" element={user ? <Navigate to={returnPathFrom(location)} replace /> : <Login />} />
+              sent the user here, else the dashboard — unless a password must
+              be set first, which comes before any page. */}
+          <Route path="/login" element={user ? <Navigate to={user.mustChangePassword ? SET_PASSWORD_PATH : returnPathFrom(location)} replace /> : <Login />} />
           {/* Outside the auth guard on purpose: the pairing token in the URL is the
               phone's only credential, and it grants upload and nothing else. */}
           <Route path="/capture/:token" element={<Capture />} />
@@ -103,6 +111,8 @@ function AppRoutes() {
             <Route path="dashboard"        element={page(<Dashboard />)} />
             <Route path="automation"       element={page(<Automation />)} />
             <Route path="setup"            element={page(<Setup />)} />
+            {/* The person's own: password, sessions, recent sign-ins. */}
+            <Route path="account"          element={page(<Account />)} />
             <Route path="invoices"         element={page(<Invoices />)} />
             <Route path="invoices/:id"     element={page(<InvoiceReview />)} />
             {/* /xero-insights was the financial page's path before the rename —

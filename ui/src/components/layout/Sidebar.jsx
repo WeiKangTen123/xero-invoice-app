@@ -301,51 +301,83 @@ export default function Sidebar() {
         background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)',
         border:     isDark ? '1px solid rgba(255,255,255,0.06)' : '1px solid rgba(0,0,0,0.07)',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-          {/* Avatar */}
-          <div style={{
-            width:          32,
-            height:         32,
-            borderRadius:   9,
-            background:     'linear-gradient(135deg, #6366f1, #8b5cf6)',
+        {/* The person's own row leads to their Account page (password,
+            sessions, recent sign-ins); Sign out stays the button below it. */}
+        <NavLink
+          to="/account"
+          onClick={handleNavClick}
+          title="Account"
+          aria-label="Account"
+          style={({ isActive }) => ({
             display:        'flex',
             alignItems:     'center',
-            justifyContent: 'center',
-            fontSize:       12,
-            fontWeight:     700,
-            color:          '#fff',
-            flexShrink:     0,
-          }}>
-            {initials}
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{
-              fontSize:     12,
-              fontWeight:   600,
-              color:        isDark ? '#ffffff' : '#0d0e14',
-              overflow:     'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace:   'nowrap',
-            }}>
-              {user?.email}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 2 }}>
-              <span style={{
-                display:     'inline-flex',
-                alignItems:  'center',
-                gap:         3,
-                padding:     '1px 7px',
-                borderRadius: 100,
-                fontSize:    10,
-                fontWeight:  600,
-                background:  user?.role === 'admin' ? 'rgba(245,158,11,0.15)' : 'rgba(99,102,241,0.12)',
-                color:       user?.role === 'admin' ? '#f59e0b' : '#6366f1',
+            gap:            10,
+            marginBottom:   10,
+            padding:        '4px 6px',
+            margin:         '-4px -6px 6px',
+            borderRadius:   9,
+            textDecoration: 'none',
+            background:     isActive ? (isDark ? 'rgba(99,102,241,0.2)' : 'rgba(99,102,241,0.09)') : 'transparent',
+            transition:     'background 0.18s ease',
+          })}
+        >
+          {({ isActive }) => (
+            <>
+              {/* Avatar */}
+              <div style={{
+                width:          32,
+                height:         32,
+                borderRadius:   9,
+                background:     'linear-gradient(135deg, #6366f1, #8b5cf6)',
+                display:        'flex',
+                alignItems:     'center',
+                justifyContent: 'center',
+                fontSize:       12,
+                fontWeight:     700,
+                color:          '#fff',
+                flexShrink:     0,
               }}>
-                {user?.role === 'admin' ? '★' : '◦'} {user?.role}
+                {initials}
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{
+                  fontSize:     12,
+                  fontWeight:   600,
+                  color:        isDark ? '#ffffff' : '#0d0e14',
+                  overflow:     'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace:   'nowrap',
+                }}>
+                  {user?.email}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 2 }}>
+                  <span style={{
+                    display:     'inline-flex',
+                    alignItems:  'center',
+                    gap:         3,
+                    padding:     '1px 7px',
+                    borderRadius: 100,
+                    fontSize:    10,
+                    fontWeight:  600,
+                    background:  user?.role === 'admin' ? 'rgba(245,158,11,0.15)' : 'rgba(99,102,241,0.12)',
+                    color:       user?.role === 'admin' ? '#f59e0b' : '#6366f1',
+                  }}>
+                    {user?.role === 'admin' ? '★' : '◦'} {user?.role}
+                  </span>
+                </div>
+              </div>
+              <span style={{
+                fontSize:   10,
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+                color:      isActive ? (isDark ? '#ffffff' : '#6366f1') : (isDark ? 'rgba(255,255,255,0.35)' : '#9399b0'),
+              }}>
+                Account ›
               </span>
-            </div>
-          </div>
-        </div>
+            </>
+          )}
+        </NavLink>
         <button
           onClick={handleLogout}
           style={{

@@ -7,6 +7,12 @@ const BASE = '/api';
 // readable here without any CORS exposure.
 const SESSION_TOKEN_HEADER = 'X-Session-Token';
 
+// Where someone who must set a new password is sent: the Account page, in
+// its set-password mode. The login page goes there on a sign-in that says
+// so, the route guard (App.jsx#PrivateRoute) for any other page, and this
+// client for a request the server refused for it (below).
+export const SET_PASSWORD_PATH = '/account?set-password=1';
+
 function getToken() {
   return localStorage.getItem('token');
 }
@@ -63,6 +69,19 @@ function clearSession() {
   }
 }
 
+// The server answers 403 { code: 'password_change_required' } to nearly
+// everything while an account is on a temporary password. The session is
+// good — the token stays — the person just has to set a password first, so
+// they are taken to the form. Hard-navigated like clearSession, so whatever
+// page sent the request is dropped rather than left half-loaded; the Account
+// page itself is left alone (its own refused requests would otherwise reload
+// it in a loop), as are the pages with no session to gate.
+function requirePasswordChange() {
+  const path = window.location.pathname;
+  if (path.startsWith('/account') || path.startsWith('/login') || path.startsWith('/capture')) return;
+  window.location.href = SET_PASSWORD_PATH;
+}
+
 async function request(path, options = {}, retried = false) {
   const token   = getToken();
   const headers = { 'Content-Type': 'application/json', ...options.headers };
@@ -89,6 +108,8 @@ async function request(path, options = {}, retried = false) {
       } else {
         clearSession();
       }
+    } else if (res.status === 403 && data.code === 'password_change_required') {
+      requirePasswordChange();
     }
     // A 401 throws too. On most pages the navigation above wins the race and
     // the caller never runs; on /login (no navigation) a wrong password used to
@@ -96,6 +117,10 @@ async function request(path, options = {}, retried = false) {
     // the server's own message.
     const err    = new Error(data.error || (res.status === 401 ? 'Your session has expired. Sign in again.' : `HTTP ${res.status}`));
     err.status   = res.status;
+    // The body as well as its message: a 423 from sign-in carries when the
+    // lock ends (lockedUntil, lockMinutes), which the login page counts down.
+    err.code     = data.code;
+    err.body     = data;
     throw err;
   }
   storeRenewal(res);

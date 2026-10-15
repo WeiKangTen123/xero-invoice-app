@@ -73,6 +73,15 @@ function run() {
   _ensureColumn('xero_connection_health', 'scope_probe', 'scope_probe TEXT');
   _ensureColumn('users', 'sessions_valid_from', 'sessions_valid_from TEXT');
   _ensureColumn('users', 'disabled_at', 'disabled_at TEXT');
+  // Sign-in lockout, temporary passwords and the last sign-in (schema.sql).
+  // The counters default to 0, so an existing account starts with a clean
+  // record and no temporary password.
+  for (const [col, ddl] of [
+    ['failed_logins', 'failed_logins INTEGER NOT NULL DEFAULT 0'], ['locked_until', 'locked_until TEXT'],
+    ['lock_count', 'lock_count INTEGER NOT NULL DEFAULT 0'], ['last_locked_at', 'last_locked_at TEXT'],
+    ['must_change_password', 'must_change_password INTEGER NOT NULL DEFAULT 0'],
+    ['temp_password_expires_at', 'temp_password_expires_at TEXT'], ['last_login_at', 'last_login_at TEXT'],
+  ]) _ensureColumn('users', col, ddl);
   for (const [col, ddl] of [
     ['receipt_file', 'receipt_file TEXT'], ['receipt_mime', 'receipt_mime TEXT'], ['receipt_box', 'receipt_box TEXT'],
     ['receipt_page', 'receipt_page INTEGER'], ['receipt_group', 'receipt_group TEXT'], ['received_at', 'received_at TEXT'],

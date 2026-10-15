@@ -6,7 +6,7 @@ const { requireAdmin } = require('../middleware/auth-middleware');
 const asyncHandler     = require('../middleware/async-handler');
 const {
   getAllUsers, createUser, updateUserRole, deleteUser, readUsers, findById, getSetupStatus, isOnline,
-  passwordProblem, setPassword, invalidateSessions, setDisabled, getUserDefaults, isKnownTimezone,
+  passwordProblem, setPassword, invalidateSessions, setDisabled, unlockAccount, getUserDefaults, isKnownTimezone,
 } = require('../utils/users');
 const invoiceStore     = require('../utils/invoice-store');
 const settingsStore    = require('../utils/settings-store');
@@ -40,21 +40,25 @@ const LOGS_DIR = process.env.LOGS_DIR || path.join(__dirname, '../../logs');
 // to be read live.
 const LOG_FILES = { combined: 'combined.log', error: 'error.log' };
 
-// GET /api/admin/users
+// GET /api/admin/users — every account, with its lockout and temporary-
+// password state (users.js#sanitize: failedLogins, lockedUntil,
+// mustChangePassword, lastLoginAt).
 router.get('/users', requireAdmin, (_req, res) => {
   res.json({ users: getAllUsers() });
 });
 
-// POST /api/admin/users — create new user
+// POST /api/admin/users — create new user. The password an admin types is
+// temporary: it must be replaced at the first sign-in and dies after a day,
+// so the admin never ends up knowing a password someone is actually using.
 router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
   try {
     const { email, password, role } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
-    const problem = passwordProblem(password);
+    const problem = passwordProblem(password, email);
     if (problem) return res.status(400).json({ error: problem });
-    const user = await createUser(email, password, role === 'admin' ? 'admin' : 'user');
+    const user = await createUser(email, password, role === 'admin' ? 'admin' : 'user', { temporary: true });
     recordAdmin(req, user, 'user.create', { role: user.role });
     logger.info('Admin created user', { email, role: user.role, by: req.user.email });
     res.status(201).json({ success: true, user });
@@ -172,12 +176,14 @@ router.patch('/users/:id/role', requireAdmin, (req, res) => {
 // PATCH /api/admin/users/:id/password — set a new password for an account.
 // Passwords are bcrypt hashes: there is nothing to view, only replace. The
 // account's other sessions are signed out by the same cutoff a self-service
-// change uses (users.js#setPassword).
+// change uses (users.js#setPassword). The password set here is temporary, as
+// on Add user: replaced at the next sign-in, dead after a day. A reset also
+// unlocks the account: the person asking for one is often the one locked out.
 router.patch('/users/:id/password', requireAdmin, asyncHandler(async (req, res) => {
   try {
-    const target = findTarget(req, res, 'Change your own password from Setup');
+    const target = findTarget(req, res, 'Change your own password from the Account page');
     if (!target) return;
-    await setPassword(target.id, req.body.password);
+    await setPassword(target.id, req.body.password, { temporary: true });
     // That it was reset, and by whom. Never the password.
     recordAdmin(req, target, 'user.password_reset');
     logger.info('Admin reset user password', { email: target.email, by: req.user.email });
@@ -186,6 +192,19 @@ router.patch('/users/:id/password', requireAdmin, asyncHandler(async (req, res) 
     res.status(400).json({ error: err.message });
   }
 }));
+
+// POST /api/admin/users/:id/unlock — ends a sign-in lockout early and clears
+// the failed count behind it (users.js#unlockAccount). Allowed on your own
+// account: an admin locked out of this one is signed in on another, and
+// nothing about an unlock needs a second admin to undo.
+router.post('/users/:id/unlock', requireAdmin, (req, res) => {
+  const target = findById(req.params.id);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  const user = unlockAccount(target.id);
+  recordAdmin(req, target, 'login.unlocked');
+  logger.info('Admin unlocked user', { email: target.email, by: req.user.email });
+  res.json({ success: true, user });
+});
 
 // POST /api/admin/users/:id/sign-out — every token this account holds is
 // refused from now on. For a lost laptop or a shared password: the account is

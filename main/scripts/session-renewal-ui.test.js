@@ -19,7 +19,7 @@ function loadClient({ fetch, store = new Map(), pathname = '/invoices' }) {
     removeItem: k => { store.delete(k); },
   };
   const window = { location: { pathname, search: '', hash: '', href: pathname } };
-  const body = `${src.replace(/^export /gm, '')}\nreturn { api, tokenClaims, newerSessionToken, SESSION_TOKEN_HEADER };`;
+  const body = `${src.replace(/^export /gm, '')}\nreturn { api, tokenClaims, newerSessionToken, SESSION_TOKEN_HEADER, SET_PASSWORD_PATH };`;
   const client = new Function('fetch', 'localStorage', 'window', 'atob', body)(fetch, localStorage, window, atob);
   return { ...client, store, window };
 }
@@ -137,6 +137,43 @@ describe('request() stores a renewed token', () => {
     expect(await c.api.get('/x')).toEqual({ ok: 1 });
     expect(sent).toEqual([`Bearer ${old}`, `Bearer ${fresh}`]);
     expect(c.store.get('token')).toBe(fresh);
+  });
+});
+
+// A temporary password from an administrator: the server refuses nearly every
+// request with 403 password_change_required until a password of the person's
+// own is set. The session is good, so the token stays, and the person is
+// taken to the form rather than left on a page that cannot load.
+describe('request() on a 403 password_change_required', () => {
+  const refused = () => reply(403, { error: 'Set a new password to continue.', code: 'password_change_required' });
+
+  test('leads to the Account page in set-password mode, token kept, and the error says why', async () => {
+    const c = loadClient({ fetch: async () => refused(), pathname: '/invoices' });
+    const old = token('u1', nowSec() + 1000);
+    c.store.set('token', old);
+    await expect(c.api.get('/invoices')).rejects.toMatchObject({ status: 403, code: 'password_change_required', message: 'Set a new password to continue.' });
+    expect(c.store.get('token')).toBe(old);
+    expect(c.SET_PASSWORD_PATH).toBe('/account?set-password=1');
+    expect(c.window.location.href).toBe('/account?set-password=1');
+  });
+
+  test('on the Account page itself nothing moves: its own refused requests must not reload it in a loop', async () => {
+    const c = loadClient({ fetch: async () => refused(), pathname: '/account' });
+    c.store.set('token', token('u1', nowSec() + 1000));
+    await expect(c.api.post('/auth/sign-out-everywhere', {})).rejects.toMatchObject({ status: 403 });
+    expect(c.window.location.href).toBe('/account');
+  });
+
+  test('any other 403 is an error like before, and every error carries the body it came with', async () => {
+    const c = loadClient({ fetch: async () => reply(403, { error: 'Admins only' }), pathname: '/invoices' });
+    c.store.set('token', token('u1', nowSec() + 1000));
+    await expect(c.api.get('/admin/users')).rejects.toMatchObject({ status: 403, message: 'Admins only', body: { error: 'Admins only' } });
+    expect(c.window.location.href).toBe('/invoices');
+    // The 423 from sign-in carries when the lock ends, which the login page counts down.
+    const locked = { error: 'Too many failed attempts. This account is locked.', lockedUntil: '2026-10-16T02:45:00.000Z', lockMinutes: 15 };
+    const d = loadClient({ fetch: async () => reply(423, locked), pathname: '/login' });
+    await expect(d.api.post('/auth/login', {})).rejects.toMatchObject({ status: 423, body: locked });
+    expect(d.window.location.href).toBe('/login');
   });
 });
 

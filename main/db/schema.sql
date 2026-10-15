@@ -22,7 +22,26 @@ CREATE TABLE IF NOT EXISTS users (
   sessions_valid_from TEXT,
   -- Set while the account is disabled: sign-in and existing tokens are refused
   -- and the mailbox watcher is stopped. Rows and files stay. NULL = active.
-  disabled_at TEXT
+  disabled_at TEXT,
+  -- Sign-in lockout (users.js#lockAfterFailure). Wrong passwords in a row;
+  -- the fifth locks the account until locked_until, and every sign-in before
+  -- then is refused whatever the password. lock_count and last_locked_at
+  -- make each lock inside 24 hours of the last twice as long (15 minutes,
+  -- 30, 60, ... up to a day). A right password after the lock has ended, or
+  -- an admin's unlock, clears all four.
+  failed_logins  INTEGER NOT NULL DEFAULT 0,
+  locked_until   TEXT,
+  lock_count     INTEGER NOT NULL DEFAULT 0,
+  last_locked_at TEXT,
+  -- A password an admin set (Add user, Reset password) is temporary: it must
+  -- be replaced at the next sign-in (auth-middleware.js refuses every other
+  -- route until it is) and stops working at temp_password_expires_at. Both
+  -- are cleared when the person sets their own.
+  must_change_password     INTEGER NOT NULL DEFAULT 0,
+  temp_password_expires_at TEXT,
+  -- When the account last signed in with its password (not when it was last
+  -- seen: a session lasts a day and renews while in use).
+  last_login_at TEXT
 );
 
 -- 1:1 with users — Xero/IMAP/LLM credentials (was data/users/<id>/config.json)

@@ -281,6 +281,45 @@ describe('audit trail (store, context, retention)', () => {
     });
   });
 
+  // Sign-ins are in the admin trail too (routes/auth.js): the Events tab's
+  // sentence for each kind, and the list one person may read of their own.
+  describe('sign-in events', () => {
+    test('each kind has a filter label and a sentence', () => {
+      const { ADMIN_ACTIONS, describeAdminEvent } = auditLog;
+      for (const a of ['login.success', 'login.failed', 'login.locked', 'login.unlocked']) expect(ADMIN_ACTIONS[a]).toEqual(expect.any(String));
+      expect(describeAdminEvent('login.success', { ip: '1.2.3.4' }, 'jane@test.com')).toBe('Signed in');
+      expect(describeAdminEvent('login.failed', { email: 'jane@test.com', ip: '1.2.3.4' }, 'jane@test.com')).toBe('Wrong password for jane@test.com');
+      expect(describeAdminEvent('login.failed', { email: 'nobody@test.com', ip: '1.2.3.4' }, null)).toBe('Sign-in failed for nobody@test.com: no such account');
+      expect(describeAdminEvent('login.locked', { lockMinutes: 15, failures: 5 }, 'jane@test.com')).toBe('Locked for 15 minutes after 5 failed attempts');
+      expect(describeAdminEvent('login.locked', { lockMinutes: 60 }, 'jane@test.com')).toBe('Locked for 1 hour after 5 failed attempts');
+      expect(describeAdminEvent('login.locked', { lockMinutes: 1440 }, 'jane@test.com')).toBe('Locked for 24 hours after 5 failed attempts');
+      expect(describeAdminEvent('login.unlocked', null, 'jane@test.com')).toBe('Unlocked jane@test.com');
+    });
+
+    test('listSignInEvents: one account\'s login.* events, newest first, at most 20, as when, which and from where', () => {
+      const rec = (target, action, details) => auditLog.recordAdminEvent({ actor: null, target, action, details });
+      rec(owner, 'login.failed', { email: owner.email, ip: '10.0.0.1' });
+      rec(other, 'login.failed', { email: other.email, ip: '10.0.0.9' });
+      rec(null,  'login.failed', { email: 'nobody@test.com', ip: '10.0.0.8' });
+      auditLog.recordAdminEvent({ actor: owner, target: owner, action: 'login.success', details: { ip: '10.0.0.2' } });
+      rec(owner, 'login.locked', { ip: '10.0.0.3', lockedUntil: '2026-10-16T10:15:00.000Z', lockMinutes: 15, failures: 5 });
+      auditLog.recordAdminEvent({ actor: admin, target: owner, action: 'user.sign_out' });     // not a sign-in event
+      auditLog.recordAdminEvent({ actor: admin, target: owner, action: 'login.unlocked' });
+      expect(auditLog.listSignInEvents(owner.id)).toEqual([
+        { at: expect.any(String), action: 'login.unlocked', ip: null },
+        { at: expect.any(String), action: 'login.locked',   ip: '10.0.0.3', lockMinutes: 15 },   // how long, for the page to say
+        { at: expect.any(String), action: 'login.success',  ip: '10.0.0.2' },
+        { at: expect.any(String), action: 'login.failed',   ip: '10.0.0.1' },
+      ]);
+      for (let i = 0; i < 25; i++) rec(owner, 'login.failed', { email: owner.email, ip: `10.1.0.${i}` });
+      const page = auditLog.listSignInEvents(owner.id);
+      expect(page).toHaveLength(20);
+      expect(page[0].ip).toBe('10.1.0.24');
+      expect(auditLog.listSignInEvents(owner.id, { limit: 2 })).toHaveLength(2);
+      expect(auditLog.listSignInEvents('nope')).toEqual([]);
+    });
+  });
+
   describe('retention', () => {
     test('prunes events older than two years from both tables, and keeps the rest', () => {
       const old = new Date(Date.now() - 731 * 24 * 60 * 60 * 1000).toISOString();

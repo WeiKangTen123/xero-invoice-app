@@ -171,7 +171,24 @@ const ADMIN_ACTIONS = {
   'user.watcher_stop':     'Stopped a mailbox watcher',
   'report.resolve':        'Resolved a report',
   'password.change':       'Changed own password',
+  // Sign-ins (routes/auth.js). The first three have no admin behind them:
+  // success is the person's own, a failure and a lock are nobody's. They are
+  // here, and not only in the log, so an admin can see a guesser at work
+  // beside what was done about it, and so a person can read their own
+  // sign-ins (GET /api/auth/sign-ins).
+  'login.success':         'Signed in',
+  'login.failed':          'Failed to sign in',
+  'login.locked':          'Locked out after failed sign-ins',
+  'login.unlocked':        'Unlocked an account',
 };
+
+// A lock's length in words: minutes until it is whole hours.
+function _lockLength(minutes) {
+  const m = Number(minutes);
+  if (!Number.isFinite(m) || m <= 0) return 'a while';
+  if (m >= 60 && m % 60 === 0) return m === 60 ? '1 hour' : `${m / 60} hours`;
+  return `${m} minute${m === 1 ? '' : 's'}`;
+}
 
 // The sentence for one admin event, from its kind and facts. Kept out of the
 // table so the wording can improve without rewriting history.
@@ -179,6 +196,14 @@ function describeAdminEvent(action, details, targetEmail) {
   const d = details || {};
   const who = targetEmail || 'an account';
   switch (action) {
+    case 'login.success':         return 'Signed in';
+    // A failure names the address typed: for a known account that is the
+    // account's; for an unknown one it is what someone was trying.
+    case 'login.failed':          return targetEmail
+      ? `Wrong password for ${targetEmail}`
+      : `Sign-in failed for ${d.email || 'an unknown address'}: no such account`;
+    case 'login.locked':          return `Locked for ${_lockLength(d.lockMinutes)} after ${d.failures || 5} failed attempts`;
+    case 'login.unlocked':        return `Unlocked ${who}`;
     case 'user.create':           return `Created ${who}${d.role === 'admin' ? ' as an admin' : ''}`;
     case 'user.delete':           return `Deleted ${who}${d.role === 'admin' ? ' (an admin)' : ''}`;
     case 'user.role':             return `Changed ${who} from ${d.from || '?'} to ${d.to || '?'}`;
@@ -221,6 +246,23 @@ function listAdminEvents({ targetUserId = null, action = null, from = null, to =
   return _page(db.prepare(sql).all(...args, n + 1), n, _adminEvent);
 }
 
+// One person's own sign-in history (GET /api/auth/sign-ins): the newest
+// `limit` login.* events on their account, each as when, which and from
+// where, and for a lock how long it was for. Nothing else: the address typed
+// on a failure is theirs anyway, and the page that shows the list writes its
+// own words for each kind.
+function listSignInEvents(userId, { limit = 20 } = {}) {
+  const n = Math.min(Math.max(Number(limit) || 20, 1), PAGE_MAX);
+  return db.prepare("SELECT at, action, details FROM admin_events WHERE target_user_id = ? AND action LIKE 'login.%' ORDER BY id DESC LIMIT ?")
+    .all(String(userId), n)
+    .map(r => {
+      const d = _parse(r.details) || {};
+      const event = { at: r.at, action: r.action, ip: d.ip ? String(d.ip) : null };
+      if (r.action === 'login.locked' && Number.isFinite(Number(d.lockMinutes))) event.lockMinutes = Number(d.lockMinutes);
+      return event;
+    });
+}
+
 // ── Retention ────────────────────────────────────────────────────────────────
 
 // Deletes events older than the retention period from both tables. Returns
@@ -250,6 +292,6 @@ const BULK_LABELS = {
 };
 
 module.exports = {
-  recordInvoiceEvent, recordAdminEvent, safely, listInvoiceEvents, listAdminEvents, describeAdminEvent,
+  recordInvoiceEvent, recordAdminEvent, safely, listInvoiceEvents, listAdminEvents, listSignInEvents, describeAdminEvent,
   pruneOldEvents, ADMIN_ACTIONS, BULK_LABELS, RETENTION_DAYS, PAGE_MAX,
 };

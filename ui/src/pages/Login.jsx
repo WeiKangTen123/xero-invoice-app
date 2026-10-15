@@ -2,16 +2,21 @@ import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
-import { api } from '../api/client';
+import { api, SET_PASSWORD_PATH } from '../api/client';
 import { returnPathFrom } from '../utils/returnTo';
+import { lockMessage, lockCountdown } from './login/login';
+import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
 
+// Two modes. On first run the form creates the admin account (the server's
+// /auth/register, which takes only the first account; after that it is
+// refused and admins add users from Admin › Users). Ever after it signs in,
+// and nothing on it offers to register: the tab that did led to a 403.
 export default function Login() {
   const { login, register } = useAuth();
   const { theme, toggle }   = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [mode, setMode]       = useState('login');
   const [firstRun, setFirstRun] = useState(false);
   const [email, setEmail]     = useState('');
   const [password, setPassword] = useState('');
@@ -19,54 +24,79 @@ export default function Login() {
   const [error, setError]     = useState('');
   const [loading, setLoading] = useState(false);
   const [shaking, setShaking] = useState(false);
-  const [tabKey, setTabKey]   = useState(0);
-  const [slideDir, setSlideDir] = useState('right');
+  // The 423 the server answered with (pages/login/login.js#lockMessage) and a
+  // clock that ticks while it lasts, so the button counts down and comes back
+  // on its own at lockedUntil.
+  const [lock, setLock]       = useState(null);
+  const [now, setNow]         = useState(() => Date.now());
+  const [forgot, setForgot]   = useState(false);
 
   const shakeTimer = useRef(null);
+  const mode = firstRun ? 'register' : 'login';
 
   useEffect(() => {
     api.get('/auth/status')
-      .then(d => { if (!d.hasUsers) { setFirstRun(true); setMode('register'); } })
+      .then(d => { if (!d.hasUsers) setFirstRun(true); })
       .catch(() => {});
     return () => clearTimeout(shakeTimer.current);
   }, []);
 
-  function triggerError(msg) {
-    setError(msg);
+  useEffect(() => {
+    if (!lock) return undefined;
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [lock]);
+
+  const countdown = lock ? lockCountdown(lock.until, now) : { locked: false, text: '' };
+  const locked    = countdown.locked;
+
+  // The lock has run out: the form is a sign-in form again.
+  useEffect(() => {
+    if (lock && !locked) setLock(null);
+  }, [lock, locked]);
+
+  function shake() {
     setShaking(true);
     clearTimeout(shakeTimer.current);
     shakeTimer.current = setTimeout(() => setShaking(false), 600);
   }
 
+  function triggerError(msg) {
+    setError(msg);
+    shake();
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
+    if (mode === 'register') {
+      // The server's own rules, said before the request goes.
+      const problem = passwordProblem(password, email);
+      if (problem) { triggerError(problem); return; }
+    }
     setLoading(true);
     try {
-      if (mode === 'login') await login(email, password);
-      else                  await register(email, password);
-      // Back to the page that sent you here, if it was one of ours. Replaced
-      // rather than pushed, so Back from there does not return to this form.
-      navigate(returnPathFrom(location), { replace: true });
+      const user = mode === 'login' ? await login(email, password) : await register(email, password);
+      // A temporary password from an administrator must be replaced before
+      // anything else; otherwise back to the page that sent you here, if it
+      // was one of ours. Replaced rather than pushed, so Back from there does
+      // not return to this form.
+      navigate(user?.mustChangePassword ? SET_PASSWORD_PATH : returnPathFrom(location), { replace: true });
     } catch (err) {
+      // 423: too many wrong passwords, and the server says until when. The
+      // button is off until then; a right password is refused just the same.
+      if (err.status === 423) {
+        const l = lockMessage(err.body, Date.now());
+        if (l) { setLock(l); setNow(Date.now()); shake(); return; }
+      }
       triggerError(err.message);
     } finally {
       setLoading(false);
     }
   }
 
-  function switchMode(m) {
-    if (m === mode) return;
-    setSlideDir(m === 'register' ? 'left' : 'right');
-    setMode(m);
-    setTabKey(k => k + 1);
-    setError('');
-    setEmail('');
-    setPassword('');
-    setShowPass(false);
-  }
-
   const isDark = theme === 'dark';
+  const muted  = isDark ? '#4e4e62' : '#9399b0';
 
   const orbOpacity = isDark ? [0.14, 0.11, 0.09] : [0.28, 0.22, 0.16];
 
@@ -139,7 +169,7 @@ export default function Login() {
       <div style={{
         position: 'relative', zIndex: 1,
         width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-        padding: '40px 20px',
+        padding: '40px 16px',
       }}>
         <div style={{
           width: '100%', maxWidth: 420,
@@ -168,14 +198,12 @@ export default function Login() {
               Financial Automation
             </h1>
             <p style={{
-              fontSize:  14, color: isDark ? '#4e4e62' : '#9399b0', lineHeight: 1.5,
+              fontSize:  14, color: muted, lineHeight: 1.5,
               animation: 'fadeUp 0.4s ease 0.2s both',
             }}>
               {firstRun
                 ? 'Set up your admin account to get started'
-                : mode === 'login'
-                  ? 'Welcome back — sign in to continue'
-                  : 'Create a new account'}
+                : 'Welcome back — sign in to continue'}
             </p>
           </div>
 
@@ -192,43 +220,18 @@ export default function Login() {
             animation:      shaking ? 'shake 0.55s ease' : undefined,
           }}>
 
-            {/* Tab switcher */}
-            {!firstRun && (
-              <div style={{
-                display:      'flex', gap: 4,
-                background:   isDark ? 'rgba(255,255,255,0.05)' : 'rgba(99,102,241,0.06)',
-                borderRadius: 10, padding: 4, marginBottom: 24,
-              }}>
-                {['login', 'register'].map(m => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => switchMode(m)}
-                    style={{
-                      flex:         1, padding: '8px 0', fontSize: 13, fontWeight: 600,
-                      borderRadius: 7, border: 'none', cursor: 'pointer',
-                      transition:   'all 0.2s ease',
-                      background:   mode === m
-                        ? isDark ? '#222230' : '#ffffff'
-                        : 'transparent',
-                      color: mode === m
-                        ? isDark ? '#eeeef5' : '#6366f1'
-                        : isDark ? '#4e4e62' : '#9399b0',
-                      boxShadow: mode === m
-                        ? isDark
-                          ? '0 2px 8px rgba(0,0,0,0.3)'
-                          : '0 2px 10px rgba(99,102,241,0.15)'
-                        : 'none',
-                    }}
-                  >
-                    {m === 'login' ? 'Sign in' : 'Register'}
-                  </button>
-                ))}
-              </div>
-            )}
+            <div style={{ fontSize: 15, fontWeight: 700, color: isDark ? '#eeeef5' : '#0d0e14', marginBottom: 18 }}>
+              {firstRun ? 'Set up your admin account' : 'Sign in'}
+            </div>
 
-            {/* Alerts */}
-            {error && (
+            {/* Alerts. The lock replaces any earlier error: it is the one thing
+                to know until it ends. */}
+            {lock && locked ? (
+              <div className="alert alert-warning" role="alert">
+                <span className="alert-icon">⚠</span>
+                {lock.text}
+              </div>
+            ) : error && (
               <div className="alert alert-error">
                 <span className="alert-icon">✕</span>
                 {error}
@@ -241,16 +244,7 @@ export default function Login() {
               </div>
             )}
 
-            {/* Form — re-mounts with slide animation on tab switch */}
-            <form
-              key={tabKey}
-              onSubmit={handleSubmit}
-              style={{
-                animation: tabKey > 0
-                  ? `${slideDir === 'left' ? 'slideFromRight' : 'slideFromLeft'} 0.22s ease`
-                  : undefined,
-              }}
-            >
+            <form onSubmit={handleSubmit}>
               <div className="form-group" style={{ animation: 'fadeUp 0.3s ease 0ms both' }}>
                 <label htmlFor="login-email" className="form-label">Email address</label>
                 <div className="input-wrapper">
@@ -277,11 +271,11 @@ export default function Login() {
                   <input id="login-password"
                     type={showPass ? 'text' : 'password'}
                     className="form-input has-icon"
-                    placeholder={mode === 'register' ? 'Min. 8 characters' : 'Enter your password'}
+                    placeholder={mode === 'register' ? passwordHint() : 'Enter your password'}
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     required
-                    minLength={mode === 'register' ? 8 : 1}
+                    minLength={mode === 'register' ? PASSWORD_MIN_LENGTH : 1}
                     autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
                     style={{ paddingRight: 42 }}
                   />
@@ -302,38 +296,67 @@ export default function Login() {
                     {showPass ? '🙈' : '👁'}
                   </button>
                 </div>
+                {mode === 'register' && (
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 5 }}>
+                    {passwordHint()}. Not your email address, and not one of the passwords everyone tries first.
+                  </div>
+                )}
               </div>
 
               <div style={{ animation: 'fadeUp 0.3s ease 110ms both' }}>
                 <button
                   type="submit"
-                  disabled={loading}
+                  disabled={loading || locked}
                   style={{
                     width:       '100%', padding: '12px 0',
                     background:  'linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)',
                     color:       '#fff', border: 'none', borderRadius: 10,
-                    fontSize:    15, fontWeight: 700, cursor: loading ? 'not-allowed' : 'pointer',
+                    fontSize:    15, fontWeight: 700, cursor: loading || locked ? 'not-allowed' : 'pointer',
                     display:     'flex', alignItems: 'center', justifyContent: 'center', gap: 9,
-                    opacity:     loading ? 0.7 : 1,
+                    opacity:     loading || locked ? 0.7 : 1,
                     boxShadow:   '0 4px 18px rgba(99,102,241,0.45)',
                     transition:  'all 0.2s ease',
                   }}
-                  onMouseEnter={e => { if (!loading) { e.currentTarget.style.boxShadow = '0 6px 26px rgba(99,102,241,0.58)'; e.currentTarget.style.transform = 'translateY(-1px)'; } }}
+                  onMouseEnter={e => { if (!loading && !locked) { e.currentTarget.style.boxShadow = '0 6px 26px rgba(99,102,241,0.58)'; e.currentTarget.style.transform = 'translateY(-1px)'; } }}
                   onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 4px 18px rgba(99,102,241,0.45)'; e.currentTarget.style.transform = 'none'; }}
                 >
                   {loading && <span className="btn-spinner" />}
                   {loading
                     ? 'Please wait...'
-                    : mode === 'login' ? 'Sign in' : 'Create account'}
+                    : locked
+                      ? `Locked · ${countdown.text}`
+                      : mode === 'login' ? 'Sign in' : 'Create account'}
                 </button>
               </div>
             </form>
+
+            {/* After first run there is nowhere to register: accounts and
+                password resets both come from an administrator, and the form
+                says so rather than leaving someone to look for a button. */}
+            {!firstRun && (
+              <div style={{ marginTop: 18, textAlign: 'center', fontSize: 12.5, lineHeight: 1.55 }}>
+                <button
+                  type="button"
+                  onClick={() => setForgot(v => !v)}
+                  aria-expanded={forgot}
+                  style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, color: 'var(--accent)' }}
+                >
+                  Forgot your password?
+                </button>
+                {forgot && (
+                  <p style={{ marginTop: 6, color: isDark ? 'rgba(255,255,255,0.6)' : '#4b5068', animation: 'fadeIn 0.2s ease' }}>
+                    Ask your administrator to reset it from Users. You&apos;ll get a temporary password to sign in with, then set your own.
+                  </p>
+                )}
+                <p style={{ marginTop: 8, color: muted }}>Need an account? Ask your administrator.</p>
+              </div>
+            )}
           </div>
 
           {/* Footer note */}
           <p style={{
             textAlign:  'center', marginTop: 20, fontSize: 12,
-            color:      isDark ? '#4e4e62' : '#9399b0',
+            color:      muted,
             animation:  'fadeIn 0.5s ease 0.4s both',
           }}>
             Secure · JWT authenticated · No data shared externally

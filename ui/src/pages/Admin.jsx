@@ -5,10 +5,13 @@ import Modal from '../components/Modal';
 import RetryAlert from '../components/RetryAlert';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
+import { useToast } from '../context/ToastContext';
 import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney } from '../utils/format';
 import { staggerIn } from '../utils/stagger';
 import ActivityPanel from './admin/ActivityPanel';
+import { lockBadge, failedNote, mustSetNote } from './admin/users';
+import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
 
 const ADMIN_TABS = [
   { key: 'users',      label: '👥 Users' },
@@ -43,13 +46,16 @@ function keyboardFocused(el) {
   try { return el.matches(':focus-visible'); } catch (_) { return true; }
 }
 
-// An admin cannot see a password (it is a bcrypt hash), only set a new one and
-// pass it on. The server signs out every session that account has open.
+// An admin cannot see a password (it is a bcrypt hash), only set a temporary
+// one and pass it on. It works once, for 24 hours; the account must then
+// choose its own. The server signs out every session that account has open.
 function ResetPasswordDialog({ user, onClose, onDone }) {
   const [password, setPassword] = useState('');
   const [show,     setShow]     = useState(false);
   const [error,    setError]    = useState('');
   const [saving,   setSaving]   = useState(false);
+  // The server's rules (pages/account/password-rules.js), said as typed.
+  const problem = passwordProblem(password, user.email);
 
   async function submit(e) {
     e.preventDefault();
@@ -67,30 +73,32 @@ function ResetPasswordDialog({ user, onClose, onDone }) {
     <Modal onClose={onClose} busy={saving} label={`Reset password for ${user.email}`}>
       <div className="card-title">Reset password</div>
       <div className="card-subtitle">
-        Set a new password for <strong>{user.email}</strong> and pass it on to them.
+        Set a temporary password for <strong>{user.email}</strong> and pass it on to them.
+        They sign in with this once, within 24 hours, then must choose their own.
         The current one cannot be shown. Every session they have open is signed out.
       </div>
       <form onSubmit={submit}>
         <div className="form-group">
-          <label htmlFor="reset-password" className="form-label">New password</label>
+          <label htmlFor="reset-password" className="form-label">Temporary password</label>
           <div style={{ position: 'relative' }}>
             <input id="reset-password"
               type={show ? 'text' : 'password'}
               className="form-input"
-              placeholder="Min. 8 characters"
+              placeholder={passwordHint()}
               value={password}
               onChange={e => setPassword(e.target.value)}
-              required minLength={8} autoFocus autoComplete="new-password"
+              required minLength={PASSWORD_MIN_LENGTH} autoFocus autoComplete="new-password"
               style={{ paddingRight: 38 }}
             />
             <button type="button" onClick={() => setShow(v => !v)} style={EYE_BUTTON}
               aria-label={show ? 'Hide password' : 'Show password'}>{show ? '🙈' : '👁'}</button>
           </div>
+          {password && problem && <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }}>{problem}</div>}
         </div>
         {error && <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
           <button type="button" className="btn btn-outline" onClick={onClose} disabled={saving}>Cancel</button>
-          <button type="submit" className="btn btn-primary" disabled={saving || password.length < 8}>
+          <button type="submit" className="btn btn-primary" disabled={saving || !!problem}>
             {saving ? 'Saving…' : 'Set password'}
           </button>
         </div>
@@ -102,6 +110,7 @@ function ResetPasswordDialog({ user, onClose, onDone }) {
 export default function Admin() {
   const { user: me } = useAuth();
   const confirm = useConfirm();
+  const toast   = useToast();
   const navigate     = useNavigate();
   // The open tab is in the address, so Back from a flagged invoice opened on
   // Reports returns to Reports rather than to Users, and a reload stays put.
@@ -178,17 +187,29 @@ export default function Admin() {
   }
 
   // One request per control, then the list is refetched so the row shows the
-  // server's view rather than an optimistic guess.
+  // server's view rather than an optimistic guess. True when the request went
+  // through, for a caller with something to say after it.
   async function control(key, u, send, done) {
     setBusy(`${key}:${u.id}`); setError(''); setSuccess('');
     try {
       await send();
       if (done) showSuccess(done);
       await fetchUsers();
+      return true;
     } catch (err) {
       setError(err.message);
+      return false;
     } finally {
       setBusy(null);
+    }
+  }
+
+  // The lock ends on its own at lockedUntil; this ends it now, for the owner
+  // who mistyped five times and is on the phone about it. The count of wrong
+  // passwords goes too.
+  async function handleUnlock(u) {
+    if (await control('unlock', u, () => api.post(`/admin/users/${u.id}/unlock`, {}))) {
+      toast.success(`${u.email} is unlocked. They can sign in again now.`);
     }
   }
 
@@ -219,6 +240,8 @@ export default function Admin() {
 
   // A disabled admin cannot sign in, so they do not count as the last one.
   const admins = users.filter(u => u.role === 'admin' && !u.disabledAt);
+  // One reading of the clock for every row's lock badge; a refetch re-renders.
+  const now = Date.now();
 
   return (
     <div>
@@ -289,11 +312,17 @@ export default function Admin() {
                 // The server refuses these too; dimming the button says why first.
                 const lastAdmin = u.role === 'admin' && !u.disabledAt && admins.length <= 1;
                 const inFlight  = key => busy === `${key}:${u.id}`;
+                // Sign-in state (pages/admin/users.js): locked, with a badge and
+                // an Unlock control; wrong passwords since the last sign-in; a
+                // temporary password still to be replaced.
+                const lock    = lockBadge(u, now, { timeZone: me?.timezone });
+                const failed  = failedNote(u, now);
+                const mustSet = mustSetNote(u);
                 return (
                   <div key={u.id} style={{ animation: staggerIn(i, 40, '0.25s') }}>
                     {/* Clicking a row opens its controls below it. Your own row has
                         none: every control here is refused on yourself, and your own
-                        password is changed from Setup. The other rows are buttons to
+                        password is changed from the Account page. The other rows are buttons to
                         the keyboard and to a screen reader too, since the controls
                         cannot be reached any other way. */}
                     <div
@@ -349,6 +378,20 @@ export default function Admin() {
                           <span className={`badge ${u.online ? 'badge-green' : 'badge-gray'}`} title={u.lastSeenAt ? `Last seen ${formatDateTime(u.lastSeenAt, me?.timezone)}` : 'Never signed in'}>
                             {u.online ? '● Online' : formatRelative(u.lastSeenAt) === '—' ? 'Never online' : `Offline · ${formatRelative(u.lastSeenAt)}`}
                           </span>
+                          {lock && (
+                            <span className="badge badge-red" title={lock.title}>{lock.text}</span>
+                          )}
+                          {failed && (
+                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="Wrong passwords since the last sign-in">{failed}</span>
+                          )}
+                          {mustSet && (
+                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="On a temporary password from an administrator">{mustSet}</span>
+                          )}
+                          {u.lastLoginAt && (
+                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                              Last sign-in {formatDateTime(u.lastLoginAt, me?.timezone)}
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -357,12 +400,18 @@ export default function Admin() {
 
                     {open && !isMe && (
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '8px 12px 10px', background: 'var(--bg-hover)', borderRadius: '0 0 10px 10px' }}>
+                        {lock && (
+                          <button className="btn btn-outline btn-sm" disabled={!!busy} title="End the lock now, so they can sign in again"
+                            onClick={() => handleUnlock(u)}>
+                            {inFlight('unlock') ? '…' : '🔓 Unlock'}
+                          </button>
+                        )}
                         <button className="btn btn-outline btn-sm" disabled={!!busy || lastAdmin}
                           title={lastAdmin ? 'Cannot demote the last admin' : u.role === 'admin' ? 'Back to an ordinary user' : 'Give them this page'}
                           onClick={() => handleRole(u)}>
                           {inFlight('role') ? '…' : u.role === 'admin' ? '◦ Make user' : '★ Make admin'}
                         </button>
-                        <button className="btn btn-outline btn-sm" disabled={!!busy} title="Set a new password for this account"
+                        <button className="btn btn-outline btn-sm" disabled={!!busy} title="Set a temporary password for this account"
                           onClick={() => setResetting(u)}>
                           🔑 Reset password
                         </button>
@@ -400,7 +449,9 @@ export default function Admin() {
               <div className="card-title">Add User</div>
             </div>
           </div>
-          <div className="card-subtitle">New users can sign in immediately after creation.</div>
+          <div className="card-subtitle">
+            The password you set is temporary. They sign in with this once, within 24 hours, then must choose their own.
+          </div>
 
           <form onSubmit={handleCreate}>
             <div className="form-group">
@@ -416,15 +467,15 @@ export default function Admin() {
             </div>
 
             <div className="form-group">
-              <label htmlFor="admin-password" className="form-label">Password</label>
+              <label htmlFor="admin-password" className="form-label">Temporary password</label>
               <div style={{ position: 'relative' }}>
                 <input id="admin-password"
                   type={showPass ? 'text' : 'password'}
                   className="form-input"
-                  placeholder="Min. 8 characters"
+                  placeholder={passwordHint()}
                   value={pass}
                   onChange={e => setPass(e.target.value)}
-                  required minLength={8}
+                  required minLength={PASSWORD_MIN_LENGTH}
                   style={{ paddingRight: 38 }}
                 />
                 <button
@@ -436,6 +487,9 @@ export default function Admin() {
                   {showPass ? '🙈' : '👁'}
                 </button>
               </div>
+              {pass && passwordProblem(pass, email) && (
+                <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }}>{passwordProblem(pass, email)}</div>
+              )}
             </div>
 
             <div className="form-group" style={{ marginBottom: 22 }}>
@@ -465,6 +519,7 @@ export default function Admin() {
             <button
               type="submit"
               className="btn btn-primary"
+              disabled={!!passwordProblem(pass, email)}
               style={{ width: '100%', justifyContent: 'center', padding: '11px 0', fontSize: 14 }}
             >
               Create account
@@ -478,7 +533,7 @@ export default function Admin() {
           user={resetting}
           onClose={() => setResetting(null)}
           onDone={() => {
-            showSuccess(`Password for ${resetting.email} updated. Their other sessions were signed out.`, 5000);
+            showSuccess(`Temporary password for ${resetting.email} set. It works once, within 24 hours; their other sessions were signed out.`, 6000);
             setResetting(null);
           }}
         />

@@ -10,6 +10,7 @@ function getBreadcrumbs(pathname, listPath = '/invoices') {
   if (pathname === '/automation') return [{ label: 'Automation' }];
   if (pathname === '/setup')      return [{ label: 'Setup' }];
   if (pathname === '/admin')      return [{ label: 'Admin' }];
+  if (pathname === '/account')    return [{ label: 'Account' }];
   if (pathname === '/invoices')   return [{ label: 'AR & AP' }];
   if (pathname.startsWith('/invoices/')) return [
     { label: 'AR & AP', to: listPath },

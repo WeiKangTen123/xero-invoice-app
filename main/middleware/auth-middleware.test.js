@@ -32,6 +32,27 @@ describe('auth-middleware secrets', () => {
     expect(auth.jwtSecret()).toBe('from-the-environment');
   });
 
+  // An account signed in with a temporary password may only replace it; the
+  // few routes that screen needs are named by method and mounted path.
+  test('allowedBeforePasswordChange: the change itself, who am I, sign out and the sign-in history, and nothing else', () => {
+    expect([...auth.PASSWORD_CHANGE_ALLOWED].sort()).toEqual([
+      'GET /api/auth/me', 'GET /api/auth/sign-ins', 'POST /api/auth/change-password', 'POST /api/auth/logout',
+    ]);
+    const ok = (m, p) => auth.allowedBeforePasswordChange(m, p);
+    expect(ok('POST', '/api/auth/change-password')).toBe(true);
+    expect(ok('get', '/api/auth/me')).toBe(true);
+    expect(ok('GET', '/api/auth/sign-ins?limit=5')).toBe(true);   // the query string is not the route
+    expect(ok('POST', '/api/auth/logout/')).toBe(true);            // nor a trailing slash
+    expect(ok('GET', '/api/auth/change-password')).toBe(false);    // a GET is not the change
+    expect(ok('POST', '/api/auth/sign-out-everywhere')).toBe(false);
+    expect(ok('GET', '/api/invoices')).toBe(false);
+    expect(ok('GET', '/api/admin/users')).toBe(false);
+    expect(ok('GET', '/auth/me')).toBe(false);                     // unmounted: not how index.js serves it
+    expect(ok('GET', '')).toBe(false);
+    expect(ok(undefined, undefined)).toBe(false);
+    expect(auth.PASSWORD_CHANGE_REQUIRED).toEqual({ error: 'Set a new password to continue.', code: 'password_change_required' });
+  });
+
   test('jwtSecretProblem: missing is fatal; short or published is only a warning', () => {
     expect(auth.jwtSecretProblem(undefined)).toEqual({ fatal: expect.stringMatching(/^JWT_SECRET is not set/) });
     expect(auth.jwtSecretProblem('')).toEqual({ fatal: expect.stringMatching(/^JWT_SECRET is not set/) });

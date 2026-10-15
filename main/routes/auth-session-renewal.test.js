@@ -43,10 +43,10 @@ describe('24-hour sliding sessions', () => {
 
     test('register and login', async () => {
       const reg = await request(serverFor(app)).post('/api/auth/register')
-        .send({ email: 'first@test.com', password: 'password123' }).expect(201);
+        .send({ email: 'first@test.com', password: 'first-admin-pass-1' }).expect(201);
       expect(lifetimeOf(reg.body.token)).toBe(DAY);
       const login = await request(serverFor(app)).post('/api/auth/login')
-        .send({ email: 'first@test.com', password: 'password123' }).expect(200);
+        .send({ email: 'first@test.com', password: 'first-admin-pass-1' }).expect(200);
       expect(lifetimeOf(login.body.token)).toBe(DAY);
       expect(jwt.decode(login.body.token)).toMatchObject({ id: reg.body.user.id, email: 'first@test.com', role: 'admin' });
       expect(jwt.decode(login.body.token).renewed).toBeUndefined();

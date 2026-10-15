@@ -251,7 +251,12 @@ function touchLastSeen(userId) {
   db.prepare('UPDATE users SET last_seen_at = ? WHERE id = ?').run(new Date(now).toISOString(), userId);
 }
 
-async function createUser(email, password, role = 'user') {
+// The password is hashed as given: the rule on what a password may be
+// (passwordProblem) is applied by every route before it gets here, so the
+// tests can make accounts with short fixture passwords without a bcrypt-cost
+// password each. `temporary` marks the password as one an admin chose, to be
+// replaced at the first sign-in and dead after a day (schema.sql).
+async function createUser(email, password, role = 'user', { temporary = false } = {}) {
   const hash = await bcrypt.hash(password, 10);
 
   const create = db.transaction(() => {
@@ -261,21 +266,24 @@ async function createUser(email, password, role = 'user') {
     // Resolved inside the transaction so two simultaneous first registrations
     // cannot both claim admin — SQLite serialises writes, only one can go first.
     const actualRole = role === 'auto' ? (hasUsers() ? 'user' : 'admin') : role;
+    const now  = Date.now();
     const user = {
       // Timestamp alone is not unique: two registrations inside the same
       // millisecond produce the same id and the INSERT fails on the primary key.
       // Keeping the timestamp prefix preserves creation order; the suffix makes
       // a collision effectively impossible.
-      id:        `${Date.now()}${require('crypto').randomBytes(4).toString('hex')}`,
+      id:        `${now}${require('crypto').randomBytes(4).toString('hex')}`,
       email:     email.toLowerCase().trim(),
       password:  hash,
       role:      actualRole,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(now).toISOString(),
+      mustChangePassword:    temporary ? 1 : 0,
+      tempPasswordExpiresAt: temporary ? new Date(now + TEMP_PASSWORD_TTL_MS).toISOString() : null,
     };
 
     db.prepare(`
-      INSERT INTO users (id, email, password, role, created_at)
-      VALUES (@id, @email, @password, @role, @createdAt)
+      INSERT INTO users (id, email, password, role, created_at, must_change_password, temp_password_expires_at)
+      VALUES (@id, @email, @password, @role, @createdAt, @mustChangePassword, @tempPasswordExpiresAt)
     `).run(user);
 
     // Pre-create the user's credentials row so every account has one from day one
@@ -302,13 +310,120 @@ async function validatePassword(email, password) {
 // Every place that accepts a password checks this — register, the admin's Add
 // User and Reset password, and Change password. The Add User form said six
 // while the server refused under eight.
-const PASSWORD_MIN_LENGTH = 8;
+//
+// Three rules and no more: at least twelve characters, not the account's own
+// email address (with or without the domain, in any case), and not on the
+// list of passwords everyone tries first (common-passwords.js). Length is
+// what makes a password hard to guess; rules about digits and symbols only
+// decide which short password is chosen. Nothing expires: a password that
+// was good stays good, so existing accounts are not asked to change. `email`
+// is the account's, for the second rule; without it that rule is skipped.
+const PASSWORD_MIN_LENGTH = 12;
 
-function passwordProblem(password) {
+function passwordProblem(password, email = null) {
   if (typeof password !== 'string' || password.length < PASSWORD_MIN_LENGTH) {
     return `Password must be at least ${PASSWORD_MIN_LENGTH} characters`;
   }
+  if (typeof email === 'string' && email.trim()) {
+    const pw   = password.toLowerCase();
+    const addr = email.toLowerCase().trim();
+    if (pw === addr || pw === addr.split('@')[0]) return 'Password must not be your email address';
+  }
+  if (require('./common-passwords').isCommonPassword(password)) return 'That password is too common; choose another';
   return null;
+}
+
+// ── Sign-in lockout ──────────────────────────────────────────────────────────
+// Per account, not per IP (routes/auth.js keeps a looser limit per IP too):
+// someone guessing one person's password from many addresses meets this; an
+// office behind one address where one person mistypes does not lock the
+// others out. Five wrong passwords in a row lock the account; each lock
+// inside a day of the last is twice as long, up to a day; a right password
+// once the lock has ended clears the slate.
+const LOCK_AFTER_FAILURES = 5;
+const LOCK_BASE_MS        = 15 * 60 * 1000;
+const LOCK_MAX_MS         = 24 * 60 * 60 * 1000;
+const LOCK_COUNT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// A password an admin set is good for this long (createUser, setPassword).
+const TEMP_PASSWORD_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Whether the account refuses sign-in at `now`: { lockedUntil, lockMinutes }
+// (the end, and the whole minutes left, at least one) or null. Read from the
+// row; nothing is written, so a lock that has ended simply stops mattering
+// and the columns say what happened until the next sign-in clears them.
+function lockStatus(row, now = Date.now()) {
+  if (!row || !row.locked_until) return null;
+  const until = Date.parse(row.locked_until);
+  if (!(until > now)) return null;
+  return { lockedUntil: new Date(until).toISOString(), lockMinutes: Math.max(1, Math.ceil((until - now) / 60000)) };
+}
+
+// The rule itself, with no database in it: what the four lockout columns
+// become after a wrong password at `now`, given the row as it is. `locked` is
+// true when this failure is the one that locked the account, and lockMinutes
+// then says for how long.
+//
+// lock_count is how many locks there have been in the current run — a run
+// continues while each lock is within a day of the last, and starts over
+// otherwise — and sets the length of the next: 15 minutes doubled that many
+// times, never more than a day. The failure count starts again at the lock,
+// so after it ends there are five more tries before the next, longer, lock.
+function lockAfterFailure(row, now = Date.now()) {
+  const failed = (row.failed_logins || 0) + 1;
+  if (failed < LOCK_AFTER_FAILURES) {
+    return {
+      failed_logins: failed, locked_until: row.locked_until ?? null,
+      lock_count: row.lock_count || 0, last_locked_at: row.last_locked_at ?? null, locked: false,
+    };
+  }
+  const last   = row.last_locked_at ? Date.parse(row.last_locked_at) : NaN;
+  const inRun  = Number.isFinite(last) && now - last < LOCK_COUNT_WINDOW_MS;
+  const count  = inRun ? (row.lock_count || 0) : 0;
+  const length = Math.min(LOCK_BASE_MS * 2 ** count, LOCK_MAX_MS);
+  return {
+    failed_logins: 0, locked_until: new Date(now + length).toISOString(),
+    lock_count: count + 1, last_locked_at: new Date(now).toISOString(),
+    locked: true, lockMinutes: Math.round(length / 60000),
+  };
+}
+
+// A wrong password for this account: applies lockAfterFailure to the row and
+// writes the result. Read and written in one transaction, so two wrong
+// passwords landing together each count. Returns what lockAfterFailure did,
+// or null for an account that no longer exists.
+const recordFailedLogin = db.transaction((id, now = Date.now()) => {
+  const row = findById(id);
+  if (!row) return null;
+  const next = lockAfterFailure(row, now);
+  db.prepare('UPDATE users SET failed_logins = ?, locked_until = ?, lock_count = ?, last_locked_at = ? WHERE id = ?')
+    .run(next.failed_logins, next.locked_until, next.lock_count, next.last_locked_at, id);
+  return next;
+});
+
+// A sign-in that went through: the lockout record is cleared whole, and the
+// time of the sign-in kept.
+function recordSuccessfulLogin(id, now = Date.now()) {
+  db.prepare('UPDATE users SET failed_logins = 0, locked_until = NULL, lock_count = 0, last_locked_at = NULL, last_login_at = ? WHERE id = ?')
+    .run(new Date(now).toISOString(), id);
+}
+
+// An admin's unlock: the same clean slate a successful sign-in leaves, without
+// the sign-in. Also what a password reset does, since the person the reset is
+// for is the one who was locked out.
+function unlockAccount(id) {
+  const user = findById(id);
+  if (!user) throw new Error('User not found');
+  db.prepare('UPDATE users SET failed_logins = 0, locked_until = NULL, lock_count = 0, last_locked_at = NULL WHERE id = ?').run(id);
+  return sanitize({ ...user, failed_logins: 0, locked_until: null, lock_count: 0, last_locked_at: null });
+}
+
+// Whether the row's password is a temporary one whose day has run out. A
+// password the person chose has no expiry.
+function temporaryPasswordExpired(row, now = Date.now()) {
+  if (!row || !row.must_change_password || !row.temp_password_expires_at) return false;
+  const until = Date.parse(row.temp_password_expires_at);
+  return Number.isFinite(until) && until <= now;
 }
 
 // The stored hash when `password` matches it, else null. Change password
@@ -330,18 +445,35 @@ async function verifiedPasswordHash(id, password) {
 // unconditionally, the user's change silently replaced the password the admin
 // had just set. Returns false when that happened and nothing was written. An
 // admin's reset passes no hash and always writes.
-async function setPassword(id, newPassword, { ifCurrentHash = null } = {}) {
-  const problem = passwordProblem(newPassword);
+//
+// `temporary` is the admin's reset: the new password must be replaced at the
+// next sign-in and dies after a day, and the account is unlocked, since the
+// person asking for a reset is as likely as not the one who got locked out.
+// A person's own change is the opposite: it is the replacement, so the
+// temporary marks come off.
+async function setPassword(id, newPassword, { ifCurrentHash = null, temporary = false } = {}) {
+  const user = findById(id);
+  if (!user) throw new Error('User not found');
+  const problem = passwordProblem(newPassword, user.email);
   if (problem) throw new Error(problem);
-  if (!findById(id)) throw new Error('User not found');
   const hash = await bcrypt.hash(newPassword, 10);
-  const at   = new Date().toISOString();
+  const now  = Date.now();
+  const at   = new Date(now).toISOString();
+  const marks = temporary
+    ? { must: 1, expires: new Date(now + TEMP_PASSWORD_TTL_MS).toISOString() }
+    : { must: 0, expires: null };
   if (ifCurrentHash) {
-    const { changes } = db.prepare('UPDATE users SET password = ?, sessions_valid_from = ? WHERE id = ? AND password = ?')
-      .run(hash, at, id, ifCurrentHash);
+    const { changes } = db.prepare(`
+      UPDATE users SET password = ?, sessions_valid_from = ?, must_change_password = ?, temp_password_expires_at = ?
+      WHERE id = ? AND password = ?
+    `).run(hash, at, marks.must, marks.expires, id, ifCurrentHash);
     return changes > 0;
   }
-  db.prepare('UPDATE users SET password = ?, sessions_valid_from = ? WHERE id = ?').run(hash, at, id);
+  db.prepare(`
+    UPDATE users SET password = ?, sessions_valid_from = ?, must_change_password = ?, temp_password_expires_at = ?
+    WHERE id = ?
+  `).run(hash, at, marks.must, marks.expires, id);
+  if (temporary) unlockAccount(id);
   return true;
 }
 
@@ -394,12 +526,21 @@ function readUsers() {
   return db.prepare('SELECT * FROM users ORDER BY created_at').all();
 }
 
+// The account as the client sees it: never the hash, and the lockout and
+// temporary-password state in words the Admin page and the sign-in response
+// use. lockedUntil is only given while the lock is in force; the column keeps
+// its old value after the lock ends, until the next sign-in clears it.
 function sanitize(u) {
-  const lastSeenAt = u.last_seen_at ?? u.lastSeenAt ?? null;
+  const lastSeenAt  = u.last_seen_at ?? u.lastSeenAt ?? null;
+  const lockedUntil = lockStatus({ locked_until: u.locked_until ?? u.lockedUntil ?? null });
   return {
     id: u.id, email: u.email, role: u.role, createdAt: u.created_at || u.createdAt,
     lastSeenAt, online: isOnline(lastSeenAt),
     disabledAt: u.disabled_at ?? u.disabledAt ?? null,
+    failedLogins:       u.failed_logins ?? u.failedLogins ?? 0,
+    lockedUntil:        lockedUntil ? lockedUntil.lockedUntil : null,
+    mustChangePassword: !!(u.must_change_password ?? u.mustChangePassword),
+    lastLoginAt:        u.last_login_at ?? u.lastLoginAt ?? null,
   };
 }
 
@@ -478,6 +619,8 @@ function ensureUserDirectories() {
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
   passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, PASSWORD_MIN_LENGTH,
+  lockStatus, lockAfterFailure, recordFailedLogin, recordSuccessfulLogin, unlockAccount, temporaryPasswordExpired,
+  LOCK_AFTER_FAILURES, LOCK_BASE_MS, LOCK_MAX_MS, TEMP_PASSWORD_TTL_MS,
   getAllUsers, updateUserRole, deleteUser, readUsers,
   getUserConfig, saveUserConfig, getUserDefaults, defaultsFrom, getSetupStatus, getImapSettings, ensureUserDirectories,
   checkAllowanceSettings, allowanceSettingsFrom, getAllowanceSettings, formatRate,

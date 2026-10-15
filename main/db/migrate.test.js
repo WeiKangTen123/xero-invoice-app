@@ -141,6 +141,24 @@ describe('db/migrate', () => {
     expect(users.getUserConfig(u.id).IMAP_PASS).toBe('legacy-plain');
   });
 
+  // Sign-in lockout, temporary passwords and the last sign-in on users: the
+  // counters default to 0 so an existing account starts clean.
+  test('the users lockout, temporary-password and last-sign-in columns exist, default clean, and are added to an older database', () => {
+    const COLS = ['failed_logins', 'locked_until', 'lock_count', 'last_locked_at', 'must_change_password', 'temp_password_expires_at', 'last_login_at'];
+    const cols = () => db.prepare('PRAGMA table_info(users)').all();
+    const check = () => {
+      const names = cols().map(c => c.name);
+      for (const c of COLS) expect(names).toContain(c);
+      for (const c of ['failed_logins', 'lock_count', 'must_change_password']) expect(cols().find(x => x.name === c)).toMatchObject({ notnull: 1, dflt_value: '0' });
+    };
+    run();
+    check();
+    for (const c of COLS) db.exec(`ALTER TABLE users DROP COLUMN ${c}`);
+    expect(cols().map(c => c.name)).not.toContain('locked_until');
+    run();
+    check();
+  });
+
   // Columns other parts of the app depend on: the Message-ID a row was read
   // from (indexed, as the worker looks it up before reading every email), the
   // reader's confidence, and the reports' recurring account codes.

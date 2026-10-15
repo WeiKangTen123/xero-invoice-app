@@ -79,20 +79,22 @@ describe('routes/auth', () => {
   });
 
   describe('POST /register security controls', () => {
-    test('enforces minimum 8 character password', async () => {
+    test('enforces minimum 12 character password', async () => {
       const res = await request(serverFor(app))
         .post('/api/auth/register')
-        .send({ email: 'short@test.com', password: 'short' })
+        .send({ email: 'short@test.com', password: 'elevenchars' })
         .expect(400);
-      expect(res.body.error).toMatch(/at least 8 characters/);
+      expect(res.body.error).toMatch(/at least 12 characters/);
     });
 
-    test('the very first account can always be created, and becomes admin', async () => {
+    test('the very first account can always be created, becomes admin, and its password is its own (not temporary)', async () => {
       const res = await request(serverFor(app))
         .post('/api/auth/register')
-        .send({ email: 'first@test.com', password: 'password123' })
+        .send({ email: 'first@test.com', password: 'first-admin-pass-1' })
         .expect(201);
       expect(res.body.user.role).toBe('admin');
+      expect(res.body.user.mustChangePassword).toBe(false);
+      expect(users.findById(res.body.user.id)).toMatchObject({ must_change_password: 0, temp_password_expires_at: null });
     });
 
     test('once a user exists, registration is closed unless ALLOW_REGISTRATION=true', async () => {
@@ -104,14 +106,14 @@ describe('routes/auth', () => {
         delete process.env.ALLOW_REGISTRATION;
         const res = await request(serverFor(app))
           .post('/api/auth/register')
-          .send({ email: 'stranger@test.com', password: 'password123' })
+          .send({ email: 'stranger@test.com', password: 'stranger-pass-2026' })
           .expect(403);
         expect(res.body.error).toMatch(/registration is disabled/i);
 
         process.env.ALLOW_REGISTRATION = 'true';
         await request(serverFor(app))
           .post('/api/auth/register')
-          .send({ email: 'stranger@test.com', password: 'password123' })
+          .send({ email: 'stranger@test.com', password: 'stranger-pass-2026' })
           .expect(201);
       } finally {
         if (prevEnv === undefined) delete process.env.ALLOW_REGISTRATION; else process.env.ALLOW_REGISTRATION = prevEnv;
@@ -144,7 +146,7 @@ describe('routes/auth password and account state', () => {
   const change = (token, body) => request(serverFor(app)).post('/api/auth/change-password').set('Authorization', `Bearer ${token}`).send(body);
 
   describe('POST /change-password', () => {
-    test('needs the current password, both fields and at least 8 characters', async () => {
+    test('needs the current password, both fields and at least 12 characters', async () => {
       const u = await users.createUser('cp@test.com', 'password123', 'user');
       const t = tokenFor(u);
       // A wrong current password is a 400, not a 401: a 401 would bounce the
@@ -180,18 +182,18 @@ describe('routes/auth password and account state', () => {
       const realCompare = bcrypt.compare;
       jest.spyOn(bcrypt, 'compare').mockImplementationOnce(async (pw, hash) => {
         const ok = await realCompare(pw, hash);
-        await users.setPassword(u.id, 'adminset123');   // what PATCH /api/admin/users/:id/password calls
+        await users.setPassword(u.id, 'admin-set-pass-01');   // what PATCH /api/admin/users/:id/password calls
         return ok;
       });
       try {
-        const res = await change(tokenFor(u), { currentPassword: 'password123', newPassword: 'mychoice123' }).expect(409);
+        const res = await change(tokenFor(u), { currentPassword: 'password123', newPassword: 'my-choice-pass-01' }).expect(409);
         expect(res.body.error).toMatch(/changed elsewhere/i);
         expect(res.body.token).toBeUndefined();
       } finally {
         jest.restoreAllMocks();
       }
-      await login('race@test.com', 'adminset123').expect(200);
-      await login('race@test.com', 'mychoice123').expect(401);
+      await login('race@test.com', 'admin-set-pass-01').expect(200);
+      await login('race@test.com', 'my-choice-pass-01').expect(401);
       await login('race@test.com', 'password123').expect(401);
     });
 
@@ -273,5 +275,203 @@ describe('routes/auth password and account state', () => {
     const sameSecond = jwt.sign({ id: u.id, email: u.email, role: u.role, iat: Math.floor(Date.parse(at) / 1000) }, jwtSecret());
     await me(stale).expect(401);
     await me(sameSecond).expect(200);
+  });
+});
+
+// ── Sign-in lockout, temporary passwords and the Account page ───────────────
+describe('routes/auth sign-in lockout, temporary passwords and the Account page', () => {
+  let app, users, db, auth;
+  const PW = 'Fixture-pass-2026';
+  const HOUR = 60 * 60;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    db    = require('../db');
+    users = require('../utils/users');
+    auth  = require('../middleware/auth-middleware');
+    app = express();
+    app.use(express.json());
+    app.use('/api/auth', require('./auth'));
+    // Any other route, behind the same requireAuth every real route uses.
+    app.get('/api/invoices', auth.requireAuth, (_req, res) => res.json({ ok: true }));
+  });
+
+  function tokenFor(user, secondsAgo = 0) {
+    const iat = Math.floor(Date.now() / 1000) - secondsAgo;
+    return jwt.sign({ id: user.id, email: user.email, role: user.role, iat }, auth.jwtSecret(), { expiresIn: 24 * HOUR });
+  }
+  const login = (email, password) => request(serverFor(app)).post('/api/auth/login').send({ email, password });
+  const as    = (token, verb, path) => request(serverFor(app))[verb](path).set('Authorization', `Bearer ${token}`);
+  const row   = id => users.findById(id);
+  const adminEvents = () => db.prepare('SELECT * FROM admin_events ORDER BY id').all().map(r => ({ ...r, details: r.details ? JSON.parse(r.details) : null }));
+  const failTimes = async (email, n) => { for (let i = 0; i < n; i++) await login(email, `wrong-${i}`); };
+  const endLock = id => db.prepare('UPDATE users SET locked_until = ? WHERE id = ?').run(new Date(Date.now() - 1000).toISOString(), id);
+
+  describe('lockout', () => {
+    test('the fifth wrong password locks the account for 15 minutes: 423 with when it ends, and the right password is refused too', async () => {
+      const u = await users.createUser('lock@test.com', PW, 'user');
+      for (let i = 0; i < 4; i++) {
+        const res = await login('lock@test.com', 'wrong').expect(401);
+        expect(res.body.error).toBe('Invalid email or password');
+      }
+      expect(row(u.id).failed_logins).toBe(4);
+      const locked = await login('lock@test.com', 'wrong').expect(423);
+      expect(locked.body).toEqual({ error: 'Too many failed attempts. This account is locked.', lockedUntil: expect.any(String), lockMinutes: 15 });
+      const left = Date.parse(locked.body.lockedUntil) - Date.now();
+      expect(left).toBeGreaterThan(14 * 60 * 1000);
+      expect(left).toBeLessThanOrEqual(15 * 60 * 1000);
+      expect(row(u.id)).toMatchObject({ failed_logins: 0, lock_count: 1, locked_until: locked.body.lockedUntil, last_locked_at: expect.any(String) });
+
+      // The right password, while locked: the same answer, and nothing changes.
+      const right = await login('lock@test.com', PW).expect(423);
+      expect(right.body).toEqual({ error: 'Too many failed attempts. This account is locked.', lockedUntil: locked.body.lockedUntil, lockMinutes: 15 });
+      await login('lock@test.com', 'wrong').expect(423);
+      expect(row(u.id)).toMatchObject({ failed_logins: 0, lock_count: 1, locked_until: locked.body.lockedUntil, last_login_at: null });
+      // Five failures and the lock in the trail; the attempts during it are not.
+      expect(adminEvents().map(e => e.action)).toEqual([...Array(5).fill('login.failed'), 'login.locked']);
+      expect(adminEvents().pop().details).toEqual({ ip: expect.any(String), lockedUntil: locked.body.lockedUntil, lockMinutes: 15, failures: 5 });
+    });
+
+    test('once the lock has ended the right password signs in and clears the record', async () => {
+      const u = await users.createUser('after@test.com', PW, 'user');
+      await failTimes('after@test.com', 5);
+      endLock(u.id);
+      const res = await login('after@test.com', PW).expect(200);
+      expect(res.body.token).toBeTruthy();
+      expect(res.body.user).toMatchObject({ id: u.id, email: 'after@test.com', role: 'user', mustChangePassword: false });
+      expect(row(u.id)).toMatchObject({ failed_logins: 0, lock_count: 0, locked_until: null, last_locked_at: null, last_login_at: expect.any(String) });
+      expect(adminEvents().pop()).toMatchObject({ action: 'login.success', actor_id: u.id, target_user_id: u.id, details: { ip: expect.any(String) } });
+    });
+
+    test('after an ended lock wrong passwords count again, and the next lock inside 24 hours is twice as long', async () => {
+      const u = await users.createUser('twice@test.com', PW, 'user');
+      await failTimes('twice@test.com', 5);
+      endLock(u.id);
+      await failTimes('twice@test.com', 4);
+      expect(row(u.id)).toMatchObject({ failed_logins: 4, lock_count: 1 });
+      const second = await login('twice@test.com', 'wrong').expect(423);
+      expect(second.body.lockMinutes).toBe(30);
+      expect(Date.parse(second.body.lockedUntil) - Date.now()).toBeGreaterThan(29 * 60 * 1000);
+      expect(row(u.id).lock_count).toBe(2);
+    });
+
+    test('an unknown address is a 401 that counts nothing and is still recorded, without the password', async () => {
+      const res = await login('nobody@test.com', 'Secret-typed-here').expect(401);
+      expect(res.body.error).toBe('Invalid email or password');
+      const [e] = adminEvents();
+      expect(e).toMatchObject({ action: 'login.failed', actor_id: null, target_user_id: null, target_email: null, details: { email: 'nobody@test.com', ip: expect.any(String) } });
+      expect(JSON.stringify(adminEvents())).not.toContain('Secret-typed-here');
+    });
+
+    test('a wrong password on a disabled account counts; the right one is still the disabled answer, and counts nothing', async () => {
+      const u = await users.createUser('off@test.com', PW, 'user');
+      users.setDisabled(u.id, true);
+      await login('off@test.com', 'wrong').expect(401);
+      expect(row(u.id).failed_logins).toBe(1);
+      const res = await login('off@test.com', PW).expect(403);
+      expect(res.body.error).toMatch(/disabled/);
+      expect(row(u.id)).toMatchObject({ failed_logins: 1, last_login_at: null });
+    });
+  });
+
+  describe('temporary passwords', () => {
+    test('a temporary password signs in with mustChangePassword, and /me says so too', async () => {
+      const u = await users.createUser('temp@test.com', PW, 'user', { temporary: true });
+      const res = await login('temp@test.com', PW).expect(200);
+      expect(res.body.user).toMatchObject({ id: u.id, mustChangePassword: true });
+      const me = await as(res.body.token, 'get', '/api/auth/me').expect(200);
+      expect(me.body.user).toMatchObject({ id: u.id, email: 'temp@test.com', mustChangePassword: true, timezone: 'Asia/Singapore' });
+    });
+
+    test('an expired temporary password is refused with its own message, and is not a failure', async () => {
+      const u = await users.createUser('old@test.com', PW, 'user', { temporary: true });
+      db.prepare('UPDATE users SET temp_password_expires_at = ? WHERE id = ?').run(new Date(Date.now() - 1000).toISOString(), u.id);
+      const res = await login('old@test.com', PW).expect(401);
+      expect(res.body.error).toBe('This temporary password has expired. Ask your administrator for a new one.');
+      expect(row(u.id)).toMatchObject({ failed_logins: 0, last_login_at: null });
+      expect(adminEvents()).toEqual([]);
+      // A wrong password is still a wrong password.
+      await login('old@test.com', 'wrong').expect(401);
+      expect(row(u.id).failed_logins).toBe(1);
+    });
+
+    test('until it is replaced every other route is a 403 with a code; the change clears it', async () => {
+      const u = await users.createUser('gate@test.com', PW, 'user', { temporary: true });
+      const { body: { token } } = await login('gate@test.com', PW).expect(200);
+      const gated = await as(token, 'get', '/api/invoices').expect(403);
+      expect(gated.body).toEqual({ error: 'Set a new password to continue.', code: 'password_change_required' });
+      await as(token, 'post', '/api/auth/sign-out-everywhere').expect(403);
+      // The allow-list: what the change-password screen needs.
+      await as(token, 'get', '/api/auth/me').expect(200);
+      await as(token, 'get', '/api/auth/sign-ins').expect(200);
+      await as(token, 'get', '/api/auth/sign-ins?x=1').expect(200);
+      await as(token, 'post', '/api/auth/logout').expect(200);
+      const short = await as(token, 'post', '/api/auth/change-password').send({ currentPassword: PW, newPassword: 'elevenchars' }).expect(400);
+      expect(short.body.error).toBe('Password must be at least 12 characters');
+      const changed = await as(token, 'post', '/api/auth/change-password').send({ currentPassword: PW, newPassword: 'my-own-pass-2026' }).expect(200);
+      expect(row(u.id)).toMatchObject({ must_change_password: 0, temp_password_expires_at: null });
+      await as(changed.body.token, 'get', '/api/invoices').expect(200);
+      const me = await as(changed.body.token, 'get', '/api/auth/me').expect(200);
+      expect(me.body.user.mustChangePassword).toBe(false);
+      const again = await login('gate@test.com', 'my-own-pass-2026').expect(200);
+      expect(again.body.user.mustChangePassword).toBe(false);
+    });
+  });
+
+  describe('password rules at the routes', () => {
+    test('register refuses the email address and a common password, naming the rule', async () => {
+      const email = 'rules@test.com';
+      const register = password => request(serverFor(app)).post('/api/auth/register').send({ email, password });
+      expect((await register('Rules@Test.com').expect(400)).body.error).toBe('Password must not be your email address');
+      expect((await register('qwerty123456').expect(400)).body.error).toBe('That password is too common; choose another');
+      expect((await register('elevenchars').expect(400)).body.error).toBe('Password must be at least 12 characters');
+      await register('correct horse battery staple').expect(201);
+    });
+
+    test('change-password applies the same rules to the new password', async () => {
+      const u = await users.createUser('cp-rules@test.com', PW, 'user');
+      const token = tokenFor(u);
+      const change = newPassword => as(token, 'post', '/api/auth/change-password').send({ currentPassword: PW, newPassword });
+      expect((await change('cp-rules@test.com').expect(400)).body.error).toBe('Password must not be your email address');
+      expect((await change('CP-RULES').expect(400)).body.error).toBe('Password must be at least 12 characters');
+      expect((await change('1q2w3e4r5t6y').expect(400)).body.error).toBe('That password is too common; choose another');
+      await login('cp-rules@test.com', PW).expect(200);
+    });
+  });
+
+  describe('the Account page', () => {
+    test('GET /sign-ins is the caller\'s last 20 sign-in events, newest first, each with the address', async () => {
+      const u = await users.createUser('acct@test.com', PW, 'user');
+      await users.createUser('other@test.com', PW, 'user');
+      await login('other@test.com', 'wrong').expect(401);
+      await login('acct@test.com', 'wrong').expect(401);
+      const { body: { token } } = await login('acct@test.com', PW).expect(200);
+      const res = await as(token, 'get', '/api/auth/sign-ins').expect(200);
+      expect(res.body.events.map(e => e.action)).toEqual(['login.success', 'login.failed']);
+      for (const e of res.body.events) expect(e).toEqual({ at: expect.any(String), action: expect.any(String), ip: expect.any(String) });
+
+      const insert = db.prepare("INSERT INTO admin_events (at, target_user_id, target_email, action, details) VALUES (?, ?, ?, 'login.failed', ?)");
+      for (let i = 0; i < 25; i++) insert.run(new Date(Date.now() + i).toISOString(), u.id, u.email, JSON.stringify({ email: u.email, ip: `10.0.0.${i}` }));
+      const capped = await as(token, 'get', '/api/auth/sign-ins').expect(200);
+      expect(capped.body.events).toHaveLength(20);
+      expect(capped.body.events[0].ip).toBe('10.0.0.24');
+    });
+
+    test('POST /sign-out-everywhere ends the other sessions, keeps this one by its new token, and is recorded as the person\'s own', async () => {
+      const u = await users.createUser('bye@test.com', PW, 'user');
+      const other = await users.createUser('stay@test.com', PW, 'user');
+      const old = tokenFor(u, 2 * HOUR);     // old enough to be due a renewal
+      await as(old, 'get', '/api/auth/me').expect(200);
+      const res = await as(old, 'post', '/api/auth/sign-out-everywhere').expect(200);
+      expect(res.body).toEqual({ token: expect.any(String) });
+      expect(res.headers['x-session-token']).toBeUndefined();   // the renewal predates the cutoff
+      await as(old, 'get', '/api/auth/me').expect(401);
+      await as(res.body.token, 'get', '/api/auth/me').expect(200);
+      await as(tokenFor(other, 5), 'get', '/api/auth/me').expect(200);   // nobody else's session
+      const [e] = adminEvents();
+      expect(e).toMatchObject({ action: 'user.sign_out', actor_id: u.id, actor_email: u.email, target_user_id: u.id, target_email: u.email });
+      await request(serverFor(app)).post('/api/auth/sign-out-everywhere').expect(401);
+    });
   });
 });

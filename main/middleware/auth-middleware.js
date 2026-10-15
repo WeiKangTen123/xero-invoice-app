@@ -146,11 +146,42 @@ function renewSession(res, live, claims) {
   try { res.set(SESSION_TOKEN_HEADER, signSession(live, { renewed: true })); } catch {}
 }
 
+// ── A temporary password must be replaced first ──────────────────────────────
+// An account signed in with a password an admin set (users.js: must_change_
+// password) may do one thing: choose its own. Every other route answers 403
+// with a code the client turns into the change-password screen, and that
+// screen needs only these: the change itself, who am I, sign out, and the
+// account's own sign-in history (the Account page shows it beside the form).
+// Keyed by method and the full path as mounted in index.js, so a router
+// mounted elsewhere, or a GET added to a POST-only path, is gated until it is
+// named here.
+const PASSWORD_CHANGE_ALLOWED = new Set([
+  'POST /api/auth/change-password',
+  'GET /api/auth/me',
+  'POST /api/auth/logout',
+  'GET /api/auth/sign-ins',
+]);
+const PASSWORD_CHANGE_REQUIRED = { error: 'Set a new password to continue.', code: 'password_change_required' };
+
+// Whether this request may run while the account's password is temporary.
+// The query string and a trailing slash are not part of the route.
+function allowedBeforePasswordChange(method, url) {
+  const path = String(url || '').split('?')[0].replace(/\/+$/, '') || '/';
+  return PASSWORD_CHANGE_ALLOWED.has(`${String(method || '').toUpperCase()} ${path}`);
+}
+
 function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '').trim();
   const { user: live, claims, error } = sessionUser(token);
   if (error) return res.status(401).json({ error });
-  req.user = { ...claims, id: live.id, email: live.email, role: live.role };
+  // The 403 comes after every 401: a dead session is a dead session, whatever
+  // the password. A 403 rather than a 401 because the client treats every 401
+  // as a session that has ended and goes back to the login page, which is
+  // exactly where this must not send someone who has just signed in.
+  if (live.must_change_password && !allowedBeforePasswordChange(req.method, req.originalUrl || req.url)) {
+    return res.status(403).json(PASSWORD_CHANGE_REQUIRED);
+  }
+  req.user = { ...claims, id: live.id, email: live.email, role: live.role, mustChangePassword: !!live.must_change_password };
   renewSession(res, live, claims);
   // Throttled to at most one DB write per user per minute — see
   // users.js#touchLastSeen. Failure here must never turn into a 401 — it's
@@ -173,4 +204,5 @@ function requireAdmin(req, res, next) {
 module.exports = {
   requireAuth, requireAdmin, sessionUser, signSession, jwtSecret, jwtSecretProblem, MIN_JWT_SECRET_LENGTH,
   SESSION_TTL_SECONDS, SESSION_RENEW_AFTER_SECONDS, SESSION_TOKEN_HEADER, SESSION_EXPIRED_MESSAGE,
+  allowedBeforePasswordChange, PASSWORD_CHANGE_ALLOWED, PASSWORD_CHANGE_REQUIRED,
 };
