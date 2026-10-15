@@ -17,21 +17,34 @@ const { _parseISODate } = require('./periods');
 //      ageing's total for the same side, which is the Dashboard's headline
 //      Total Receivables (Payables) by another road.
 //
-// All three read what the projection has just read, from the cache, so the
-// check costs no Xero call of its own when the tab is on screen. What they
-// prove is that no account was mismatched or counted twice and no open
-// invoice was lost or doubled on the way to a date. They do not check the
-// dates themselves: those are a forecast, and Xero holds no figure to set
+// The app's side is the projection as the tab shows it, from the reads it was
+// built from. Xero's side is read afresh (force): the Bank Summary for today,
+// and the invoices and credit notes behind the ageing. Set against the same
+// cached reads, the two sides could only ever agree, and a payment entered in
+// Xero since the tab was loaded would never show. So the check costs those
+// reads, the Bank Summary one call and the invoices a call a page with the
+// organisation and the credit notes, unless a Refresh in the last few seconds
+// has just made them (report-cache.js's FORCE_GRACE_MS). A difference may
+// then be Xero having changed since the tab was loaded, and the notes say
+// that Refresh brings it in.
+//
+// What they prove is that no account was mismatched or counted twice and no
+// open invoice was lost or doubled on the way to a date. They do not check
+// the dates themselves: those are a forecast, and Xero holds no figure to set
 // them against.
 //
-// Not cached: it is built from cached reads, and the accounts counted are
-// options a person can change between two looks.
+// Not cached: Xero's side is read fresh each time, and the accounts counted
+// are options a person can change between two looks.
 
 const _skip = (key, label, reason) => ({ key, label, skipped: true, reason, calls: 0 });
 
 const BALANCE_LABEL = 'bank balances against the Bank Summary';
 async function _balanceCheck(userId, tenantId, cm, { timezone, force }) {
-  if (!cm.bank.available) return _skip('balance', BALANCE_LABEL, 'Bank balances could not be read from Xero, so there is nothing to check them against.');
+  if (!cm.bank.available) {
+    return _skip('balance', BALANCE_LABEL, cm.bank.unavailableReason === 'accounts'
+      ? 'Xero\'s list of bank accounts could not be read, so which accounts the opening balance counts is not known and there is no balance to check.'
+      : 'Bank balances could not be read from Xero, so there is nothing to check them against.');
+  }
   const counted = cm.bank.accounts.filter(a => a.included && !a.foreign);
   if (!counted.length) return _skip('balance', BALANCE_LABEL, 'No bank account is counted in the opening balance, so there is no balance to check.');
 
@@ -73,7 +86,8 @@ const SIDES = {
 };
 async function _openCheck(userId, tenantId, cm, side, { timezone, force }) {
   const spec = SIDES[side];
-  // The same day's ageing, from the same cached reads the projection used.
+  // The same day's ageing, read as `force` says: afresh from Xero for the
+  // check (see the top of this file).
   const ageing = await getAgeing(userId, tenantId, { side, timezone, force });
   const mine = cm.open[side];
   const column = { label: cm.today };
@@ -92,12 +106,20 @@ async function _openCheck(userId, tenantId, cm, side, { timezone, force }) {
   };
 }
 
+// Said with any difference: the two sides were read at different times.
+const STALE_NOTE = 'Xero was read afresh for this check, while the tab shows what was read when it was loaded, so a '
+  + 'difference may be Xero having changed since then. Refresh on the tab reads Xero again and brings the change in; '
+  + 'check again after it.';
+
 async function _getCashManagerCheckRaw(userId, tenantId, { timezone = 'UTC', force = false } = {}) {
-  // The tab under check, through its own in-flight sharing and cached reads.
+  // The tab under check, as it is shown: through its own in-flight sharing
+  // and cached reads, unless the person asked for a refresh.
   const cm = await getCashManager(userId, tenantId, { timezone, force });
-  const opts = { timezone, force: false };
+  // Xero's side, always read afresh.
+  const opts = { timezone, force: true };
   // A rejection is the caller's answer: a failure to reach Xero is a failure,
-  // never an "agrees".
+  // never an "agrees". One after the other, so the second side's ageing
+  // finds the invoices the first has just read rather than reading them again.
   const checks = [
     await _balanceCheck(userId, tenantId, cm, opts),
     await _openCheck(userId, tenantId, cm, 'receivables', opts),
@@ -105,7 +127,9 @@ async function _getCashManagerCheckRaw(userId, tenantId, { timezone = 'UTC', for
   ];
   const ran = checks.filter(c => !c.skipped);
   const ok  = ran.length > 0 && ran.every(c => c.ok);
+  const differs = ran.some(c => c.differences.length || c.onlyInXero.length || c.onlyInApp.length);
   const notes = [
+    ...(differs ? [STALE_NOTE] : []),
     ...checks.map(c => (c.skipped ? c.reason : c.proves)),
     'The dates items are placed on are a forecast and are not checked: Xero holds no figure to set them against. '
       + 'Entries and changes made here are this app\'s own and are left out of every comparison.',

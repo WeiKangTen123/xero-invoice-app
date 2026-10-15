@@ -319,10 +319,183 @@ describe('the lists', () => {
   });
 
   test('every basis has a marker and a reason', () => {
-    expect(['override', 'expected', 'planned', 'predicted', 'due', 'scheduled', 'payment', 'manual'].map(h.basisLabel))
-      .toEqual(['Changed here', 'Expected', 'Planned', 'Predicted', 'Due', 'Repeating', 'Payment', 'Your entry']);
+    expect(['override', 'expected', 'planned', 'predicted', 'due', 'scheduled', 'payment', 'banktx', 'manual', 'none'].map(h.basisLabel))
+      .toEqual(['Changed here', 'Expected', 'Planned', 'Predicted', 'Due', 'Repeating', 'Payment', 'Spend/Receive Money dated ahead',
+        'Your entry', 'No date in Xero']);
     expect(h.basisHint('predicted')).toMatch(/payment history|paid before/);
+    expect(h.basisHint('banktx')).toMatch(/Spend Money or Receive Money .* date after today/);
+    expect(h.basisHint('none')).toMatch(/no date .* Set a date on it/);
     expect(h.basisLabel('other')).toBe('');
+  });
+});
+
+describe('Spend/Receive Money dated ahead, and an item with no date in Xero', () => {
+  const banktx = item('banktx:t9', { direction: 'out', source: 'banktx', dateBasis: 'banktx', date: '2026-10-20', dueDate: null, amount: 640,
+                                     reference: 'Insurance', accounts: [{ code: '480', amount: 640 }] });
+  const undated = item('invoice:i20', { date: null, dueDate: null, dateBasis: 'none', overdue: true, amount: 250, contactName: 'Zeta', number: 'INV-0020' });
+  const all = [...items, banktx, undated];
+
+  test('a bank transaction dated ahead is a row like any other, under its own marker', () => {
+    expect(h.contactOf(banktx)).toBe('No contact');
+    expect(h.itemTitle(banktx)).toEqual({ primary: 'Insurance', secondary: '' });
+    expect(h.itemDateText(banktx)).toBe('20 Oct 2026');
+    expect(h.listRows(all, 'out', { filter: 'current' }).groups[0].rows.map(r => r.key))
+      .toEqual(['invoice:b1', 'invoice:b3', 'invoice:b4', 'banktx:t9']);
+  });
+
+  test('no date says so where the date would be, and sorts and groups last without throwing', () => {
+    expect(h.itemDateText(undated)).toBe('No date in Xero');
+    expect(h.itemDateText({ date: null })).toBe('No date in Xero');
+    expect(h.itemDateText(items[0])).toBe('12 Oct 2026');
+    const overdue = h.listRows(all, 'in', { filter: 'overdue' });
+    expect(overdue.groups[0].rows.map(r => r.key)).toEqual(['invoice:i5', 'invoice:i20']);
+    expect(h.listRows(all, 'in', { filter: 'overdue', groupBy: 'due' }).groups.map(g => g.label)).toEqual(['Due 30 Sep 2026', 'No date in Xero']);
+    expect(h.listRows(all, 'in', { filter: 'all', groupBy: 'contact' }).groups.map(g => g.label)).toContain('Zeta');
+    expect(h.listRows(all, 'in', { filter: 'all' }).count).toBe(6);
+    // It stands with the overdue items, never on a day.
+    const withIt = { ...payload, items: all };
+    expect(h.dayItems(withIt, 'overdue').map(i => i.key)).toContain('invoice:i20');
+    expect(h.daySummary(withIt, 'overdue', Infinity).items.map(i => i.key)).toContain('invoice:i20');
+  });
+
+  test('a date can be set on it, and only a date: there is nothing to shift', () => {
+    expect(h.overrideFromForm(undated, { how: 'date', date: '2026-10-30', amount: '250.00' })).toEqual({ body: { key: 'invoice:i20', date: '2026-10-30' }, errors: {} });
+    expect(h.overrideFromForm(undated, { how: 'shift', shift: '7', amount: '250.00' }).errors.shift).toBe('This item has no date to shift');
+    expect(h.overrideFromForm(undated, { how: 'date', date: '', amount: '250.00' }).errors).toEqual({ form: 'Nothing has changed' });
+  });
+});
+
+describe('credit notes netted off an item', () => {
+  const credited = item('invoice:i30', { date: '2026-10-25', dueDate: '2026-10-25', amount: 1200, originalAmount: 1500, creditApplied: 300,
+                                         contactName: 'Eta', number: 'INV-0030' });
+
+  test('the credit taken off, and none on an item that had none', () => {
+    expect(h.creditOf(credited)).toBe(300);
+    expect(h.creditOf(items[0])).toBe(0);
+    expect(h.creditOf({ creditApplied: 0.001 })).toBe(0);
+    expect(h.creditOf({ creditApplied: null })).toBe(0);
+  });
+
+  test('netted credit is not a change made here, even on an item moved to another date', () => {
+    expect(h.amountChanged(credited)).toBe(false);
+    expect(h.amountChanged({ ...credited, overridden: true, dateBasis: 'override' })).toBe(false);
+    expect(h.amountChanged({ ...credited, overridden: true, amount: 1000 })).toBe(true);
+    expect(h.amountChanged(items[6])).toBe(true);
+  });
+
+  test('the list totals the credit netted off what it shows', () => {
+    const list = h.listRows([...items, credited, { ...credited, key: 'invoice:i31', creditApplied: 0.1, amount: 50 }], 'in', { filter: 'current' });
+    expect(list.credit).toBe(300.1);
+    expect(h.listRows(items, 'in', { filter: 'current' }).credit).toBe(0);
+    expect(h.listRows([...items, credited], 'in', { filter: 'excluded' }).credit).toBe(0);
+  });
+});
+
+describe('a bank balance that could not be read', () => {
+  const blind = (reason = 'summary', extra = {}) => ({
+    ...payload,
+    bank: { ...payload.bank, available: false, balance: null, overdraft: null, unavailableReason: reason },
+    tiles: { ...payload.tiles, bankBalance: null },
+    runwayDays: null,
+    series: series.map(s => ({ ...s, balance: null })),
+    ...extra,
+  });
+
+  test('the tile says Unavailable and why, with no overdraft limit or runway beside it', () => {
+    expect(h.tileFigures(blind('summary'))[0]).toMatchObject({
+      key: 'bank', value: null, text: 'Unavailable', note: 'Xero\'s Bank Summary could not be read just now', overdraft: 0, runwayDays: null, tone: undefined,
+    });
+    expect(h.tileFigures(blind('accounts'))[0].note).toBe('Xero\'s list of bank accounts could not be read, so which accounts count is unknown');
+    expect(h.tileFigures(blind(null))[0].note).toBe('Xero\'s bank balances could not be read just now');
+    // A runway the server sent anyway is not read against an unknown balance.
+    expect(h.tileFigures(blind('summary', { runwayDays: 3 }))[0].runwayDays).toBeNull();
+    // Known, it says nothing more than before.
+    expect(h.tileFigures(payload)[0]).toMatchObject({ value: 10000, text: '', note: '' });
+    expect(h.bankKnown(payload)).toBe(true);
+    expect(h.bankUnavailableText(payload)).toBe('');
+  });
+
+  test('a server from before null balances (zero, available false) is still unknown, never a zero balance', () => {
+    const old = { ...payload, bank: { ...payload.bank, available: false, balance: 0, overdraft: 0 }, tiles: { ...payload.tiles, bankBalance: 0 } };
+    expect(h.bankKnown(old)).toBe(false);
+    expect(h.tileFigures(old)[0].value).toBeNull();
+    expect(h.chartBars(old, 30, 'balance').points.every(p => p.balance === null)).toBe(true);
+  });
+
+  test('no balance line is drawn: every balance null, the axis from nothing but zero, and the chart says why', () => {
+    const c = h.chartBars(blind(), 30, 'balance');
+    expect(c.points).toHaveLength(31);
+    expect(c.points.every(p => p.balance === null)).toBe(true);
+    expect(c).toMatchObject({ min: 0, max: 0, overdraft: 0 });
+    expect(c.balanceNote).toBe('No balance line until the bank balance is known: Xero\'s Bank Summary could not be read just now.');
+    // The bars do not need the balance, and say nothing about it.
+    expect(h.chartBars(blind(), 30, 'inout')).toMatchObject({ min: -15000, max: 5000, balanceNote: '' });
+    expect(h.chartBars(payload, 30, 'balance').balanceNote).toBe('');
+    // A day the server left null on a known balance breaks the line there, not at zero.
+    const gap = h.chartBars({ ...payload, series: series.map((s, i) => (i === 3 ? { ...s, balance: null } : s)) }, 30, 'balance');
+    expect(gap.points[3].balance).toBeNull();
+    expect(gap.points[4].balance).toBe(900);
+  });
+
+  test('the hover, the day panel, the table and the calendar leave the balance blank; the table says why', () => {
+    expect(h.daySummary(blind(), TODAY)).toMatchObject({ in: 1200, out: 300, net: 900, balance: null });
+    const t = h.tableRows(blind('accounts'), 30);
+    expect(t.rows[1]).toMatchObject({ date: TODAY, balance: null });
+    expect(t.total).toEqual({ in: 7100, out: 19300, net: -12200, balance: null });
+    expect(t.balanceNote).toBe('Bank balance unavailable: Xero\'s list of bank accounts could not be read, so which accounts count is unknown.');
+    const cells = h.calendarMonths(blind(), 30).flatMap(m => m.weeks.flat()).filter(Boolean);
+    expect(cells.find(c => c.date === TODAY)).toMatchObject({ inWindow: true, net: 900, balance: null });
+  });
+
+  test('the days before today have no balance either, whatever the server worked back', () => {
+    const actuals = [{ date: '2026-10-11', in: 0, out: 100, net: -100, balance: 4000 }];
+    const past = blind('summary', { actualsAvailable: true, actuals, actualItems: [] });
+    expect(h.actualWindow(past).rows[0]).toMatchObject({ date: '2026-10-11', out: 100, balance: null });
+    expect(h.chartBars(past, 30, 'balance').actual[0].balance).toBeNull();
+    expect(h.daySummary(past, '2026-10-11').balance).toBeNull();
+  });
+
+  test('bank options: a failed read is said as one, balances are unavailable, and so is the starting balance', () => {
+    const accounts = payload.bank.accounts;
+    expect(h.bankOptionsNotice({ available: false, unavailableReason: 'accounts', accounts: [] }))
+      .toBe('Xero\'s list of bank accounts could not be read just now. Bank options can be set once it can.');
+    expect(h.bankOptionsNotice({ available: false, unavailableReason: 'summary', accounts: [] }))
+      .toBe('The bank accounts could not be read from Xero just now: its Bank Summary did not answer. Bank options can be set once they can.');
+    expect(h.bankOptionsNotice({ available: false, accounts: [] })).toMatch(/could not be read from Xero just now\. Bank options can be set once they can\.$/);
+    expect(h.bankOptionsNotice({ available: false, unavailableReason: 'summary', accounts }))
+      .toBe('Xero\'s Bank Summary could not be read just now, so the balances are unavailable.');
+    // Only a read that worked can say there are none.
+    expect(h.bankOptionsNotice({ available: true, accounts: [] })).toBe('Xero returned no bank accounts.');
+    expect(h.bankOptionsNotice(payload.bank)).toBe('');
+    expect(h.accountBalance(accounts[0], payload.bank)).toBe(9000);
+    expect(h.accountBalance(accounts[0], { available: false })).toBeNull();
+    expect(h.accountBalance({ balance: null }, payload.bank)).toBeNull();
+    const form = h.bankOptionsForm(accounts);
+    expect(h.bankStart(accounts, form, payload.bank)).toBe(10000);
+    expect(h.bankStart(accounts, form, { available: false })).toBeNull();
+  });
+});
+
+describe('the organisation the tab asks for', () => {
+  const two = { ...payload, tenants: [{ tenantId: 't1' }, { tenantId: 't2' }], activeTenantId: 't2' };
+
+  test('the page\'s choice while it is still connected', () => {
+    expect(h.connectedTenant('t1', payload)).toBe('t1');
+    expect(h.connectedTenant('t1', two)).toBe('t1');
+  });
+
+  test('after a disconnect, the one the server answered for, else the first connected', () => {
+    expect(h.connectedTenant('gone', two)).toBe('t2');
+    expect(h.connectedTenant('gone', { tenants: [{ tenantId: 't3' }, { tenantId: 't4' }], activeTenantId: 'gone' })).toBe('t3');
+    expect(h.connectedTenant('', two)).toBe('t2');
+  });
+
+  test('none when nothing is connected; the page\'s choice before there is a list to check', () => {
+    expect(h.connectedTenant('t1', { connected: false, tenants: [] })).toBe('');
+    expect(h.connectedTenant('t1', { tenants: [] })).toBe('');
+    expect(h.connectedTenant('t1', null)).toBe('t1');
+    expect(h.connectedTenant('', { activeTenantId: 't9' })).toBe('t9');
+    expect(h.connectedTenant('', null)).toBe('');
   });
 });
 
@@ -439,13 +612,30 @@ describe('a day\'s items, the table and the calendar', () => {
   });
 
   test('the table: Overdue first with no balance, a row a day, and the window\'s totals', () => {
-    const { rows, total, days } = h.tableRows(payload, 30);
+    const { rows, total, days, balanceNote } = h.tableRows(payload, 30);
     expect(rows).toHaveLength(32);
     expect(days).toBe(31);
+    expect(balanceNote).toBe('');
     expect(rows[0]).toEqual({ key: 'overdue', date: 'overdue', label: 'Overdue', in: 500, out: 800, net: -300, balance: null });
     expect(rows[1]).toMatchObject({ date: TODAY, label: 'Mon 12 Oct', today: true, balance: 10900 });
     expect(rows[31]).toMatchObject({ date: '2026-11-11', label: 'Wed 11 Nov' });
     expect(total).toEqual({ in: 7100, out: 19300, net: -12200, balance: -2200 });
+  });
+
+  test('the foot counts the days as the heading does and names the rows it adds: today + 30 days under "30 days"', () => {
+    for (const d of [30, 60, 90]) {
+      const t = h.tableRows(payload, d);
+      const w = h.windowOf(payload, d);
+      expect(w.title).toMatch(new RegExp(`^Projected for ${d} days `));
+      expect(t.ahead).toBe(d);
+      expect(t.totalLabel).toBe(`Total, today + ${d} days`);
+      // Today and the d days after it: the rows the totals add up.
+      expect(t.days).toBe(d + 1);
+      expect(t.rows.filter(r => r.key !== 'overdue')).toHaveLength(d + 1);
+    }
+    expect(h.tableRows({ ...payload, series: series.slice(0, 2) }, 30).totalLabel).toBe('Total, today + 1 day');
+    expect(h.tableRows({ ...payload, series: series.slice(0, 1) }, 30).totalLabel).toBe('Total, today');
+    expect(h.tableRows({ ...payload, series: [] }, 30).totalLabel).toBe('Total');
   });
 
   test('the calendar: a month grid from Monday for each month the window touches, figures only inside it', () => {
@@ -648,6 +838,42 @@ describe('the tab and its parts are wired to the helpers and the server', () => 
     expect(modals).toMatch(/api\.delete\(`\/cash-manager\/overrides\?\$\{q\.toString\(\)\}`\)/);
     expect(modals).toMatch(/Reset to Xero&apos;s/);
     expect(modals).toMatch(/Not counted \(foreign currency\)/);
+  });
+
+  test('every request names an organisation still connected, and none connected shows the way to Setup', () => {
+    expect(tab).toMatch(/const tid = connectedTenant\(tenantId, d\);/);
+    expect(tab).not.toMatch(/tenantId \|\| d\?\.activeTenantId/);
+    expect(tab).toMatch(/const connected = d\?\.connected !== false;\s*const ready = !!d && !cash\.error && connected;/);
+    expect(tab).toMatch(/d && !cash\.error && !connected && \(/);
+    expect(tab).toContain('No Xero connection yet');
+    expect(tab).toMatch(/<Link to="\/setup"/);
+  });
+
+  test('a balance that could not be read is Unavailable, with why, and no line or limit is drawn for it', () => {
+    expect(tab).toMatch(/\{t\.value === null \? <span[^>]*>\{t\.text\}<\/span> : fmtCell\(t\.value\)\}/);
+    expect(tab).toMatch(/\? t\.note \|\| \[t\.date,/);
+    expect(chart).toMatch(/\{!c\.balanceNote && <ChartLegend/);
+    expect(chart).toMatch(/\{c\.balanceNote && \(/);
+    expect(chart).toMatch(/c\.points\.length === 1 && c\.points\[0\]\.balance !== null/);
+    expect(chart).toMatch(/\[actualNote, balanceNote\]\.filter\(Boolean\)/);
+    expect(modals).toMatch(/const notice = bankOptionsNotice\(bank\);/);
+    expect(modals).not.toContain('Xero returned no bank accounts');
+    expect(modals).toMatch(/accountBalance\(a, bank\) === null \? 'Unavailable'/);
+    expect(modals).toMatch(/const start = bankStart\(accounts, form, bank\);/);
+  });
+
+  test('the table\'s foot is the helper\'s, not a count of its rows', () => {
+    expect(chart).toMatch(/<td style=\{dateCell\(\{ fontWeight: 700 \}\)\}>\{totalLabel\}<\/td>/);
+    expect(chart).not.toMatch(/Total, \{ahead\} days/);
+  });
+
+  test('credit netted off is shown by the amount and totalled; no date is said where the date would be', () => {
+    for (const src of [chart, lists]) expect(src).toMatch(/after \{fmtCell\(creditOf\(item\)\)\} credit/);
+    expect(lists).toMatch(/\{list\.credit > 0 && \(/);
+    expect(lists).toContain('Credit notes netted off');
+    expect(lists).toMatch(/\{itemDateText\(item\)\}\s*\{item\.date && <BasisMarker/);
+    expect(modals).toMatch(/Now expected: \{itemDateText\(item\)\}/);
+    expect(modals).toMatch(/of credit notes netted off/);
   });
 
   test('the forms validate with the helpers before anything is sent', () => {

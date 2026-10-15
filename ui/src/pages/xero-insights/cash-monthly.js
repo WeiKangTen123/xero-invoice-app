@@ -37,12 +37,18 @@ const SOURCE_HINT = {
   'open bills': 'bills still owed, on their planned dates',
   'repeating': 'invoices and bills repeating templates will raise',
   'payments dated ahead': 'payments recorded in Xero with a later date',
+  'spend/receive money dated ahead': 'Spend Money and Receive Money transactions entered in Xero with a later date',
+  'bank transactions dated ahead': 'Spend Money and Receive Money transactions entered in Xero with a later date',
   'your entries': 'entries made in the Cash Flow Manager',
+  'your bank adjustments': 'the opening adjustments set in the bank options',
 };
 
 const num = v => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const cents = v => Math.round(num(v) * 100);
-const isBlank = v => v === null || v === undefined || v === '';
+// Null, or anything that is not a number, is a figure the server does not
+// have (a Bank Summary month that came back empty, this month's rows when
+// Xero's records could not be read): blank on screen, never a nil.
+const isBlank = v => v === null || v === undefined || v === '' || !Number.isFinite(Number(v));
 
 // ── The controls ────────────────────────────────────────────────────────────
 
@@ -142,7 +148,7 @@ function longDay(iso) {
 // Red below the overdraft limit (or below zero with no limit set), orange
 // below zero within it, nothing at or above zero. Read in cents, so a balance
 // a hair under zero from adding floats is not called overdrawn. A blank cell
-// has no colour.
+// (or one that is not a number) has no colour.
 export function closingTone(value, overdraft = 0) {
   if (isBlank(value)) return null;
   const b = cents(value);
@@ -168,14 +174,21 @@ export function sourcesText(row, index, payload) {
   // The overdue row's source is already a sentence of its own.
   if (row.key === 'overdue') return `${head}: ${raw}`;
   const parts = raw.split(' + ').map(s => s.trim()).filter(Boolean);
-  const lines = parts.map(s => (SOURCE_HINT[s] ? `• ${s}: ${SOURCE_HINT[s]}` : `• ${s}`));
+  const lines = parts.map(s => {
+    const hint = SOURCE_HINT[s.toLowerCase()];
+    return hint ? `• ${s}: ${hint}` : `• ${s}`;
+  });
   return [`${head}, from:`, ...lines].join('\n');
 }
 
 // The grid as the table draws it: a heading before each group, then each
-// line with its cells. A line in a group is indented; the totals and the
-// balances are bold; the overdue line is muted and stands apart. A closing
-// balance carries its colour.
+// line with its cells. A line in a group is indented; the totals, Opening,
+// Net and Closing are bold; the overdue line is muted and stands apart. Your
+// bank adjustments, between Net and Closing, is a balance line but not bold:
+// it is a step on the way to the closing balance, not one of its own. A
+// closing balance carries its colour. A cell with no figure is blank, with no
+// hover text: what a figure was made of says nothing about one that is not
+// there.
 export function gridRows(payload) {
   const rows = Array.isArray(payload?.rows) ? payload.rows.filter(Boolean) : [];
   const cols = columnsOf(payload);
@@ -189,11 +202,12 @@ export function gridRows(payload) {
       strong: STRONG.includes(r.key), indent: grouped && !/_total$/.test(r.key), info: r.group === 'info',
       cells: cols.map((c, i) => {
         const value = r.values?.[i];
+        const blank = isBlank(value);
         return {
           key: c.key, kind: c.kind,
-          value: isBlank(value) ? null : num(value),
+          value: blank ? null : num(value),
           tone: r.key === 'closing' ? closingTone(value, overdraft) : null,
-          title: sourcesText(r, i, payload),
+          title: blank ? '' : sourcesText(r, i, payload),
         };
       }),
     });

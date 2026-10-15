@@ -68,21 +68,32 @@ beforeEach(() => {
 });
 afterEach(() => jest.useRealTimers());
 
-const xeroCalls = () => Object.values(api).filter(f => f && f.mock).reduce((s, f) => s + f.mock.calls.length, 0);
-
 test('the SDK is the mock', () => {
   expect(jest.isMockFunction(AccountingApi)).toBe(true);
 });
 
-test('everything agrees, in the check shape, and with the tab loaded the check costs no Xero call', async () => {
+const callsOf = () => Object.fromEntries(Object.entries(api).filter(([, f]) => f && f.mock)
+  .map(([k, f]) => [k, f.mock.calls.length]).filter(([, c]) => c > 0));
+const added = (before, after) => Object.fromEntries(Object.keys(after)
+  .map(k => [k, after[k] - (before[k] || 0)]).filter(([, c]) => c > 0));
+// Past report-cache.js's FORCE_GRACE_MS, inside the reads' five minutes: the
+// tab's reads are still cached, and a forced read goes to Xero.
+const later = () => jest.setSystemTime(new Date(`${TODAY}T04:01:00Z`));
+
+test('everything agrees, in the check shape; the tab\'s side is its cached projection and Xero\'s side is read afresh', async () => {
   await reports.getCashManager(U, T, { timezone: 'UTC' });
-  const before = xeroCalls();
+  later();
+  const before = callsOf();
   const v = await reports.getCashManagerCheck(U, T, { timezone: 'UTC' });
-  expect(xeroCalls()).toBe(before);
-  expect(v).toMatchObject({ ok: true, calls: 0, period: null, currency: 'SGD' });
+  // The Bank Summary, and the invoices, organisation and credit notes behind
+  // the ageing, once between the two sides; nothing the projection alone
+  // reads, and only reads.
+  expect(added(before, callsOf())).toEqual({ getReportBankSummary: 1, getInvoices: 1, getOrganisations: 1, getCreditNotes: 1 });
+  for (const name of Object.keys(callsOf())) expect(name).toMatch(/^get/);
+  expect(v).toMatchObject({ ok: true, calls: 2, period: null, currency: 'SGD' });
   expect(typeof v.checkedAt).toBe('string');
   expect(v.checks.map(c => [c.key, c.skipped, c.ok, c.calls])).toEqual([
-    ['balance', false, true, 0], ['receivables', false, true, 0], ['payables', false, true, 0],
+    ['balance', false, true, 1], ['receivables', false, true, 1], ['payables', false, true, 0],
   ]);
   for (const c of v.checks) {
     expect(c).toEqual(expect.objectContaining({
@@ -97,6 +108,52 @@ test('everything agrees, in the check shape, and with the tab loaded the check c
   expect(v.checks[1].proves).toMatch(/\(2, 400\.00 before credit notes/);
   expect(v.checks[2].proves).toMatch(/\(1, 120\.00 before credit notes/);
   expect(v.notes.length).toBe(4);
+  expect(v.notes.join(' ')).not.toMatch(/read afresh/);
+});
+
+test('Xero changed since the tab was loaded: the check sees it, against the tab as shown, and says Refresh brings it in', async () => {
+  const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
+  later();
+  // A receipt into Operating and a new invoice, entered in Xero after the tab was loaded.
+  api.getReportBankSummary.mockResolvedValue({ body: { reports: [{ rows: bankRows([['Operating', '1,400.00'], ['Savings', '250.00'], ['USD Account', '9,000.00']]) }] } });
+  const { body: { invoices } } = await api.getInvoices.mock.results[0].value;
+  api.getInvoices.mockResolvedValue({ body: { invoices: [...invoices, inv({ amountDue: 60 })] } });
+  const v = await reports.getCashManagerCheck(U, T, { timezone: 'UTC' });
+  expect(v.ok).toBe(false);
+  expect(v.checks[0].differences).toEqual([
+    { label: 'Operating', column: `Closing ${TODAY}`, app: 1000, xero: 1400, diff: -400 },
+    { label: 'Opening balance, less adjustments made here', column: `Closing ${TODAY}`, app: 1250, xero: 1650, diff: -400 },
+  ]);
+  expect(v.checks[1].differences).toEqual([
+    { label: 'Open sales invoices, amount', column: TODAY, app: 400, xero: 460, diff: -60 },
+    { label: 'Open sales invoices, count', column: TODAY, app: 2, xero: 3, diff: -1 },
+  ]);
+  expect(v.notes[0]).toBe('Xero was read afresh for this check, while the tab shows what was read when it was loaded, so a '
+    + 'difference may be Xero having changed since then. Refresh on the tab reads Xero again and brings the change in; '
+    + 'check again after it.');
+  expect(cm.bank.balance).toBe(1250);
+  // A Refresh brings the change in, and the check agrees again.
+  jest.setSystemTime(new Date(`${TODAY}T04:02:00Z`));
+  const fresh = await reports.getCashManager(U, T, { timezone: 'UTC', force: true });
+  expect(fresh.bank.balance).toBe(1650);
+  expect((await reports.getCashManagerCheck(U, T, { timezone: 'UTC' })).ok).toBe(true);
+});
+
+test('without the list of bank accounts the balance check is skipped and says so', async () => {
+  api.getAccounts.mockRejectedValue(new Error('accounts down'));
+  const v = await reports.getCashManagerCheck(U, T, { timezone: 'UTC' });
+  expect(v.checks[0]).toMatchObject({ key: 'balance', skipped: true, reason: expect.stringMatching(/list of bank accounts could not be read/), calls: 0 });
+  expect(v.checks.filter(c => !c.skipped).map(c => c.key)).toEqual(['receivables', 'payables']);
+});
+
+test('an undated invoice is still one open invoice to the check', async () => {
+  api.getInvoices.mockResolvedValue({ body: { invoices: [inv({ amountDue: 300 }), inv({ amountDue: 25, dueDate: null, date: null })] } });
+  const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
+  // The oldest of Acme's items, so the 50 of credit goes against it first.
+  expect(cm.items.find(i => i.dateBasis === 'none')).toMatchObject({ date: null, overdue: true, originalAmount: 25, creditApplied: 25 });
+  const v = await reports.getCashManagerCheck(U, T, { timezone: 'UTC' });
+  expect(v.checks[1]).toMatchObject({ ok: true });
+  expect(v.checks[1].proves).toMatch(/\(2, 325\.00 before credit notes/);
 });
 
 test('cold, the check reads what the tab reads, once', async () => {

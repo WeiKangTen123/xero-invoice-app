@@ -114,6 +114,51 @@ describe('overdue is by calendar day where the user is', () => {
   });
 });
 
+// How late each contact pays (for the Cash Flow Manager's dates) was measured
+// over the year to today in UTC, inside the shared, timezone-free read: in
+// Singapore before 08:00, an invoice paid that morning was not yet counted,
+// and one paid a year and a day ago still was.
+describe('lateness is measured over the year to today where the user is', () => {
+  const { _getOutstanding } = require('./summary');
+  const paidOn = (due, paid) => inv({ status: 'PAID', amountDue: 0, dueDate: `${due}T00:00:00`, fullyPaidOnDate: `${paid}T00:00:00` });
+
+  test('a payment made this morning in Singapore counts there before it is today in UTC; one read serves both', async () => {
+    fakeNow('2026-10-12T17:30:00Z');   // 01:30 on the 13th in Singapore
+    api.getInvoices.mockResolvedValue({ body: { invoices: [
+      paidOn('2026-09-01', '2026-09-11'),
+      paidOn('2026-10-03', '2026-10-13'),   // today in Singapore, tomorrow in UTC
+      inv({ dueDate: '2026-10-20T00:00:00' }),
+    ] } });
+    const sg   = await _getOutstanding(U, T, { timezone: 'Asia/Singapore' });
+    const utc  = await _getOutstanding(U, T, { timezone: 'UTC' });
+    const none = await _getOutstanding(U, T);
+    expect(sg.lateness).toEqual({ 'ACCREC:c-acme': { days: 10, count: 2, average: 10 } });
+    expect(utc.lateness).toEqual({});
+    expect(none.lateness).toEqual({});
+    expect(calls().invoices).toBe(1);
+    // The open invoices are the same for every reader, and the history they are measured from stays inside.
+    expect(sg.invoices).toEqual(utc.invoices);
+    expect(sg).not.toHaveProperty('paidHistory');
+  });
+
+  test('and at the far end: the year back from Singapore\'s day leaves out a payment UTC\'s year still takes in', async () => {
+    fakeNow('2026-10-12T17:30:00Z');
+    api.getInvoices.mockResolvedValue({ body: { invoices: [
+      paidOn('2025-10-02', '2025-10-12'),   // 365 days before UTC's 12 Oct, 366 before Singapore's 13th
+      paidOn('2026-09-01', '2026-09-11'),
+    ] } });
+    expect((await _getOutstanding(U, T, { timezone: 'UTC' })).lateness).toEqual({ 'ACCREC:c-acme': { days: 10, count: 2, average: 10 } });
+    expect((await _getOutstanding(U, T, { timezone: 'Asia/Singapore' })).lateness).toEqual({});
+  });
+
+  test('the Dashboard\'s summary is the same whatever the lateness', async () => {
+    fakeNow('2026-10-12T17:30:00Z');
+    api.getInvoices.mockResolvedValue({ body: { invoices: [paidOn('2026-10-03', '2026-10-13'), inv({ dueDate: '2026-10-20T00:00:00' })] } });
+    const s = await reports.getSummary(U, T, { timezone: 'Asia/Singapore' });
+    expect(s.kpis).toMatchObject({ totalReceivables: 100, receivablesCount: 1, statusBreakdown: { paid: 1, awaiting: 1, overdue: 0 } });
+  });
+});
+
 // The header showed every open invoice gross while the ageing, and Xero's
 // Balance Sheet, took off the credit customers and suppliers had not yet used,
 // so "Total Receivables" was higher than the ageing it opens.

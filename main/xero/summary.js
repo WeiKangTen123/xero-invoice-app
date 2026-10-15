@@ -296,12 +296,37 @@ function _latenessOf(invoices = [], todayISO = new Date().toISOString().slice(0,
   return out;
 }
 
+// Pure. The paid invoices _latenessOf measures from, cut down to what it
+// reads, so they can be cached beside the open invoices. The year it looks
+// back over ends on today where the reader is, which a read shared by every
+// timezone cannot know, so the measure is taken per request
+// (_getOutstanding) and only these are kept: every paid invoice of the last
+// year and two days, `todayISO` being the UTC day of the fetch. No reader's
+// day is more than a day either side of it, so none loses an invoice its own
+// year takes in.
+function _paidHistoryOf(invoices = [], todayISO) {
+  const today = _parseISODate(todayISO);
+  const since = today ? _fmtISODate(_addDays(today, -(LATENESS_LOOKBACK_DAYS + 2))) : null;
+  const out = [];
+  for (const inv of invoices || []) {
+    if (!inv || inv.status !== 'PAID') continue;
+    if (inv.type !== 'ACCREC' && inv.type !== 'ACCPAY') continue;
+    const dueDate = _day(inv.dueDate), fullyPaidOnDate = _day(inv.fullyPaidOnDate);
+    if (!dueDate || !fullyPaidOnDate || (since && fullyPaidOnDate < since)) continue;
+    out.push({
+      status: 'PAID', type: inv.type, dueDate, fullyPaidOnDate,
+      contact: { contactID: inv.contact?.contactID || null, name: inv.contact?.name || '' },
+    });
+  }
+  return out;
+}
+
 // One read of Xero for the summary and the open invoices behind it, cached as
 // two entries: the figures that do not depend on the day (_summaryBase) and
 // the invoices still owed (_outstandingOf). Neither depends on the day or the
 // timezone, so the /summary route in Singapore and getPerformance's read,
 // which names no timezone, share one fetch and one cache entry; the day is
-// applied per request in getSummary.
+// applied per request in getSummary, and the lateness in _getOutstanding.
 async function _fetchSummaryRaw(userId, tenantId, { force = false } = {}) {
   const key    = `summary:${userId}:${tenantId}`;
   const cached = _cacheGet(key, force);
@@ -335,7 +360,10 @@ async function _fetchSummaryRaw(userId, tenantId, { force = false } = {}) {
     capped: invoices.length >= LIST_PAGE_SIZE * LIST_MAX_PAGES,
     // In the same entry as the open invoices it dates, so the two are always
     // from one fetch: the cash manager never predicts from a stale history.
-    lateness: _latenessOf(invoices, _fmtISODate(_partsFromDate(new Date()))),
+    // The lateness itself was measured here, over the year to today in UTC,
+    // so in Singapore before 08:00 an invoice paid that morning was not yet
+    // counted; it is measured per request from these instead.
+    paidHistory: _paidHistoryOf(invoices, _fmtISODate(_partsFromDate(new Date()))),
   });
   const base = _cacheSet(key, _summaryBase(org, invoices));
   logger.info('Insights summary fetched', { userId, tenantId, invoiceCount: base.invoices.length });
@@ -390,18 +418,22 @@ const getSummary             = _dedupe('getSummary', _getSummaryRaw, { timezone:
 // disagree about what is outstanding. A dashboard has always loaded its summary
 // by the time anyone opens the ageing, so this normally costs no Xero call at
 // all. `cached` says whether this call went to Xero.
-async function _getOutstanding(userId, tenantId, { force = false } = {}) {
+//
+// `lateness` (_latenessOf) is measured over the year to today in `timezone`,
+// UTC when none is named. Only the measure depends on the day, and it is one
+// pass over a year of paid invoices, so it is taken here per request and the
+// cached read stays one per company, whatever the reader's timezone.
+async function _getOutstanding(userId, tenantId, { force = false, timezone = 'UTC' } = {}) {
   const key = _outstandingKey(userId, tenantId);
-  const hit = _cacheGet(key, force);
-  if (hit) return hit;
   // Through the same fetch the /summary route's request makes, so it shares
   // that request when both arrive together, and the summary's cache entry is
   // refreshed with it.
-  const { outstanding } = await _fetchSummary(userId, tenantId, { force });
-  return outstanding;
+  const read = _cacheGet(key, force) || (await _fetchSummary(userId, tenantId, { force })).outstanding;
+  const { paidHistory, ...rest } = read;
+  return { ...rest, lateness: _latenessOf(paidHistory || [], _todayIn(timezone)) };
 }
 
 module.exports = {
-  getSummary, _buildSummary, _summaryBase, _summaryAsOf, _outstandingOf, _getOutstanding, _latenessOf, _contactKey,
+  getSummary, _buildSummary, _summaryBase, _summaryAsOf, _outstandingOf, _getOutstanding, _latenessOf, _paidHistoryOf, _contactKey,
   LATENESS_LOOKBACK_DAYS, LATENESS_MIN_PAID, LATENESS_MAX_DAYS,
 };

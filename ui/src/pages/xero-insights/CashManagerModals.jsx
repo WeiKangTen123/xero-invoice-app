@@ -3,8 +3,8 @@ import Modal from '../../components/Modal';
 import { api } from '../../api/client';
 import { fmtCell, fmtMoney } from '../../utils/format';
 import {
-  bankOptionsBody, bankOptionsForm, bankStart, basisLabel, contactOf, emptyEntryForm, entriesFrom, entryBody,
-  entryFor, entryForm, itemTitle, longDay, overrideFromForm, repeatOptions, validateEntry, weekdayDay,
+  accountBalance, bankOptionsBody, bankOptionsForm, bankOptionsNotice, bankStart, basisLabel, contactOf, creditOf, emptyEntryForm,
+  entriesFrom, entryBody, entryFor, entryForm, itemDateText, itemTitle, longDay, overrideFromForm, repeatOptions, validateEntry, weekdayDay,
 } from './cash-manager';
 
 // The Cash Flow Manager's three dialogs: bank options, an entry of one's own
@@ -58,6 +58,10 @@ export function BankOptionsModal({ bank, tenantId, currency, onClose, onSaved })
   const [error, setError] = useState('');
   const { body, errors } = bankOptionsBody(accounts, form, tenantId);
   const invalid = Object.keys(errors).length > 0;
+  // A read of Xero that failed is said as one, not as an organisation with
+  // no bank accounts; the starting balance waits for the balances.
+  const notice = bankOptionsNotice(bank);
+  const start = bankStart(accounts, form, bank);
 
   function change(id, patch) {
     setForm(f => ({ ...f, [id]: { ...f[id], ...patch } }));
@@ -85,7 +89,7 @@ export function BankOptionsModal({ bank, tenantId, currency, onClose, onSaved })
         <Title sub="Choose the accounts the forecast starts from. An opening adjustment adds to an account's Xero balance, or takes from it with a minus; the overdraft limit is how far below zero the balance line stays orange before it turns red.">
           Bank options
         </Title>
-        {accounts.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Xero returned no bank accounts.</div>}
+        {notice && <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: accounts.length ? 10 : 0 }}>{notice}</div>}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {accounts.map(a => {
             const f = form[a.accountId];
@@ -100,8 +104,8 @@ export function BankOptionsModal({ bank, tenantId, currency, onClose, onSaved })
                            onChange={e => change(a.accountId, { included: e.target.checked })} />
                     {a.name}
                   </label>
-                  <span style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
-                    {fmtMoney(a.balance, a.currency)}
+                  <span style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums', color: accountBalance(a, bank) === null ? 'var(--text-muted)' : 'var(--text-secondary)' }}>
+                    {accountBalance(a, bank) === null ? 'Unavailable' : fmtMoney(a.balance, a.currency)}
                   </span>
                 </div>
                 {a.foreign ? (
@@ -130,7 +134,9 @@ export function BankOptionsModal({ bank, tenantId, currency, onClose, onSaved })
         </div>
         {accounts.length > 0 && (
           <div style={{ fontSize: 12.5, marginTop: 12, color: 'var(--text-secondary)' }}>
-            The forecast starts from <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(bankStart(accounts, form), currency)}</strong>.
+            {start === null
+              ? 'The balance the forecast starts from is unavailable until Xero\'s bank balances can be read.'
+              : <>The forecast starts from <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(start, currency)}</strong>.</>}
           </div>
         )}
         <ErrorLine text={error} />
@@ -300,6 +306,9 @@ export function OverrideModal({ item, tenantId, onClose, onSaved }) {
   const { body, errors } = overrideFromForm(item, form);
   const t = itemTitle(item);
   const xeroAmount = item.originalAmount ?? item.amount;
+  // Credit notes netted off are why the amount below is under Xero's.
+  const credit = creditOf(item);
+  const xeroHint = `Xero's amount: ${fmtCell(xeroAmount)}${credit > 0 ? `, less ${fmtCell(credit)} of credit notes netted off` : ''}`;
   const shifted = form.how === 'shift' && body.date ? body.date : '';
 
   function change(patch) {
@@ -353,7 +362,7 @@ export function OverrideModal({ item, tenantId, onClose, onSaved }) {
             In Xero: {item.dueDate ? `due ${longDay(item.dueDate)}` : 'no due date'} · {fmtCell(xeroAmount)}
           </div>
           <div style={{ color: 'var(--text-muted)' }}>
-            Now expected: {longDay(item.date) || '—'}{basisLabel(item.dateBasis) ? ` (${basisLabel(item.dateBasis)})` : ''}
+            Now expected: {itemDateText(item)}{item.date && basisLabel(item.dateBasis) ? ` (${basisLabel(item.dateBasis)})` : ''}
           </div>
         </div>
 
@@ -373,8 +382,7 @@ export function OverrideModal({ item, tenantId, onClose, onSaved }) {
                    onChange={e => change({ shift: e.target.value })} />
           </Field>
         )}
-        <Field label="Amount" htmlFor="cm-ov-amount" error={errors.amount}
-               hint={`Xero's amount: ${fmtCell(xeroAmount)}`}>
+        <Field label="Amount" htmlFor="cm-ov-amount" error={errors.amount} hint={xeroHint}>
           <input id="cm-ov-amount" className="form-input" inputMode="decimal" value={form.amount} disabled={saving}
                  onChange={e => change({ amount: e.target.value })} />
         </Field>

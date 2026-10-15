@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../../api/client';
 import RetryAlert from '../../components/RetryAlert';
 import { useConfirm } from '../../context/ConfirmContext';
@@ -13,7 +14,7 @@ import { CashCalendar, CashChart, CashTable, DayPanel } from './CashManagerChart
 import { CashList } from './CashManagerLists';
 import { BankOptionsModal, EntryModal, OverrideModal } from './CashManagerModals';
 import CashMonthly from './CashMonthly';
-import { daysOptions, exportQueryFor, modeOptions, readPrefs, tileFigures, viewOptions, windowOf } from './cash-manager';
+import { connectedTenant, daysOptions, exportQueryFor, modeOptions, readPrefs, tileFigures, viewOptions, windowOf } from './cash-manager';
 
 // The Cash Flow Manager, after Xero Analytics' own: what the bank balance is
 // today, what is expected in and out over the next 30, 60 or 90 days, and
@@ -82,9 +83,13 @@ export default function CashManagerTab({ cash, fetchCashManager, tenantId, curre
   const [busyKey, setBusyKey] = useState(null);
 
   const d = cash.data;
-  const ready = !!d && !cash.error;
+  // The server answers connected:false once no organisation is connected (a
+  // disconnect in Setup since the page loaded): there is no forecast to show.
+  const connected = d?.connected !== false;
+  const ready = !!d && !cash.error && connected;
   const cur = d?.organisation?.currency || currency;
-  const tid = tenantId || d?.activeTenantId || '';
+  // The page's organisation only while it is still connected (cash-manager.js).
+  const tid = connectedTenant(tenantId, d);
   const exportQuery = exportQueryFor({ tenantId: tid, days: prefs.days });
 
   function setPref(patch) {
@@ -205,6 +210,18 @@ export default function CashManagerTab({ cash, fetchCashManager, tenantId, curre
         <RetryAlert message={cash.error} onRetry={() => fetchCashManager({ force: true })} busy={cash.status === 'loading'} style={{ marginTop: 14 }} />
       )}
 
+      {/* The page's own "No Xero connection yet", in the tab: an organisation
+          disconnected since the page loaded leaves nothing to forecast. */}
+      {d && !cash.error && !connected && (
+        <div style={{ textAlign: 'center', padding: '36px 16px' }}>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>No Xero connection yet</div>
+          <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 14 }}>
+            No Xero organisation is connected now. Connect one in Setup to see its cash flow forecast.
+          </div>
+          <Link to="/setup" className="btn btn-primary btn-sm">Go to Setup →</Link>
+        </div>
+      )}
+
       {ready && section === 'overview' && (
         <>
           {cur && <div style={{ fontSize: 10.5, color: 'var(--text-muted)', margin: '16px 0 6px' }}>Figures in {cur}</div>}
@@ -212,12 +229,14 @@ export default function CashManagerTab({ cash, fetchCashManager, tenantId, curre
             {tileFigures(d).map(t => (
               <div key={t.key} className="card figure-tile" style={{ flex: 1, minWidth: 170, background: 'var(--bg-secondary)', padding: '12px 14px' }}>
                 <div className="figure-label" style={{ fontSize: 11.5, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 4 }}>{t.label}</div>
+                {/* A balance that could not be read says so, never "-" for
+                    nil, and why under it in place of the limit and runway. */}
                 <div className="figure-value" style={{ fontSize: 20, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: t.tone }}>
-                  {fmtCell(t.value)}
+                  {t.value === null ? <span style={{ fontSize: 16, color: 'var(--text-muted)' }}>{t.text}</span> : fmtCell(t.value)}
                 </div>
                 <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 3, fontVariantNumeric: 'tabular-nums' }}>
                   {t.kind === 'balance'
-                    ? [t.date, t.overdraft > 0 ? `overdraft limit ${fmtCell(t.overdraft)}` : '', t.runwayDays !== null ? `runway ${t.runwayDays} day${t.runwayDays === 1 ? '' : 's'}` : '']
+                    ? t.note || [t.date, t.overdraft > 0 ? `overdraft limit ${fmtCell(t.overdraft)}` : '', t.runwayDays !== null ? `runway ${t.runwayDays} day${t.runwayDays === 1 ? '' : 's'}` : '']
                       .filter(Boolean).join(' · ')
                     : `In ${fmtCell(t.in)} · Out ${fmtCell(t.out)}`}
                 </div>
@@ -266,8 +285,10 @@ export default function CashManagerTab({ cash, fetchCashManager, tenantId, curre
             Figures in {cur || 'the organisation\'s base currency'}; bank accounts in another currency are not counted.
             Each invoice and bill is placed on the date set here if there is one, else its expected (invoice) or planned
             (bill) payment date in Xero, else a date predicted from the contact&apos;s payment history, else its due date.
-            Repeating invoices and bills are placed on their next dates. Overdue items &mdash; due before today and not yet
-            paid &mdash; stand apart, left of today. Further left, behind a solid line, the days before today are what
+            Repeating invoices and bills are placed on their next dates, and Spend or Receive Money entered in Xero with a
+            later date on that date. Overdue items &mdash; due before today and not yet paid, or with no date in Xero
+            &mdash; stand apart, left of today. Credit notes not yet allocated are netted off the same contact&apos;s
+            earliest items. Further left, behind a solid line, the days before today are what
             actually moved: the payments and bank transactions recorded in Xero. Graph days counts the days ahead only.
             {(d.notes || []).map((note, i) => <div key={i}>{note}</div>)}
           </div>

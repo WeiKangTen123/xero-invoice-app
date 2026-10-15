@@ -1,11 +1,12 @@
 import { Fragment, useMemo, useState } from 'react';
 import { fmtCell } from '../../utils/format';
 import {
-  amountChanged, basisHint, basisLabel, contactOf, filterOptions, groupOptions, itemTitle, listRows, longDay,
+  amountChanged, basisHint, basisLabel, contactOf, creditOf, filterOptions, groupOptions, itemDateText, itemTitle, listRows, longDay,
 } from './cash-manager';
 
 // "Manage cash in" and "Manage cash out": every invoice, bill, repeating
-// item, payment and entry the forecast is built from, one side at a time,
+// item, payment, Spend/Receive Money dated ahead and entry the forecast is
+// built from, one side at a time,
 // with the controls to move one to another date, change what it is expected
 // to bring, leave it out, or (for an entry made here) edit or delete it. None
 // of it touches Xero; the tab says so above, and each change's toast again.
@@ -123,9 +124,11 @@ export function CashList({ payload, direction, busyKey, onEdit, onToggleExclude,
                         {item.dueDate ? longDay(item.dueDate) : '—'}
                         {item.overdue && <div style={{ fontSize: 10.5, fontWeight: 600 }}>Overdue</div>}
                       </td>
-                      <td style={{ ...td, whiteSpace: 'nowrap' }}>
-                        {longDay(item.date) || '—'}
-                        <BasisMarker basis={item.dateBasis} />
+                      {/* An item Xero holds no date for says so where the
+                          date would be; its marker would only repeat it. */}
+                      <td style={{ ...td, whiteSpace: 'nowrap', color: item.date ? undefined : 'var(--text-muted)' }}>
+                        {itemDateText(item)}
+                        {item.date && <BasisMarker basis={item.dateBasis} />}
                       </td>
                       <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', fontWeight: 600,
                                    textDecoration: item.excluded ? 'line-through' : undefined }}>
@@ -139,6 +142,13 @@ export function CashList({ payload, direction, busyKey, onEdit, onToggleExclude,
                         {amountChanged(item) && (
                           <div style={{ fontSize: 10.5, fontWeight: 400, color: 'var(--accent)' }} title="Changed in this app. Xero is unchanged.">
                             Xero: {fmtCell(item.originalAmount)}
+                          </div>
+                        )}
+                        {/* The amount is what is still to be paid once the
+                            contact's unallocated credit notes are netted off. */}
+                        {creditOf(item) > 0 && (
+                          <div style={{ fontSize: 10.5, fontWeight: 400, color: 'var(--text-muted)' }} title="Unallocated credit notes netted off this item">
+                            after {fmtCell(creditOf(item))} credit
                           </div>
                         )}
                       </td>
@@ -187,6 +197,13 @@ export function CashList({ payload, direction, busyKey, onEdit, onToggleExclude,
                     <td />
                   </tr>
                 </>
+              )}
+              {list.credit > 0 && (
+                <tr>
+                  <td colSpan={4} style={pinned({ ...td, color: 'var(--text-muted)' })}>Credit notes netted off</td>
+                  <td style={{ ...td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--text-muted)' }}>{fmtCell(list.credit)}</td>
+                  <td />
+                </tr>
               )}
             </tfoot>
           )}

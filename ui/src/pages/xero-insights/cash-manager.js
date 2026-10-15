@@ -36,6 +36,17 @@ const PHONE_WIDTH = 600;
 const PHONE_ACTUAL_DAYS = 7;
 // What the screen says when the server could not read the days before today.
 const PAST_UNAVAILABLE = 'Past cash unavailable';
+// What the screen says when today's bank balance could not be read, by which
+// of Xero's reads failed (the server's bank.unavailableReason), and in place
+// of the figure itself.
+const BANK_UNAVAILABLE = {
+  summary:  'Xero\'s Bank Summary could not be read just now',
+  accounts: 'Xero\'s list of bank accounts could not be read, so which accounts count is unknown',
+};
+const BANK_UNAVAILABLE_ANY = 'Xero\'s bank balances could not be read just now';
+const UNAVAILABLE = 'Unavailable';
+// Where an item's date would be when Xero holds none for it.
+const NO_DATE = 'No date in Xero';
 // A shift of more than ten years is a slip of the keyboard, not a plan.
 const SHIFT_MAX = 3650;
 // The server's bounds: no amount past a billion, no date outside 1990–2100.
@@ -46,6 +57,9 @@ const YEAR_MAX = 2100;
 const num = v => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const mag = v => Math.abs(num(v));
 const cents = v => Math.round(num(v) * 100);
+// A figure the server sends as null when it is not known: it stays null, so
+// it is never shown or drawn as a nil a reader would take for a fact.
+const known = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // ── The choices the controls offer ──────────────────────────────────────────
 
@@ -119,6 +133,40 @@ export function exportQueryFor({ tenantId, days } = {}) {
   if (tenantId) q.tenantId = tenantId;
   q.days = String(normaliseDays(days));
   return q;
+}
+
+// The organisation every request from the tab names. The page's choice holds
+// only while it is still among the organisations connected, which the
+// forecast lists (payload.tenants, read when it was): after a disconnect the
+// page can still hold the one that went, and every change, export and the
+// monthly view sent for it would be refused. Then it is the one the server
+// answered for, else the first connected. '' when none is connected. Before
+// the forecast has landed there is no list to check against, so the page's
+// choice stands.
+export function connectedTenant(tenantId, payload) {
+  if (payload?.connected === false) return '';
+  if (!Array.isArray(payload?.tenants)) return tenantId || payload?.activeTenantId || '';
+  const ids = payload.tenants.map(t => t?.tenantId).filter(Boolean);
+  return [tenantId, payload.activeTenantId].find(id => id && ids.includes(id)) || ids[0] || '';
+}
+
+// ── Today's bank balance ────────────────────────────────────────────────────
+
+// Whether today's bank balance is known. A forecast that says the bank could
+// not be read is not, whatever figure it carries: a server from before the
+// balance was sent as null sent zero then, and a projection from zero is not
+// the company's.
+export function bankKnown(payload) {
+  const bank = payload?.bank || {};
+  if (bank.available === false) return false;
+  return known(payload?.tiles?.bankBalance ?? bank.balance) !== null;
+}
+
+// Why the balance is not known, in a line, by which of Xero's reads failed;
+// '' when it is known.
+export function bankUnavailableText(payload) {
+  if (bankKnown(payload)) return '';
+  return BANK_UNAVAILABLE[payload?.bank?.unavailableReason] || BANK_UNAVAILABLE_ANY;
 }
 
 // ── Dates ───────────────────────────────────────────────────────────────────
@@ -211,6 +259,7 @@ export function actualDaysFor(width) {
 export function actualWindow(payload, count = null) {
   const all = (Array.isArray(payload?.actuals) ? payload.actuals : []).filter(a => a && isIsoDate(a.date));
   const n = count === null || count === undefined ? all.length : Math.max(0, Math.min(all.length, Math.floor(num(count))));
+  const bank = bankKnown(payload);
   const rows = (n ? all.slice(-n) : []).map(a => {
     const cin = mag(a.in), cout = mag(a.out);
     return {
@@ -218,7 +267,7 @@ export function actualWindow(payload, count = null) {
       net: a.net === undefined || a.net === null ? cin - cout : num(a.net),
       // Null when there was no balance today to work back from: a line
       // drawn at zero would be a balance nobody had.
-      balance: a.balance === undefined || a.balance === null ? null : num(a.balance),
+      balance: bank ? known(a.balance) : null,
     };
   });
   return { rows, note: payload?.actualsAvailable === false ? PAST_UNAVAILABLE : '' };
@@ -261,16 +310,19 @@ function modeOf(mode) {
 // stand on a real baseline; under "Bank balance" the overdraft limit is taken
 // in too once the balance goes below zero, so the reader can see how close it
 // runs. `empty` is about the days ahead and the overdue pair only: what moved
-// before today is not something expected.
+// before today is not something expected. With today's balance unknown every
+// balance is null and no line is drawn: one from zero would be a balance
+// nobody had. `balanceNote` says so under "Bank balance", and why.
 export function chartBars(payload, days, mode, { maxLabels = 10, actualDays = null } = {}) {
   const m = modeOf(mode);
   const { series } = windowOf(payload, days);
   const step = labelStep(series.length, maxLabels);
-  const overdraft = Math.max(0, num(payload?.bank?.overdraft));
+  const bank = bankKnown(payload);
+  const overdraft = bank ? Math.max(0, num(payload?.bank?.overdraft)) : 0;
   const points = series.map((s, i) => {
     const cin = mag(s.in), cout = mag(s.out);
     const net = s.net === undefined || s.net === null ? cin - cout : num(s.net);
-    return { date: s.date, label: shortDay(s.date), tick: i % step === 0, in: cin, out: cout, net, balance: num(s.balance) };
+    return { date: s.date, label: shortDay(s.date), tick: i % step === 0, in: cin, out: cout, net, balance: bank ? known(s.balance) : null };
   });
   const past = actualWindow(payload, actualDays);
   const actual = past.rows.map(a => ({ ...a, label: shortDay(a.date) }));
@@ -290,11 +342,12 @@ export function chartBars(payload, days, mode, { maxLabels = 10, actualDays = nu
     values = [...actual, ...points].map(p => p.net);
     if (overdue) values.push(overdue.net);
   } else {
-    values = [...actual.filter(a => a.balance !== null).map(a => a.balance), ...points.map(p => p.balance)];
+    values = [...actual, ...points].filter(p => p.balance !== null).map(p => p.balance);
     if (overdraft > 0 && values.some(v => v < 0)) values.push(-overdraft);
   }
   return {
     mode: m, points, actual, actualNote: past.note, overdue, overdraft, step,
+    balanceNote: m === 'balance' && !bank ? `No balance line until the bank balance is known: ${bankUnavailableText(payload)}.` : '',
     min: Math.min(0, ...values),
     max: Math.max(0, ...values),
     empty: points.every(p => !cents(p.in) && !cents(p.out)) && !(overdue && (cents(overdue.in) || cents(overdue.out))),
@@ -376,6 +429,9 @@ export function signColour(v) {
 // starts from, then the movement today, over the next week, over the rest of
 // the month, and what is overdue. A movement tile's figure is its net; what
 // came in and went out are kept beside it for the line under the figure.
+// A balance that could not be read is null, `text` says "Unavailable" in its
+// place and `note` why, with no overdraft limit or runway beside it: both are
+// read against a balance nobody knows.
 export function tileFigures(payload) {
   const t = payload?.tiles || {};
   const bank = payload?.bank || {};
@@ -385,14 +441,16 @@ export function tileFigures(payload) {
     const value = m.net === undefined || m.net === null ? cin - cout : num(m.net);
     return { key, label, kind: 'movement', value, in: cin, out: cout, tone: signColour(value) };
   };
-  const balance = num(t.bankBalance ?? bank.balance);
-  const overdraft = Math.max(0, num(bank.overdraft));
-  const runway = Number.isFinite(Number(payload?.runwayDays)) && payload?.runwayDays !== null ? Number(payload.runwayDays) : null;
+  const isKnown = bankKnown(payload);
+  const balance = isKnown ? known(t.bankBalance ?? bank.balance) : null;
+  const overdraft = isKnown ? Math.max(0, num(bank.overdraft)) : 0;
+  const runway = isKnown ? known(payload?.runwayDays) : null;
   return [
     {
       key: 'bank', label: 'Today\'s bank balance', kind: 'balance', value: balance,
+      text: isKnown ? '' : UNAVAILABLE, note: bankUnavailableText(payload),
       date: longDay(payload?.today), overdraft, runwayDays: runway,
-      tone: cents(balance) < 0 ? balanceColour(balance, overdraft) : undefined,
+      tone: isKnown && cents(balance) < 0 ? balanceColour(balance, overdraft) : undefined,
     },
     move('today', 'Today\'s movement'),
     move('next7', 'Next 1–7 days movement'),
@@ -431,7 +489,22 @@ export function itemTitle(item) {
   return { primary: text || (item?.source === 'manual' ? 'Your entry' : '—'), secondary: '' };
 }
 
-const byDateThenContact = (a, b) => String(a.date || '').localeCompare(String(b.date || ''))
+// The Expected date column: the day, or for an item Xero holds no date for
+// (the server's dateBasis 'none', which stands with the overdue items until a
+// date is set here) that it has none.
+export function itemDateText(item) {
+  return longDay(item?.date) || (item?.dateBasis === 'none' || !item?.date ? NO_DATE : '—');
+}
+
+// The credit notes the server netted off an item, already taken out of its
+// amount: 0 when none were.
+export function creditOf(item) {
+  return cents(item?.creditApplied) > 0 ? num(item.creditApplied) : 0;
+}
+
+// In date order, an item with no date last, as its group is.
+const byDateThenContact = (a, b) => (!a.date) - (!b.date)
+  || String(a.date || '').localeCompare(String(b.date || ''))
   || contactOf(a).localeCompare(contactOf(b))
   || String(a.number || '').localeCompare(String(b.number || ''));
 
@@ -440,10 +513,12 @@ const sumOf = rows => rows.reduce((s, r) => s + mag(r.amount), 0);
 // One side's list — cash in (invoices, money to come) or cash out (bills) —
 // under a filter, in date order, grouped as asked: not at all, by contact
 // (alphabetical), or by due date (earliest first; entries made here have no
-// due date and are grouped by their own date). Each group carries its total,
-// and the foot three: everything shown, what of it the forecast counts, and
-// what of it is excluded. `counts` is how many items each filter would show,
-// for the filter buttons.
+// due date and are grouped by their own date; an item Xero holds no date for
+// is under its own group, last). Each group carries its total, and the foot
+// three: everything shown, what of it the forecast counts, and what of it is
+// excluded; and `credit`, the credit notes netted off what is shown, which
+// the amounts are already after. `counts` is how many items each filter
+// would show, for the filter buttons.
 export function listRows(items, direction, { filter = 'current', groupBy = 'none' } = {}) {
   const f = FILTERS.includes(filter) ? filter : 'current';
   const g = GROUPS.includes(groupBy) ? groupBy : 'none';
@@ -460,7 +535,7 @@ export function listRows(items, direction, { filter = 'current', groupBy = 'none
       const due = item.dueDate || item.date || '';
       const key = g === 'contact' ? contactOf(item) : due;
       if (!map.has(key)) {
-        const label = g === 'contact' ? key : (due ? `${item.dueDate ? 'Due' : 'Dated'} ${longDay(due)}` : 'No date');
+        const label = g === 'contact' ? key : (due ? `${item.dueDate ? 'Due' : 'Dated'} ${longDay(due)}` : NO_DATE);
         map.set(key, { key, label, rows: [] });
       }
       map.get(key).rows.push(item);
@@ -480,6 +555,7 @@ export function listRows(items, direction, { filter = 'current', groupBy = 'none
     counted: sumOf(shown.filter(i => !i.excluded)),
     excluded: sumOf(excludedRows),
     excludedCount: excludedRows.length,
+    credit: shown.reduce((s, i) => s + cents(creditOf(i)), 0) / 100,
   };
 }
 
@@ -492,8 +568,10 @@ const BASIS = {
   due:       ['Due',          'The due date in Xero: no expected date is set and there is no payment history to predict from.'],
   scheduled: ['Repeating',    'The next date of a repeating invoice or bill in Xero.'],
   payment:   ['Payment',      'The date of a payment recorded in Xero.'],
+  banktx:    ['Spend/Receive Money dated ahead', 'A Spend Money or Receive Money transaction entered in Xero with a date after today, on that date.'],
   manual:    ['Your entry',   'An entry made in this app. Xero is unchanged.'],
   actual:    ['Actual',       'Money that moved: a payment or bank transaction recorded in Xero on this day.'],
+  none:      [NO_DATE,        'Xero holds no date for this item, so it stands with the overdue ones. Set a date on it to place it.'],
 };
 
 export function basisLabel(dateBasis) {
@@ -505,9 +583,11 @@ export function basisHint(dateBasis) {
 }
 
 // Whether an amount was changed here, so the list can say what Xero holds.
+// Credit notes netted off are not a change made here: Xero's amount less
+// them is the amount as Xero has it.
 export function amountChanged(item) {
   return !!item?.overridden && item.originalAmount !== undefined && item.originalAmount !== null
-    && cents(item.originalAmount) !== cents(item.amount);
+    && cents(item.originalAmount) - cents(creditOf(item)) !== cents(item.amount);
 }
 
 // ── The forms ───────────────────────────────────────────────────────────────
@@ -691,17 +771,44 @@ export function bankOptionsBody(accounts, form, tenantId) {
   return { body, errors };
 }
 
+// An account's balance as the dialog shows it: null when the bank could not
+// be read (or the server sent none for it), which the dialog says is
+// unavailable rather than showing nil.
+export function accountBalance(account, bank) {
+  return bank?.available === false ? null : known(account?.balance);
+}
+
 // The balance the forecast would start from with the options as typed: each
 // counted account's Xero balance plus its adjustment. Shown in the dialog so
-// the effect of a change is seen before it is saved.
-export function bankStart(accounts, form) {
+// the effect of a change is seen before it is saved. Null when a counted
+// account's balance is not known: a sum without it is no one's balance.
+export function bankStart(accounts, form, bank) {
   let total = 0;
   for (const a of accounts || []) {
     const f = form?.[a?.accountId];
     if (!f || a.foreign || !f.included) continue;
-    total += num(a.balance) + (amountError(f.openingAdjustment, { allowNegative: true, allowZero: true }) ? 0 : toAmount(f.openingAdjustment));
+    const balance = accountBalance(a, bank);
+    if (balance === null) return null;
+    total += balance + (amountError(f.openingAdjustment, { allowNegative: true, allowZero: true }) ? 0 : toAmount(f.openingAdjustment));
   }
   return Math.round(total * 100) / 100;
+}
+
+// What the dialog says above the accounts, or '' when it has nothing to say.
+// A read that failed is not an organisation with no bank accounts: it says
+// which of Xero's reads failed, and that the options wait for it.
+export function bankOptionsNotice(bank) {
+  const accounts = Array.isArray(bank?.accounts) ? bank.accounts : [];
+  if (bank?.available === false) {
+    const reason = bank.unavailableReason;
+    if (accounts.length) {
+      return reason === 'accounts' ? `${BANK_UNAVAILABLE.accounts}.` : `${BANK_UNAVAILABLE[reason] || BANK_UNAVAILABLE_ANY}, so the balances are unavailable.`;
+    }
+    if (reason === 'accounts') return 'Xero\'s list of bank accounts could not be read just now. Bank options can be set once it can.';
+    if (reason === 'summary') return 'The bank accounts could not be read from Xero just now: its Bank Summary did not answer. Bank options can be set once they can.';
+    return 'The bank accounts could not be read from Xero just now. Bank options can be set once they can.';
+  }
+  return accounts.length ? '' : 'Xero returned no bank accounts.';
 }
 
 // ── A day's items ───────────────────────────────────────────────────────────
@@ -745,7 +852,7 @@ export function daySummary(payload, date, limit = 5) {
     const s = (payload?.series || []).find(x => x.date === date);
     if (s) {
       cin = mag(s.in); cout = mag(s.out); net = s.net === undefined || s.net === null ? cin - cout : num(s.net);
-      balance = num(s.balance);
+      balance = bankKnown(payload) ? known(s.balance) : null;
     } else {
       cin = sumOf(all.filter(i => i.direction === 'in'));
       cout = sumOf(all.filter(i => i.direction === 'out'));
@@ -763,12 +870,17 @@ export function daySummary(payload, date, limit = 5) {
 // The table view: the days before today as they happened, each marked as
 // actual, then the Overdue row (it has no balance — it is not a day), then a
 // row a day ahead, and the window's totals with the balance it ends on. The
-// totals and `days` are the days ahead only: what moved before today is not
-// part of what the window projects. `actualNote` says when the days before
-// today could not be read.
+// totals and `days` (the rows they add up) are today and the days ahead only:
+// what moved before today is not part of what the window projects. Xero's
+// "30 days" is today and the thirty after it, so the heading's 30 is `ahead`
+// and the foot (`totalLabel`) says "today + 30 days" over the 31 rows it
+// adds, where it said "31 days" under a heading of 30. `actualNote` says when
+// the days before today could not be read, `balanceNote` when today's
+// balance could not, and the balance column is blank.
 export function tableRows(payload, days) {
-  const { series } = windowOf(payload, days);
+  const { series, days: ahead } = windowOf(payload, days);
   const past = actualWindow(payload);
+  const bank = bankKnown(payload);
   const od = payload?.tiles?.overdue || {};
   const oin = mag(od.in), oout = mag(od.out);
   const rows = past.rows.map(a => ({ key: `actual:${a.date}`, ...a, label: weekdayDay(a.date) }));
@@ -777,12 +889,16 @@ export function tableRows(payload, days) {
   for (const s of series) {
     const cin = mag(s.in), cout = mag(s.out);
     daysRows.push({ key: s.date, date: s.date, label: weekdayDay(s.date), today: s.date === payload?.today,
-                    in: cin, out: cout, net: s.net === undefined || s.net === null ? cin - cout : num(s.net), balance: num(s.balance) });
+                    in: cin, out: cout, net: s.net === undefined || s.net === null ? cin - cout : num(s.net),
+                    balance: bank ? known(s.balance) : null });
   }
   return {
     rows: [...rows, ...daysRows],
     actualNote: past.note,
+    balanceNote: bank ? '' : `Bank balance unavailable: ${bankUnavailableText(payload)}.`,
     days: daysRows.length,
+    ahead,
+    totalLabel: !daysRows.length ? 'Total' : ahead ? `Total, today + ${ahead} day${ahead === 1 ? '' : 's'}` : 'Total, today',
     total: {
       in: daysRows.reduce((s, r) => s + r.in, 0),
       out: daysRows.reduce((s, r) => s + r.out, 0),
@@ -806,6 +922,7 @@ export function calendarMonths(payload, days) {
   const { series, start: from, end } = windowOf(payload, days);
   if (!series.length || !isIsoDate(from) || !isIsoDate(end)) return [];
   const past = actualWindow(payload).rows;
+  const bank = bankKnown(payload);
   const byDate = new Map([...past, ...series].map(s => [s.date, s]));
   const today = payload?.today || from;
   const start = past.length && past[0].date < from ? past[0].date : from;
@@ -824,7 +941,7 @@ export function calendarMonths(payload, days) {
       cells.push({
         date, day: d, inWindow, today: date === today, actual: !!s?.actual,
         in: cin, out: cout, net: inWindow ? (s.net === undefined || s.net === null ? cin - cout : num(s.net)) : 0,
-        balance: inWindow && s.balance !== null ? num(s.balance) : null,
+        balance: inWindow && bank ? known(s.balance) : null,
       });
     }
     while (cells.length % 7) cells.push(null);

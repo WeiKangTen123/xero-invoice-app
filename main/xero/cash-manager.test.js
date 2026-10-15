@@ -30,7 +30,7 @@ require('../db/migrate').run();
 const reports = require('./reports');
 const {
   _buildCashManager, _repeatingDates, _repeatingDue, _templatesOf, _paymentsOf, _bankTransactionsOf, _manualDates, _todayBalanceWindow,
-  HORIZON_DAYS, ACTUAL_DAYS,
+  HORIZON_DAYS, ACTUAL_DAYS, REPEATING_TTL_MS,
 } = require('./cash-manager');
 const { _outstandingOf, _latenessOf, LATENESS_MAX_DAYS } = require('./summary');
 const { _creditsOf } = require('./ageing');
@@ -195,6 +195,36 @@ describe('overdue', () => {
     expect(onDay(cm, day(2)).in).toBe(100);
   });
 
+  test('an invoice with neither a due date nor an invoice date is undated and overdue: on no day, never on today', () => {
+    const none = inv({ dueDate: null, date: null, amountDue: 40 });
+    const bill = inv({ type: 'ACCPAY', dueDate: undefined, date: undefined, amountDue: 15, contact: { contactID: 's1', name: 'Supplier' } });
+    const dated = inv({ dueDate: null, date: `${day(3)}T00:00:00`, amountDue: 9 });   // no due date: its own date
+    const cm = build({ invoices: [none, bill, dated], credits: [credit({ remainingCredit: 10 })] });
+    expect(item(cm, `invoice:${none.invoiceID}`)).toMatchObject({
+      date: null, dueDate: null, originalDate: null, dateBasis: 'none', overdue: true, beyondHorizon: false,
+    });
+    expect(item(cm, `invoice:${bill.invoiceID}`)).toMatchObject({ date: null, dateBasis: 'none', overdue: true });
+    expect(item(cm, `invoice:${dated.invoiceID}`)).toMatchObject({ date: day(3), dateBasis: 'due', overdue: false });
+    // The credit goes against the undated invoice first: it is the oldest.
+    expect(item(cm, `invoice:${none.invoiceID}`)).toMatchObject({ amount: 30, creditApplied: 10 });
+    expect(cm.tiles.overdue).toEqual({ in: 30, out: 15, net: 15 });
+    expect(cm.tiles.today).toEqual({ in: 0, out: 0, net: 0 });
+    expect(onDay(cm, TODAY)).toMatchObject({ in: 0, out: 0 });
+    expect(onDay(cm, day(3)).in).toBe(9);
+    // Listed first, before anything dated.
+    expect(cm.items.slice(0, 2).map(i => i.date)).toEqual([null, null]);
+    expect(cm.notes.join(' ')).toMatch(/2 invoices and bills carry neither a due date nor an invoice date in Xero, so they are counted as overdue and placed on no day until a date is set here/);
+    expect(cm.open).toEqual({ receivables: { amount: 49, count: 2 }, payables: { amount: 15, count: 1 } });
+  });
+
+  test('a date set here places an undated invoice, and then it is no longer counted as undated', () => {
+    const none = inv({ dueDate: null, date: null });
+    const cm = build({ invoices: [none], overrides: { [`invoice:${none.invoiceID}`]: { date: day(6) } } });
+    expect(item(cm, `invoice:${none.invoiceID}`)).toMatchObject({ date: day(6), dateBasis: 'override', originalDate: null, overdue: false });
+    expect(onDay(cm, day(6)).in).toBe(100);
+    expect(cm.notes.join(' ')).not.toMatch(/neither a due date/);
+  });
+
   test('history can push a not-yet-due invoice past today, and one already late further, never earlier', () => {
     const history = [paid(-60, 10), paid(-40, 10)];
     const late = inv({ dueDate: `${day(-30)}T00:00:00` });
@@ -255,6 +285,21 @@ describe('unallocated credit notes', () => {
     const cm = build({ invoices: [a, b], credits: [credit({ remainingCredit: 30 })], overrides: { [`invoice:${a.invoiceID}`]: { date: day(9) } } });
     expect(item(cm, `invoice:${b.invoiceID}`).creditApplied).toBe(30);
     expect(item(cm, `invoice:${a.invoiceID}`).creditApplied).toBe(0);
+  });
+
+  test('a credit note in another currency with no exchange rate is left out and named, never netted at face value', () => {
+    const a = inv({ amountDue: 500 });
+    const cm = build({ invoices: [a], credits: [
+      credit({ creditNoteNumber: 'CN-USD', remainingCredit: 100, currencyCode: 'USD' }),                       // no rate
+      credit({ creditNoteNumber: 'CN-EUR', remainingCredit: 60, currencyCode: 'EUR', currencyRate: 0 }),        // nor this
+      credit({ creditNoteNumber: 'CN-OK', remainingCredit: 74, currencyCode: 'USD', currencyRate: 0.74 }),      // 100 SGD
+    ] });
+    expect(item(cm, `invoice:${a.invoiceID}`)).toMatchObject({ amount: 400, creditApplied: 100 });
+    const notes = cm.notes.join(' ');
+    expect(notes).toMatch(/1 unallocated credit note is netted .* 100\.00 in all/);
+    expect(notes).toMatch(/2 credit notes in another currency carried no exchange rate and are not netted off: CN-EUR \(Acme, EUR\), CN-USD \(Acme, USD\)\./);
+    // A base-currency note needs no rate.
+    expect(build({ invoices: [a], credits: [credit({ remainingCredit: 30 })] }).notes.join(' ')).not.toMatch(/no exchange rate/);
   });
 
   test('credit notes that could not be read net nothing, and say so', () => {
@@ -388,6 +433,127 @@ describe('future-dated payments', () => {
     expect(item(cm, 'payment:p-usd')).toMatchObject({ amount: 100, currency: 'USD', faceAmount: 74 });
     expect(item(cm, 'payment:p-off')).toBeUndefined();
     expect(cm.notes.join(' ')).toMatch(/1 future payment goes through a bank account left out of the balance/);
+  });
+});
+
+// ── Spend and Receive Money dated after today ───────────────────────────────
+
+describe('Spend and Receive Money dated after today', () => {
+  const list = [...LIST, { accountId: 'a-op2', name: 'Payroll', currency: 'SGD' },
+    { accountId: 'a-sav', name: 'Savings', currency: 'SGD' }, { accountId: 'a-usd', name: 'USD Account', currency: 'USD' }];
+  const bank = { accounts: [
+    { name: 'Operating', closingBalance: 1000 }, { name: 'Payroll', closingBalance: 0 },
+    { name: 'Savings', closingBalance: 0 }, { name: 'USD Account', closingBalance: 0 },
+  ] };
+  const btx = (id, n, type, total, over = {}) => ({
+    bankTransactionID: id, type, status: 'AUTHORISED', date: new Date(`${day(n)}T00:00:00Z`), total,
+    bankAccount: { accountID: 'a-op' }, contact: { name: 'Landlord' }, reference: `ref ${id}`,
+    lineAmountTypes: 'Inclusive', lineItems: [{ accountCode: '400', lineAmount: total }], ...over,
+  });
+  const ahead = (records, over = {}) => build({
+    bank, bankAccounts: list, bankOptions: { 'a-sav': { included: false } },
+    bankTransactions: _bankTransactionsOf(records), ...over,
+  });
+
+  test('each is an item on its own date, in base currency, with its accounts; today\'s and earlier ones are in the balance already', () => {
+    const cm = ahead([
+      btx('rent', 5, 'SPEND', 1200),
+      btx('grant', 9, 'RECEIVE', 500, { contact: { name: 'Agency' }, lineItems: [{ accountCode: '260', lineAmount: 500 }] }),
+      btx('usd', 10, 'SPEND', 74, { currencyCode: 'USD', currencyRate: 0.74, lineItems: [{ accountCode: '400', lineAmount: 74 }] }),
+      btx('today', 0, 'SPEND', 99), btx('past', -2, 'SPEND', 88), btx('gone', 6, 'SPEND', 77, { status: 'DELETED' }),
+    ]);
+    expect(item(cm, 'banktx:rent')).toEqual({
+      key: 'banktx:rent', direction: 'out', source: 'banktx', date: day(5), dueDate: null, dateBasis: 'banktx',
+      amount: 1200, originalAmount: 1200, currency: 'SGD', contactName: 'Landlord', number: '', reference: 'ref rent',
+      overdue: false, excluded: false, overridden: false, entryId: null, originalDate: day(5), faceAmount: 1200, foreign: false,
+      creditApplied: 0, daysLate: null, invoiceDate: null, description: null, beyondHorizon: false,
+      accounts: [{ code: '400', amount: 1200 }], transfer: false,
+    });
+    expect(item(cm, 'banktx:grant')).toMatchObject({ direction: 'in', amount: 500, contactName: 'Agency', accounts: [{ code: '260', amount: 500 }] });
+    expect(item(cm, 'banktx:usd')).toMatchObject({ amount: 100, currency: 'USD', faceAmount: 74, foreign: true, accounts: [{ code: '400', amount: 100 }] });
+    for (const id of ['today', 'past', 'gone']) expect(item(cm, `banktx:${id}`)).toBeUndefined();
+    expect(onDay(cm, day(5)).out).toBe(1200);
+    expect(onDay(cm, day(9)).in).toBe(500);
+    expect(cm.notes.join(' ')).toMatch(/3 Spend and Receive Money transactions recorded in Xero with a date after today are on that date\./);
+    // Only the items carry accounts.
+    expect(build({ invoices: [inv()] }).items[0]).not.toHaveProperty('accounts');
+  });
+
+  test('accounts: each line\'s cash with its tax, put together by code, split to add up to the amount to the cent', () => {
+    const cm = ahead([
+      btx('mixed', 3, 'SPEND', 109, { lineAmountTypes: 'Exclusive', lineItems: [
+        { accountCode: '400', lineAmount: 50, taxAmount: 4.5 }, { accountCode: '420', lineAmount: 40, taxAmount: 3.6 },
+        { accountCode: '400', lineAmount: 10, taxAmount: 0.9 },
+      ] }),
+      btx('thirds', 4, 'SPEND', 100, { lineItems: [1, 2, 3].map(k => ({ accountCode: `40${k}`, lineAmount: 33.33 + (k === 3 ? 0.01 : 0) })) }),
+      btx('discount', 5, 'SPEND', 90, { lineItems: [{ accountCode: '400', lineAmount: 100 }, { accountCode: '410', lineAmount: -10 }] }),
+      btx('bare', 6, 'SPEND', 40, { lineItems: [] }),
+      btx('nolines', 7, 'SPEND', 40, { lineItems: undefined }),
+    ]);
+    expect(item(cm, 'banktx:mixed').accounts).toEqual([{ code: '400', amount: 65.4 }, { code: '420', amount: 43.6 }]);
+    expect(item(cm, 'banktx:thirds').accounts).toEqual([{ code: '401', amount: 33.33 }, { code: '402', amount: 33.33 }, { code: '403', amount: 33.34 }]);
+    // A code that comes to less than nothing takes no share; the rest still adds up.
+    expect(item(cm, 'banktx:discount').accounts).toEqual([{ code: '400', amount: 90 }]);
+    expect(item(cm, 'banktx:bare').accounts).toEqual([]);
+    expect(item(cm, 'banktx:nolines').accounts).toEqual([]);
+    for (const it of cm.items.filter(i => i.accounts.length)) {
+      expect(Math.round(it.accounts.reduce((s, a) => s + a.amount * 100, 0))).toBe(Math.round(it.amount * 100));
+      expect(it.accounts.every(a => a.amount > 0)).toBe(true);
+    }
+  });
+
+  test('an amount set here is split across the same accounts, so they still add up to it; a date set here moves it', () => {
+    const cm = ahead([btx('split', 3, 'SPEND', 300, { lineItems: [{ accountCode: '400', lineAmount: 200 }, { accountCode: '420', lineAmount: 100 }] })], {
+      overrides: { 'banktx:split': { amountCents: 10000, date: day(8) } },
+    });
+    expect(item(cm, 'banktx:split')).toMatchObject({
+      amount: 100, originalAmount: 300, date: day(8), dateBasis: 'override', accounts: [{ code: '400', amount: 66.67 }, { code: '420', amount: 33.33 }],
+    });
+  });
+
+  test('left out with an account the balance leaves out, and said', () => {
+    const cm = ahead([
+      btx('sav', 3, 'SPEND', 20, { bankAccount: { accountID: 'a-sav' } }),
+      btx('usd', 3, 'RECEIVE', 20, { bankAccount: { accountID: 'a-usd' } }),
+      btx('op', 3, 'SPEND', 20),
+    ]);
+    expect(cm.items.map(i => i.key)).toEqual(['banktx:op']);
+    expect(cm.notes.join(' ')).toMatch(/2 Spend and Receive Money transactions dated after today go through a bank account left out of the balance, so they are left out too/);
+  });
+
+  test('a transfer between two counted accounts is left out, both halves; one with an account left out moves the balance counted and is projected', () => {
+    const cm = ahead([
+      // Operating to Payroll, both counted: no money in or out.
+      btx('t-out', 4, 'SPEND-TRANSFER', 800, { lineItems: [] }),
+      btx('t-in', 4, 'RECEIVE-TRANSFER', 800, { bankAccount: { accountID: 'a-op2' }, lineItems: [] }),
+      // Operating to Savings, switched off here: the Savings half goes with
+      // its account, and Operating's 300 out is real.
+      btx('s-out', 6, 'SPEND-TRANSFER', 300, { lineItems: [] }),
+      btx('s-in', 6, 'RECEIVE-TRANSFER', 300, { bankAccount: { accountID: 'a-sav' }, lineItems: [] }),
+      // A spend of the same amount on the same day as a transfer is not taken for its other half.
+      btx('lookalike', 4, 'RECEIVE', 800, { bankAccount: { accountID: 'a-op2' } }),
+    ]);
+    expect(cm.items.map(i => i.key).sort()).toEqual(['banktx:lookalike', 'banktx:s-out']);
+    expect(item(cm, 'banktx:s-out')).toMatchObject({ direction: 'out', amount: 300, transfer: true, accounts: [] });
+    expect(onDay(cm, day(4))).toMatchObject({ in: 800, out: 0 });
+    expect(cm.series[90].balance).toBe(1000 + 800 - 300);
+    const notes = cm.notes.join(' ');
+    expect(notes).toMatch(/1 transfer dated after today between two bank accounts counted in the balance is left out: it moves no money in or out/);
+    expect(notes).toMatch(/One is a transfer with no matching transfer into or out of another account counted in the balance/);
+    expect(notes).toMatch(/1 Spend or Receive Money transaction dated after today goes through a bank account left out/);
+  });
+
+  test('bank transactions that could not be read say so for the days ahead too', () => {
+    expect(build({ bankTransactions: null, bankTransactionsFailure: 'error' }).notes.join(' '))
+      .toMatch(/Spend and Receive Money dated after today could not be read from Xero just now, so none is included/);
+    expect(build({ bankTransactions: null, bankTransactionsFailure: 'scope' }).notes.join(' '))
+      .toMatch(/Spend and Receive Money dated after today could not be read: the Xero connection does not allow it/);
+  });
+
+  test('the actuals still take the same read\'s past records, and none of the ones ahead', () => {
+    const cm = ahead([btx('past', -2, 'SPEND', 88), btx('rent', 5, 'SPEND', 1200)]);
+    expect(cm.actualItems.map(i => i.key)).toEqual(['actual:banktransaction:past']);
+    expect(cm.items.map(i => i.key)).toEqual(['banktx:rent']);
   });
 });
 
@@ -618,11 +784,84 @@ describe('the series, the tiles and the runway', () => {
     expect(build({ entries: [out(0, 100001)] }).runwayDays).toBe(0);
   });
 
-  test('without a bank balance the projection starts from zero, says so, and gives no runway', () => {
+  test('without a bank balance there is no balance anywhere, never a 0; cash in and out still are, and it says so', () => {
     const cm = build({ bank: null, entries: [{ id: 'o', direction: 'out', description: 'x', amountCents: 100, date: day(1), frequency: 'once' }] });
-    expect(cm.bank).toMatchObject({ available: false, balance: 0, accounts: [] });
+    expect(cm.bank).toEqual({ available: false, unavailableReason: 'summary', balance: null, overdraft: null, accounts: [] });
+    expect(cm.tiles.bankBalance).toBeNull();
+    expect(cm.series).toHaveLength(91);
+    expect(cm.series.every(d => d.balance === null)).toBe(true);
+    expect(cm.series[1]).toEqual({ date: day(1), in: 0, out: 1, net: -1, balance: null });
+    expect(cm.tiles.next7).toEqual({ in: 0, out: 1, net: -1 });
     expect(cm.runwayDays).toBeNull();
-    expect(cm.notes.join(' ')).toMatch(/Bank balances could not be read/);
+    expect(cm.notes.join(' ')).toMatch(/Bank balances could not be read from Xero just now, so no opening balance is shown, the running balance is not drawn and no runway is given/);
+    expect(cm.notes.join(' ')).not.toMatch(/starts from zero/);
+  });
+
+  test('with a balance, unavailableReason is null and the running balance is drawn', () => {
+    const cm = build();
+    expect(cm.bank).toMatchObject({ available: true, unavailableReason: null, balance: 1000, overdraft: 0 });
+    expect(cm.series.every(d => d.balance === 1000)).toBe(true);
+  });
+});
+
+// ── The bank account list could not be read ─────────────────────────────────
+
+describe('without Xero\'s list of bank accounts', () => {
+  // 5,000 SGD in Operating and 11,000 USD: without the list, the USD line was
+  // taken for base currency and the balance read 16,000.
+  const bank = { accounts: [
+    { name: 'Operating', closingBalance: 5000, cashReceived: 0, cashSpent: 0, openingBalance: 5000 },
+    { name: 'USD Account', closingBalance: 11000, cashReceived: 0, cashSpent: 0, openingBalance: 11000 },
+  ] };
+  const pay = (id, n, over = {}) => ({
+    paymentID: id, paymentType: 'ACCRECPAYMENT', status: 'AUTHORISED', date: `${day(n)}T00:00:00`, amount: 70,
+    account: { accountID: 'a-usd' }, invoice: { invoiceNumber: `INV-${id}`, contact: { name: 'Acme' } }, ...over,
+  });
+
+  test('no balance is given, never one with a foreign account added in at face value, and the reason is the list', () => {
+    const cm = build({ bank, bankAccounts: null });
+    expect(cm.bank).toEqual({ available: false, unavailableReason: 'accounts', balance: null, overdraft: null, accounts: [] });
+    expect(cm.tiles.bankBalance).toBeNull();
+    expect(cm.series.every(d => d.balance === null)).toBe(true);
+    expect(cm.runwayDays).toBeNull();
+    const notes = cm.notes.join(' ');
+    expect(notes).toMatch(/Xero's list of bank accounts could not be read just now, so which accounts are in base currency and which are switched off here is not known: the bank balance is not shown, the running balance is not drawn and no runway is given/);
+    expect(notes).not.toMatch(/Bank balances could not be read/);
+    // With the list, the same Bank Summary counts the SGD account only.
+    const known = build({ bank, bankAccounts: [...LIST, { accountId: 'a-usd', name: 'USD Account', currency: 'USD' }] });
+    expect(known.bank).toMatchObject({ available: true, unavailableReason: null, balance: 5000 });
+  });
+
+  test('the last thirty days are not shown rather than guessed, and say why', () => {
+    const cm = build({ bank, bankAccounts: null, payments: _paymentsOf([pay('old', -3)]), bankTransactions: [] });
+    expect(cm).toMatchObject({ actualsAvailable: false, actuals: [], actualItems: [], actualsCheck: null });
+    const notes = cm.notes.join(' ');
+    expect(notes).toMatch(/The 30 days before today are not shown either, since money through an account in another currency or switched off here cannot be told apart/);
+    // Both reads succeeded, so it is not said that they failed.
+    expect(notes).not.toMatch(/Past cash could not be read/);
+  });
+
+  test('payments dated ahead are all counted, since none can be checked, and the note says so', () => {
+    const cm = build({ bank, bankAccounts: null, payments: _paymentsOf([pay('ahead', 4)]) });
+    expect(item(cm, 'payment:ahead')).toMatchObject({ amount: 70, date: day(4) });
+    expect(cm.notes.join(' ')).toMatch(/Payments and Spend or Receive Money dated after today are all counted: without the list of bank accounts, the account each goes through could not be checked/);
+    // With the list, the same payment into the USD account is left out.
+    const known = build({ bank, bankAccounts: [...LIST, { accountId: 'a-usd', name: 'USD Account', currency: 'USD' }], payments: _paymentsOf([pay('ahead', 4)]) });
+    expect(item(known, 'payment:ahead')).toBeUndefined();
+    expect(known.notes.join(' ')).not.toMatch(/all counted/);
+  });
+
+  test('with the Bank Summary unreadable but the list read, a foreign or switched-off account\'s records are still left out', () => {
+    const list = [...LIST, { accountId: 'a-usd', name: 'USD Account', currency: 'USD' }, { accountId: 'a-sav', name: 'Savings', currency: 'SGD' }];
+    const cm = build({
+      bank: null, bankAccounts: list, bankOptions: { 'a-sav': { included: false } },
+      payments: _paymentsOf([pay('usd', 4), pay('sav', 5, { account: { accountID: 'a-sav' } }), pay('op', 6, { account: { accountID: 'a-op' } }),
+        pay('usd-past', -2), pay('op-past', -2, { account: { accountID: 'a-op' } })]),
+    });
+    expect(cm.bank.unavailableReason).toBe('summary');
+    expect(cm.items.filter(i => i.source === 'payment').map(i => i.key)).toEqual(['payment:op']);
+    expect(cm.actualsAvailable).toBe(true);
+    expect(cm.actualItems.map(i => i.key)).toEqual(['actual:payment:op-past']);
   });
 });
 
@@ -726,7 +965,9 @@ describe('getCashManager — Xero calls', () => {
     // One read of payments for both sides of today, from the Bank Summary
     // window's first day; one of bank transactions over that same window.
     expect(api.getPayments.mock.calls[0]).toEqual([T, undefined, 'Date >= DateTime(2026,9,11) && Status=="AUTHORISED"', 'Date ASC', 1]);
-    expect(api.getBankTransactions.mock.calls[0]).toEqual([T, undefined, 'Date >= DateTime(2026,9,11) && Date < DateTime(2026,10,13) && Status=="AUTHORISED"', 'Date ASC', 1]);
+    // No upper bound, as the payments: Spend and Receive Money dated ahead
+    // come from the same read.
+    expect(api.getBankTransactions.mock.calls[0]).toEqual([T, undefined, 'Date >= DateTime(2026,9,11) && Status=="AUTHORISED"', 'Date ASC', 1]);
     // The Overview's own balance window, so a Dashboard already open has it.
     expect(api.getReportBankSummary.mock.calls[0]).toEqual([T, '2026-09-11', TODAY]);
     expect(_todayBalanceWindow({ year: 2026, month: 10, day: 12 })).toEqual({ from: '2026-09-11', to: TODAY });
@@ -808,6 +1049,61 @@ describe('getCashManager — Xero calls', () => {
     expect(cm.notes.join(' ')).toMatch(/Bank balances could not be read/);
   });
 
+  test('the Bank Summary failing gives no balance, not a 0, and says the summary was the reason', async () => {
+    api.getReportBankSummary.mockRejectedValueOnce(new Error('bank summary down'));
+    const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
+    expect(cm.bank).toMatchObject({ available: false, unavailableReason: 'summary', balance: null, overdraft: null });
+    expect(cm.tiles.bankBalance).toBeNull();
+    expect(cm.series.every(d => d.balance === null)).toBe(true);
+    expect(cm.series.some(d => d.in > 0)).toBe(true);
+  });
+
+  test('the account list failing gives no balance and no actuals, rather than the USD account counted as base', async () => {
+    api.getAccounts.mockRejectedValueOnce(new Error('accounts down'));
+    const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
+    expect(cm.bank).toMatchObject({ available: false, unavailableReason: 'accounts', balance: null, accounts: [] });
+    expect(cm.tiles.bankBalance).toBeNull();
+    expect(cm.actualsAvailable).toBe(false);
+    expect(cm.notes.join(' ')).toMatch(/Xero's list of bank accounts could not be read just now/);
+    // Not cached as an empty list: the next load asks again and has the balance.
+    const again = await reports.getCashManager(U, T, { timezone: 'UTC' });
+    expect(again.bank).toMatchObject({ available: true, unavailableReason: null, balance: 1000 });
+    expect(again.actualsAvailable).toBe(true);
+  });
+
+  test('the templates are read again as soon as the invoices are, so an invoice raised from one is not counted twice', async () => {
+    const { CACHE_TTL_MS } = require('./report-cache');
+    expect(REPEATING_TTL_MS).toBe(CACHE_TTL_MS);
+    await reports.getCashManager(U, T, { timezone: 'UTC' });
+    jest.setSystemTime(new Date(NOW.getTime() + CACHE_TTL_MS - 1000));
+    await reports.getCashManager(U, T, { timezone: 'UTC' });
+    expect([api.getInvoices.mock.calls.length, api.getRepeatingInvoices.mock.calls.length]).toEqual([1, 1]);
+    jest.setSystemTime(new Date(NOW.getTime() + CACHE_TTL_MS + 1000));
+    await reports.getCashManager(U, T, { timezone: 'UTC' });
+    expect([api.getInvoices.mock.calls.length, api.getRepeatingInvoices.mock.calls.length]).toEqual([2, 2]);
+  });
+
+  test('Spend and Receive Money dated ahead come from the one bank-transactions read, and a longer horizon finds the same read', async () => {
+    api.getBankTransactions.mockResolvedValue({ body: { bankTransactions: [
+      { bankTransactionID: 'past', type: 'SPEND', status: 'AUTHORISED', date: new Date(Date.UTC(2026, 9, 9)), total: 45, bankAccount: { accountID: 'a-op' } },
+      { bankTransactionID: 'gst', type: 'SPEND', status: 'AUTHORISED', date: new Date(Date.UTC(2026, 9, 28)), total: 630,
+        bankAccount: { accountID: 'a-op' }, contact: { name: 'IRAS' }, reference: 'GST Q3', lineAmountTypes: 'NoTax', lineItems: [{ accountCode: '820', lineAmount: 630 }] },
+      { bankTransactionID: 'far', type: 'RECEIVE', status: 'AUTHORISED', date: new Date(Date.UTC(2027, 4, 3)), total: 900,
+        bankAccount: { accountID: 'a-op' }, lineItems: [{ accountCode: '260', lineAmount: 900 }] },
+    ] } });
+    const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
+    expect(cm.items.find(i => i.key === 'banktx:gst')).toMatchObject({
+      source: 'banktx', dateBasis: 'banktx', date: '2026-10-28', direction: 'out', amount: 630, contactName: 'IRAS', reference: 'GST Q3',
+      accounts: [{ code: '820', amount: 630 }],
+    });
+    expect(cm.items.find(i => i.key === 'banktx:far')).toBeUndefined();   // past the 90 days
+    expect(cm.actualItems.map(i => i.key)).toEqual(['actual:banktransaction:past']);
+    // The monthly forecast's year ahead: no second read, and the one past the 90 days is on it.
+    const long = await reports.getCashManager(U, T, { timezone: 'UTC', horizonDays: 300 });
+    expect(api.getBankTransactions).toHaveBeenCalledTimes(1);
+    expect(long.items.find(i => i.key === 'banktx:far')).toMatchObject({ date: '2027-05-03', direction: 'in', amount: 900 });
+  });
+
   test('a failed read of the bank transactions costs the actuals only, and is asked for again next time', async () => {
     api.getBankTransactions.mockRejectedValueOnce(new Error('rate limited'));
     const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
@@ -850,6 +1146,20 @@ describe('getCashManager — Xero calls', () => {
       ['repeating:r1:2026-10-15', '2026-11-01'], ['repeating:r1:2026-11-15', '2026-12-01'], ['repeating:r1:2026-12-15', '2027-01-01'],
     ]);
     expect(cm.items.find(i => i.key === 'payment:p1')).toMatchObject({ date: '2026-10-20', direction: 'in', amount: 90 });
+  });
+
+  test('how late a contact pays is measured to the user\'s today: a payment made this morning in Singapore counts there', async () => {
+    jest.setSystemTime(new Date('2026-10-12T17:30:00Z'));   // the 13th in Singapore
+    api.getInvoices.mockResolvedValue({ body: { invoices: [
+      inv({ dueDate: `${day(5)}T00:00:00`, amountDue: 300 }),
+      paid(-60, 10),
+      inv({ status: 'PAID', amountDue: 0, dueDate: '2026-10-03T00:00:00', fullyPaidOnDate: '2026-10-13T00:00:00' }),
+    ] } });
+    const sg = await reports.getCashManager(U, T, { timezone: 'Asia/Singapore' });
+    const la = await reports.getCashManager(U, T, { timezone: 'America/Los_Angeles' });
+    expect(sg.items.find(i => i.source === 'invoice')).toMatchObject({ dateBasis: 'predicted', daysLate: 10 });
+    expect(la.items.find(i => i.source === 'invoice')).toMatchObject({ dateBasis: 'due', daysLate: null });
+    expect(api.getInvoices).toHaveBeenCalledTimes(1);
   });
 
   test('"today" is the user\'s: Singapore is already on the 13th', async () => {

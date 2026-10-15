@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { fmtCell } from '../../utils/format';
 import {
   actualDaysFor, actualWindow, axisTicks, balanceColour, basisHint, basisLabel, calendarMonths, chartBars, compactAmount, contactOf,
-  currencySymbol, daySummary, itemTitle, signColour, tableRows, weekdayLabels,
+  creditOf, currencySymbol, daySummary, itemTitle, signColour, tableRows, weekdayLabels,
 } from './cash-manager';
 
 // The Cash Flow Manager's three ways of showing the window — a chart, a
@@ -197,7 +197,8 @@ export function CashChart({ payload, days, mode, currency, selected, onSelect })
 
   return (
     <div>
-      <ChartLegend mode={c.mode} overdraft={c.overdraft} />
+      {/* No colours to explain when there is no balance line. */}
+      {!c.balanceNote && <ChartLegend mode={c.mode} overdraft={c.overdraft} />}
       {c.actualNote && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>{c.actualNote}</div>}
       <div ref={boxRef} style={{ position: 'relative', marginTop: 8 }} onMouseLeave={() => setHover(null)}>
         <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ display: 'block', width: '100%', height: H }}
@@ -253,7 +254,7 @@ export function CashChart({ payload, days, mode, currency, selected, onSelect })
           {bars && c.points.map((p, i) => <g key={p.date}>{drawBars(p, cx(i), p.date, 1)}</g>)}
 
           {!bars && line(c.points, cx, 'p', 1)}
-          {!bars && c.points.length === 1 && (
+          {!bars && c.points.length === 1 && c.points[0].balance !== null && (
             <circle cx={cx(0)} cy={y(c.points[0].balance)} r="4" fill={balanceColour(c.points[0].balance, c.overdraft)} />
           )}
           {!bars && hoverBalance !== null && (
@@ -293,6 +294,12 @@ export function CashChart({ payload, days, mode, currency, selected, onSelect })
             Nothing expected in or out in these days.
           </div>
         )}
+        {c.balanceNote && (
+          <div style={{ position: 'absolute', inset: `${padT}px ${padR}px ${padB}px ${padL}px`, display: 'flex', textAlign: 'center',
+                        alignItems: 'center', justifyContent: 'center', pointerEvents: 'none', fontSize: 12.5, color: 'var(--text-muted)', padding: '0 12px' }}>
+            {c.balanceNote}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -304,7 +311,7 @@ export function CashChart({ payload, days, mode, currency, selected, onSelect })
 // its own box both ways, the date column and the headings pinned, as the
 // budget grid.
 export function CashTable({ payload, days, selected, onSelect }) {
-  const { rows, total, actualNote, days: ahead } = tableRows(payload, days);
+  const { rows, total, actualNote, balanceNote, totalLabel } = tableRows(payload, days);
   const overdraft = payload?.bank?.overdraft || 0;
   const head = { padding: '7px 10px', textAlign: 'right', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap',
                  position: 'sticky', top: 0, background: 'var(--bg-card)', zIndex: 1, borderBottom: '1px solid var(--border)' };
@@ -323,11 +330,11 @@ export function CashTable({ payload, days, selected, onSelect }) {
           </tr>
         </thead>
         <tbody>
-          {actualNote && (
-            <tr style={{ borderBottom: '1px solid var(--border)' }}>
-              <td colSpan={5} style={{ padding: '6px 0', color: 'var(--text-muted)' }}>{actualNote}</td>
+          {[actualNote, balanceNote].filter(Boolean).map(note => (
+            <tr key={note} style={{ borderBottom: '1px solid var(--border)' }}>
+              <td colSpan={5} style={{ padding: '6px 0', color: 'var(--text-muted)' }}>{note}</td>
             </tr>
-          )}
+          ))}
           {rows.map(r => {
             const on = selected === r.date;
             const bg = on ? 'var(--accent-subtle)' : r.key === 'overdue' ? 'var(--warning-subtle)' : r.actual ? 'var(--bg-secondary)' : 'var(--bg-card)';
@@ -355,7 +362,7 @@ export function CashTable({ payload, days, selected, onSelect }) {
         </tbody>
         <tfoot>
           <tr style={{ borderTop: '2px solid var(--border)', fontWeight: 700 }}>
-            <td style={dateCell({ fontWeight: 700 })}>Total, {ahead} days</td>
+            <td style={dateCell({ fontWeight: 700 })}>{totalLabel}</td>
             <td style={num()}>{fmtCell(total.in)}</td>
             <td style={num()}>{fmtCell(total.out)}</td>
             <td style={num({ color: signColour(total.net) })}>{fmtCell(total.net)}</td>
@@ -478,6 +485,9 @@ export function DayPanel({ payload, date, onClose, onEdit }) {
                     </td>
                     <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
                       {item.direction === 'out' ? '−' : '+'}{fmtCell(item.amount)}
+                      {creditOf(item) > 0 && (
+                        <div style={{ fontSize: 10.5, fontWeight: 400, color: 'var(--text-muted)' }}>after {fmtCell(creditOf(item))} credit</div>
+                      )}
                     </td>
                     {/* What actually moved is Xero's record, not an item of
                         the forecast, so there is nothing here to change. */}

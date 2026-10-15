@@ -32,7 +32,8 @@ const ROWS = [
   ['out_finance',   'Loan repayments & capex',    'out',     [0, 0, 0, 0, 0]],
   ['out_other',     'Other / unexplained',        'out',     [2000, 500, 4900, 0, 0.5]],
   ['out_total',     'Total cash out',             'out',     [3000, 1500, 5000, 2300, 400.5]],
-  ['net',           'Net movement',               'net',     [2000, 500, -4000, -1300, 1600]],
+  ['net',           'Net movement',               'net',     [2000, 500, -4250, -1300, 1600]],
+  ['adjustment',    'Your bank adjustments',      'balance', [null, null, 250, null, null]],
   ['closing',       'Closing balance',            'balance', [3000, 3500, -500, -1800, 100]],
   ['overdue',       'Overdue, not yet scheduled', 'info',    [null, null, 420, null, null]],
 ];
@@ -93,7 +94,7 @@ describe('reports/cash-monthly-doc — the PDF definition', () => {
     expect(lines.map(r => r[0].text)).toEqual([
       'Opening balance', 'Cash in', 'Customer receipts', 'Other income & refunds', 'Loans & capital', 'Total cash in',
       'Cash out', 'Supplier payments', 'Wages & salaries', 'GST & tax', 'Overheads', 'Loan repayments & capex',
-      'Other / unexplained', 'Total cash out', 'Net movement', 'Closing balance', 'Overdue, not yet scheduled',
+      'Other / unexplained', 'Total cash out', 'Net movement', 'Your bank adjustments', 'Closing balance', 'Overdue, not yet scheduled',
     ]);
     for (const [, label, , values] of ROWS) {
       const r = lines.find(x => x[0].text === label);
@@ -107,6 +108,17 @@ describe('reports/cash-monthly-doc — the PDF definition', () => {
     expect(lines.find(x => x[0].text === 'Total cash in')[1].style).toBe('strong');
     expect(lines.find(x => x[0].text === 'Customer receipts')[1].style).toBe('account');
     expect(lines.find(x => x[0].text === 'Overdue, not yet scheduled')[3]).toMatchObject({ text: '420.00', italics: true });
+  });
+
+  test('the bank adjustments sit between the net movement and the closing balance, plain, in this month only', () => {
+    const lines = body.slice(2);
+    const k = lines.findIndex(x => x[0].text === 'Your bank adjustments');
+    expect(lines[k - 1][0].text).toBe('Net movement');
+    expect(lines[k + 1][0].text).toBe('Closing balance');
+    const adj = lines[k];
+    expect(adj[0]).toEqual({ text: 'Your bank adjustments', style: 'account' });
+    expect(adj.slice(1).map(c => c.text)).toEqual(['', '', '250.00', '', '']);
+    expect(adj.slice(1).every(c => c.style === 'account' && c.color === undefined)).toBe(true);
   });
 
   test('a closing balance below the overdraft limit is red, below zero within it amber, and nothing else is coloured', () => {

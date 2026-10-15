@@ -41,11 +41,17 @@ const BASIS = {
   // from the template's schedule); said the same way as `repeating`.
   scheduled: 'Repeating invoice',
   payment:   'Payment dated ahead',
+  banktx:    'Spend/Receive Money dated ahead',
   manual:    'Your entry',
   override:  'Changed here',
+  // An invoice or bill Xero sent with neither a due date nor an invoice date:
+  // overdue, on no day, until a date is set on it.
+  none:      'No date in Xero',
 };
 // What an item's source says about its date when the payload names no basis.
-const SOURCE_BASIS = { repeating: 'repeating', payment: 'payment', manual: 'manual' };
+const SOURCE_BASIS = { repeating: 'repeating', payment: 'payment', banktx: 'banktx', manual: 'manual' };
+// Printed where an item's date would be when it has none.
+const NO_DATE = BASIS.none;
 
 // A Xero item whose date or amount was changed here is no longer on Xero's
 // date, whatever basis it started from, so "Changed here" wins. An entry the
@@ -139,12 +145,14 @@ function cashSubtitle(payload, span) {
 
 // The five figures across the top, in the screen's order. The bank balance
 // stands alone; each of the others is a net movement, with the cash in and out
-// it is made of printed beneath it.
+// it is made of printed beneath it. A balance that could not be read is null,
+// and is said in words: a dash would read as nil.
 function tiles(payload) {
   const t = payload?.tiles || {};
   const flow = (label, f) => ({ label, amount: f?.net, in: f?.in, out: f?.out });
+  const balance = t.bankBalance !== undefined ? t.bankBalance : payload?.bank?.balance;
   return [
-    { label: "Today's bank balance", amount: t.bankBalance ?? payload?.bank?.balance, balance: true },
+    { label: "Today's bank balance", amount: balance ?? null, balance: true, unavailable: balance === null || balance === undefined },
     flow("Today's movement", t.today),
     flow('Next 1–7 days', t.next7),
     flow('Next 8–30 days', t.next8to30),
@@ -194,6 +202,9 @@ function itemLists(payload, span) {
 }
 
 const EXCLUDED_NOTE = 'Items struck through and marked "excluded" are left out of every figure above.';
+// In the bank balance's place when it could not be read; the notes say why.
+const NO_BALANCE = 'Not available';
+const NO_BALANCE_ASIDE = 'Could not be read from Xero';
 const FOLDED_NOTE   = 'A "?" stands for a character the PDF\'s built-in font cannot draw. '
   + 'The Excel export carries every name as written in Xero.';
 
@@ -231,8 +242,10 @@ function tileTable(payload) {
           { text: t.label, style: 'colHead' },
           // Red only for a balance below zero, as in the daily table: red
           // means overdrawn, and a net outflow is not that.
-          { text: cell(t.amount), fontSize: 12, bold: true, margin: [0, 2, 0, 1], ...(t.balance && num(t.amount) < 0 ? { color: NEGATIVE } : {}) },
-          { text: t.balance ? bankLine : `In ${cell(t.in)} · Out ${cell(t.out)}`, style: 'aside' },
+          t.unavailable
+            ? { text: NO_BALANCE, fontSize: 12, bold: true, margin: [0, 2, 0, 1], color: MUTED }
+            : { text: cell(t.amount), fontSize: 12, bold: true, margin: [0, 2, 0, 1], ...(t.balance && num(t.amount) < 0 ? { color: NEGATIVE } : {}) },
+          { text: t.unavailable ? NO_BALANCE_ASIDE : t.balance ? bankLine : `In ${cell(t.in)} · Out ${cell(t.out)}`, style: 'aside' },
         ],
       }))],
     },
@@ -280,7 +293,7 @@ function itemRow(item, overdue) {
   const desc = latin1(describe(item));
   const day  = overdue ? dueOf(item) : item.date;
   const row  = [
-    text(dayLabel(day) || latin1(day)),
+    text(day ? (dayLabel(day) || latin1(day)) : NO_DATE),
     text(latin1(item.contactName)),
     item.excluded
       ? { text: [{ text: desc, ...off }, { text: `${desc ? '  ' : ''}excluded`, italics: true, color: MUTED }], style: 'account' }
@@ -421,8 +434,11 @@ function summarySheet(wb, payload, subtitle, opts, currency) {
   const columns = [{ label: 'Figure', width: 30 }, { ...MONEY(16), label: 'Amount' }, { ...MONEY(16), label: 'Cash in' }, { ...MONEY(16), label: 'Cash out' }];
   const sheet = addSheet(wb, 'Summary', payload, subtitle, opts, columns);
   for (const t of tiles(payload)) {
-    const row = addRow(sheet, columns, t.balance ? [t.label, num(t.amount), null, null] : [t.label, num(t.amount), num(t.in), num(t.out)]);
-    if (t.balance && num(t.amount) < 0) row.getCell(2).font = { color: { argb: ARGB.negative } };
+    // A balance that could not be read is said in words, not left as a 0 a
+    // reader would sum.
+    const amount = t.unavailable ? NO_BALANCE : num(t.amount);
+    const row = addRow(sheet, columns, t.balance ? [t.label, amount, null, null] : [t.label, amount, num(t.in), num(t.out)]);
+    if (t.balance && !t.unavailable && num(t.amount) < 0) row.getCell(2).font = { color: { argb: ARGB.negative } };
   }
   // The accounts behind the opening balance, as the PDF names them under the
   // figures, with whether each is counted in it.
@@ -515,7 +531,7 @@ function overdueSheet(wb, items, payload, subtitle, opts, currency) {
   for (const it of items) {
     const amount = num(it.amount);
     const row = addRow(sheet, columns, [
-      sheetDate(dueOf(it)), String(it.contactName ?? ''), String(it.number ?? ''), String(it.reference || it.description || ''),
+      sheetDate(dueOf(it)) || NO_DATE, String(it.contactName ?? ''), String(it.number ?? ''), String(it.reference || it.description || ''),
       it.direction === 'in' ? amount : null, it.direction === 'out' ? amount : null, it.excluded ? 'Excluded' : '',
     ]);
     markExcluded(row, it, columns.length);

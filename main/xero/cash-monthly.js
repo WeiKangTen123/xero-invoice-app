@@ -3,7 +3,7 @@ const logger             = require('../utils/logger');
 const { withRetry, isScopeError, xeroErrMsg } = require('./xero-utils');
 const { _cacheGet, _cacheSet, _dedupe, _periodCacheTtl } = require('./report-cache');
 const { _apiFor, _allPages, getAccounts } = require('./report-fetch');
-const { _buildBankSummary, _bankAccountList } = require('./bank');
+const { _buildBankSummary, _bankAccountsOrNull } = require('./bank');
 const { _bankByCurrency, _isInvoicePayment, _isLive, _isReceiptPayment, _isTransfer } = require('./cash-flow');
 const { getCashManager, HORIZON_DAYS, MAX_HORIZON_DAYS } = require('./cash-manager');
 const { getBudgetVariance, _mapWithConcurrency, _norm, _pnlCallPlan, _sectionKind } = require('./budget-variance');
@@ -66,12 +66,17 @@ const ROWS = [
   { key: 'out_other',     label: 'Other / unexplained',      group: 'out' },
   { key: 'out_total',     label: 'Total cash out',           group: 'out' },
   { key: 'net',           label: 'Net movement',             group: 'net' },
+  // The bank options' opening adjustments, this month only: not cash in or
+  // out, but where the Cash Flow Manager's balance starts from.
+  { key: 'adjustment',    label: 'Your bank adjustments',    group: 'balance' },
   { key: 'closing',       label: 'Closing balance',          group: 'balance' },
   { key: 'overdue',       label: 'Overdue, not yet scheduled', group: 'info' },
 ];
 const LINES_IN  = ['in_customer', 'in_other', 'in_finance'];
 const LINES_OUT = ['out_supplier', 'out_wages', 'out_tax', 'out_overheads', 'out_finance', 'out_other'];
 const LINES     = [...LINES_IN, ...LINES_OUT];
+// The rows going out that the budget's cost of sales and expenses fill.
+const BUDGET_OUT = ['out_supplier', 'out_wages', 'out_overheads'];
 
 // What a cell's figure was made from, in the words the screen shows on hover.
 const SRC = {
@@ -84,21 +89,26 @@ const SRC = {
   previous:    'previous closing',
   forecast:    'forecast',
   budget:      'budget',
-  bankMove:    'bank movement',
 };
 const ITEM_SOURCE = {
   invoice:   'open invoices',
   bill:      'open bills',
   repeating: 'repeating',
   payment:   'payments dated ahead',
+  banktx:    'bank transactions dated ahead',
   manual:    'your entries',
 };
 
 // Names that say what an account or an entry is for. Wages are matched on the
 // account's name because Xero types a payroll expense as an ordinary expense
-// outside the regions with payroll account types; tax likewise.
-const WAGES_RE       = /wage|salar|payroll|cpf|bonus|staff/i;
-const TAX_ACCOUNT_RE = /gst|vat|tax/i;
+// outside the regions with payroll account types; tax likewise. "Staff" alone
+// is not wages ("Staff welfare", "Staff training" are overheads): only staff
+// costs, pay, salaries or wages are. Superannuation is wages, as CPF is.
+const WAGES_RE       = /\bwage|salar|payroll|cpf|bonus|\bstaff\s+(costs?|pay|salary|salaries|wages?)\b|\bsuper(annuation)?\b/i;
+// Tax as whole words, payroll taxes with it, so "Private loan" is not VAT and
+// "Union fees" not National Insurance. PAYE, PAYG and NI held for the tax
+// office are tax, not a loan.
+const TAX_ACCOUNT_RE = /\b(gst|vat|tax|taxes|taxation|paye|payg|withholdings?|national\s+insurance|ni|nics?)\b/i;
 // An entry's description is free text, so tax is matched as a word: "Taxi
 // fares" is not tax, "GST Q3" and "BAS" are.
 const TAX_ENTRY_RE   = /\b(gst|vat|bas|paye|payg|iras|hmrc|ato|ird|tax|taxes)\b/i;
@@ -124,10 +134,12 @@ const money = cents => (Math.abs(cents) / 100).toLocaleString('en-US', { minimum
 // ── Which row money belongs in ──────────────────────────────────────────────
 
 // Pure. The row for money moving `direction` ('in' or 'out') through a line
-// coded to `account` (getAccounts' { type, name, systemAccount? }). Money
-// coming back through an expense or income account is a refund, under "Other
-// income & refunds" or "Other / unexplained"; an account this cannot place is
-// "other" too, never guessed into a named row.
+// coded to `account` (getAccounts' { type, name, systemAccount }). A cash
+// sale is a customer's money and a direct cost a supplier's, as the budget
+// fills the months ahead, so the past compares with them; other income is
+// other. Money coming back through an expense or income account is a refund,
+// under "Other income & refunds" or "Other / unexplained"; an account this
+// cannot place is "other" too, never guessed into a named row.
 function _accountCategory(account, direction) {
   const into = direction === 'in';
   if (!account) return into ? 'in_other' : 'out_other';
@@ -140,9 +152,13 @@ function _accountCategory(account, direction) {
   if (sys === 'CREDITORS') return into ? 'in_other' : 'out_supplier';
   if (sys === 'GST' || sys === 'GSTONIMPORTS') return into ? 'in_other' : 'out_tax';
   if (sys === 'WAGEPAYABLES') return into ? 'in_other' : 'out_wages';
-  if (INCOME_TYPES.has(type)) return into ? 'in_other' : 'out_other';
+  if (INCOME_TYPES.has(type)) return into ? (type === 'OTHERINCOME' ? 'in_other' : 'in_customer') : 'out_other';
   if (WAGE_TYPES.has(type))   return into ? 'in_other' : 'out_wages';
-  if (EXPENSE_TYPES.has(type)) return into ? 'in_other' : WAGES_RE.test(name) ? 'out_wages' : 'out_overheads';
+  if (EXPENSE_TYPES.has(type)) {
+    if (into) return 'in_other';
+    if (WAGES_RE.test(name)) return 'out_wages';
+    return type === 'DIRECTCOSTS' ? 'out_supplier' : 'out_overheads';
+  }
   if (type === 'PAYGLIABILITY') return into ? 'in_other' : 'out_tax';
   if (type === 'CURRLIAB') {
     // A GST refund from the tax office comes in through the same account the
@@ -175,10 +191,24 @@ function _entryCategory(description) {
   return 'out_overheads';
 }
 
+// Pure. A bank transaction dated ahead's lines ({ code, amount }, in base
+// currency) in cents, their codes as `accountsByCode` keys them, and whether
+// the item can be split by them: not when a line is below nothing, or when
+// they do not add up to the item's own amount (an amount changed here, say).
+function _itemLines(item, cents) {
+  const lines = (Array.isArray(item?.accounts) ? item.accounts : [])
+    .map(l => ({ code: String(l?.code || '').toUpperCase(), cents: toCents(l?.amount) }))
+    .filter(l => l.cents);
+  if (!lines.length) return { lines, whole: false };
+  return { lines, whole: !lines.some(l => l.cents < 0) && sum(lines.map(l => l.cents)) === cents };
+}
+
 // Pure. The row a Cash Flow Manager item lands in. Repeating invoices and
 // payments dated ahead are trade, a customer's or a supplier's, by their
-// direction; an entry made here coming in is other income.
-function _itemCategory(item) {
+// direction; an entry made here coming in is other income. A bank
+// transaction dated ahead goes by the account its largest line is coded to
+// (see _itemParts for its split), or is other with no line to go by.
+function _itemCategory(item, accountsByCode = new Map()) {
   const into = item?.direction === 'in';
   switch (item?.source) {
     case 'invoice':   return into ? 'in_customer' : 'out_supplier';
@@ -186,8 +216,28 @@ function _itemCategory(item) {
     case 'repeating':
     case 'payment':   return into ? 'in_customer' : 'out_supplier';
     case 'manual':    return into ? 'in_other' : _entryCategory(item.description || item.reference);
+    case 'banktx': {
+      const { lines } = _itemLines(item, toCents(item.amount));
+      if (!lines.length) return into ? 'in_other' : 'out_other';
+      const largest = lines.reduce((a, b) => (Math.abs(b.cents) > Math.abs(a.cents) ? b : a));
+      return _accountCategory(accountsByCode.get(largest.code) || null, into ? 'in' : 'out');
+    }
     default:          return into ? 'in_other' : 'out_other';
   }
+}
+
+// Pure. A Cash Flow Manager item as cents under rows. A bank transaction
+// dated ahead is split by its lines, each under the row of the account it is
+// coded to, as a past one is; when its lines do not add up to its amount it
+// goes whole under its largest line's row. Everything else is one row.
+function _itemParts(item, accountsByCode = new Map()) {
+  const cents = toCents(item?.amount);
+  if (item?.source === 'banktx') {
+    const { lines, whole } = _itemLines(item, cents);
+    const dir = item.direction === 'in' ? 'in' : 'out';
+    if (whole) return lines.map(l => ({ row: _accountCategory(accountsByCode.get(l.code) || null, dir), cents: l.cents }));
+  }
+  return [{ row: _itemCategory(item, accountsByCode), cents }];
 }
 
 // ── The records ─────────────────────────────────────────────────────────────
@@ -250,6 +300,20 @@ function _allocate(totalCents, weights) {
   });
 }
 
+// Pure. `totalCents` split across `weights` in proportion, in whole cents,
+// each share rounded down and the cents that leaves over put on the largest
+// weight, so the shares add up to exactly the total and no row is ever below
+// nothing. Null when the weights add to nothing.
+function _splitToLargest(totalCents, weights) {
+  const whole = sum(weights);
+  if (!whole) return null;
+  const shares = weights.map(w => Math.floor((totalCents * w) / whole));
+  let largest = 0;
+  weights.forEach((w, k) => { if (w > weights[largest]) largest = k; });
+  shares[largest] += totalCents - sum(shares);
+  return shares;
+}
+
 // Pure. A bank transaction as cents under rows, in base currency. A customer's
 // or supplier's overpayment or prepayment is trade money whatever its lines
 // say. A transaction with no lines to go by is other.
@@ -267,16 +331,22 @@ function _bankTransactionParts(t, { accountsByCode, accountsById, base }) {
   });
 }
 
-// Pure. What moved in each month from `fromISO` to `toISO`: cents under each
-// row with the records it came from, and transfers between bank accounts kept
-// apart, since one between two counted accounts is no money in or out. `keep`
-// says whether a record went through a counted bank account.
-function _movementByMonth({ payments = [], bankTransactions = [], accounts = [], base = '', keep = () => true, fromISO, toISO }) {
+// Pure. The chart of accounts by code (upper case) and by Xero id.
+function _accountMaps(accounts = []) {
   const accountsByCode = new Map(), accountsById = new Map();
   for (const a of accounts || []) {
     if (a?.code) accountsByCode.set(String(a.code).toUpperCase(), a);
     if (a?.accountId) accountsById.set(a.accountId, a);
   }
+  return { accountsByCode, accountsById };
+}
+
+// Pure. What moved in each month from `fromISO` to `toISO`: cents under each
+// row with the records it came from, and transfers between bank accounts kept
+// apart, since one between two counted accounts is no money in or out. `keep`
+// says whether a record went through a counted bank account.
+function _movementByMonth({ payments = [], bankTransactions = [], accounts = [], base = '', keep = () => true, fromISO, toISO }) {
+  const { accountsByCode, accountsById } = _accountMaps(accounts);
   const out = new Map();
   const at = key => {
     if (!out.has(key)) out.set(key, { rows: {}, sources: {}, transfersIn: 0, transfersOut: 0 });
@@ -310,9 +380,12 @@ function _movementByMonth({ payments = [], bankTransactions = [], accounts = [],
 // Pure. A Bank Summary cut to the accounts the Cash Flow Manager counts: base
 // currency (see cash-flow.js#_bankByCurrency) and not switched off in its bank
 // options, matched by Xero id or, for an account the list does not name, by
-// name, as the Cash Flow Manager matches them. In cents.
+// name, as the Cash Flow Manager matches them. In cents. Null for a summary
+// with no account lines at all: that is no balance, not a balance of nil.
+// Lines that are all switched off or foreign are a nil balance of the
+// accounts chosen to count, as on the Cash Flow Manager.
 function _countedBank(bank, bankAccounts = [], base = '', bankOptions = {}) {
-  if (!bank) return null;
+  if (!bank || !(bank.accounts || []).length) return null;
   const byCur = _bankByCurrency(bank, bankAccounts, base);
   const lines = byCur.accounts.filter(a => bankOptions?.[a.accountId || `name:${a.name}`]?.included !== false);
   const total = field => lines.reduce((s, a) => s + toCents(a[field]), 0);
@@ -324,7 +397,8 @@ function _countedBank(bank, bankAccounts = [], base = '', bankOptions = {}) {
 }
 
 // Pure. The bank accounts the records of which are left out: another
-// currency, or switched off in the bank options.
+// currency, or switched off in the bank options. An account switched off by
+// its Xero id is left out even when the list could not be read (null).
 function _leftOutIds(bankAccounts = [], base = '', bankOptions = {}) {
   const out = new Set();
   const b = String(base || '').toUpperCase();
@@ -332,6 +406,9 @@ function _leftOutIds(bankAccounts = [], base = '', bankOptions = {}) {
     if (!a?.accountId) continue;
     const cur = String(a.currency || '').toUpperCase();
     if ((b && cur && cur !== b) || bankOptions?.[a.accountId]?.included === false) out.add(a.accountId);
+  }
+  for (const [id, o] of Object.entries(bankOptions || {})) {
+    if (o?.included === false && !id.startsWith('name:')) out.add(id);
   }
   return out;
 }
@@ -373,6 +450,15 @@ function _budgetByMonth(budget, accounts = []) {
   return { byMonth, left };
 }
 
+// Pure. Whether the budget holds any figure, of any line, for the months
+// `keys`: a budget set up in Xero but left at nought fills nothing.
+function _budgetHasFigures(budget, keys = []) {
+  if (!budget || budget.budgetMissing) return false;
+  const wanted = new Set(keys);
+  return (budget.months || []).some((m, i) => wanted.has(m?.key)
+    && (budget.rows || []).some(r => r?.kind === 'account' && toCents(r.monthly?.[i]?.budget) !== 0));
+}
+
 // ── The forecast ────────────────────────────────────────────────────────────
 
 // Pure. The months shown, `past` before today's, today's, and `future` after.
@@ -408,7 +494,8 @@ function _monthlySpan({ past, future, fill } = {}) {
 // not be read; `currentBank` this month's to today, read only when no past
 // month is shown to open it. `payments` and `bankTransactions` are the
 // records from the first month shown to today, null when either could not be
-// read; `accounts` the chart of accounts, null likewise. `budget` is
+// read; `accounts` the chart of accounts, null likewise; `bankAccounts` the
+// bank account list, null when it could not be read. `budget` is
 // getBudgetVariance's payload over the months ahead, null when not asked for
 // or not read (`budgetFailure` says which: 'scope' or 'error').
 function _buildCashMonthly({
@@ -441,6 +528,12 @@ function _buildCashMonthly({
 
   // ── What moved, from the first month shown to today.
   const recordsRead = payments !== null && bankTransactions !== null;
+  // Without the bank account list (null) which Bank Summary line is which
+  // account, and which are in another currency, is not known: the balances
+  // read from it are left blank rather than guessed.
+  const listRead = bankAccounts !== null;
+  const countBank = raw => (listRead ? _countedBank(raw, bankAccounts, base, bankOptions) : null);
+  const { accountsByCode } = _accountMaps(accounts);
   const leftOut = _leftOutIds(bankAccounts, base, bankOptions);
   const bankIds = new Set((bankAccounts || []).map(a => a?.accountId).filter(Boolean));
   // A record through an account the balance leaves out, or through an account
@@ -468,13 +561,15 @@ function _buildCashMonthly({
 
   // ── The months before this one, as they happened.
   const ties = [];
-  const unreadBank = [];
+  const unreadBank = [], emptyBank = [];
+  const pastBank = [];
   let prevBankClosing = null;
   for (let i = 0; i < cur; i++) {
     const m = months[i];
-    const b = _countedBank(bankMonths[i], bankAccounts, base, bankOptions);
+    const b = pastBank[i] = countBank(bankMonths[i]);
     const mv = moved ? (moved.get(m.key) || empty) : null;
-    if (!b) unreadBank.push(m.label);
+    if (listRead && !bankMonths[i]) unreadBank.push(m.label);
+    else if (listRead && !b) emptyBank.push(m.label);
     if (mv) {
       const catIn = sum(Object.entries(mv.rows).filter(([k]) => LINES_IN.includes(k)).map(([, v]) => v));
       const catOut = sum(Object.entries(mv.rows).filter(([k]) => LINES_OUT.includes(k)).map(([, v]) => v));
@@ -522,41 +617,46 @@ function _buildCashMonthly({
 
   // ── This month: what has moved to today, then what is expected after it.
   const bank = cm?.bank || {};
-  const counted = (bank.accounts || []).filter(a => a && a.included && !a.foreign);
-  const todayRaw = bank.available ? sum(counted.map(a => toCents(a.balance))) : null;
-  const adjustment = bank.available ? sum(counted.map(a => toCents(a.openingAdjustment))) : 0;
+  const countedToday = (bank.accounts || []).filter(a => a && a.included && !a.foreign);
+  const todayRaw = bank.available ? sum(countedToday.map(a => toCents(a.balance))) : null;
+  // The bank options' opening adjustments, which the Cash Flow Manager starts
+  // from, so this forecast starts from the same balance. They are not cash
+  // in or out, so they are a line of their own; unknown without the bank.
+  const adjustment = bank.available ? sum(countedToday.map(a => toCents(a.openingAdjustment))) : null;
+  let currentOpeningGap = null;
   {
     const i = cur;
     if (i > 0 && values.closing[i - 1] !== null) {
       values.opening[i] = values.closing[i - 1];
       addSources('opening', i, sources.closing[i - 1]);
     } else if (i === 0) {
-      const cb = _countedBank(currentBank, bankAccounts, base, bankOptions);
+      const cb = countBank(currentBank);
       if (cb) { values.opening[i] = cb.opening; sources.opening[i].add(SRC.bank); }
+      else if (listRead) currentOpeningGap = currentBank ? 'empty' : 'unread';
     }
-    zeroLines(i);
-    const mv = moved ? (moved.get(months[i].key) || empty) : null;
-    if (mv) takeRecords(i, mv);
-    // Today's balance, less what the records explain since the month opened,
-    // is the movement nothing the app reads accounts for. Without the records
-    // the whole movement to today is the bank's, unsplit.
-    if (values.opening[i] !== null && todayRaw !== null) {
-      const u = (todayRaw - values.opening[i]) - (lineIn(i) - lineOut(i));
-      const source = mv ? SRC.unexplained : SRC.bankMove;
-      if (u > 0) add('in_other', i, u, source);
-      if (u < 0) add('out_other', i, -u, source);
+    // Without the records this month's rows are blank, as an unread past
+    // month's are: its movement is worked out from the balances below.
+    if (moved) {
+      takeRecords(i, moved.get(months[i].key) || empty);
+      // Today's balance, less what the records explain since the month
+      // opened, is the movement nothing the app reads accounts for.
+      if (values.opening[i] !== null && todayRaw !== null) {
+        const u = (todayRaw - values.opening[i]) - (lineIn(i) - lineOut(i));
+        if (u > 0) add('in_other', i, u, SRC.unexplained);
+        if (u < 0) add('out_other', i, -u, SRC.unexplained);
+      }
     }
-    // The bank options' adjustments, which the Cash Flow Manager starts from,
-    // so this forecast starts from the same balance.
-    if (adjustment > 0) add('in_other', i, adjustment, SRC.adjustment);
-    if (adjustment < 0) add('out_other', i, -adjustment, SRC.adjustment);
+    values.adjustment[i] = adjustment;
+    if (adjustment !== null) sources.adjustment[i].add(SRC.adjustment);
   }
-  const actualNet = lineIn(cur) - lineOut(cur);
 
   // ── What the Cash Flow Manager expects, month by month. Excluded items count
-  // nowhere; overdue ones stand apart, as on that tab.
+  // nowhere; overdue ones stand apart, as on that tab. What is expected in the
+  // rest of this month is kept apart too, for its closing balance: today's
+  // balance does not hold it yet.
   const lastEnd = months[n - 1].endISO;
   const overdue = { in: 0, out: 0, count: 0 };
+  let restOfMonth = 0, restCount = 0;
   for (let i = cur + 1; i < n; i++) zeroLines(i);
   for (const it of cm?.items || []) {
     if (!it || it.excluded) continue;
@@ -569,23 +669,38 @@ function _buildCashMonthly({
     if (!it.date || it.date > lastEnd) continue;
     const i = index.get(String(it.date).slice(0, 7));
     if (i === undefined || i < cur || !cents) continue;
-    add(_itemCategory(it), i, cents, ITEM_SOURCE[it.source] || SRC.forecast);
+    if (i === cur) { restOfMonth += it.direction === 'in' ? cents : -cents; restCount++; }
+    // This month's rows are blank without its records: what is expected in
+    // it then shows in its net movement and closing balance only.
+    if (i === cur && !moved) continue;
+    for (const part of _itemParts(it, accountsByCode)) {
+      if (part.cents) add(part.row, i, part.cents, ITEM_SOURCE[it.source] || SRC.forecast);
+    }
   }
 
   // ── The budget, for what the months ahead are expected to bring beyond what
-  // is already scheduled in each row. Never below nothing: a month already
-  // scheduled past its budget is not taken down to it.
+  // is already scheduled. Never below nothing: a month already scheduled past
+  // its budget is not taken down to it. Revenue is set against what is
+  // scheduled from customers. Going out, the budget's cost of sales, wages and
+  // overheads together are set against everything scheduled under those three
+  // rows: a rent bill already scheduled is a supplier payment here and Rent in
+  // the budget, and must not be counted twice. What the budget expects beyond
+  // it is shared across the rows as the budget shares it.
   const { byMonth: budgetRows, left } = span.fill === 'budget' ? _budgetByMonth(budget, accounts) : { byMonth: new Map(), left: null };
   let filled = 0;
   for (let i = cur + 1; i < n; i++) {
-    for (const [row, cents] of Object.entries(budgetRows.get(months[i].key) || {})) {
-      const gap = Math.max(0, cents - (values[row][i] || 0));
-      if (gap) { add(row, i, gap, SRC.budget); filled++; }
-    }
+    const rows = budgetRows.get(months[i].key) || {};
+    const inGap = Math.max(0, (rows.in_customer || 0) - (values.in_customer[i] || 0));
+    if (inGap) { add('in_customer', i, inGap, SRC.budget); filled++; }
+    const budgeted = BUDGET_OUT.map(k => Math.max(0, rows[k] || 0));
+    const outGap = Math.max(0, sum(budgeted) - sum(BUDGET_OUT.map(k => values[k][i] || 0)));
+    const shares = outGap ? _splitToLargest(outGap, budgeted) : null;
+    (shares || []).forEach((c, k) => { if (c) { add(BUDGET_OUT[k], i, c, SRC.budget); filled++; } });
   }
 
   // ── Totals, and each month's balance carried into the next.
   for (let i = 0; i < n; i++) {
+    const kind = months[i].kind;
     const known = values.in_customer[i] !== null;
     if (known) {
       values.in_total[i]  = lineIn(i);
@@ -593,12 +708,12 @@ function _buildCashMonthly({
       values.net[i]       = values.in_total[i] - values.out_total[i];
       for (const k of LINES_IN) { addSources('in_total', i, sources[k][i]); addSources('net', i, sources[k][i]); }
       for (const k of LINES_OUT) { addSources('out_total', i, sources[k][i]); addSources('net', i, sources[k][i]); }
-    } else if (values.opening[i] !== null && values.closing[i] !== null) {
-      values.net[i] = values.closing[i] - values.opening[i];
-      sources.net[i].add(SRC.bank);
     }
-    const kind = months[i].kind;
     if (kind === 'actual') {
+      if (!known && values.opening[i] !== null && values.closing[i] !== null) {
+        values.net[i] = values.closing[i] - values.opening[i];
+        sources.net[i].add(SRC.bank);
+      }
       if (values.opening[i] === null && i > 0 && values.closing[i - 1] !== null) {
         values.opening[i] = values.closing[i - 1]; sources.opening[i].add(SRC.previous);
       }
@@ -606,11 +721,18 @@ function _buildCashMonthly({
         values.closing[i] = values.opening[i] + values.net[i]; sources.closing[i].add(SRC.previous);
       }
     } else if (kind === 'current') {
-      // Today's balance and what is expected after it; with the opening known
-      // this is also the opening plus the month's movement, by construction.
+      // Today's balance, the adjustments and what is expected after today.
+      // With the records and the opening known this is also the opening plus
+      // the month's net movement plus the adjustments, by construction.
       if (todayRaw !== null) {
-        values.closing[i] = todayRaw + adjustment + (values.net[i] - actualNet);
+        values.closing[i] = todayRaw + adjustment + restOfMonth;
         sources.closing[i].add(SRC.bank); sources.closing[i].add(SRC.forecast);
+      }
+      // Without the records, the net movement is what the balances say.
+      if (!known && values.opening[i] !== null && values.closing[i] !== null) {
+        values.net[i] = values.closing[i] - adjustment - values.opening[i];
+        sources.net[i].add(SRC.bank);
+        if (restCount) sources.net[i].add(SRC.forecast);
       }
     } else {
       if (values.closing[i - 1] !== null) {
@@ -624,7 +746,7 @@ function _buildCashMonthly({
   // unexplained rows exist so that it does. Checked rather than assumed, and
   // said if it does not.
   for (let i = 0; i < cur; i++) {
-    const b = _countedBank(bankMonths[i], bankAccounts, base, bankOptions);
+    const b = pastBank[i];
     if (!b || values.in_total[i] === null) continue;
     const difference = b.closing - (b.opening + values.net[i]);
     ties.push({ key: months[i].key, agrees: difference === 0, difference: fromCents(difference) });
@@ -645,7 +767,8 @@ function _buildCashMonthly({
   if (cur > 0) {
     notes.push(`${months[0].label} to ${months[cur - 1].label} are what happened: each month opens and closes on Xero's Bank `
       + 'Summary for the bank accounts the Cash Flow Manager counts, and its cash in and out are the payments and bank '
-      + 'transactions recorded in Xero that month, each bank transaction line under the row of the account it is coded to. '
+      + 'transactions recorded in Xero that month, each bank transaction line under the row of the account it is coded to: '
+      + 'cash sales under Customer receipts and direct costs under Supplier payments, as the budget fills the months ahead. '
       + 'Transfers between your own counted accounts are left out.');
   }
   notes.push('"Other / unexplained" holds refunds, spending coded to no row above, and whatever the Bank Summary shows moving '
@@ -654,20 +777,31 @@ function _buildCashMonthly({
     + 'With them, every past month adds up to Xero\'s closing balance to the cent.');
   notes.push(`${curLabel} is actual to today, ${todayISO}, and forecast for the rest of the month.`);
   notes.push('The months ahead each open on the month before\'s closing balance and hold the Cash Flow Manager\'s forecast: '
-    + 'open invoices and bills on their expected, planned, predicted or due dates, repeating invoices, payments dated ahead and '
-    + 'your entries, with your changes and exclusions and unallocated credit notes netted off.');
+    + 'open invoices and bills on their expected, planned, predicted or due dates, repeating invoices, payments dated ahead, '
+    + 'bank transactions dated ahead (each line under the row of the account it is coded to) and your entries, with your '
+    + 'changes and exclusions and unallocated credit notes netted off.');
+  const aheadKeys = months.slice(cur + 1).map(m => m.key);
   if (span.fill === 'none') {
     notes.push('Nothing is filled in from the budget: the months ahead hold only what is scheduled.');
+  } else if (budget && !budget.budgetMissing && !_budgetHasFigures(budget, aheadKeys)) {
+    notes.push('The Overall Budget in Xero has no figures for the months ahead, so nothing is filled in from it.');
   } else if (budget && !budget.budgetMissing) {
-    notes.push('Where the Overall Budget in Xero expects more than is scheduled in a row, the difference is added as "budget": '
-      + 'revenue to Customer receipts, cost of sales to Supplier payments, and other expenses to Wages & salaries or Overheads '
-      + 'by name, never below nothing. Bills already scheduled count against the cost-of-sales budget only. Budgets are '
-      + 'entered in Xero before GST, while invoices and bills include it.');
+    notes.push('Where the Overall Budget in Xero expects more than is scheduled, the difference is added as "budget", never '
+      + 'below nothing. Coming in, budgeted revenue is set against Customer receipts. Going out, budgeted cost of sales and '
+      + 'expenses are set against everything scheduled under Supplier payments, Wages & salaries and Overheads together, so '
+      + 'a bill already scheduled is not counted again under another row; what the budget expects beyond that is shared '
+      + 'across those rows as the budget shares it, cost of sales to Supplier payments and other expenses to Wages & '
+      + 'salaries or Overheads by name. Budgets are entered in Xero before GST, while invoices and bills include it.');
     if (left.nonCash) notes.push('Depreciation and amortisation in the budget are left out: they move no cash.');
     if (left.incomeTax) notes.push('Income tax in the budget is left out: it is paid on the tax office\'s dates, not month by month. Add it as an entry.');
     if (left.otherIncome) notes.push('Other income in the budget is not added.');
     notes.push('GST is not in a budget, so GST & tax holds only what is scheduled. Add GST or BAS payments as quarterly entries.');
-    if (!filled) notes.push('Everything the budget expects is already scheduled, so nothing is added from it.');
+    if (!filled) {
+      const anyCash = aheadKeys.some(k => Object.values(budgetRows.get(k) || {}).some(Boolean));
+      notes.push(anyCash
+        ? 'Everything the budget expects is already scheduled, so nothing is added from it.'
+        : 'Nothing the budget holds for the months ahead is cash this fills in, so nothing is added from it.');
+    }
   } else if (budget && budget.budgetMissing) {
     notes.push('Xero has no Overall Budget for the months ahead, so nothing is filled in from one.');
   } else if (budgetFailure) {
@@ -678,22 +812,51 @@ function _buildCashMonthly({
   notes.push(`Overdue items, dated before today and not yet paid, are in the last row under ${curLabel} and in no total, `
     + 'as the Cash Flow Manager keeps them apart. Set a date on one there to place it in a month.');
   if (adjustment) {
-    notes.push(`The opening adjustments set in the bank options (${adjustment < 0 ? '-' : ''}${money(adjustment)}) are added `
-      + `to ${curLabel}, so the forecast starts from the same balance as the Cash Flow Manager.`);
+    notes.push(`The opening adjustments set in the bank options (${adjustment < 0 ? '-' : ''}${money(adjustment)}) are on their `
+      + `own line, Your bank adjustments, under ${curLabel}: they are not cash in or out, but ${curLabel} closes on them, so `
+      + 'the forecast starts from the same balance as the Cash Flow Manager.');
   }
   if (!recordsRead) {
-    notes.push(recordsFailure === 'scope'
-      ? 'Payments and bank transactions could not be read: the Xero connection does not allow it. Reconnect in Setup to split past cash by what it was.'
-      : 'Payments or bank transactions could not be read from Xero just now, so past months show the Bank Summary\'s balances and movement without the split.');
+    const blank = cur > 0 ? `${months[0].label} to ${curLabel}` : curLabel;
+    notes.push((recordsFailure === 'scope'
+      ? 'Payments and bank transactions could not be read: the Xero connection does not allow it. Reconnect in Setup to split cash by what it was. '
+      : 'Payments or bank transactions could not be read from Xero just now. ')
+      + `Without them cash in and out are blank for ${blank}, and each month's net movement is the change in its bank `
+      + `balance; ${curLabel}'s includes what is expected for the rest of the month, which shows only in its net movement `
+      + 'and closing balance.');
   } else if (accounts === null) {
     notes.push('The chart of accounts could not be read from Xero just now, so bank transactions are under Other rather than split by account.');
+  }
+  if (!listRead) {
+    notes.push('Xero\'s list of bank accounts could not be read just now, so which accounts are in another currency or '
+      + 'switched off is not known: the balances from Xero\'s Bank Summary are left blank rather than guessed, and nothing '
+      + 'is shown as unexplained. Cash in and out count the payments and bank transactions, past and dated ahead, of every '
+      + 'bank account not switched off here, any in another currency included.');
   }
   if (unreadBank.length) {
     notes.push(`Xero's Bank Summary for ${unreadBank.join(', ')} could not be read just now, so ${unreadBank.length === 1 ? 'that month opens' : 'those months open'} `
       + 'where the month before closed and nothing in them is unexplained.');
   }
+  if (emptyBank.length) {
+    const one = emptyBank.length === 1;
+    notes.push(`Xero's Bank Summary for ${emptyBank.join(', ')} lists no bank accounts, so ${one ? 'that month has' : 'those months have'} `
+      + `no balance from it: ${one ? 'it opens' : 'each opens'} where the month before closed, where that is known, and nothing `
+      + `in ${one ? 'it' : 'them'} is unexplained.`);
+  }
+  if (currentOpeningGap) {
+    notes.push(currentOpeningGap === 'empty'
+      ? `Xero's Bank Summary for ${curLabel} lists no bank accounts, so its opening balance is blank.`
+      : `Xero's Bank Summary for ${curLabel} could not be read just now, so its opening balance is blank.`);
+  }
   if (!bank.available) {
-    notes.push('Today\'s bank balances could not be read from Xero just now, so no balance is carried into the months ahead.');
+    if (bank.unavailableReason === 'accounts' && !listRead) {
+      notes.push('For the same reason today\'s bank balance is not known, so no balance is carried into the months ahead.');
+    } else if (bank.unavailableReason === 'accounts') {
+      notes.push('Today\'s bank balance is not known: Xero\'s list of bank accounts could not be read just now, so which '
+        + 'accounts to count is not known either. No balance is carried into the months ahead.');
+    } else {
+      notes.push('Today\'s bank balances could not be read from Xero just now, so no balance is carried into the months ahead.');
+    }
   } else {
     const foreign = (bank.accounts || []).filter(a => a?.foreign);
     if (foreign.length) {
@@ -702,9 +865,10 @@ function _buildCashMonthly({
     }
   }
   // The Cash Flow Manager's own gaps (a read that failed) are this forecast's too.
-  // Its past cash and today's balance are said above in this view's words.
+  // Its past cash, today's balance and its bank account list are said above in
+  // this view's words.
   for (const note of cm?.notes || []) {
-    if (/could not be read/i.test(note) && !/^(Past cash|Bank balances)/i.test(note)) notes.push(note);
+    if (/could not be read/i.test(note) && !/^(Past cash|Bank balances|Xero's list of bank accounts)/i.test(note)) notes.push(note);
   }
 
   return {
@@ -806,6 +970,25 @@ function _storeStamp(store) {
     .digest('hex').slice(0, 16);
 }
 
+// Pure. What this view takes from the Cash Flow Manager's payload, as a short
+// fingerprint for the same key: today, the bank (its balances, which accounts
+// count and their adjustments) and every item as placed. Any change the
+// Cash Flow Manager shows, whichever of its reads it came from, builds this
+// again; the age of its oldest read, which barely moves, would not.
+function _cmStamp(cm) {
+  const bank = cm?.bank || {};
+  return crypto.createHash('sha1').update(JSON.stringify([
+    cm?.today || null,
+    cm?.organisation?.name || '', cm?.organisation?.currency || '',
+    !!bank.available, bank.unavailableReason || null, bank.overdraft ?? null,
+    (bank.accounts || []).map(a => [a?.accountId || null, a?.name || '', a?.currency || '', a?.balance ?? null,
+      !!a?.included, a?.openingAdjustment ?? null, !!a?.foreign]),
+    (cm?.items || []).map(it => [it?.key, it?.date ?? null, it?.amount ?? null, !!it?.excluded, !!it?.overdue,
+      it?.direction || null, it?.source || null, it?.description ?? null, it?.accounts ?? null]),
+    cm?.notes || [],
+  ])).digest('hex').slice(0, 16);
+}
+
 async function _getCashMonthlyRaw(userId, tenantId, { timezone = 'UTC', past = PAST_DEFAULT, future = FUTURE_DEFAULT, fill = 'budget', force = false } = {}) {
   const span = _monthlySpan({ past, future, fill });
   const todayParts = _todayPartsInTz(timezone);
@@ -822,10 +1005,10 @@ async function _getCashMonthlyRaw(userId, tenantId, { timezone = 'UTC', past = P
   // Required here: the store opens the database, which no other report needs.
   const store = require('../utils/cash-manager-store').forTenant(userId, tenantId);
   const bankOptions = store.bankOptions();
-  // The Cash Flow Manager's reads are in the key by their age, so a payload is
-  // never older than the tab it sits on: a Refresh there, or a change seen in
-  // Xero, builds this again.
-  const key = `cashmonthly:${userId}:${tenantId}:${todayISO}:${span.past}:${span.future}:${span.fill}:${cm.fetchedAt}:${_storeStamp(store)}`;
+  // What the Cash Flow Manager shows is in the key by its content, so a
+  // payload never shows other figures than the tab it sits on: anything that
+  // changes there, from a Refresh or a change seen in Xero, builds this again.
+  const key = `cashmonthly:${userId}:${tenantId}:${todayISO}:${span.past}:${span.future}:${span.fill}:${_cmStamp(cm)}:${_storeStamp(store)}`;
   const hit = _cacheGet(key, force);
   if (hit) {
     const { readAt, ...rest } = hit;
@@ -841,7 +1024,9 @@ async function _getCashMonthlyRaw(userId, tenantId, { timezone = 'UTC', past = P
   // the budget: at most four calls in flight, inside Xero's five per
   // organisation.
   const [bankAccounts, accountsRead, paymentsRead, bankTxRead] = await Promise.all([
-    _bankAccountList(userId, tenantId, force),
+    // Null when it could not be read: the balances are then left blank
+    // rather than a foreign account added in as base currency.
+    _bankAccountsOrNull(userId, tenantId, force),
     _soft('chart of accounts', getAccounts(userId, tenantId, { force }), ctx),
     _soft('payments', _getMonthlyPayments(userId, tenantId, records), ctx),
     _soft('bank transactions', _getMonthlyBankTransactions(userId, tenantId, records), ctx),
@@ -887,7 +1072,7 @@ async function _getCashMonthlyRaw(userId, tenantId, { timezone = 'UTC', past = P
   });
   // Kept only when every read landed: one that failed is asked for again on
   // the next load rather than its gap served for ten minutes.
-  if (reads.every(r => r.value)) _cacheSet(key, { ...data, readAt: fetchedAt }, PAYLOAD_TTL_MS);
+  if (bankAccounts !== null && reads.every(r => r.value)) _cacheSet(key, { ...data, readAt: fetchedAt }, PAYLOAD_TTL_MS);
   return {
     ...data,
     calls,
@@ -901,8 +1086,8 @@ const getCashMonthly = _dedupe('getCashMonthly', _getCashMonthlyRaw,
 
 module.exports = {
   getCashMonthly, _buildCashMonthly,
-  _accountCategory, _paymentCategory, _entryCategory, _itemCategory,
-  _monthlyPaymentsOf, _monthlyBankTransactionsOf, _bankTransactionParts, _allocate, _movementByMonth,
-  _countedBank, _leftOutIds, _budgetByMonth, _monthsAround, _monthlySpan, _budgetCalls,
+  _accountCategory, _paymentCategory, _entryCategory, _itemCategory, _itemParts,
+  _monthlyPaymentsOf, _monthlyBankTransactionsOf, _bankTransactionParts, _allocate, _splitToLargest, _movementByMonth,
+  _countedBank, _leftOutIds, _budgetByMonth, _budgetHasFigures, _monthsAround, _monthlySpan, _budgetCalls, _cmStamp,
   ROWS, PAST_MAX, FUTURE_MAX, PAST_DEFAULT, FUTURE_DEFAULT, FILLS, PAYLOAD_TTL_MS,
 };

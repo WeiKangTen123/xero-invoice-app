@@ -96,10 +96,14 @@ async function _getOrganisationRaw(userId, tenantId, force) {
 // xero/invoices.js#getOrgTaxRates), and Contacts already has full read/write
 // access for invoice creation. Nothing here needed a wider OAuth consent.
 
+// `systemAccount` is Xero's own word for the accounts it runs (DEBTORS,
+// CREDITORS, GST, WAGEPAYABLES...), empty on every other: the monthly cash
+// forecast places money by it before any name (cash-monthly.js#_accountCategory).
 function _buildAccounts(accounts) {
   return accounts.map(a => ({
     accountId: a.accountID, code: a.code || '', name: a.name || '',
     type: a.type || '', taxType: a.taxType || '', status: a.status || '',
+    systemAccount: a.systemAccount || '',
   }));
 }
 

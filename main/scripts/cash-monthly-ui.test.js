@@ -156,6 +156,49 @@ describe('the rows and what a figure was made of', () => {
       .toBe('Overdue, not yet scheduled, Oct 2026 (actual + forecast): 2 overdue items: 500.00 to come in, 80.00 to go out');
     expect(h.gridRows(payload).find(x => x.key === 'in_customer').cells[2].title).toBe(h.sourcesText(r, 2, payload));
   });
+
+  test('Spend/Receive Money dated ahead and your bank adjustments are named in words, whatever their case', () => {
+    const r = row('out_overheads', 'Overheads', 'out', [null, null, 300, 640, 0],
+      ['', '', 'Spend/Receive Money dated ahead', 'spend/receive money dated ahead + open bills', '']);
+    expect(h.sourcesText(r, 2, payload)).toBe([
+      'Overheads, Oct 2026 (actual + forecast), from:',
+      '• Spend/Receive Money dated ahead: Spend Money and Receive Money transactions entered in Xero with a later date',
+    ].join('\n'));
+    expect(h.sourcesText(r, 3, payload)).toMatch(/• spend\/receive money dated ahead: Spend Money .*\n• open bills: bills still owed/);
+    expect(h.sourcesText(row('adjustment', 'Your bank adjustments', 'balance', [null, null, 250, null, null], ['', '', 'opening adjustment', '', '']), 2, payload))
+      .toMatch(/• opening adjustment: the opening adjustment set in the bank options/);
+  });
+});
+
+describe('your bank adjustments, and figures the server does not have', () => {
+  // The server's newer rows: the adjustment between Net and Closing, with a
+  // figure in this month only, and months it could not read left null.
+  const rows = [...payload.rows];
+  rows.splice(rows.findIndex(r => r.key === 'closing'), 0,
+    row('adjustment', 'Your bank adjustments', 'balance', [null, null, 250, null, null], ['', '', 'opening adjustment', '', '']));
+  const withAdj = { ...payload, rows: rows.map(r => (r.key === 'opening' ? { ...r, values: [1000, null, 3500, -500, -1500] } : r)) };
+  const grid = h.gridRows(withAdj);
+  const by = key => grid.find(r => r.key === key);
+
+  test('it sits between Net and Closing, under no heading, not indented and lighter than the balances', () => {
+    const order = grid.map(r => (r.type === 'heading' ? `# ${r.label}` : r.key));
+    expect(order.slice(order.indexOf('net'))).toEqual(['net', 'adjustment', 'closing', 'overdue']);
+    expect(by('adjustment')).toMatchObject({ label: 'Your bank adjustments', group: 'balance', indent: false, strong: false, info: false });
+    expect([by('opening').strong, by('closing').strong]).toEqual([true, true]);
+    expect(by('adjustment').cells.map(c => c.value)).toEqual([null, null, 250, null, null]);
+    expect(by('adjustment').cells.map(c => c.tone)).toEqual([null, null, null, null, null]);
+  });
+
+  test('a cell with no figure is blank, never nil, and says nothing on hover', () => {
+    expect(by('opening').cells[1]).toMatchObject({ value: null, tone: null, title: '' });
+    // A source named for a cell the server left without a figure is not shown.
+    expect(by('in_customer').cells[1]).toMatchObject({ value: null, title: '' });
+    const odd = h.gridRows({ ...payload, rows: [row('closing', 'Closing balance', 'balance', ['n/a', undefined, '', -500, 0], ['bank', 'bank', 'bank', 'bank', 'bank'])] });
+    expect(odd[0].cells.map(c => c.value)).toEqual([null, null, null, -500, 0]);
+    expect(odd[0].cells.map(c => c.tone)).toEqual([null, null, null, 'warning', null]);
+    expect(odd[0].cells.map(c => c.title === '')).toEqual([true, true, true, false, false]);
+    expect(h.closingTone('n/a', 0)).toBeNull();
+  });
 });
 
 describe('the wiring', () => {
@@ -188,6 +231,13 @@ describe('the wiring', () => {
     expect(monthly).toMatch(/position: 'sticky', left: 0/);
     expect(monthly).toMatch(/title=\{cell\.title \|\| undefined\}/);
     expect(monthly).toMatch(/color: toneColour\(cell\.tone\)/);
+    // No figure is blank, never fmtCell's dash for nil.
+    expect(monthly).toMatch(/\{cell\.value === null \? '' : fmtCell\(cell\.value\)\}/);
+  });
+
+  test('it asks for the organisation the Cash Flow Manager has checked is still connected', () => {
+    expect(tab).toMatch(/const tid = connectedTenant\(tenantId, d\);/);
+    expect(monthly).toMatch(/if \(!tenantId\) return;/);
   });
 
   test('quarterly is a repeat an entry can have, for GST and BAS', () => {

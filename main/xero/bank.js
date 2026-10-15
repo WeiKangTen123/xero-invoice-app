@@ -129,6 +129,19 @@ async function _bankAccountList(userId, tenantId, force) {
   }
 }
 
+// The same list for a view that must not guess: null when it could not be
+// read, so a foreign account is never added in as base currency and an
+// account switched off by its Xero id is never counted again under its name.
+// An empty array is an organisation with no bank accounts.
+async function _bankAccountsOrNull(userId, tenantId, force) {
+  try {
+    return (await getBankAccounts(userId, tenantId, { force })).bankAccounts || [];
+  } catch (err) {
+    logger.warn('Bank account list unavailable', { userId, tenantId, error: err.message });
+    return null;
+  }
+}
+
 // Bank Summary is COLUMNAR, not sectioned-with-labeled-rows like it visually
 // appears in Xero's UI: one Header row spells out what each cell position
 // means ("Bank Accounts" | "Opening Balance" | "Cash Received" | "Cash Spent"
@@ -242,7 +255,7 @@ const getBankTransactions    = _dedupe('getBankTransactions', _getBankTransactio
 const getBankSummary         = _dedupe('getBankSummary', _getBankSummaryRaw);
 
 module.exports = {
-  getBankTransactions, getBankSummary, _bankAccountList,
+  getBankTransactions, getBankSummary, _bankAccountList, _bankAccountsOrNull,
   _buildBankTransactions, _buildPayments, _buildBankSummary,
   _splitIntoReportWindows, _clampReportFrom,
 };

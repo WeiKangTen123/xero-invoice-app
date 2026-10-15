@@ -139,7 +139,12 @@ describe('xero/reports — _buildSummary (pure)', () => {
 describe('xero/reports — directory builders (pure)', () => {
   test('_buildAccounts maps the fields the Chart of Accounts table needs', () => {
     const accounts = _buildAccounts([{ accountID: 'a1', code: '200', name: 'Sales', type: 'REVENUE', taxType: 'OUTPUT', status: 'ACTIVE' }]);
-    expect(accounts).toEqual([{ accountId: 'a1', code: '200', name: 'Sales', type: 'REVENUE', taxType: 'OUTPUT', status: 'ACTIVE' }]);
+    expect(accounts).toEqual([{ accountId: 'a1', code: '200', name: 'Sales', type: 'REVENUE', taxType: 'OUTPUT', status: 'ACTIVE', systemAccount: '' }]);
+  });
+
+  test('_buildAccounts carries Xero\'s system account, which the monthly cash forecast places money by', () => {
+    const [gst] = _buildAccounts([{ accountID: 'a2', code: '820', name: 'Output control', type: 'CURRLIAB', systemAccount: 'GST' }]);
+    expect(gst.systemAccount).toBe('GST');
   });
 
   test('_buildBankAccounts keeps only Type==BANK accounts', () => {

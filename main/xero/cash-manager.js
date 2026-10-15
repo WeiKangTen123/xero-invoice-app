@@ -1,9 +1,9 @@
 const logger             = require('../utils/logger');
 const { withRetry, isScopeError, xeroErrMsg } = require('./xero-utils');
-const { _cacheGet, _cacheSet, _dedupe } = require('./report-cache');
+const { _cacheGet, _cacheSet, _dedupe, CACHE_TTL_MS } = require('./report-cache');
 const { _apiFor, _allPages, _getOrganisation } = require('./report-fetch');
 const { _getOutstanding, _contactKey } = require('./summary');
-const { getBankSummary, _bankAccountList } = require('./bank');
+const { getBankSummary, _bankAccountsOrNull } = require('./bank');
 const { _bankByCurrency, _isLive, _isReceiptPayment, _isTransfer } = require('./cash-flow');
 const { _getCreditNotes, _daysBetween } = require('./ageing');
 const { _xeroDay } = require('./performance');
@@ -24,7 +24,9 @@ const { _addDays, _fmtISODate, _fmtXeroDate, _lastDayOfMonth, _parseISODate, _to
 //     to be paid, and with unallocated credit notes netted off;
 //   * the invoices and bills approved repeating templates will raise;
 //   * payments already recorded in Xero with a date after today (the same
-//     read as the last thirty days' payments);
+//     read as the last thirty days' payments), and Spend and Receive Money
+//     dated after today (the same read as the last thirty days' bank
+//     transactions);
 //   * entries, changes to single items, and bank account options kept in this
 //     app's database (utils/cash-manager-store.js), never written to Xero.
 //
@@ -39,8 +41,13 @@ const HORIZON_DAYS = 91;
 // The days before today shown as what actually moved, as Xero's chart shows
 // the receipts left of today.
 const ACTUAL_DAYS = 30;
-// Templates change rarely and are read whole, with no paging, in one call.
-const REPEATING_TTL_MS = 60 * 60 * 1000;
+// Templates are read whole, with no paging, in one call, and kept exactly as
+// long as the invoice list they are set beside (the summary's fetch, cached
+// for report-cache.js's CACHE_TTL_MS). When Xero raises an invoice from a
+// template, the next invoice read has it open while the template's old
+// occurrence is still projected until the templates are read again: held for
+// an hour, the two counted the same invoice twice for up to that hour.
+const REPEATING_TTL_MS = CACHE_TTL_MS;
 // Payments dated after today are what someone has just scheduled, and the last
 // days' records are still being reconciled, so both are read again sooner
 // than the templates.
@@ -179,26 +186,68 @@ function _paymentsOf(list = []) {
   }));
 }
 
-// Pure. The bank transactions of the last days, cut down to what the actuals
-// need: money spent or received with no invoice behind it, which no payment
-// record shows. A transfer between the org's own accounts is marked rather
-// than dropped here, since it moves the balance of the account it leaves even
-// though no money came into or left the business.
+// Pure. The bank transactions, cut down to what the actuals and the
+// projection need: money spent or received with no invoice behind it, which
+// no payment record shows. A transfer between the org's own accounts is
+// marked rather than dropped here, since it moves the balance of the account
+// it leaves even though no money came into or left the business. Each line
+// keeps the account it is coded to and its cash, tax included (a line
+// entered exclusive of tax adds its tax to the total), as cash-monthly.js
+// reads the same lines: one dated ahead is split across that view's rows by
+// these accounts.
 function _bankTransactionsOf(list = []) {
-  return (list || []).filter(t => t && _isLive(t)).map(t => ({
-    bankTransactionId: t.bankTransactionID || null,
-    status:       t.status ? String(t.status) : '',
-    type:         t.type ? String(t.type) : '',
-    receipt:      /^RECEIVE/i.test(String(t.type || '')),
-    transfer:     _isTransfer(t),
-    date:         _xeroDay(t.date),
-    amount:       Number(t.total || 0),
-    currencyRate: t.currencyRate ?? null,
-    currencyCode: t.currencyCode ? String(t.currencyCode) : '',
-    accountId:    t.bankAccount?.accountID || null,
-    contactName:  t.contact?.name || '',
-    reference:    t.reference || '',
-  }));
+  return (list || []).filter(t => t && _isLive(t)).map(t => {
+    const inclusive = /^(INCLUSIVE|NOTAX)$/i.test(String(t.lineAmountTypes || ''));
+    return {
+      bankTransactionId: t.bankTransactionID || null,
+      status:       t.status ? String(t.status) : '',
+      type:         t.type ? String(t.type) : '',
+      receipt:      /^RECEIVE/i.test(String(t.type || '')),
+      transfer:     _isTransfer(t),
+      date:         _xeroDay(t.date),
+      amount:       Number(t.total || 0),
+      currencyRate: t.currencyRate ?? null,
+      currencyCode: t.currencyCode ? String(t.currencyCode) : '',
+      accountId:    t.bankAccount?.accountID || null,
+      contactName:  t.contact?.name || '',
+      reference:    t.reference || '',
+      lines: (t.lineItems || []).map(l => ({
+        accountCode: l?.accountCode ? String(l.accountCode) : '',
+        amount:      Number(l?.lineAmount || 0) + (inclusive ? 0 : Number(l?.taxAmount || 0)),
+      })),
+    };
+  });
+}
+
+// Pure. `totalCents` split across positive `weights` in proportion, in whole
+// cents that add up to exactly the total: each share is the rounded running
+// total less the one before, so no cent is lost or made in the rounding.
+function _split(totalCents, weights) {
+  const whole = weights.reduce((s, w) => s + w, 0);
+  let run = 0, prev = 0;
+  return weights.map(w => {
+    run += w;
+    const upto = Math.round((totalCents * run) / whole);
+    const share = upto - prev;
+    prev = upto;
+    return share;
+  });
+}
+
+// Pure. The accounts a Spend or Receive Money item is coded to, each with its
+// share of the item's `cents`: its lines' base-currency cash put together by
+// account code, the item's amount split in proportion to them. A code whose
+// lines come to nothing or less (a discount line on its own code, say) takes
+// no share, so every share is positive and the shares add up to the item's
+// amount to the cent, whatever amount was set here. Empty when no line is
+// left to go by.
+function _accountShares(lines, cents) {
+  const byCode = new Map();
+  for (const l of lines || []) byCode.set(l.code, (byCode.get(l.code) || 0) + l.cents);
+  const codes = [...byCode].filter(([, c]) => c > 0);
+  if (!codes.length || !(cents > 0)) return [];
+  const shares = _split(cents, codes.map(([, c]) => c));
+  return codes.map(([code], i) => ({ code, amount: fromCents(shares[i]) })).filter(a => a.amount > 0);
 }
 
 // ── What actually moved ─────────────────────────────────────────────────────
@@ -224,11 +273,16 @@ function _bankTransactionsOf(list = []) {
 // shown instead, every record dated today or 31 days ago would read as a
 // difference. `bankLines` are the Bank Summary lines counted in the balance;
 // null skips the check.
+//
+// `leftOut` is null when Xero's list of bank accounts could not be read:
+// which records went through an account in another currency, or one switched
+// off here, is then not known, and actuals that guessed would add a USD
+// receipt in as base currency. So there are none, as when a read failed.
 function _buildActuals({
   todayISO, base = '', payments = null, bankTransactions = null, leftOut = new Set(),
   balanceCents = null, bankLines = null, days = ACTUAL_DAYS,
 } = {}) {
-  const available = payments !== null && bankTransactions !== null;
+  const available = payments !== null && bankTransactions !== null && leftOut !== null;
   if (!available) return { available, actuals: [], actualItems: [], check: null };
 
   const first     = addDaysISO(todayISO, -days);
@@ -357,20 +411,23 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 //
 // `outstanding` is summary.js#_outstandingOf's records and `lateness` its
 // map of how late each contact pays. `credits` (ageing.js#_creditsOf),
-// `bank` (a Bank Summary), `templates`, `payments` (_paymentsOf, either side
-// of today) and `bankTransactions` (_bankTransactionsOf) are null when they
-// could not be read; `repeatingFailure`, `paymentsFailure` and
+// `bank` (a Bank Summary), `bankAccounts` (Xero's list of bank accounts),
+// `templates`, `payments` (_paymentsOf, either side of today) and
+// `bankTransactions` (_bankTransactionsOf, either side of today) are null
+// when they could not be read; `repeatingFailure`, `paymentsFailure` and
 // `bankTransactionsFailure` say why ('scope' or 'error'). `entries`,
 // `overrides` and `bankOptions` are the store's.
 //
 // How an item is dated, first match wins: a date set here ('override'); the
 // expected (sales) or planned (bills) payment date set in Xero ('expected',
 // 'planned'); the due date moved by the contact's average days late
-// ('predicted'); the due date ('due'). Repeating invoices are 'scheduled',
-// future payments 'payment' and entries 'manual'. An item dated before today
-// is overdue: it is listed and totalled, and placed on no day, since when it
-// will be paid is exactly what is not known. An excluded item stays listed and
-// counts nowhere.
+// ('predicted'); the due date, or the invoice date when Xero sent no due date
+// ('due'); nothing at all when Xero sent neither ('none'). Repeating invoices
+// are 'scheduled', future payments 'payment', Spend and Receive Money dated
+// ahead 'banktx' and entries 'manual'. An item dated before today, or not
+// dated at all, is overdue: it is listed and totalled, and placed on no day,
+// since when it will be paid is exactly what is not known. An excluded item
+// stays listed and counts nowhere.
 function _buildCashManager({
   todayISO, timezone = null, horizonDays = HORIZON_DAYS,
   organisation = {}, baseCurrency = '',
@@ -390,10 +447,30 @@ function _buildCashManager({
   // ── The bank, today. Base-currency accounts only count (see
   // cash-flow.js#_bankByCurrency): a USD balance added to an SGD one is a
   // number that means nothing. Each account's options are applied by its Xero
-  // id, or by its name when the account list could not name it.
-  const byCur = bank ? _bankByCurrency(bank, bankAccounts, base) : null;
+  // id, or by its name when the account list does not name it.
+  //
+  // Which line is in which currency, and which carries the id its options are
+  // kept under, is the account list's to say. Without it every line would be
+  // taken for base currency and matched by name only, so a USD account would
+  // be added in at face value and one switched off here counted again: the
+  // balance is then not given at all, as when the Bank Summary itself could
+  // not be read, and `unavailableReason` says which it was.
+  const accountsKnown = Array.isArray(bankAccounts);
+  const byCur = bank && accountsKnown ? _bankByCurrency(bank, bankAccounts, base) : null;
+  const unavailableReason = !bank ? 'summary' : !accountsKnown ? 'accounts' : null;
   const accounts = [];
-  const leftOutAccounts = new Set();
+  // The accounts whose payments and bank transactions go with their balance:
+  // another currency, or switched off here. Read off the account list itself
+  // as well as the Bank Summary's lines, so a Bank Summary that could not be
+  // read does not let a USD account's records in as base currency. Null when
+  // the list could not be read and so which accounts these are is unknown.
+  const leftOutAccounts = accountsKnown ? new Set() : null;
+  const B = base.toUpperCase();
+  for (const a of bankAccounts || []) {
+    if (!a?.accountId) continue;
+    const currency = String(a.currency || '').toUpperCase() || B;
+    if ((B && currency !== B) || bankOptions?.[a.accountId]?.included === false) leftOutAccounts.add(a.accountId);
+  }
   const countedLines = [];
   let balanceCents = 0, overdraftCents = 0, included = 0;
   if (byCur) {
@@ -433,10 +510,16 @@ function _buildCashManager({
       date = given; dateBasis = sales ? 'expected' : 'planned'; stated++;
     } else if (dueDate && late) {
       daysLate = late.days; date = addDaysISO(dueDate, late.days); dateBasis = 'predicted'; predicted++;
-    } else {
+    } else if (dueDate || _xeroDay(inv.date)) {
       // Xero will not approve an invoice without a due date; one that came
-      // back without it is placed on its own date, or today, not dropped.
-      date = dueDate || _xeroDay(inv.date) || todayISO; dateBasis = 'due';
+      // back without it is placed on its own date, not dropped.
+      date = dueDate || _xeroDay(inv.date); dateBasis = 'due';
+    } else {
+      // Nor without a date. One that came back with neither has no day to be
+      // placed on: it used to be put on today, as though it were due now.
+      // Undated, it is overdue (listed and totalled, on no day) until a date
+      // is set here.
+      date = null; dateBasis = 'none';
     }
     const cents = toCents(_toBase(inv, amountDue, base));
     const side  = open[sales ? 'receivables' : 'payables'];
@@ -477,10 +560,17 @@ function _buildCashManager({
   // projection does not hold, so it is left out with it. The read reaches
   // back before today for the actuals; those, and today's, which are in
   // today's balance already, are not projected.
+  //
+  // Without the account list, which accounts those are is not known. Each
+  // payment is then counted, as the invoice it pays would have been had it
+  // not been paid ahead: leaving them all out would make every such invoice's
+  // cash vanish, and with no balance given there is no running total for one
+  // through a left-out account to throw off. The notes say they could not be
+  // checked.
   let paymentCount = 0, paymentsLeftOut = 0;
   for (const p of payments || []) {
     if (!p.date || !_isLive(p) || p.date <= todayISO) continue;
-    if (p.accountId && leftOutAccounts.has(p.accountId)) { paymentsLeftOut++; continue; }
+    if (p.accountId && leftOutAccounts?.has(p.accountId)) { paymentsLeftOut++; continue; }
     const cents = Math.abs(toCents(_toBase(p, p.amount, base)));
     if (!cents) continue;
     paymentCount++;
@@ -489,6 +579,57 @@ function _buildCashManager({
       date: p.date, dueDate: null, dateBasis: 'payment', cents, originalCents: cents,
       currency: p.currencyCode || base, faceAmount: p.amount, foreign: isForeign(p),
       contactId: null, contactName: p.contactName, number: p.number, reference: p.reference, entryId: null,
+    });
+  }
+
+  // ── Spend and Receive Money dated after today: money in or out with no
+  // invoice behind it that someone has already entered in Xero, from the same
+  // read as the last thirty days' bank transactions, and left out with an
+  // account the balance leaves out, as the payments are. Overpayments and
+  // prepayments are among them: dated ahead, that money is not in the bank
+  // yet.
+  //
+  // A transfer is two of these, one out of an account and one into the
+  // other, on one date for one amount. Between two accounts the balance
+  // counts it moves no money in or out, so the two halves are found and left
+  // out together. Between a counted account and one left out, the left-out
+  // half has gone with its account above and the counted half is all that
+  // remains: it does move the balance counted, so it is projected like any
+  // other.
+  let banktxCount = 0, banktxLeftOut = 0, transfersPaired = 0, transfersCounted = 0;
+  const ahead = [];
+  for (const t of bankTransactions || []) {
+    if (!t.date || !_isLive(t) || t.date <= todayISO) continue;
+    if (t.accountId && leftOutAccounts?.has(t.accountId)) { banktxLeftOut++; continue; }
+    const cents = Math.abs(toCents(_toBase(t, t.amount, base)));
+    if (cents) ahead.push({ t, cents, paired: false });
+  }
+  const halves = new Map();
+  for (const h of ahead) {
+    if (!h.t.transfer) continue;
+    const k = `${h.t.date}:${h.cents}`;
+    if (!halves.has(k)) halves.set(k, []);
+    halves.get(k).push(h);
+  }
+  for (const group of halves.values()) {
+    for (const into of group.filter(h => h.t.receipt)) {
+      const from = group.find(h => !h.t.receipt && !h.paired && (!h.t.accountId || h.t.accountId !== into.t.accountId));
+      if (from) { into.paired = from.paired = true; transfersPaired++; }
+    }
+  }
+  for (const { t, cents, paired } of ahead) {
+    if (paired) continue;
+    banktxCount++;
+    if (t.transfer) transfersCounted++;
+    items.push({
+      key: `banktx:${t.bankTransactionId}`, direction: t.receipt ? 'in' : 'out', source: 'banktx',
+      date: t.date, dueDate: null, dateBasis: 'banktx', cents, originalCents: cents,
+      currency: t.currencyCode || base, faceAmount: t.amount, foreign: isForeign(t),
+      contactId: null, contactName: t.contactName, number: '', reference: t.reference, entryId: null,
+      transfer: t.transfer,
+      // Each line's cash in base currency, the weights its accounts' shares
+      // are worked out from once the amount is final (_accountShares).
+      lines: (t.lines || []).map(l => ({ code: l.accountCode, cents: toCents(_toBase(t, l.amount, base)) })),
     });
   }
 
@@ -522,20 +663,28 @@ function _buildCashManager({
   // arrives. One left over once the contact's items are used up is said, and
   // counts nowhere. An excluded item, or one whose amount was set here, takes
   // none: the first counts nowhere, and the second already says what will be
-  // paid.
+  // paid. An item with no date goes first: it is overdue, and the oldest.
+  //
+  // A note in another currency that carried no exchange rate would be netted
+  // at face value, 100 USD taken off as 100 SGD. It is left out and named
+  // instead, as a template in another currency is.
   let creditCount = 0, creditApplied = 0, creditLeft = 0, creditLeftCount = 0;
+  const creditsNoRate = [];
   const contactOf = x => x.contactId || `name:${x.contactName}`;
   const sortedCredits = [...(credits || [])].sort((a, b) =>
     (_xeroDay(a.date) || '').localeCompare(_xeroDay(b.date) || '') || String(a.number).localeCompare(String(b.number)));
   for (const cn of sortedCredits) {
     const source = cn.type === 'ACCRECCREDIT' ? 'invoice' : cn.type === 'ACCPAYCREDIT' ? 'bill' : null;
-    let left = source ? toCents(_toBase(cn, Number(cn.remainingCredit || 0), base)) : 0;
+    const remaining = Number(cn.remainingCredit || 0);
+    if (!source || !(remaining > 0)) continue;
+    if (isForeign(cn) && !(Number(cn.currencyRate) > 0)) { creditsNoRate.push(cn); continue; }
+    let left = toCents(_toBase(cn, remaining, base));
     if (!(left > 0)) continue;
     creditCount++;
     const who = contactOf(cn);
     const targets = items
       .filter(i => i.source === source && contactOf(i) === who && !i.excluded && !i.amountOverridden && i.cents > 0)
-      .sort((a, b) => a.date.localeCompare(b.date) || a.number.localeCompare(b.number));
+      .sort((a, b) => (a.date || '').localeCompare(b.date || '') || a.number.localeCompare(b.number));
     for (const t of targets) {
       const take = Math.min(left, t.cents);
       t.cents -= take; t.creditCents += take; creditApplied += take; left -= take;
@@ -549,9 +698,11 @@ function _buildCashManager({
   const tiles = { today: zero(), next7: zero(), next8to30: zero(), overdue: zero() };
   const shown = [];
   let beyond = 0;
+  let undated = 0;
   for (const it of items) {
-    it.overdue = it.date < todayISO;
-    it.beyondHorizon = it.date > horizonEnd;
+    if (!it.date) undated++;
+    it.overdue = !it.date || it.date < todayISO;
+    it.beyondHorizon = !!it.date && it.date > horizonEnd;
     if (it.beyondHorizon) {
       // Kept on the list only when a change made here sent it there, so the
       // change can be found and undone.
@@ -569,15 +720,19 @@ function _buildCashManager({
     else if (i <= 30) tiles.next8to30[dir] += it.cents;
   }
 
+  // From a balance that could not be read there is no running balance: one
+  // run from nothing would draw a line that is wrong on every day, and its
+  // first day "below the overdraft" would be an artefact of starting at
+  // nothing, not a warning. Cash in and out on each day stand without it.
   let running = balanceCents, runwayDays = null;
   const series = days.map((d, i) => {
     running += d.in - d.out;
-    if (runwayDays === null && running < -overdraftCents) runwayDays = i;
-    return { date: d.date, in: fromCents(d.in), out: fromCents(d.out), net: fromCents(d.in - d.out), balance: fromCents(running) };
+    if (byCur && runwayDays === null && running < -overdraftCents) runwayDays = i;
+    return {
+      date: d.date, in: fromCents(d.in), out: fromCents(d.out), net: fromCents(d.in - d.out),
+      balance: byCur ? fromCents(running) : null,
+    };
   });
-  // From a balance that could not be read, the first day "below the
-  // overdraft" is an artefact of starting at nothing, not a warning.
-  if (!byCur) runwayDays = null;
 
   const past = _buildActuals({
     todayISO, base, payments, bankTransactions, leftOut: leftOutAccounts,
@@ -585,7 +740,7 @@ function _buildCashManager({
   });
 
   const order = { in: 0, out: 1 };
-  shown.sort((a, b) => a.date.localeCompare(b.date) || order[a.direction] - order[b.direction]
+  shown.sort((a, b) => (a.date || '').localeCompare(b.date || '') || order[a.direction] - order[b.direction]
     || a.contactName.localeCompare(b.contactName) || a.key.localeCompare(b.key));
 
   // ── What the figures are, and what they leave out, plainly.
@@ -601,6 +756,10 @@ function _buildCashManager({
   if (predicted) notes.push(`${plural(predicted, 'invoice or bill is', 'invoices and bills are')} dated by the contact's payment history.`);
   notes.push(`Anything dated before today, ${todayISO}${tzText}, is overdue: it is totalled on its own and placed on no day, `
     + 'since when it will be paid is not known. Set a date on it to place it.');
+  if (undated) {
+    notes.push(`${plural(undated, 'invoice or bill carries', 'invoices and bills carry')} neither a due date nor an invoice `
+      + `date in Xero, so ${undated === 1 ? 'it is' : 'they are'} counted as overdue and placed on no day until a date is set here.`);
+  }
   if (credits === null) {
     notes.push('Credit notes could not be read from Xero just now, so none are netted off; what is owed may be less.');
   } else if (creditCount) {
@@ -608,6 +767,11 @@ function _buildCashManager({
       + `same contact's earliest items, ${fromCents(creditApplied).toFixed(2)} in all.`
       + (creditLeft ? ` ${fromCents(creditLeft).toFixed(2)} of credit on ${plural(creditLeftCount, 'note', 'notes')} has no `
         + 'open item of its contact to go against and is left out.' : ''));
+  }
+  if (creditsNoRate.length) {
+    notes.push(`${plural(creditsNoRate.length, 'credit note', 'credit notes')} in another currency carried no exchange rate `
+      + `and ${creditsNoRate.length === 1 ? 'is' : 'are'} not netted off: `
+      + `${creditsNoRate.map(cn => `${cn.number || 'credit note'} (${[cn.contactName, cn.currencyCode].filter(Boolean).join(', ')})`).join(', ')}.`);
   }
   notes.push('Unallocated overpayments and prepayments are not used: that money is already in the bank, so it is in '
     + 'the opening balance.');
@@ -633,17 +797,44 @@ function _buildCashManager({
     notes.push(`${plural(paymentCount, 'payment', 'payments')} recorded in Xero with a date after today ${paymentCount === 1 ? 'is' : 'are'} on that date.`);
   }
   if (paymentsLeftOut) notes.push(`${plural(paymentsLeftOut, 'future payment goes', 'future payments go')} through a bank account left out of the balance, so ${paymentsLeftOut === 1 ? 'it is' : 'they are'} left out too.`);
+  if (bankTransactions === null) {
+    notes.push(bankTransactionsFailure === 'scope'
+      ? 'Spend and Receive Money dated after today could not be read: the Xero connection does not allow it. Reconnect in Setup to include it.'
+      : 'Spend and Receive Money dated after today could not be read from Xero just now, so none is included.');
+  } else if (banktxCount) {
+    notes.push(`${plural(banktxCount, 'Spend or Receive Money transaction', 'Spend and Receive Money transactions')} recorded in `
+      + `Xero with a date after today ${banktxCount === 1 ? 'is' : 'are'} on that date.`
+      + (transfersCounted ? ` ${transfersCounted === 1 ? 'One is a transfer' : `${transfersCounted} are transfers`} with no `
+        + 'matching transfer into or out of another account counted in the balance, so the balance counted moves by '
+        + `${transfersCounted === 1 ? 'it' : 'them'}.` : ''));
+  }
+  if (transfersPaired) {
+    notes.push(`${plural(transfersPaired, 'transfer', 'transfers')} dated after today between two bank accounts counted in the `
+      + `balance ${transfersPaired === 1 ? 'is' : 'are'} left out: ${transfersPaired === 1 ? 'it moves' : 'they move'} no money in or out.`);
+  }
+  if (banktxLeftOut) {
+    notes.push(`${plural(banktxLeftOut, 'Spend or Receive Money transaction dated after today goes', 'Spend and Receive Money '
+      + 'transactions dated after today go')} through a bank account left out of the balance, so `
+      + `${banktxLeftOut === 1 ? 'it is' : 'they are'} left out too.`);
+  }
+  if (!accountsKnown && paymentCount + banktxCount > 0) {
+    notes.push('Payments and Spend or Receive Money dated after today are all counted: without the list of bank accounts, '
+      + 'the account each goes through could not be checked, so one through an account in another currency or switched off '
+      + 'here may be among them.');
+  }
   if (past.available) {
     notes.push(`The ${ACTUAL_DAYS} days before today are what actually moved: the payments and bank transactions recorded in `
       + `Xero from ${addDaysISO(todayISO, -ACTUAL_DAYS)} to ${addDaysISO(todayISO, -1)}, without transfers between your own `
       + 'accounts or accounts left out of the balance. '
       + (byCur ? 'The balance on each is worked back from today\'s.' : 'With no bank balance to work back from, no balance is given for them.'));
-  } else {
+  } else if (payments === null || bankTransactions === null) {
     const scope = paymentsFailure === 'scope' || bankTransactionsFailure === 'scope';
     notes.push(scope
       ? 'Past cash could not be read: the Xero connection does not allow reading payments or bank transactions. Reconnect in Setup to include it.'
       : `Past cash could not be read from Xero just now, so the last ${ACTUAL_DAYS} days are not shown.`);
   }
+  // Otherwise both were read and the account list was not: the note on the
+  // bank below says why the past days are not shown.
   if (past.check && !past.check.agrees) {
     const c = past.check;
     notes.push(`Past cash does not tie to Xero's Bank Summary for ${c.from} to ${c.to}: the payments and bank transactions `
@@ -651,9 +842,18 @@ function _buildCashManager({
       + `and ${c.bank.out.toFixed(2)} out, transfers between your own accounts left out of both. Usually a payment posted to `
       + 'an account that is not a bank account, or an entry posted straight to a bank account, such as a manual journal.');
   }
-  if (!byCur) {
-    notes.push('Bank balances could not be read from Xero just now, so the projection starts from zero and no runway is given.');
-  } else {
+  if (unavailableReason === 'summary') {
+    notes.push('Bank balances could not be read from Xero just now, so no opening balance is shown, the running balance is '
+      + 'not drawn and no runway is given. Cash in and out on each day are shown as usual.');
+  }
+  if (!accountsKnown) {
+    notes.push('Xero\'s list of bank accounts could not be read just now, so which accounts are in base currency and which '
+      + 'are switched off here is not known'
+      + (bank ? ': the bank balance is not shown, the running balance is not drawn and no runway is given' : '')
+      + `. The ${ACTUAL_DAYS} days before today are not shown either, since money through an account in another currency `
+      + 'or switched off here cannot be told apart from the rest. Refresh to read it again.');
+  }
+  if (byCur) {
     notes.push(`The opening balance is today's closing balance of ${plural(included, 'bank account', 'bank accounts')} `
       + `from Xero's Bank Summary, with any adjustment set here.`);
     if (byCur.foreignAccounts.length) {
@@ -679,15 +879,23 @@ function _buildCashManager({
     timezone,
     horizonDays,
     horizonEnd,
-    bank: { available: !!byCur, accounts, balance: fromCents(balanceCents), overdraft: fromCents(overdraftCents) },
+    // With no balance (`available` false) the balance, the overdraft, the
+    // bank tile and every day's running balance are null, never 0, and
+    // `unavailableReason` says why: 'summary' when the Bank Summary could not
+    // be read, 'accounts' when the list of bank accounts could not.
+    bank: {
+      available: !!byCur, unavailableReason, accounts,
+      balance: byCur ? fromCents(balanceCents) : null, overdraft: byCur ? fromCents(overdraftCents) : null,
+    },
     tiles: {
-      bankBalance: fromCents(balanceCents),
+      bankBalance: byCur ? fromCents(balanceCents) : null,
       today: money(tiles.today), next7: money(tiles.next7), next8to30: money(tiles.next8to30), overdue: money(tiles.overdue),
     },
     runwayDays,
     series,
     // The days before today, oldest first, and what moved on them. Empty, with
-    // actualsAvailable false, when either read failed. actualsCheck is the
+    // actualsAvailable false, when either read failed or the list of bank
+    // accounts could not be read. actualsCheck is the
     // records against the Bank Summary over its own window, null without one.
     actualDays: ACTUAL_DAYS,
     actualsAvailable: past.available,
@@ -703,6 +911,11 @@ function _buildCashManager({
       originalDate: it.originalDate, faceAmount: it.faceAmount, foreign: !!it.foreign,
       creditApplied: fromCents(it.creditCents), daysLate: it.daysLate ?? null,
       invoiceDate: it.invoiceDate || null, description: it.description || null, beyondHorizon: it.beyondHorizon,
+      // Spend and Receive Money only: the accounts its lines are coded to,
+      // each with its share of the amount (positive, in base currency, adding
+      // up to `amount`), for the monthly view's rows; and whether it is the
+      // counted half of a transfer.
+      ...(it.source === 'banktx' ? { accounts: _accountShares(it.lines, it.cents), transfer: !!it.transfer } : {}),
     })),
     // Every open invoice and bill before credit notes and changes made here,
     // past the horizon too: what the check sets against the ageing.
@@ -717,8 +930,9 @@ function _buildCashManager({
 // ── Fetching ────────────────────────────────────────────────────────────────
 
 // Every approved template in one call: the endpoint is not paged, and the
-// list is short. Cached for an hour, keyed so a disconnect or a change in Xero
-// (report-cache.js#clearTenant) drops it with everything else.
+// list is short. Cached as long as the invoice list (REPEATING_TTL_MS), keyed
+// so a disconnect or a change in Xero (report-cache.js#clearTenant) drops it
+// with everything else.
 async function _getRepeatingRaw(userId, tenantId, { force = false } = {}) {
   const key    = `repeating:${userId}:${tenantId}`;
   const cached = _cacheGet(key, force);
@@ -749,9 +963,14 @@ async function _getPaymentsRaw(userId, tenantId, { todayISO, force = false } = {
 }
 const _getPayments = _dedupe('_getCashManagerPayments', _getPaymentsRaw, { force: false });
 
-// Approved bank transactions over today's Bank Summary window, reconciled or
-// not (the Bank Summary counts both), paged. The one call the actuals add:
-// their payments come from the read above.
+// Approved bank transactions from the first day of today's Bank Summary
+// window on, reconciled or not (the Bank Summary counts both), paged: one
+// read for both the actuals before today and the Spend and Receive Money
+// dated after it, as the payments read above is. The one call the actuals
+// add: their payments come from that read. With no upper bound, as that read
+// has none, one cached read serves any horizon, so the monthly forecast's
+// longer one never finds a shorter read under the same key: the key is the
+// day alone.
 async function _getRecentBankTransactionsRaw(userId, tenantId, { todayISO, force = false } = {}) {
   const key    = `cmbanktx:${userId}:${tenantId}:${todayISO}`;
   const cached = _cacheGet(key, force);
@@ -759,8 +978,7 @@ async function _getRecentBankTransactionsRaw(userId, tenantId, { todayISO, force
   const tokenCache = require('../utils/token-cache').forUser(userId);
   const api   = _apiFor(await tokenCache.getValidToken(tenantId));
   const from  = _parseISODate(addDaysISO(todayISO, -BALANCE_WINDOW_DAYS));
-  const to    = _parseISODate(addDaysISO(todayISO, 1));   // Xero's upper bound is exclusive
-  const where = `Date >= ${_fmtXeroDate(from)} && Date < ${_fmtXeroDate(to)} && Status=="AUTHORISED"`;
+  const where = `Date >= ${_fmtXeroDate(from)} && Status=="AUTHORISED"`;
   const list  = await _allPages(page => api.getBankTransactions(tenantId, undefined, where, 'Date ASC', page),
     'bankTransactions', { what: 'Bank transaction', tenantId });
   return _cacheSet(key, { bankTransactions: _bankTransactionsOf(list) }, PAYMENTS_TTL_MS);
@@ -787,11 +1005,15 @@ async function _getCashManagerRaw(userId, tenantId, { timezone = 'UTC', force = 
   const todayISO   = _fmtISODate(todayParts);
   const ctx = { userId, tenantId };
   const [outstanding, org, credits, bank, bankAccounts, repeating, payments, bankTx] = await Promise.all([
-    _getOutstanding(userId, tenantId, { force }),
+    // The lateness that dates invoices by payment history is measured over
+    // the year to today where the user is.
+    _getOutstanding(userId, tenantId, { force, timezone }),
     _getOrganisation(userId, tenantId, force),
     _soft('credit notes', _getCreditNotes(userId, tenantId, { force }), ctx),
     _soft('bank summary', getBankSummary(userId, tenantId, { ..._todayBalanceWindow(todayParts), force }), ctx),
-    _bankAccountList(userId, tenantId, force),
+    // Null when it could not be read, never an empty list taken for "every
+    // account is in base currency": see the bank in _buildCashManager.
+    _bankAccountsOrNull(userId, tenantId, force),
     _soft('repeating invoices', _getRepeatingInvoices(userId, tenantId, { force }), ctx),
     _soft('payments', _getPayments(userId, tenantId, { todayISO, force }), ctx),
     _soft('bank transactions', _getRecentBankTransactions(userId, tenantId, { todayISO, force }), ctx),
@@ -826,6 +1048,6 @@ const getCashManager = _dedupe('getCashManager', _getCashManagerRaw, { timezone:
 
 module.exports = {
   getCashManager, _buildCashManager, _templatesOf, _repeatingDates, _repeatingDue, _paymentsOf, _bankTransactionsOf,
-  _buildActuals, _manualDates, _todayBalanceWindow, _monthDay,
+  _buildActuals, _manualDates, _todayBalanceWindow, _monthDay, _accountShares,
   HORIZON_DAYS, MAX_HORIZON_DAYS, ACTUAL_DAYS, REPEATING_TTL_MS, PAYMENTS_TTL_MS, BALANCE_WINDOW_DAYS,
 };

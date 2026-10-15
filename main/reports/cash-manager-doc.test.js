@@ -327,6 +327,8 @@ describe('reports/cash-manager-doc — date basis in words', () => {
     expect(say({ dateBasis: 'payment' })).toBe('Payment dated ahead');
     expect(say({ dateBasis: 'manual', source: 'manual' })).toBe('Your entry');
     expect(say({ dateBasis: 'override' })).toBe('Changed here');
+    expect(say({ dateBasis: 'banktx', source: 'banktx' })).toBe('Spend/Receive Money dated ahead');
+    expect(say({ dateBasis: 'none' })).toBe('No date in Xero');
   });
 
   test('a change made here wins over Xero\'s basis, but not over the user\'s own entry', () => {
@@ -336,6 +338,7 @@ describe('reports/cash-manager-doc — date basis in words', () => {
 
   test('the source stands in for a missing basis, and an unknown one says nothing', () => {
     expect(cm.basisText(item({ dateBasis: null, source: 'repeating' }))).toBe('Repeating invoice');
+    expect(cm.basisText(item({ dateBasis: null, source: 'banktx' }))).toBe('Spend/Receive Money dated ahead');
     expect(cm.basisText(item({ dateBasis: undefined, source: 'manual' }))).toBe('Your entry');
     expect(cm.basisText(item({ dateBasis: 'constructor' }))).toBe('');
     expect(cm.basisText(undefined)).toBe('');
@@ -490,6 +493,63 @@ describe('reports/cash-manager-doc — filenames', () => {
     const odd = payload({ organisation: { name: 'Müller & Söhne (SG) Pte. Ltd.', currency: 'SGD' } });
     expect(cm.cashManagerFilename(odd, 'pdf', 60)).toBe('Cash-Flow-Manager_Müller-Söhne-SG-Pte-Ltd_2026-10-12_60-days.pdf');
     expect(cm.cashManagerFilename({ organisation: {} }, 'pdf')).toBe('Cash-Flow-Manager_organisation_undated.pdf');
+  });
+});
+
+describe('reports/cash-manager-doc — what Xero could not give', () => {
+  // As the service sends it when the Bank Summary, or the bank account list,
+  // could not be read: no balance anywhere, cash in and out still there.
+  const noBank = () => payload({
+    bank: { available: false, unavailableReason: 'summary', accounts: [], balance: null, overdraft: null },
+    tiles: { ...payload().tiles, bankBalance: null },
+    series: SERIES.map(r => ({ ...r, balance: null })),
+    actuals: ACTUALS.map(r => ({ ...r, balance: null })),
+    notes: ['Bank balances could not be read from Xero just now, so no opening balance is shown, the running balance is not drawn and no runway is given.'],
+  });
+  // Xero sent neither a due date nor an invoice date: overdue, on no day.
+  const undated = item({ key: 'invoice:inv-x', date: null, dueDate: null, originalDate: null, dateBasis: 'none', overdue: true, amount: 640, contactName: 'Omega', number: 'INV-0001' });
+
+  test('a balance that could not be read is said in words in the PDF, never printed as a nil, and the days carry no balance', () => {
+    const d = cm.cashManagerDefinition(noBank(), { ...SGT, days: 30 });
+    expect(tileCells(d)[0].stack.map(s => s.text)).toEqual(["Today's bank balance", 'Not available', 'Could not be read from Xero']);
+    expect(tileCells(d)[1].stack[1].text).toBe('-');   // the movements still print
+    expect(tileCells(d)[2].stack[1].text).toBe('8,531.00');
+    const body = bodyAfter(d, 'Day by day');
+    expect(body.slice(1).every(r => r[4].text === '')).toBe(true);
+    expect(body[4].map(c => c.text)).toEqual(['Thu 15 Oct 2026', '12,000.00', '-', '12,000.00', '']);
+    expect(d.content.some(c => c.style === 'note' && /running balance is not drawn/.test(c.text))).toBe(true);
+  });
+
+  test('and in the workbook: the words in the balance\'s place, and blank balances on the days', () => {
+    const wb = cm.cashManagerWorkbook(noBank(), { ...SGT, days: 30 });
+    const summary = wb.getWorksheet('Summary');
+    let tile = null;
+    summary.eachRow(r => { if (r.getCell(1).value === "Today's bank balance") tile = r; });
+    expect([tile.getCell(2).value, tile.getCell(3).value]).toEqual(['Not available', null]);
+    const daily = [];
+    wb.getWorksheet('Daily').eachRow(r => { if (r.getCell(1).value instanceof Date) daily.push(r.getCell(5).value); });
+    expect(daily).toHaveLength(31);
+    expect(daily.every(v => v === null)).toBe(true);
+  });
+
+  test('an item with no date in Xero is listed as overdue, with the words where its date would be', () => {
+    const p = payload({ items: [...ITEMS.map(it => ({ ...it })), undated] });
+    const d = cm.cashManagerDefinition(p, { ...SGT, days: 60 });
+    const rows = bodyAfter(d, 'Overdue').slice(1).map(r => r.map(plain));
+    expect(rows).toEqual([
+      ['No date in Xero', 'Omega', 'INV-0001', cell(640), ''],
+      ...OVERDUE.map(([date, contact, desc, amount]) => [date, contact, desc, cell(amount), '']),
+    ]);
+    const ws = cm.cashManagerWorkbook(p, { ...SGT, days: 60 }).getWorksheet('Overdue');
+    const found = [];
+    ws.eachRow(r => { if (r.getCell(2).value === 'Omega') found.push([r.getCell(1).value, r.getCell(5).value]); });
+    expect(found).toEqual([['No date in Xero', 640]]);
+  });
+
+  test('Spend and Receive Money dated ahead is listed with its own date basis', () => {
+    const tx = item({ key: 'banktx:b1', direction: 'out', source: 'banktx', date: '2026-10-22', dueDate: null, dateBasis: 'banktx', amount: 630, contactName: 'IRAS', reference: 'GST Q3' });
+    const d = cm.cashManagerDefinition(payload({ items: [tx] }), { ...SGT, days: 30 });
+    expect(bodyAfter(d, 'Cash out').slice(1).map(r => r.map(plain))).toEqual([['22 Oct 2026', 'IRAS', 'GST Q3', 'Spend/Receive Money dated ahead', cell(630)]]);
   });
 });
 
