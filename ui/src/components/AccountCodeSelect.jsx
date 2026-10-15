@@ -1,5 +1,7 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api/client';
+import { placePopover, fieldOffScreen } from './popover-place';
 
 // Searchable account picker backed by the connected Xero org's chart of accounts.
 //
@@ -93,7 +95,12 @@ export default function AccountCodeSelect({ value, onChange, invoiceType, disabl
   const [failed,   setFailed]   = useState(false);
   const [open,     setOpen]     = useState(false);
   const [query,    setQuery]    = useState('');
+  // Where the open list is drawn (popover-place.js), from the field's place
+  // in the window.
+  const [place,    setPlace]    = useState(null);
   const wrapRef  = useRef(null);
+  const fieldRef = useRef(null);
+  const listRef  = useRef(null);
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -108,10 +115,30 @@ export default function AccountCodeSelect({ value, onChange, invoiceType, disabl
     return () => { alive = false; };
   }, [tenantId]);
 
-  // Close on outside click / Escape.
+  // The list follows the field while the page scrolls or the window changes
+  // size, and closes once the field has left the window. Measured before
+  // paint, so it never shows a frame in the wrong place.
+  useLayoutEffect(() => {
+    if (!open) { setPlace(null); return; }
+    const measure = () => {
+      if (!fieldRef.current) return;
+      const rect = fieldRef.current.getBoundingClientRect();
+      if (fieldOffScreen(rect, window.innerHeight)) { setOpen(false); return; }
+      setPlace(placePopover(rect, window.innerHeight));
+    };
+    measure();
+    // Capture: a scroll inside any container moves the field too.
+    window.addEventListener('scroll', measure, true);
+    window.addEventListener('resize', measure);
+    return () => { window.removeEventListener('scroll', measure, true); window.removeEventListener('resize', measure); };
+  }, [open]);
+
+  // Close on outside click / Escape. The list is drawn outside this field's
+  // element (a portal), so a click in it is inside too.
   useEffect(() => {
     if (!open) return;
-    const onDown = e => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    const inside = t => (wrapRef.current && wrapRef.current.contains(t)) || (listRef.current && listRef.current.contains(t));
+    const onDown = e => { if (!inside(e.target)) setOpen(false); };
     const onKey  = e => { if (e.key === 'Escape') setOpen(false); };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
@@ -183,6 +210,7 @@ export default function AccountCodeSelect({ value, onChange, invoiceType, disabl
       {/* Closed state shows the NAME, with the code as a quiet trailing chip —
           a bare "200" tells you nothing about what you're coding to. */}
       <button
+        ref={fieldRef}
         type="button" disabled={disabled} autoFocus={autoFocus}
         onClick={() => { setOpen(o => !o); setQuery(''); setTimeout(() => inputRef.current?.focus(), 0); }}
         className="form-input"
@@ -215,12 +243,17 @@ export default function AccountCodeSelect({ value, onChange, invoiceType, disabl
         </div>
       )}
 
-      {open && (
-        <div style={{
-          position: 'absolute', top: 'calc(100% + 5px)', left: 0, right: 0, zIndex: 60,
+      {/* Drawn at the top of the page, over every card, the Save settings bar
+          and the chat button: inside the field's card it was drawn under the
+          cards after it (popover-place.js). Above a Modal (1000), under a
+          confirm dialog (1100) and the toasts. */}
+      {open && place && createPortal(
+        <div ref={listRef} style={{
+          position: 'fixed', left: place.left, width: place.width, zIndex: 1050,
+          ...(place.up ? { bottom: place.bottom } : { top: place.top }),
           background: 'var(--bg-primary)', border: '1px solid var(--border)',
           borderRadius: 'var(--radius-sm)', boxShadow: '0 12px 32px rgba(0,0,0,0.35)',
-          maxHeight: 320, display: 'flex', flexDirection: 'column', overflow: 'hidden',
+          maxHeight: place.maxHeight, display: 'flex', flexDirection: 'column', overflow: 'hidden',
         }}>
           <div style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>
             <input
@@ -282,7 +315,8 @@ export default function AccountCodeSelect({ value, onChange, invoiceType, disabl
               <span>＋ Use &ldquo;{typed}&rdquo; as a custom code</span>
             </button>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

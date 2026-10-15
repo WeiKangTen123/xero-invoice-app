@@ -39,6 +39,7 @@ describe('the chat launcher and the bars pinned to the bottom', () => {
   // without either reserving it or being named here as exempt.
   const EXEMPT = new Set([
     'components/ChatAssistant.jsx',   // the launcher itself and its panel
+    'components/AccountCodeSelect.jsx', // a list open under (or over) its field, only while open; not a bar
     'components/layout/BottomNav.jsx', // the phone nav sits UNDER the launcher by design
     'components/layout/Layout.jsx',    // the sidebar backdrop covers the whole screen
     'components/Modal.jsx',            // a modal backdrop covers the whole screen
@@ -70,5 +71,15 @@ describe('the chat launcher and the bars pinned to the bottom', () => {
 
   test('every bar pinned to the bottom reserves the corner', () => {
     for (const rel of pinned) expect(read(rel)).toMatch(/--fab-clearance/);
+  });
+
+  // Setup's bar was a full-width dark band pinned at all times, and hid
+  // whatever field scrolled behind it. Now it is pinned only with something
+  // to save, as a small box, and the strip around the box lets clicks through.
+  test('Setup\'s save bar is pinned only with unsaved changes, as a box and not a band', () => {
+    const setup = read('pages/Setup.jsx');
+    expect(setup).toMatch(/\.\.\.\(dirty \? \{ position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none' \} : \{\}\)/);
+    expect(setup).toMatch(/pointerEvents: 'auto', padding: '10px 10px 10px 16px'/);
+    expect(setup).not.toMatch(/linear-gradient\(to top, var\(--bg-primary\) 80%, transparent\)/);
   });
 });

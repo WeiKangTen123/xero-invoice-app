@@ -1112,32 +1112,42 @@ export default function Setup() {
           );
         })}
 
-        {/* Save bar */}
+        {/* Save bar. With nothing to save it sits in its place after the
+            last card and covers nothing. With unsaved changes it is pinned to
+            the window's bottom as a small box on the right, not the
+            full-width dark band it was, which hid whatever field scrolled
+            behind it; the pinned strip lets clicks through everywhere but the
+            box. Pinned, it still takes its place in the page, so scrolled to
+            the end the last card sits clear above it. The right-hand room is
+            the chat launcher's corner (globals.css --fab-clearance): the
+            button is right-aligned and sat under it. */}
         <div className="setup-save-bar" style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12,
-          // The right-hand room is the chat launcher's corner (globals.css
-          // --fab-clearance): the button is right-aligned and sat under it.
+          display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
           padding: '16px var(--fab-clearance) 16px 0',
-          position: 'sticky', bottom: 0,
-          background: 'linear-gradient(to top, var(--bg-primary) 80%, transparent)',
-          zIndex: 10,
+          ...(dirty ? { position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none' } : {}),
         }}>
-          {dirty && (
-            <span style={{ fontSize: 12, color: 'var(--warning)', fontWeight: 600 }}>Unsaved changes</span>
-          )}
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            Secrets are hidden by default — click 👁 to reveal
-          </span>
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={saving}
-            style={{ minWidth: 130 }}
-          >
-            {saving
-              ? <><span className="btn-spinner" /> Saving...</>
-              : '💾 Save settings'}
-          </button>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 12,
+            ...(dirty ? {
+              pointerEvents: 'auto', padding: '10px 10px 10px 16px',
+              background: 'var(--bg-card)', border: '1px solid var(--border-card)',
+              borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-md)',
+            } : {}),
+          }}>
+            {dirty
+              ? <span style={{ fontSize: 12, color: 'var(--warning)', fontWeight: 600 }}>● Unsaved changes</span>
+              : <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Secrets are hidden by default — click 👁 to reveal</span>}
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={saving}
+              style={{ minWidth: 130 }}
+            >
+              {saving
+                ? <><span className="btn-spinner" /> Saving...</>
+                : '💾 Save settings'}
+            </button>
+          </div>
         </div>
       </form>
 
