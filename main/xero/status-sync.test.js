@@ -1,6 +1,7 @@
 // Reading back from Xero what became of posted records: grouped by company,
-// asked 50 IDs at a time, If-Modified-Since from the last complete read, and
-// stopped for a company by its daily limit. The SDK class is replaced by a
+// asked 50 IDs at a time, If-Modified-Since from the last complete read, the
+// paid-on day asked in full (a summary answer leaves it out), and stopped for
+// a company by its daily limit. The SDK class is replaced by a
 // small fake Xero (a book of invoices per company that answers getInvoices
 // the way Xero does), so nothing here reaches Xero. The database, the token
 // cache and withRetry are the real ones.
@@ -23,12 +24,23 @@ function inXero(tenantId, invoiceID, fields = {}, updatedAt) {
 }
 // getInvoices(tenant, ifModifiedSince, where, order, iDs, invoiceNumbers,
 //             contactIDs, statuses, page, includeArchived, createdByMyApp, unitdp, summaryOnly)
-function fakeXero(tenantId, since, _where, _order, ids) {
+// Like Xero, a summaryOnly answer leaves FullyPaidOnDate out (a live
+// organisation's had it on none of its paid invoices), unless a test says
+// this one carries it.
+let summaryCarriesPaidDate = false;
+function fakeXero(tenantId, since, _where, _order, ids, ...rest) {
+  const summaryOnly = rest[7]; // the 13th argument
   const book = xero.get(tenantId) || new Map();
   const found = (ids || []).map(id => book.get(id)).filter(Boolean)
     .filter(inv => !since || inv.updatedDateUTC >= since);
-  return Promise.resolve({ body: { invoices: found.map(i => ({ ...i })) } });
+  return Promise.resolve({ body: { invoices: found.map(i => {
+    const inv = { ...i };
+    if (summaryOnly && !summaryCarriesPaidDate) delete inv.fullyPaidOnDate;
+    return inv;
+  }) } });
 }
+// Xero answers a summary read and fails the full one.
+const fullReadFails = (...args) => (args[12] ? fakeXero(...args) : Promise.reject(new Error('socket hang up')));
 const xid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const callsFor = tenantId => mockGetInvoices.mock.calls.filter(c => c[0] === tenantId);
 
@@ -50,6 +62,7 @@ describe('xero/status-sync', () => {
     jest.resetModules();
     mockGetInvoices.mockReset().mockImplementation(fakeXero);
     xero.clear();
+    summaryCarriesPaidDate = false;
     require('../db/migrate').run();
     db           = require('../db');
     users        = require('../utils/users');
@@ -69,6 +82,12 @@ describe('xero/status-sync', () => {
     xeroInvoiceId, xeroTenantId: tenantId, processedAt: new Date().toISOString(), ...extra,
   });
   const raw = id => db.prepare('SELECT * FROM invoices WHERE id = ?').get(id);
+  // The record's history lines from Xero status reads.
+  const history = id => db.prepare("SELECT summary FROM invoice_events WHERE invoice_id = ? AND action = 'xero.status' ORDER BY id")
+    .all(id).map(r => r.summary);
+  const lastRead = tenantId => (db.prepare('SELECT last_success_at FROM xero_status_sync WHERE user_id = ? AND tenant_id = ?')
+    .get(user.id, tenantId) || {}).last_success_at;
+  const paidOnDay = day => ({ status: 'PAID', amountDue: 0, amountPaid: 110, fullyPaidOnDate: new Date(`${day}T00:00:00Z`) });
 
   test('asks each company about its own records only, 50 IDs to a call, summaryOnly', async () => {
     connect('t-A'); connect('t-B');
@@ -128,6 +147,164 @@ describe('xero/status-sync', () => {
     expect(fromXero({ status: 'AUTHORISED', total: 100, amountDue: 30, amountCredited: 20 }).amountPaid).toBe(50);
     expect(fromXero({ status: 'ARCHIVED' })).toBeNull();
     expect(fromXero({ status: 'AUTHORISED', amountDue: 10, amountPaid: 0, fullyPaidOnDate: '2026-01-01' }).paidOn).toBeNull();
+  });
+
+  describe('the paid-on day, which a summary answer leaves out', () => {
+    test('the paid ones are asked again in full, those IDs alone, and the day comes with one history line', async () => {
+      connect('t-A');
+      posted('paid', xid(1), 't-A'); posted('open', xid(2), 't-A'); posted('also', xid(3), 't-A');
+      inXero('t-A', xid(1), paidOnDay('2026-09-15'), clock - HOUR);
+      inXero('t-A', xid(2), { status: 'AUTHORISED', amountDue: 60.5, amountPaid: 49.5 }, clock - HOUR);
+      inXero('t-A', xid(3), paidOnDay('2026-09-20'), clock - HOUR);
+
+      await expect(run()).resolves.toEqual({ checked: 3, updated: 3, failedTenants: 0 });
+
+      const [summary, full] = mockGetInvoices.mock.calls;
+      expect(mockGetInvoices).toHaveBeenCalledTimes(2);
+      expect(summary[4]).toEqual([xid(1), xid(2), xid(3)]);
+      expect(summary[12]).toBe(true);
+      // The full read: the tenant, the paid IDs, and nothing else at all. No
+      // If-Modified-Since, and summaryOnly left out (status-sync-sdk.test.js:
+      // undefined is not sent).
+      expect(full[0]).toBe('t-A');
+      expect(full[4]).toEqual([xid(1), xid(3)]);
+      for (const i of [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12]) expect(full[i]).toBeUndefined();
+
+      expect(store.getById('paid')).toMatchObject({ xeroStatus: 'PAID', xeroAmountDue: 0, xeroAmountPaid: 110, xeroPaidOn: '2026-09-15' });
+      expect(store.getById('also').xeroPaidOn).toBe('2026-09-20');
+      expect(store.getById('open').xeroPaidOn).toBeNull();
+      expect(history('paid')).toEqual(['Paid in Xero on 2026-09-15']);
+    });
+
+    test('paid since the last read: one more call for the day, then none while it does not change', async () => {
+      connect('t-A');
+      for (let i = 1; i <= 3; i++) { posted(`r${i}`, xid(i), 't-A'); inXero('t-A', xid(i), { status: 'AUTHORISED' }, clock - 48 * HOUR); }
+      await run();
+      inXero('t-A', xid(2), paidOnDay('2026-10-01'), clock + HOUR);
+      clock += 3 * HOUR;
+      mockGetInvoices.mockClear();
+
+      await expect(run()).resolves.toEqual({ checked: 3, updated: 1, failedTenants: 0 });
+      expect(mockGetInvoices.mock.calls.map(c => [c[1] instanceof Date, c[4], c[12]])).toEqual([
+        [true, [xid(1), xid(2), xid(3)], true],
+        [false, [xid(2)], undefined],
+      ]);
+      expect(store.getById('r2')).toMatchObject({ xeroStatus: 'PAID', xeroPaidOn: '2026-10-01' });
+      expect(history('r2')).toEqual(['Approved in Xero', 'Paid in Xero on 2026-10-01']);
+
+      clock += 3 * HOUR;
+      mockGetInvoices.mockClear();
+      await run();
+      expect(mockGetInvoices).toHaveBeenCalledTimes(1);
+      expect(store.getById('r2').xeroPaidOn).toBe('2026-10-01');
+    });
+
+    test('no full read when the summary answer has the day, or nothing in it is PAID', async () => {
+      connect('t-A'); connect('t-B');
+      posted('paid', xid(1), 't-A'); inXero('t-A', xid(1), paidOnDay('2026-09-15'), clock - HOUR);
+      posted('part', xid(2), 't-B'); inXero('t-B', xid(2), { status: 'AUTHORISED', amountDue: 60.5, amountPaid: 49.5 }, clock - HOUR);
+      posted('void', xid(3), 't-B'); inXero('t-B', xid(3), { status: 'VOIDED', amountDue: 0 }, clock - HOUR);
+      posted('draft', xid(4), 't-B'); inXero('t-B', xid(4), {}, clock - HOUR);
+      summaryCarriesPaidDate = true;
+
+      await run();
+
+      expect(callsFor('t-A').map(c => c[12])).toEqual([true]);
+      expect(callsFor('t-B').map(c => c[12])).toEqual([true]);
+      expect(store.getById('paid').xeroPaidOn).toBe('2026-09-15');
+    });
+
+    // Every row read before the full asking existed: PAID, no day, and
+    // unchanged in Xero, so If-Modified-Since never brings it back.
+    test('rows stored as PAID without a day are asked in full once, and not again on the next read', async () => {
+      connect('t-A');
+      const before = new Date(clock - 24 * HOUR).toISOString(); // after Xero last changed any of them
+      for (let i = 1; i <= 52; i++) {
+        posted(`p${i}`, xid(i), 't-A');
+        store.recordXeroStatus(`p${i}`, xid(i), { status: 'PAID', amountDue: 0, amountPaid: 110, tenantId: 't-A' }, before);
+        // The last one was settled by a credit note: Xero has no day for it even in full.
+        inXero('t-A', xid(i), i === 52 ? { ...paidOnDay('2026-09-01'), fullyPaidOnDate: undefined } : paidOnDay('2026-09-01'), clock - 48 * HOUR);
+      }
+      posted('open', xid(100), 't-A');
+      store.recordXeroStatus('open', xid(100), { status: 'AUTHORISED', amountDue: 110, amountPaid: 0, tenantId: 't-A' }, before);
+      inXero('t-A', xid(100), { status: 'AUTHORISED' }, clock - 48 * HOUR);
+      posted('dated', xid(101), 't-A');
+      store.recordXeroStatus('dated', xid(101), { status: 'PAID', amountDue: 0, amountPaid: 110, paidOn: '2026-08-01', tenantId: 't-A' }, before);
+      inXero('t-A', xid(101), paidOnDay('2026-08-01'), clock - 48 * HOUR);
+      // The complete read that stored them, as the code before this made it.
+      db.prepare('INSERT INTO xero_status_sync (user_id, tenant_id, last_success_at) VALUES (?, ?, ?)').run(user.id, 't-A', before);
+
+      await expect(run()).resolves.toEqual({ checked: 54, updated: 51, failedTenants: 0 });
+
+      // The rest in summary under If-Modified-Since; the undated paid ones in
+      // full, without it, 50 to a call, and not in summary as well.
+      expect(mockGetInvoices.mock.calls.map(c => [c[1] instanceof Date, c[4].length, c[12]])).toEqual([
+        [true, 2, true],
+        [false, 50, undefined],
+        [false, 2, undefined],
+      ]);
+      expect(mockGetInvoices.mock.calls[0][4]).toEqual([xid(100), xid(101)]);
+      expect(mockGetInvoices.mock.calls.slice(1).flatMap(c => c[4])).toEqual([...Array(52)].map((_, i) => xid(i + 1)));
+      expect(store.getById('p1')).toMatchObject({ xeroStatus: 'PAID', xeroAmountPaid: 110, xeroPaidOn: '2026-09-01' });
+      expect(store.getById('p52')).toMatchObject({ xeroStatus: 'PAID', xeroPaidOn: null });
+      // The day arriving on a record already PAID is one line of its own.
+      expect(history('p1')).toEqual(['Paid in Xero', 'Paid in Xero on 2026-09-01']);
+      expect(history('p52')).toEqual(['Paid in Xero']);
+
+      // Next read: nothing asked in full, the one Xero has no day for included.
+      clock += 3 * HOUR;
+      mockGetInvoices.mockClear();
+      await run();
+      expect(mockGetInvoices.mock.calls.map(c => [c[1] instanceof Date, c[4].length, c[12]])).toEqual([
+        [true, 50, true],
+        [true, 4, true],
+      ]);
+      expect(store.getById('p52').xeroPaidOn).toBeNull();
+      expect(history('p1')).toEqual(['Paid in Xero', 'Paid in Xero on 2026-09-01']);
+    });
+
+    test('a failed full read keeps what the summary said, stops the company, and is asked again next time', async () => {
+      connect('t-A');
+      posted('old', xid(1), 't-A'); inXero('t-A', xid(1), {}, clock - 48 * HOUR);
+      await run();
+      const firstRead = lastRead('t-A');
+      // Posted since, and paid in Xero long before the last read: unchanged
+      // from here on, so If-Modified-Since alone would never bring it back.
+      posted('paid', xid(2), 't-A'); inXero('t-A', xid(2), paidOnDay('2026-09-15'), clock - 48 * HOUR);
+      clock += 3 * HOUR;
+      mockGetInvoices.mockClear().mockImplementation(fullReadFails);
+
+      await expect(run()).resolves.toEqual({ checked: 1, updated: 1, failedTenants: 1 });
+
+      expect(store.getById('paid')).toMatchObject({ xeroStatus: 'PAID', xeroAmountDue: 0, xeroAmountPaid: 110, xeroPaidOn: null });
+      // Stopped there: the read of the rest never went, and the last complete read stays.
+      expect(mockGetInvoices.mock.calls.map(c => [c[4], c[12]])).toEqual([[[xid(2)], true], [[xid(2)], undefined]]);
+      expect(lastRead('t-A')).toBe(firstRead);
+
+      clock += 3 * HOUR;
+      mockGetInvoices.mockClear().mockImplementation(fakeXero);
+      await expect(run()).resolves.toEqual({ checked: 2, updated: 1, failedTenants: 0 });
+      expect(mockGetInvoices.mock.calls.map(c => [c[1] instanceof Date, c[4], c[12]])).toEqual([
+        [true, [xid(1)], true],
+        [false, [xid(2)], undefined],
+      ]);
+      expect(store.getById('paid').xeroPaidOn).toBe('2026-09-15');
+      expect(history('paid')).toEqual(['Paid in Xero', 'Paid in Xero on 2026-09-15']);
+    });
+
+    test('a failed full read leaves a day already stored where it is', async () => {
+      connect('t-A');
+      posted('paid', xid(1), 't-A'); inXero('t-A', xid(1), paidOnDay('2026-09-15'), clock - 48 * HOUR);
+      await run();
+      // Touched in Xero (a note, say): the summary brings it back without its day.
+      inXero('t-A', xid(1), paidOnDay('2026-09-15'), clock + HOUR);
+      clock += 3 * HOUR;
+      mockGetInvoices.mockClear().mockImplementation(fullReadFails);
+
+      await expect(run()).resolves.toEqual({ checked: 1, updated: 0, failedTenants: 1 });
+      expect(store.getById('paid')).toMatchObject({ xeroStatus: 'PAID', xeroPaidOn: '2026-09-15' });
+      expect(history('paid')).toEqual(['Paid in Xero on 2026-09-15']);
+    });
   });
 
   test('the next read sends If-Modified-Since from the last complete one and leaves unchanged records alone', async () => {
@@ -210,7 +387,9 @@ describe('xero/status-sync', () => {
     connect('t-A');
     posted('legacy', xid(1), undefined); inXero('t-A', xid(1), { status: 'PAID', amountDue: 0, amountPaid: 110 }, clock - HOUR);
     await run();
-    expect(callsFor('t-A')).toHaveLength(1);
+    // The summary read, then the full one for its paid day: both of that company.
+    expect(callsFor('t-A').map(c => c[12])).toEqual([true, undefined]);
+    expect(mockGetInvoices).toHaveBeenCalledTimes(2);
     expect(store.getById('legacy')).toMatchObject({ xeroStatus: 'PAID', xeroTenantId: 't-A' });
   });
 
@@ -245,13 +424,14 @@ describe('xero/status-sync', () => {
     const result = await run();
 
     // One call for A: the refusal is not retried and its second batch never goes.
+    // Two for B: its paid one is asked again in full for the day.
     expect(callsFor('t-A')).toHaveLength(1);
-    expect(callsFor('t-B')).toHaveLength(1);
+    expect(callsFor('t-B')).toHaveLength(2);
     expect(result).toEqual({ checked: 1, updated: 1, failedTenants: 1 });
     expect(store.getById('a1').xeroStatus).toBeNull();
     expect(store.getById('b1').xeroStatus).toBe('PAID');
-    const reads = db.prepare('SELECT tenant_id FROM xero_status_sync WHERE user_id = ?').all(user.id).map(r => r.tenant_id);
-    expect(reads).toEqual(['t-B']);
+    expect(lastRead('t-A')).toBeUndefined();
+    expect(lastRead('t-B')).toBe(new Date(clock).toISOString());
 
     // Until Xero's reset time, A is not asked again at all.
     mockGetInvoices.mockClear();

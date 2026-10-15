@@ -7,6 +7,7 @@ jest.mock('xero-node', () => {
     getOrganisations: jest.fn(),
     getInvoices:      jest.fn(),
     getCreditNotes:   jest.fn(),
+    getPayments:      jest.fn(),
   };
   return { AccountingApi: jest.fn(() => api), __api: api };
 });
@@ -53,12 +54,14 @@ beforeEach(() => {
   T = `t-summary-${++n}`;
   api.getOrganisations.mockResolvedValue({ body: { organisations: [ORG] } });
   api.getCreditNotes.mockResolvedValue({ body: { creditNotes: [] } });
+  api.getPayments.mockResolvedValue({ body: { payments: [] } });
 });
 afterEach(() => jest.useRealTimers());
 
 const calls = () => ({
   invoices: api.getInvoices.mock.calls.length,
   credits: api.getCreditNotes.mock.calls.length,
+  payments: api.getPayments.mock.calls.length,
 });
 
 // An invoice due on the 7th was compared with the clock as an instant: Xero's
@@ -109,7 +112,7 @@ describe('overdue is by calendar day where the user is', () => {
     expect(later.invoices[0].status).toBe('overdue');
     expect(utc.invoices[0].status).toBe('awaiting');
     expect(none.kpis).toEqual(utc.kpis);
-    expect(calls()).toEqual({ invoices: 1, credits: 1 });
+    expect(calls()).toEqual({ invoices: 1, credits: 1, payments: 1 });
     expect(later.cached).toBe(true);
   });
 });
@@ -159,6 +162,135 @@ describe('lateness is measured over the year to today where the user is', () => 
   });
 });
 
+// The lateness was measured from each paid invoice's FullyPaidOnDate, which
+// Xero's summaryOnly invoice list never sends (a live organisation: none of
+// eleven paid invoices carried it), so the paid history was always empty and
+// the Cash Flow Manager never placed an item on a predicted date. The day an
+// invoice was paid now comes from its payments, read in the same cached fetch.
+describe('the paid history is dated by Xero\'s payments', () => {
+  const { _getOutstanding, _lastPaidOn, _paidHistoryOf } = require('./summary');
+  const logger = require('../utils/logger');
+  // A PAID invoice as the list sends it: no FullyPaidOnDate.
+  const paid = (id, due, over = {}) => inv({ invoiceID: id, status: 'PAID', amountDue: 0, dueDate: `${due}T00:00:00`, ...over });
+  const pay  = (invoiceID, date, over = {}) => ({
+    paymentID: `p-${++seq}`, status: 'AUTHORISED', paymentType: 'ACCRECPAYMENT',
+    date: `${date}T00:00:00`, amount: 50, invoice: { invoiceID }, ...over,
+  });
+  const supplier = { contactID: 's1', name: 'Supplier' };
+  // 2026-10-12 in UTC: the history reaches back a year and two days, to 10 Oct 2025.
+  const NOW   = '2026-10-12T17:30:00Z';
+  const WHERE = 'Date >= DateTime(2025,10,10) && Status=="AUTHORISED"';
+
+  test('a paid invoice without FullyPaidOnDate is dated by its last payment, and the contact has a lateness', async () => {
+    fakeNow(NOW);
+    api.getInvoices.mockResolvedValue({ body: { invoices: [
+      paid('a1', '2026-09-01'),
+      paid('a2', '2026-10-01'),
+      paid('a3', '2026-09-15'),                         // settled by a credit note alone: no payment, no day
+      paid('b1', '2026-08-01', { type: 'ACCPAY', contact: supplier }),
+      paid('b2', '2026-09-01', { type: 'ACCPAY', contact: supplier }),
+      inv({ dueDate: '2026-10-20T00:00:00' }),
+    ] } });
+    api.getPayments.mockResolvedValue({ body: { payments: [
+      pay('a1', '2026-09-11'),                          // the part that finished it, listed first
+      pay('a1', '2026-09-05'),                          // a part payment before it
+      pay('a2', '2026-10-09'),
+      pay('b1', '2026-08-21', { paymentType: 'ACCPAYPAYMENT' }),
+      pay('b2', '', { paymentType: 'ACCPAYPAYMENT', date: '/Date(1789948800000+0000)/' }),   // 21 Sep, as Xero's JSON dates it
+    ] } });
+
+    const out = await _getOutstanding(U, T, { timezone: 'UTC' });
+    expect(out.lateness).toEqual({
+      'ACCREC:c-acme': { days: 9, count: 2, average: 9 },   // 10 and 8 days late; a3 left out
+      'ACCPAY:s1':     { days: 20, count: 2, average: 20 },
+    });
+    expect(out.invoices).toHaveLength(1);
+    // One payments read, paged from page 1, over the history's span.
+    expect(api.getPayments).toHaveBeenCalledTimes(1);
+    expect(api.getPayments).toHaveBeenCalledWith(T, undefined, WHERE, 'Date DESC', 1);
+
+    // Still one cached read per company, shared with the Dashboard's summary.
+    const again = await _getOutstanding(U, T, { timezone: 'Asia/Singapore' });
+    const s     = await reports.getSummary(U, T, { timezone: 'UTC' });
+    expect(again.lateness).toEqual(out.lateness);
+    expect(s.kpis).toMatchObject({ totalReceivables: 100, statusBreakdown: { paid: 5 } });
+    expect(calls()).toEqual({ invoices: 1, credits: 1, payments: 1 });
+  });
+
+  test('the invoice\'s own FullyPaidOnDate wins over its payments when Xero sends it', async () => {
+    fakeNow(NOW);
+    api.getInvoices.mockResolvedValue({ body: { invoices: [
+      paid('a1', '2026-09-01', { fullyPaidOnDate: '2026-09-11T00:00:00' }),
+      paid('a2', '2026-10-01', { fullyPaidOnDate: '2026-10-11T00:00:00' }),
+    ] } });
+    api.getPayments.mockResolvedValue({ body: { payments: [pay('a1', '2026-09-30'), pay('a2', '2026-10-01')] } });
+    expect((await _getOutstanding(U, T, { timezone: 'UTC' })).lateness)
+      .toEqual({ 'ACCREC:c-acme': { days: 10, count: 2, average: 10 } });
+  });
+
+  test('payments outside the year, or for an invoice not in the list or still open, change nothing', async () => {
+    fakeNow(NOW);
+    api.getInvoices.mockResolvedValue({ body: { invoices: [
+      paid('a1', '2026-09-01'),
+      paid('a2', '2026-10-01'),
+      paid('old', '2025-09-01'),                       // paid off 1 Oct 2025, before the history begins
+      inv({ invoiceID: 'open', dueDate: '2026-09-01T00:00:00', amountDue: 40 }),   // part paid, still owed
+    ] } });
+    api.getPayments.mockResolvedValue({ body: { payments: [
+      pay('a1', '2026-09-11'),
+      pay('a2', '2026-10-11'),
+      pay('old', '2025-10-01'),
+      pay('gone', '2026-09-30'),                       // an invoice the list did not return
+      pay('open', '2026-10-01'),
+    ] } });
+    const out = await _getOutstanding(U, T, { timezone: 'UTC' });
+    expect(out.lateness).toEqual({ 'ACCREC:c-acme': { days: 10, count: 2, average: 10 } });
+    expect(api.getPayments).toHaveBeenCalledWith(T, undefined, WHERE, 'Date DESC', 1);
+  });
+
+  test.each([
+    ['fails', new Error(JSON.stringify({ response: { statusCode: 500 }, body: {} })), false],
+    ['is refused for want of accounting.payments.read',
+      new Error(JSON.stringify({ response: { statusCode: 401, headers: { 'www-authenticate': 'insufficient_scope' } }, body: {} })), true],
+  ])('a payments read that %s leaves no lateness; the summary and open invoices still come', async (_, err, scope) => {
+    fakeNow(NOW);
+    const warn = jest.spyOn(logger, 'warn');
+    api.getInvoices.mockResolvedValue({ body: { invoices: [
+      paid('a1', '2026-09-01'), paid('a2', '2026-10-01'), inv({ dueDate: '2026-10-20T00:00:00' }),
+    ] } });
+    api.getPayments.mockRejectedValue(err);
+
+    const out = await _getOutstanding(U, T, { timezone: 'UTC' });
+    const s   = await reports.getSummary(U, T, { timezone: 'UTC' });
+    expect(out.lateness).toEqual({});
+    expect(out.invoices).toHaveLength(1);
+    expect(s.kpis).toMatchObject({ totalReceivables: 100, receivablesCount: 1, statusBreakdown: { paid: 2, awaiting: 1 } });
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/payments unavailable/), expect.objectContaining({ tenantId: T, scope }));
+    expect(calls()).toEqual({ invoices: 1, credits: 1, payments: 1 });
+    warn.mockRestore();
+  });
+
+  test('_lastPaidOn: the latest payment per invoice; deleted ones, and refunds that pay no invoice, passed over', () => {
+    const days = _lastPaidOn([
+      pay('a1', '2026-09-05'), pay('a1', '2026-09-11'), pay('a1', '2026-09-08'),
+      pay('a2', '2026-09-01'), pay('a2', '2026-09-20', { status: 'DELETED' }),
+      pay(undefined, '2026-09-25', { invoice: undefined, paymentType: 'ARCREDITPAYMENT', creditNote: { creditNoteID: 'cn' } }),
+      pay('a3', null),
+      null,
+    ]);
+    expect(Object.fromEntries(days)).toEqual({ a1: '2026-09-11', a2: '2026-09-01' });
+  });
+
+  test('_paidHistoryOf keeps the compact shape _latenessOf reads, with no payments as before', () => {
+    const list = [paid('a1', '2026-09-01'), paid('a2', '2026-09-01', { fullyPaidOnDate: '2026-09-04T00:00:00' })];
+    expect(_paidHistoryOf(list, '2026-10-12')).toEqual([
+      { status: 'PAID', type: 'ACCREC', dueDate: '2026-09-01', fullyPaidOnDate: '2026-09-04', contact: { contactID: 'c-acme', name: 'Acme' } },
+    ]);
+    expect(_paidHistoryOf(list, '2026-10-12', new Map([['a1', '2026-09-11']])).map(r => r.fullyPaidOnDate))
+      .toEqual(['2026-09-11', '2026-09-04']);
+  });
+});
+
 // The header showed every open invoice gross while the ageing, and Xero's
 // Balance Sheet, took off the credit customers and suppliers had not yet used,
 // so "Total Receivables" was higher than the ageing it opens.
@@ -190,7 +322,7 @@ describe('receivables and payables net unallocated credit notes, as the ageing d
     expect(s.kpis.creditsUnavailable).toBe(false);
     expect(s.kpis).toMatchObject({ receivablesCount: 2, payablesCount: 1 });
     // One read of the credit notes between them.
-    expect(calls()).toEqual({ invoices: 1, credits: 1 });
+    expect(calls()).toEqual({ invoices: 1, credits: 1, payments: 1 });
   });
 
   test('credit notes that cannot be read leave the gross figure, flagged, and are asked for again next time', async () => {
@@ -207,6 +339,6 @@ describe('receivables and payables net unallocated credit notes, as the ageing d
 
     const next = await reports.getSummary(U, T, { timezone: 'Asia/Singapore' });
     expect(next.kpis).toMatchObject({ totalReceivables: 70, creditsUnavailable: false, creditsNetted: { receivables: 30 } });
-    expect(calls()).toEqual({ invoices: 1, credits: 2 });
+    expect(calls()).toEqual({ invoices: 1, credits: 2, payments: 1 });
   });
 });

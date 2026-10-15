@@ -10,13 +10,37 @@
 // Read-only: getInvoices is the only Xero call made here, and nothing is ever
 // sent back. For one user, each connected company in turn:
 //
-//   - Asked by ID, 50 to a call, summaryOnly (no line items, which nothing
-//     here needs and which make each answer many times larger).
+//   - Asked by ID, 50 to a call, summaryOnly: Xero's lighter answer, without
+//     the line items, which nothing here needs and which make each answer
+//     many times larger.
+//   - But the summary answer leaves out FullyPaidOnDate, the day a document
+//     was paid in full (a live organisation's had it on none of its paid
+//     invoices; the same invoices asked without summaryOnly all had it). So
+//     the documents a summary answer calls PAID are asked again in full:
+//     those IDs alone, no summaryOnly, no If-Modified-Since. The day is taken
+//     from that answer before anything is stored, so a payment is one
+//     history line with its date. Most reads find nothing newly paid and
+//     make no such call; a batch with something just paid makes one. If it
+//     fails, what the summary said is still stored (the day unknown, or kept
+//     for a row that was PAID already), the company stops there as on any
+//     failure, and its catch-up (below) is to be done again, so the next
+//     read asks that document in full even if nothing about it changes.
 //   - Rows already read are asked with If-Modified-Since set to the company's
 //     last complete read (xero_status_sync), so Xero answers with only the
 //     ones that changed; the rest are confirmed unchanged without being sent.
 //     Rows never read are asked without it, since an old document unchanged
 //     for a year would otherwise never come back at all.
+//   - The catch-up. A row stored as PAID without its day (by every read made
+//     before the asking in full, or after one that failed) would never come
+//     back under If-Modified-Since: nothing about it changed in Xero. So
+//     while a company's catch-up is not done, its rows stored that way are
+//     asked in full instead of in summary, without If-Modified-Since, 50 to
+//     a call. Done is recorded with each complete read, as a second
+//     xero_status_sync row keyed "paid-on:<tenant id>" (_recordSuccess).
+//     Afterwards a paid document is asked in full only when a summary answer
+//     brings it back, i.e. when it changed in Xero, so one Xero has no
+//     FullyPaidOnDate for even in full (settled by a credit note, say) is
+//     asked once, not on every read.
 //   - VOIDED and DELETED rows are not asked again: Xero cannot undo either,
 //     so asking would spend a call for an answer already known.
 //   - Every call goes through withRetry, so a minute limit is waited out and
@@ -82,6 +106,9 @@ function _chunk(list, size) {
   return out;
 }
 
+// Xero's IDs are GUIDs, matched whatever their case.
+const _key = id => String(id).toLowerCase();
+
 function _amount(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
@@ -107,6 +134,7 @@ function _xeroDay(value) {
 /**
  * What one invoice from Xero says, as the store keeps it, or null for a
  * status this app does not know (stored as nothing rather than as a guess).
+ * paidOn is null from a summary answer: Xero leaves FullyPaidOnDate out of it.
  */
 function fromXero(inv) {
   const status = String((inv && inv.status) || '').toUpperCase();
@@ -130,11 +158,41 @@ function _lastSuccess(userId, tenantId) {
   return Number.isFinite(t) ? t : null;
 }
 
+// Whether the company's rows stored as PAID without a paid day have been
+// asked in full (the header's catch-up). Kept in xero_status_sync, which only
+// this module reads or writes, under a key no Xero tenant ID (a GUID) can be:
+// a new column would need a migration for a flag written once per company.
+// Lost, it costs one more catch-up, never a wrong answer.
+const _caughtUpKey = tenantId => `paid-on:${tenantId}`;
+
+function _paidOnCaughtUp(userId, tenantId) {
+  return !!db.prepare('SELECT 1 FROM xero_status_sync WHERE user_id = ? AND tenant_id = ?')
+    .get(userId, _caughtUpKey(tenantId));
+}
+
+// A complete read under this code leaves no row stored as PAID that was not
+// asked in full at least once: a first read brings every row back in summary
+// and the paid ones are asked again, a catch-up asks the rest, and after that
+// a newly paid one is asked when it comes back. So the catch-up is recorded
+// as done with every complete read, kept from the first (the time it was).
 function _recordSuccess(userId, tenantId, at) {
-  db.prepare(`
-    INSERT INTO xero_status_sync (user_id, tenant_id, last_success_at) VALUES (?, ?, ?)
-    ON CONFLICT(user_id, tenant_id) DO UPDATE SET last_success_at = excluded.last_success_at
-  `).run(userId, tenantId, at);
+  db.transaction(() => {
+    db.prepare(`
+      INSERT INTO xero_status_sync (user_id, tenant_id, last_success_at) VALUES (?, ?, ?)
+      ON CONFLICT(user_id, tenant_id) DO UPDATE SET last_success_at = excluded.last_success_at
+    `).run(userId, tenantId, at);
+    db.prepare(`
+      INSERT INTO xero_status_sync (user_id, tenant_id, last_success_at) VALUES (?, ?, ?)
+      ON CONFLICT(user_id, tenant_id) DO NOTHING
+    `).run(userId, _caughtUpKey(tenantId), at);
+  })();
+}
+
+// After a failed asking again: the row stored PAID without its day may not
+// change in Xero again, so If-Modified-Since would not bring it back. The
+// next complete read's catch-up asks it (and any other such row) in full.
+function _forgetCatchUp(userId, tenantId) {
+  db.prepare('DELETE FROM xero_status_sync WHERE user_id = ? AND tenant_id = ?').run(userId, _caughtUpKey(tenantId));
 }
 
 // ── Which company each row is in ─────────────────────────────────────────────
@@ -180,11 +238,13 @@ function _groupByTenant(userId, rows, connected) {
 // summary flag as something else with no error; status-sync.test.js pins the
 // slots against the installed SDK. ifModifiedSince must be a Date: the SDK
 // calls toISOString() on it. No page: one call answers up to 50 IDs whole.
-async function _fetchBatch(api, tenantId, ids, since) {
+// full leaves summaryOnly undefined, which the SDK then leaves off the
+// request: Xero's full answer, the only one with FullyPaidOnDate in it.
+async function _fetchBatch(api, tenantId, ids, { since = null, full = false } = {}) {
   try {
     const res = await withRetry(() => api.getInvoices(
       tenantId, since || undefined, undefined, undefined, ids,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, true,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, full ? undefined : true,
     ));
     return (res && res.body && res.body.invoices) || [];
   } catch (err) {
@@ -225,18 +285,25 @@ async function _syncTenant(userId, tenantId, rows, counts, now) {
   const since     = last === null ? null : new Date(last - CLOCK_SLACK_MS);
   const unread    = since ? rows.filter(r => !r.xeroStatus) : rows;
   const known     = since ? rows.filter(r => r.xeroStatus)  : [];
+  // The catch-up (see the header), in place of these rows' summary read. With
+  // no complete read on file there is none: every row comes back anyway.
+  const catchUp   = since && !_paidOnCaughtUp(userId, tenantId)
+    ? known.filter(r => r.xeroStatus === 'PAID' && !r.xeroPaidOn)
+    : [];
+  const inFull    = new Set(catchUp);
   const plan = [
     ..._chunk(unread, BATCH_SIZE).map(batch => ({ batch, since: null })),
-    ..._chunk(known,  BATCH_SIZE).map(batch => ({ batch, since })),
+    ..._chunk(known.filter(r => !inFull.has(r)), BATCH_SIZE).map(batch => ({ batch, since })),
+    ..._chunk(catchUp, BATCH_SIZE).map(batch => ({ batch, since: null, full: true })),
   ];
 
   for (const step of plan) {
-    const invoices = await _fetchBatch(api, tenantId, step.batch.map(r => r.xeroInvoiceId), step.since);
-    const syncedAt = now().toISOString();
-    const byId = new Map(invoices.filter(i => i && i.invoiceID).map(i => [String(i.invoiceID).toLowerCase(), i]));
+    const invoices = await _fetchBatch(api, tenantId, step.batch.map(r => r.xeroInvoiceId), step);
+    const byId = new Map(invoices.filter(i => i && i.invoiceID).map(i => [_key(i.invoiceID), i]));
+    const answered  = [];
     const unchanged = [];
     for (const row of step.batch) {
-      const inv = byId.get(String(row.xeroInvoiceId).toLowerCase());
+      const inv = byId.get(_key(row.xeroInvoiceId));
       if (!inv) {
         // Left out of an If-Modified-Since answer: unchanged. Left out of a
         // plain one: not found by its ID, which is not the same as deleted,
@@ -249,12 +316,46 @@ async function _syncTenant(userId, tenantId, rows, counts, now) {
         logger.warn('Xero answered with a status this app does not know', { userId, tenantId, status: inv.status });
         continue;
       }
+      answered.push({ row, seen });
+    }
+
+    // A summary answer has no FullyPaidOnDate: the paid ones in it are asked
+    // again in full, before anything is stored (see the header).
+    let failure = null;
+    const undated = step.full ? [] : answered.filter(a => a.seen.status === 'PAID' && !a.seen.paidOn);
+    if (undated.length) {
+      let full = null;
+      try {
+        // At most BATCH_SIZE IDs: they all come from this one batch.
+        full = await _fetchBatch(api, tenantId, undated.map(a => a.row.xeroInvoiceId), { full: true });
+      } catch (err) {
+        failure = err;
+      }
+      const fullById = new Map((full || []).filter(i => i && i.invoiceID).map(i => [_key(i.invoiceID), i]));
+      for (const a of undated) {
+        const inv = fullById.get(_key(a.row.xeroInvoiceId));
+        // Xero's full answer settles it, a day or none (one settled only by a
+        // credit note, say). With no answer, a row that was PAID already
+        // keeps the day it has rather than losing it to the summary.
+        if (inv) a.seen.paidOn = _xeroDay(inv.fullyPaidOnDate);
+        else if (a.row.xeroStatus === 'PAID') a.seen.paidOn = a.row.xeroPaidOn || null;
+      }
+    }
+
+    const syncedAt = now().toISOString();
+    for (const { row, seen } of answered) {
       const changed = store.recordXeroStatus(row.id, row.xeroInvoiceId, { ...seen, tenantId }, syncedAt);
       if (changed === null) continue; // the row changed under us; nothing written
       counts.checked++;
       if (changed) counts.updated++;
     }
     counts.checked += store.markXeroChecked(unchanged, syncedAt);
+    // What the summary said is stored. The company stops here, its last
+    // complete read unmoved and its catch-up to do again (see the header).
+    if (failure) {
+      _forgetCatchUp(userId, tenantId);
+      throw failure;
+    }
   }
 
   _recordSuccess(userId, tenantId, startedAt.toISOString());

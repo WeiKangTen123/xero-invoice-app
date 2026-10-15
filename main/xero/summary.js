@@ -1,10 +1,10 @@
 const logger             = require('../utils/logger');
-const { xeroErrMsg }     = require('./xero-utils');
+const { isScopeError, xeroErrMsg } = require('./xero-utils');
 const { _cacheGet, _cacheSet, _dedupe } = require('./report-cache');
-const { _apiFor, _allInvoices, _getOrganisation, LIST_PAGE_SIZE, LIST_MAX_PAGES } = require('./report-fetch');
+const { _apiFor, _allInvoices, _allPages, _getOrganisation, LIST_PAGE_SIZE, LIST_MAX_PAGES } = require('./report-fetch');
 const { _toBase, _foreignCurrency } = require('./currency');
 const { _raisedByMonth } = require('./cash-flow');
-const { _addDays, _dateFromParts, _fmtISODate, _parseISODate, _partsFromDate, _todayPartsInTz } = require('./periods');
+const { _addDays, _dateFromParts, _fmtISODate, _fmtXeroDate, _parseISODate, _partsFromDate, _todayPartsInTz } = require('./periods');
 
 // The calendar day of a Xero date (see performance.js#_xeroDay). Required when
 // first used rather than at load: performance.js reads the summary, so the two
@@ -243,7 +243,9 @@ function _outstandingOf(invoices = []) {
 // How late each contact pays, or is paid, read from the PAID invoices the
 // summary's fetch already returns, so the cash manager can date an open
 // invoice by when that customer actually tends to pay rather than by a due
-// date they routinely miss. No call of its own.
+// date they routinely miss. The day each was paid comes from Xero's payments,
+// which the same fetch reads beside the invoices (_lastPaidOn): the invoice
+// list does not carry it.
 //
 // Per direction as well as per contact: a business that is both customer and
 // supplier pays its bills on its own habits and is paid on ours, and the two
@@ -296,6 +298,36 @@ function _latenessOf(invoices = [], todayISO = new Date().toISOString().slice(0,
   return out;
 }
 
+// The paid history reaches this many days past the year _latenessOf looks
+// back over (see _paidHistoryOf), and the payments read for it as far.
+const PAID_HISTORY_MARGIN_DAYS = 2;
+
+// Pure. The day each invoice was last paid, from Xero's payments: a Map of
+// invoice id to the latest of its payments' dates, which for a PAID invoice
+// is the day it was paid off. Xero's invoice list, read summaryOnly as every
+// list here is (report-fetch.js#_allInvoices), leaves FullyPaidOnDate out: a
+// live organisation's list carried it on none of its eleven paid invoices, so
+// the paid history was always empty and no contact ever had a lateness. A
+// part-paid invoice has several payments, and the latest is the one that
+// finished it. Only a payment against an invoice names one; a refund of a
+// credit note, an overpayment or a prepayment does not, and is passed over.
+//
+// An invoice settled with no payment at all, by a credit note or an
+// overpayment or prepayment allocated to it, has no paid day here and is left
+// out of the average rather than dated by a guess; Xero lists allocations, not
+// payments, for those. One paid in part and finished by a credit note is dated
+// by its last payment, which may be before the credit finished it.
+function _lastPaidOn(payments = []) {
+  const out = new Map();
+  for (const p of payments || []) {
+    if (!p || /^(DELETED|VOIDED)$/i.test(String(p.status || '').trim())) continue;
+    const id = p.invoice?.invoiceID, day = _day(p.date);
+    if (!id || !day) continue;
+    if (!out.has(id) || day > out.get(id)) out.set(id, day);
+  }
+  return out;
+}
+
 // Pure. The paid invoices _latenessOf measures from, cut down to what it
 // reads, so they can be cached beside the open invoices. The year it looks
 // back over ends on today where the reader is, which a read shared by every
@@ -304,14 +336,21 @@ function _latenessOf(invoices = [], todayISO = new Date().toISOString().slice(0,
 // year and two days, `todayISO` being the UTC day of the fetch. No reader's
 // day is more than a day either side of it, so none loses an invoice its own
 // year takes in.
-function _paidHistoryOf(invoices = [], todayISO) {
+//
+// Each is dated by the invoice's own FullyPaidOnDate when Xero sent it, and
+// otherwise by its last payment (`paidOn`, _lastPaidOn's map), which is how it
+// is dated in practice: the list Xero sends leaves the date out. Kept under
+// fullyPaidOnDate either way, the field _latenessOf reads. One with neither
+// date is left out.
+function _paidHistoryOf(invoices = [], todayISO, paidOn = null) {
   const today = _parseISODate(todayISO);
-  const since = today ? _fmtISODate(_addDays(today, -(LATENESS_LOOKBACK_DAYS + 2))) : null;
+  const since = today ? _fmtISODate(_addDays(today, -(LATENESS_LOOKBACK_DAYS + PAID_HISTORY_MARGIN_DAYS))) : null;
   const out = [];
   for (const inv of invoices || []) {
     if (!inv || inv.status !== 'PAID') continue;
     if (inv.type !== 'ACCREC' && inv.type !== 'ACCPAY') continue;
-    const dueDate = _day(inv.dueDate), fullyPaidOnDate = _day(inv.fullyPaidOnDate);
+    const dueDate = _day(inv.dueDate);
+    const fullyPaidOnDate = _day(inv.fullyPaidOnDate) || (inv.invoiceID && paidOn?.get(inv.invoiceID)) || null;
     if (!dueDate || !fullyPaidOnDate || (since && fullyPaidOnDate < since)) continue;
     out.push({
       status: 'PAID', type: inv.type, dueDate, fullyPaidOnDate,
@@ -319,6 +358,33 @@ function _paidHistoryOf(invoices = [], todayISO) {
     });
   }
   return out;
+}
+
+// The day each invoice paid over the paid history's span was last paid
+// (_lastPaidOn), from Xero's approved payments dated from the history's first
+// day on: `todayISO` less a year and the margin. Payments are light without
+// summaryOnly, and paged like every list (a page per hundred payments).
+// Newest first, as the invoices are, so a fetch stopped at the page cap loses
+// the oldest of the year, never the payment that finished a recent invoice.
+//
+// Soft, and null when it fails: the lateness it feeds only refines the Cash
+// Flow Manager's dates, so a failure, a connection without the
+// accounting.payments.read scope included, is logged and the history goes
+// without, no contact having a lateness, rather than failing the summary and
+// the Dashboard with it.
+async function _readPaidOn(api, tenantId, todayISO, ctx) {
+  const since = _addDays(_parseISODate(todayISO), -(LATENESS_LOOKBACK_DAYS + PAID_HISTORY_MARGIN_DAYS));
+  const where = `Date >= ${_fmtXeroDate(since)} && Status=="AUTHORISED"`;
+  try {
+    const list = await _allPages(page => api.getPayments(tenantId, undefined, where, 'Date DESC', page),
+      'payments', { what: 'Payment', tenantId });
+    return _lastPaidOn(list);
+  } catch (err) {
+    logger.warn('Summary: payments unavailable, no payment history to date the Cash Flow Manager by', {
+      ...ctx, scope: isScopeError(err), error: xeroErrMsg(err),
+    });
+    return null;
+  }
 }
 
 // One read of Xero for the summary and the open invoices behind it, cached as
@@ -346,9 +412,16 @@ async function _fetchSummaryRaw(userId, tenantId, { force = false } = {}) {
   // and so did Budget vs Actual, so a cold Dashboard load asked Xero for the
   // same record twice within the second. `force` is passed on: a refresh past
   // the grace window re-reads the organisation with everything else.
-  const [org, invoices] = await Promise.all([
+  //
+  // The payments that date the paid invoices (_readPaidOn) are read beside
+  // the invoice pages, a page at a time, so the fetch has one call more in
+  // flight than the two it had, never more, under Xero's five per
+  // organisation. Their failure is caught inside, so it never fails this.
+  const todayISO = _fmtISODate(_partsFromDate(new Date()));
+  const [org, invoices, paidOn] = await Promise.all([
     _getOrganisation(userId, tenantId, force),
     _allInvoices(api, tenantId, { order: 'Date DESC', statuses: ['AUTHORISED', 'PAID'] }),
+    _readPaidOn(api, tenantId, todayISO, { userId, tenantId }),
   ]);
 
   const outstanding = _cacheSet(_outstandingKey(userId, tenantId), {
@@ -362,11 +435,15 @@ async function _fetchSummaryRaw(userId, tenantId, { force = false } = {}) {
     // from one fetch: the cash manager never predicts from a stale history.
     // The lateness itself was measured here, over the year to today in UTC,
     // so in Singapore before 08:00 an invoice paid that morning was not yet
-    // counted; it is measured per request from these instead.
-    paidHistory: _paidHistoryOf(invoices, _fmtISODate(_partsFromDate(new Date()))),
+    // counted; it is measured per request from these instead. Each is dated
+    // by its payments (paidOn), as the list leaves FullyPaidOnDate out; empty
+    // when the payments could not be read.
+    paidHistory: _paidHistoryOf(invoices, todayISO, paidOn),
   });
   const base = _cacheSet(key, _summaryBase(org, invoices));
-  logger.info('Insights summary fetched', { userId, tenantId, invoiceCount: base.invoices.length });
+  logger.info('Insights summary fetched', {
+    userId, tenantId, invoiceCount: base.invoices.length, paidHistory: outstanding.paidHistory.length,
+  });
   return { base, outstanding };
 }
 
@@ -434,6 +511,6 @@ async function _getOutstanding(userId, tenantId, { force = false, timezone = 'UT
 }
 
 module.exports = {
-  getSummary, _buildSummary, _summaryBase, _summaryAsOf, _outstandingOf, _getOutstanding, _latenessOf, _paidHistoryOf, _contactKey,
-  LATENESS_LOOKBACK_DAYS, LATENESS_MIN_PAID, LATENESS_MAX_DAYS,
+  getSummary, _buildSummary, _summaryBase, _summaryAsOf, _outstandingOf, _getOutstanding, _latenessOf, _paidHistoryOf, _lastPaidOn,
+  _contactKey, LATENESS_LOOKBACK_DAYS, LATENESS_MIN_PAID, LATENESS_MAX_DAYS, PAID_HISTORY_MARGIN_DAYS,
 };

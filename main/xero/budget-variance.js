@@ -350,7 +350,17 @@ function _mergeChunks(parts, totalMonths) {
   }
   for (const b of budgets) _placeLines(layout, b, { field: 'budget', budgeted: true,  totalMonths });
   for (const a of actuals) _placeLines(layout, a, { field: 'actual', budgeted: false, totalMonths });
-  return { layout, budgetMissing: budgets.every(b => b.lines.length === 0) };
+  return { layout, budgetMissing: budgets.every(b => !_hasBudgetFigure(b.lines)) };
+}
+
+// Whether a budget report holds a budget. Xero answers a period with no
+// Overall Budget with its floating summary lines (Gross Profit, Total
+// Expenses, Net Profit) at nought, not with nothing (confirmed live,
+// 2026-10-15, main/scripts/cash-live-check.js Q6), so counting lines took
+// every such period for a budget of nil on every account. A budget is an
+// account line with a figure; one left at nought throughout is none either.
+function _hasBudgetFigure(lines = []) {
+  return lines.some(l => l.kind === 'account' && l.values.some(v => v));
 }
 
 // Every figure the payload carries is rounded to the cent. Sums of report
@@ -620,6 +630,6 @@ const getBudgetVariance      = _dedupe('getBudgetVariance', _getBudgetVarianceRa
 
 module.exports = {
   getBudgetVariance,
-  _pnlCallPlan, _reportLines, _mergeChunks, _buildBudgetVariance, _mapWithConcurrency,
+  _pnlCallPlan, _reportLines, _mergeChunks, _hasBudgetFigure, _buildBudgetVariance, _mapWithConcurrency,
   _variancePct, _cents, _netRow, _sectionKind, _norm,
 };

@@ -48,6 +48,11 @@ const PAYMENTS = [
   { paymentType: 'ACCPAYPAYMENT', status: 'AUTHORISED', date: '2025-02-25', amount: 330 },
 ];
 const BANK_TX = [{ type: 'RECEIVE', status: 'AUTHORISED', date: '2025-03-01', total: 200 }];
+// The cash flow's own payments read, over the period. The summary behind
+// getPerformance reads payments too, open-ended over the year that dates its
+// paid invoices (summary.js#_readPaidOn); these pay no invoice, so it uses none.
+const CF_WHERE = 'Date >= DateTime(2025,1,1) && Date < DateTime(2025,4,1)';
+const cashFlowReads = () => api.getPayments.mock.calls.filter(c => c[2] === CF_WHERE);
 
 let n = 0;
 const T = () => `t-cfr-${++n}`;
@@ -80,7 +85,8 @@ test('with every read in, the records are available, tie to the bank, and walk t
   expect(cf.movement).toMatchObject({ customerReceipts: 2200, cashIn: 2400, cashOut: 660 });
   expect(cf.unreconciled.material).toBe(false);
   expect(cf.waterfall).toMatchObject({ reconciles: true, bankClosing: 11740 });
-  expect(api.getPayments).toHaveBeenCalledTimes(1);
+  expect(cashFlowReads()).toHaveLength(1);
+  expect(api.getPayments).toHaveBeenCalledTimes(2);   // and the summary's
   expect(api.getBankTransactions).toHaveBeenCalledTimes(1);
 });
 
@@ -112,7 +118,11 @@ test('a failed Bank Summary leaves no waterfall rather than one from a balance o
 
 test('a payload missing a read is asked for again on the next load, not kept as long as a settled one', async () => {
   const t = T();
-  api.getPayments.mockRejectedValueOnce(new Error('rate limited'));
+  let failed = false;
+  api.getPayments.mockImplementation(async (tenantId, since, where) => {
+    if (where === CF_WHERE && !failed) { failed = true; throw new Error('rate limited'); }
+    return { body: { payments: PAYMENTS } };
+  });
   const first = await reports.getCashFlow(U, t, { period: PERIOD });
   expect(first.recordsAvailable).toBe(false);
   const realNow = Date.now;
@@ -121,7 +131,7 @@ test('a payload missing a read is asked for again on the next load, not kept as 
   try {
     const again = await reports.getCashFlow(U, t, { period: PERIOD });
     expect(again.recordsAvailable).toBe(true);
-    expect(api.getPayments).toHaveBeenCalledTimes(2);
+    expect(cashFlowReads()).toHaveLength(2);
   } finally {
     Date.now = realNow;
   }

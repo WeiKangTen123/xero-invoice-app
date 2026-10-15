@@ -238,7 +238,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_user_xero_invoice
 -- (xero/status-sync.js). The next read sends it as If-Modified-Since, so Xero
 -- answers with only the documents that changed since. Only a read that
 -- finished is recorded: one cut short by a limit or an error must not let the
--- next read skip what it never saw.
+-- next read skip what it never saw. A second row per company, keyed
+-- "paid-on:<tenant id>", marks that documents stored as paid without a paid
+-- date have been asked for it in full once (status-sync.js#_paidOnCaughtUp).
 CREATE TABLE IF NOT EXISTS xero_status_sync (
   user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   tenant_id       TEXT NOT NULL,

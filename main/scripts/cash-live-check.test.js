@@ -301,13 +301,16 @@ describe('cash-live-check — the answers', () => {
     expect(absent.evidence).toMatch(/1 ACTIVE not listed/);
   });
 
-  it('Q6: zero lines for a period with no budget is YES; lines of zeros or a 400 is NO', () => {
+  it('Q6: a no-budget period the app reads as no budget is YES, zero lines or lines of zeros; a 400 is NO', () => {
     const yes = check.answerQ6({ far: { rows: budgetRows([]) }, next: { rows: BUDGET_NEXT } });
     expect(yes.answer).toBe('YES');
     expect(yes.sections).toEqual(['Income', 'Less Cost of Sales', 'Less Operating Expenses', 'Weird Section']);
     expect(yes.evidence).toMatch(/next 12 months: 6 lines/);
+    // What Xero sent on the first live run: lines, every one at nought.
     const zeros = budgetRows([{ title: 'Income', rows: [{ label: 'Sales', value: 0 }] }]);
-    expect(check.answerQ6({ far: { rows: zeros }, next: { rows: BUDGET_NEXT } }).answer).toBe('NO');
+    expect(check.answerQ6({ far: { rows: zeros }, next: { rows: BUDGET_NEXT } }).answer).toBe('YES');
+    const figures = budgetRows([{ title: 'Income', rows: [{ label: 'Sales', value: 40 }] }]);
+    expect(check.answerQ6({ far: { rows: figures }, next: { rows: BUDGET_NEXT } }).answer).toBe('UNKNOWN');
     expect(check.answerQ6({ far: { error: 'HTTP 400: no budget', status: 400 }, next: { rows: BUDGET_NEXT } }).answer).toBe('NO');
     expect(check.answerQ6({ far: { error: 'HTTP 500: down', status: 500 }, next: { error: 'down' } }).answer).toBe('UNKNOWN');
   });

@@ -477,9 +477,11 @@ function _budgetShape(rows = [], n = 12) {
   return { lines, sections, nonZero, kind, shape, header: _headerCells(rows), accounts: lines.filter(l => l.kind === 'account').length };
 }
 
-// Pure. `far`/`next`: { rows, window, error, status }. YES means a period with
-// no budget comes back as zero lines, which is what budget-variance.js's
-// budgetMissing (every chunk with no lines) needs.
+// Pure. `far`/`next`: { rows, window, error, status }. YES means the app reads
+// a period with no budget as no budget: budget-variance.js's budgetMissing
+// (_hasBudgetFigure, no account line with a figure in any chunk). The first
+// live run (2026-10-15) found three summary lines at nought rather than
+// nothing, which the earlier rule (no lines at all) took for a budget of nil.
 function answerQ6({ far = {}, next = {} } = {}) {
   const lines = [];
   const sections = [];
@@ -502,11 +504,11 @@ function answerQ6({ far = {}, next = {} } = {}) {
   }
   let answer;
   if (far.error) answer = far.status === 400 ? 'NO' : 'UNKNOWN';
-  else answer = farShape.kind === 'none' ? 'YES' : (farShape.kind === 'zeros' ? 'NO' : 'UNKNOWN');
-  const farText = far.error ? `error (${far.error.slice(0, 80)})` : farShape.shape + (farShape.kind === 'values' ? ' — a budget exists that far ahead' : '');
+  else answer = !L().budget._hasBudgetFigure(farShape.lines) ? 'YES' : 'UNKNOWN';
+  const farText = far.error ? `error (${far.error.slice(0, 80)})` : farShape.shape + (answer === 'UNKNOWN' ? ' — a budget exists that far ahead' : '');
   const nextText = next.error ? 'next 12 months failed' : `next 12 months: ${nextShape.lines.length} lines, sections ${JSON.stringify(nextShape.sections)}`;
   const uniq = [...new Set(sections.filter(s => String(s).trim()))];
-  return { answer, evidence: `no-budget period: ${farText}; ${nextText} (YES = zero lines)`, lines, sections: uniq };
+  return { answer, evidence: `no-budget period: ${farText}; ${nextText} (YES = the app reads it as no budget)`, lines, sections: uniq };
 }
 
 const KIND_USE = {

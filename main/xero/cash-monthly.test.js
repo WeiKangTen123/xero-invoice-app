@@ -871,7 +871,8 @@ describe('getCashMonthly — Xero calls', () => {
     // Each past month on its own dates; the records from the first of them to today, only reads.
     expect(api.getReportBankSummary.mock.calls.slice(-2).map(c => c.slice(1)).sort()).toEqual([['2026-08-01', '2026-08-31'], ['2026-09-01', '2026-09-30']]);
     const where = 'Date >= DateTime(2026,8,1) && Date < DateTime(2026,10,15) && Status=="AUTHORISED"';
-    expect(api.getPayments.mock.calls[1]).toEqual([T, undefined, where, 'Date ASC', 1]);
+    // The one call this added (the Cash Flow Manager's two, its own and the summary's, came before it).
+    expect(api.getPayments.mock.calls.at(-1)).toEqual([T, undefined, where, 'Date ASC', 1]);
     expect(api.getBankTransactions.mock.calls[1]).toEqual([T, undefined, where, 'Date ASC', 1]);
     expect(api.getReportBudgetSummary.mock.calls[0].slice(1)).toEqual(['2026-11-30', 2, 1]);
     for (const name of Object.keys(after)) expect(name).toMatch(/^get/);

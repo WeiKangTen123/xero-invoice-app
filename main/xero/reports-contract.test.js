@@ -317,7 +317,10 @@ describe('Xero call budget — one request spelled two ways is fetched once', ()
       reports.getCashFlow(U, T2, { timezone: 'UTC', period: P, force: false }),   // the /cash-flow route
       reports.getCashFlow(U, T2, { timezone: 'UTC', force: false, period: P }),   // getVarianceInsights, getFinancialNarrative
     ]);
-    expect(api.getPayments).toHaveBeenCalledTimes(1);
+    // Two reads of payments, each once: the cash flow's, and the summary's
+    // behind getPerformance (summary.js#_readPaidOn).
+    expect(api.getPayments).toHaveBeenCalledTimes(2);
+    expect(new Set(api.getPayments.mock.calls.map(c => c[2])).size).toBe(2);
     expect(api.getBankTransactions).toHaveBeenCalledTimes(1);
     expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
   });
@@ -341,7 +344,9 @@ describe('Xero call budget — one request spelled two ways is fetched once', ()
     ]);
     expect(api.getReportBudgetSummary).toHaveBeenCalledTimes(1);
     expect(api.getReportProfitAndLoss).toHaveBeenCalledTimes(1);
-    expect(api.getPayments).toHaveBeenCalledTimes(1);
+    // The cash flow's payments and the summary's (summary.js#_readPaidOn), each once.
+    expect(api.getPayments).toHaveBeenCalledTimes(2);
+    expect(new Set(api.getPayments.mock.calls.map(c => c[2])).size).toBe(2);
   });
 
   test('an option left out and the same option at its default are one request', async () => {

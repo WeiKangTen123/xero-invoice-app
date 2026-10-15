@@ -732,10 +732,12 @@ function forUser(userId) {
   // says the document reached Xero, which stays true whatever Xero did next.
 
   // Every row in Xero, with just what the status check needs, oldest first.
+  // The paid-on day too: a row stored as PAID without one is asked again in
+  // full, since Xero's summary answer never carries it.
   function listInXero() {
     return db.prepare(`
       SELECT id, xero_invoice_id AS xeroInvoiceId, xero_tenant_id AS xeroTenantId,
-             xero_status AS xeroStatus, xero_synced_at AS xeroSyncedAt
+             xero_status AS xeroStatus, xero_paid_on AS xeroPaidOn, xero_synced_at AS xeroSyncedAt
       FROM invoices WHERE user_id = ? AND ${IN_XERO} ORDER BY rowid
     `).all(userId);
   }

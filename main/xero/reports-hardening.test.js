@@ -157,28 +157,35 @@ describe('list fetches are paged, 100 at a time, up to a cap', () => {
   test('cash flow pages payments and bank transactions over the period, and counts every page', async () => {
     const pay = i => ({ paymentID: `p${i}`, paymentType: 'ACCRECPAYMENT', status: 'AUTHORISED', date: '2025-02-10', amount: 1 });
     const tx = i => ({ bankTransactionID: `t${i}`, type: 'SPEND', status: 'AUTHORISED', date: '2025-02-11', total: 1 });
-    api.getPayments
-      .mockResolvedValueOnce({ body: { payments: many(100, pay) } })
-      .mockResolvedValueOnce({ body: { payments: many(100, i => pay(100 + i)) } })
-      .mockResolvedValueOnce({ body: { payments: many(3, i => pay(200 + i)) } });
+    const CF = 'Date >= DateTime(2025,1,1) && Date < DateTime(2025,4,1)';
+    // The pages are the cash flow's own read's. The summary behind
+    // getPerformance reads payments too, for the year that dates its paid
+    // invoices (summary.js#_readPaidOn), and finds none here.
+    const pages = [many(100, pay), many(100, i => pay(100 + i)), many(3, i => pay(200 + i))];
+    api.getPayments.mockImplementation(async (t, since, where, order, page) => ({ body: { payments: where === CF ? pages[page - 1] : [] } }));
     api.getBankTransactions
       .mockResolvedValueOnce({ body: { bankTransactions: many(100, tx) } })
       .mockResolvedValueOnce({ body: { bankTransactions: many(1, i => tx(100 + i)) } });
     const cf = await reports.getCashFlow(U, 't-cf-pages', { period: PERIOD });
-    expect(api.getPayments.mock.calls.map(c => c[4])).toEqual([1, 2, 3]);
+    expect(api.getPayments.mock.calls.filter(c => c[2] === CF).map(c => c[4])).toEqual([1, 2, 3]);
+    expect(api.getPayments.mock.calls.filter(c => c[2] !== CF)).toEqual([
+      ['t-cf-pages', undefined, expect.stringMatching(/^Date >= DateTime\(\d+,\d+,\d+\) && Status=="AUTHORISED"$/), 'Date DESC', 1],
+    ]);
     expect(api.getBankTransactions.mock.calls.map(c => c[4])).toEqual([1, 2]);
-    for (const c of [...api.getPayments.mock.calls, ...api.getBankTransactions.mock.calls]) {
-      expect(c[2]).toBe('Date >= DateTime(2025,1,1) && Date < DateTime(2025,4,1)');
-    }
+    for (const c of api.getBankTransactions.mock.calls) expect(c[2]).toBe(CF);
     expect(cf.movement.customerReceipts).toBe(203);
     expect(cf.movement.otherPayments).toBe(101);
   });
 
   test('cash flow payments stop at the cap and say so; a failed list still does not fail the report', async () => {
-    api.getPayments.mockResolvedValue({ body: { payments: many(100, i => ({ paymentID: `p${i}`, paymentType: 'ACCPAYPAYMENT', status: 'AUTHORISED', date: '2025-02-10', amount: 1 })) } });
+    const CF = 'Date >= DateTime(2025,1,1) && Date < DateTime(2025,4,1)';
+    const full = { body: { payments: many(100, i => ({ paymentID: `p${i}`, paymentType: 'ACCPAYPAYMENT', status: 'AUTHORISED', date: '2025-02-10', amount: 1 })) } };
+    // Full pages for the cash flow's read only; the summary's (summary.js#_readPaidOn) finds none.
+    api.getPayments.mockImplementation(async (t, since, where) => (where === CF ? full : { body: { payments: [] } }));
     api.getBankTransactions.mockRejectedValue(new Error('rate limited'));
     const cf = await reports.getCashFlow(U, 't-cf-cap', { period: PERIOD });
-    expect(api.getPayments).toHaveBeenCalledTimes(LIST_MAX_PAGES);
+    expect(api.getPayments.mock.calls.filter(c => c[2] === CF)).toHaveLength(LIST_MAX_PAGES);
+    expect(api.getPayments).toHaveBeenCalledTimes(LIST_MAX_PAGES + 1);
     expect(cf.movement.supplierPayments).toBe(LIST_MAX_PAGES * 100);
     expect(capWarned('Payment')).toBe(true);
   });

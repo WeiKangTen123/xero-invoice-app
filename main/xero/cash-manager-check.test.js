@@ -86,9 +86,10 @@ test('everything agrees, in the check shape; the tab\'s side is its cached proje
   const before = callsOf();
   const v = await reports.getCashManagerCheck(U, T, { timezone: 'UTC' });
   // The Bank Summary, and the invoices, organisation and credit notes behind
-  // the ageing, once between the two sides; nothing the projection alone
-  // reads, and only reads.
-  expect(added(before, callsOf())).toEqual({ getReportBankSummary: 1, getInvoices: 1, getOrganisations: 1, getCreditNotes: 1 });
+  // the ageing (with the payments the summary's fetch dates its paid invoices
+  // by), once between the two sides; nothing the projection alone reads, and
+  // only reads.
+  expect(added(before, callsOf())).toEqual({ getReportBankSummary: 1, getInvoices: 1, getOrganisations: 1, getCreditNotes: 1, getPayments: 1 });
   for (const name of Object.keys(callsOf())) expect(name).toMatch(/^get/);
   expect(v).toMatchObject({ ok: true, calls: 2, period: null, currency: 'SGD' });
   expect(typeof v.checkedAt).toBe('string');

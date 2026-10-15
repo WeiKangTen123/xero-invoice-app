@@ -1264,7 +1264,14 @@ describe('xero/reports — budget rows: identity, placement and rounding (pure)'
 
   test('budgetMissing says when BudgetSummary returned nothing for any chunk', () => {
     expect(build([], [section('Income', [pLine('Sales', [1, 2, 0])])]).budgetMissing).toBe(true);
-    expect(build([section('Income', [line('Sales', [0, 0, 0])])], []).budgetMissing).toBe(false);
+    expect(build([section('Income', [line('Sales', [0, 0, 5])])], []).budgetMissing).toBe(false);
+    // Xero's answer for a period with no Overall Budget, as read live on
+    // 2026-10-15: the floating summary lines at nought and no account line.
+    expect(build([section('', [
+      line('Gross Profit', [0, 0, 0]), line('Total Expenses', [0, 0, 0]), line('Net Profit', [0, 0, 0]),
+    ])], [section('Income', [pLine('Sales', [1, 2, 0])])]).budgetMissing).toBe(true);
+    // A budget left at nought on every account holds no budget either.
+    expect(build([section('Income', [line('Sales', [0, 0, 0])])], []).budgetMissing).toBe(true);
     const m4 = _monthsBetween('2026-01', '2026-04');
     const [c1, c2] = _chunkMonths(m4, 2);
     expect(_mergeChunks([

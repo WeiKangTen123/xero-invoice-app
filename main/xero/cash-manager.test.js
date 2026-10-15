@@ -959,12 +959,17 @@ describe('getCashManager — Xero calls', () => {
     const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
     expect(calls()).toEqual({
       getOrganisations: 1, getInvoices: 1, getCreditNotes: 1, getReportBankSummary: 1,
-      getAccounts: 1, getRepeatingInvoices: 1, getPayments: 1, getBankTransactions: 1,
+      getAccounts: 1, getRepeatingInvoices: 1, getPayments: 2, getBankTransactions: 1,
     });
     expect(api.getRepeatingInvoices.mock.calls[0]).toEqual([T, 'Status=="AUTHORISED"']);
     // One read of payments for both sides of today, from the Bank Summary
     // window's first day; one of bank transactions over that same window.
-    expect(api.getPayments.mock.calls[0]).toEqual([T, undefined, 'Date >= DateTime(2026,9,11) && Status=="AUTHORISED"', 'Date ASC', 1]);
+    // The other payments read is the summary's, over the year and two days
+    // that date its paid invoices for the lateness (summary.js#_readPaidOn).
+    expect(api.getPayments.mock.calls).toEqual(expect.arrayContaining([
+      [T, undefined, 'Date >= DateTime(2026,9,11) && Status=="AUTHORISED"', 'Date ASC', 1],
+      [T, undefined, 'Date >= DateTime(2025,10,10) && Status=="AUTHORISED"', 'Date DESC', 1],
+    ]));
     // No upper bound, as the payments: Spend and Receive Money dated ahead
     // come from the same read.
     expect(api.getBankTransactions.mock.calls[0]).toEqual([T, undefined, 'Date >= DateTime(2026,9,11) && Status=="AUTHORISED"', 'Date ASC', 1]);
@@ -1041,7 +1046,8 @@ describe('getCashManager — Xero calls', () => {
   });
 
   test('payments and the bank failing cost what they add, not the projection', async () => {
-    api.getPayments.mockRejectedValueOnce(new Error('rate limited'));
+    // Both payments reads: this tab's, and the summary's behind the lateness.
+    api.getPayments.mockRejectedValue(new Error('rate limited'));
     api.getReportBankSummary.mockRejectedValueOnce(new Error('bank summary down'));
     const cm = await reports.getCashManager(U, T, { timezone: 'UTC' });
     expect(cm.bank.available).toBe(false);
@@ -1112,7 +1118,8 @@ describe('getCashManager — Xero calls', () => {
     const again = await reports.getCashManager(U, T, { timezone: 'UTC' });
     expect(again.actualsAvailable).toBe(true);
     expect(api.getBankTransactions).toHaveBeenCalledTimes(2);
-    expect(api.getPayments).toHaveBeenCalledTimes(1);
+    // This tab's payments and the summary's (summary.js#_readPaidOn), each read once.
+    expect(api.getPayments).toHaveBeenCalledTimes(2);
   });
 
   test('past payments and bank transactions from Xero reach the actuals, from the one payments read', async () => {
@@ -1130,7 +1137,10 @@ describe('getCashManager — Xero calls', () => {
     expect(cm.actuals.find(d => d.date === '2026-10-09')).toMatchObject({ in: 0, out: 45 });
     expect(cm.actualItems.map(i => [i.key, i.source])).toEqual([['actual:payment:old', 'payment'], ['actual:banktransaction:b1', 'banktransaction']]);
     expect(cm.items.find(i => i.key === 'payment:new')).toMatchObject({ date: '2026-10-20', amount: 90 });
-    expect(api.getPayments).toHaveBeenCalledTimes(1);
+    // The one read of this tab's; the other is the summary's year behind the lateness.
+    expect(api.getPayments.mock.calls.map(c => c[2]).sort()).toEqual([
+      'Date >= DateTime(2025,10,10) && Status=="AUTHORISED"', 'Date >= DateTime(2026,9,11) && Status=="AUTHORISED"',
+    ]);
   });
 
   test('templates and future payments from Xero reach the projection', async () => {
