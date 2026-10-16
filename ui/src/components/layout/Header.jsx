@@ -77,8 +77,13 @@ export default function Header() {
         ))}
       </div>
 
-      {/* Right actions: View Mode Switcher + Theme toggle */}
+      {/* Right actions: the page's own controls, then View Mode Switcher +
+          Theme toggle. A page puts its controls in the slot through a portal
+          (Setup's Save box, pages/Setup.jsx): pinned here with the header,
+          they stay in view wherever the page is scrolled without floating
+          over its content. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div id="header-page-actions" style={{ display: 'flex', alignItems: 'center', gap: 8 }} />
         {/* Web / Mobile layout toggle.
             Kept despite every browser having its own desktop-site control,
             because Safari on iOS backs that control with a user-agent change

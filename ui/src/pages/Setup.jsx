@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api/client';
+import { useViewMode } from '../context/ViewModeContext';
 import ChartOfAccounts from '../components/ChartOfAccounts';
 import HelpTooltip from '../components/HelpTooltip';
 import AccountCodeSelect from '../components/AccountCodeSelect';
@@ -864,6 +866,13 @@ export default function Setup() {
   const savedTimer = useRef(null);
   useEffect(() => () => clearTimeout(savedTimer.current), []);
 
+  // Where the Save box goes: the header's slot on the web layout
+  // (components/layout/Header.jsx), found once this page is mounted below it;
+  // on a phone the header has no room, so the box sits at the bottom instead.
+  const { isMobile } = useViewMode();
+  const [headerSlot, setHeaderSlot] = useState(null);
+  useEffect(() => { setHeaderSlot(document.getElementById('header-page-actions')); }, [isMobile]);
+
   // Read through a ref so loading does not depend on `user`. It used to: every
   // save calls refreshUser(), which hands back a new user object, which
   // refetched the settings and overwrote the form — including anything typed
@@ -1048,60 +1057,66 @@ export default function Setup() {
         Secrets are hidden by default — click 👁 to reveal
       </div>
 
-      {/* The Save box: pinned to the window's bottom, on the right, wherever
-          the page is scrolled, so Save is always one click away. A small box
-          and not the full-width dark band it once was, which hid whatever
-          field scrolled behind it; the pinned strip lets clicks through
-          everywhere but the box. It says the state outright: saved, saving,
-          unsaved (with Discard), or why a save failed, since the banners at
-          the top of the page are out of view from down here. It still takes
-          its place at the page's end, so scrolled there the last card sits
-          clear above it. The right-hand room is the chat launcher's corner
-          (globals.css --fab-clearance): the box is right-aligned and sat
-          under it. Outside the form, after the Chart of Accounts, and
-          submits it by name. */}
-      <div className="setup-save-bar" style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-        padding: '16px var(--fab-clearance) 16px 0',
-        position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none',
-      }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 12,
-          pointerEvents: 'auto', padding: '10px 10px 10px 16px', maxWidth: '100%',
-          background: 'var(--bg-card)', border: '1px solid var(--border-card)',
-          borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-md)',
-        }}>
-          {saveState({ dirty, saving, saved, error: msgs._save })}
-          {dirty && (
-            <button type="button" className="btn btn-outline" disabled={saving} onClick={handleDiscard}>
-              Discard
-            </button>
-          )}
-          <button
-            type="submit"
-            form="setup-form"
-            className="btn btn-primary"
-            disabled={saving}
-            style={{ minWidth: 130 }}
-          >
-            {saving
-              ? <><span className="btn-spinner" /> Saving...</>
-              : '💾 Save settings'}
-          </button>
-        </div>
-      </div>
+      {/* The Save box, always in view. On the web layout it is in the
+          header's slot, pinned at the top with the header: its own band, so
+          it never floats over a card, and the bottom-right corner is the
+          chat launcher's alone. On a phone the header has no room, so it is
+          pinned to the window's bottom instead, above the nav bar
+          (globals.css .mobile-mode .setup-save-bar), as a small box and not
+          the full-width band it once was, which hid whatever field scrolled
+          behind it; the pinned strip lets clicks through everywhere but the
+          box, and the right-hand room is the chat launcher's corner
+          (--fab-clearance). Outside the form, and submits it by name. */}
+      {!isMobile && headerSlot
+        ? createPortal(<SaveControls dirty={dirty} saving={saving} saved={saved} error={msgs._save} onDiscard={handleDiscard} />, headerSlot)
+        : (
+          <div className="setup-save-bar" style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+            padding: '16px var(--fab-clearance) 16px 0',
+            position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none',
+          }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 10,
+              pointerEvents: 'auto', padding: '8px 8px 8px 14px', maxWidth: '100%',
+              background: 'var(--bg-card)', border: '1px solid var(--border-card)',
+              borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-md)',
+            }}>
+              <SaveControls compact dirty={dirty} saving={saving} saved={saved} error={msgs._save} onDiscard={handleDiscard} />
+            </div>
+          </div>
+        )}
     </div>
   );
 }
 
-// What the Save box says beside its buttons: the one line that is true now.
-// A failed save names the reason here as well as in the banner at the top,
-// which is out of view from the box.
-function saveState({ dirty, saving, saved, error }) {
-  const line = (text, color, weight = 500) => <span style={{ fontSize: 12, color, fontWeight: weight }}>{text}</span>;
-  if (saving) return line('Saving…', 'var(--text-muted)');
-  if (dirty)  return line('● Unsaved changes', 'var(--warning)', 600);
-  if (error)  return line(`✕ Not saved: ${error.text}`, 'var(--danger)', 600);
-  if (saved)  return line('✓ Saved', 'var(--success)', 600);
-  return line('✓ All settings saved', 'var(--text-muted)');
+// The Save box's contents: the one line that is true now, Discard while
+// there is something to discard, and Save, which submits the settings form
+// by name from wherever the box is. `compact` is the phone's: short words,
+// Discard as an icon, no reason for a failed save (the banner at the top has
+// it). A failed save names the reason on the web, where the banner is out of
+// view from the header.
+function SaveControls({ dirty, saving, saved, error, compact = false, onDiscard }) {
+  const line = (text, color, weight = 500) => <span style={{ fontSize: 12, color, fontWeight: weight, whiteSpace: 'nowrap' }}>{text}</span>;
+  let state;
+  if (saving)     state = line('Saving…', 'var(--text-muted)');
+  else if (dirty) state = line(compact ? '● Unsaved' : '● Unsaved changes', 'var(--warning)', 600);
+  else if (error) state = line(compact ? '✕ Not saved' : `✕ Not saved: ${error.text}`, 'var(--danger)', 600);
+  else if (saved) state = line('✓ Saved', 'var(--success)', 600);
+  else            state = line(compact ? '✓ Saved' : '✓ All settings saved', 'var(--text-muted)');
+  return (
+    <>
+      {state}
+      {dirty && (
+        <button type="button" className="btn btn-outline btn-sm" disabled={saving} onClick={onDiscard}
+          title="Discard the unsaved changes" aria-label="Discard the unsaved changes">
+          {compact ? '↶' : 'Discard'}
+        </button>
+      )}
+      <button type="submit" form="setup-form" className="btn btn-primary btn-sm" disabled={saving} style={{ minWidth: compact ? 0 : 120 }}>
+        {saving
+          ? <><span className="btn-spinner" /> Saving...</>
+          : compact ? '💾 Save' : '💾 Save settings'}
+      </button>
+    </>
+  );
 }

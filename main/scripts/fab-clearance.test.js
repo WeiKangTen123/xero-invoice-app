@@ -73,22 +73,26 @@ describe('the chat launcher and the bars pinned to the bottom', () => {
     for (const rel of pinned) expect(read(rel)).toMatch(/--fab-clearance/);
   });
 
-  // Setup's bar was a full-width dark band pinned at all times, and hid
-  // whatever field scrolled behind it. Now it is a small box pinned at all
-  // times, saying the save state, and the strip around the box lets clicks
-  // through.
-  test('Setup\'s save bar is a pinned box that says its state, not a band', () => {
-    const setup = read('pages/Setup.jsx');
+  // Setup's bar was a full-width dark band pinned at the bottom at all times,
+  // and hid whatever field scrolled behind it. Now the Save box is in the
+  // header's slot on the web layout, and on a phone a small box pinned at the
+  // bottom whose strip lets clicks through.
+  test('Setup\'s Save box is in the header on the web and a pinned box on a phone, never a band', () => {
+    const setup  = read('pages/Setup.jsx');
+    const header = read('components/layout/Header.jsx');
+    expect(header).toMatch(/<div id="header-page-actions"/);
+    expect(setup).toMatch(/document\.getElementById\('header-page-actions'\)/);
+    expect(setup).toMatch(/\{!isMobile && headerSlot\s*\? createPortal\(<SaveControls dirty=\{dirty\}/);
     expect(setup).toMatch(/position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none',/);
-    expect(setup).toMatch(/pointerEvents: 'auto', padding: '10px 10px 10px 16px'/);
+    expect(setup).toMatch(/pointerEvents: 'auto', padding: '8px 8px 8px 14px'/);
+    expect(setup).toMatch(/<SaveControls compact dirty=\{dirty\}/);
     expect(setup).not.toMatch(/linear-gradient\(to top, var\(--bg-primary\) 80%, transparent\)/);
-    expect(setup).toMatch(/\{saveState\(\{ dirty, saving, saved, error: msgs\._save \}\)\}/);
-    for (const text of ['Saving…', '● Unsaved changes', '✕ Not saved: ', '✓ Saved', '✓ All settings saved']) expect(setup).toContain(text);
-    // It is the last thing on the page, outside the form it submits by name,
-    // and with unsaved changes it offers to drop them.
+    for (const text of ['Saving…', '● Unsaved changes', '✕ Not saved: ', '✓ Saved', '✓ All settings saved', '● Unsaved', '💾 Save']) expect(setup).toContain(text);
+    // Save submits the form by name from wherever the box is, and with
+    // unsaved changes the box offers to drop them.
     expect(setup).toMatch(/<form id="setup-form" onSubmit=\{handleSave\}>/);
-    expect(setup).toMatch(/type="submit"\s+form="setup-form"/);
-    expect(setup).toMatch(/\{dirty && \(\s*<button type="button" className="btn btn-outline" disabled=\{saving\} onClick=\{handleDiscard\}>/);
+    expect(setup).toMatch(/type="submit" form="setup-form"/);
+    expect(setup).toMatch(/\{dirty && \(\s*<button type="button" className="btn btn-outline btn-sm" disabled=\{saving\} onClick=\{onDiscard\}/);
     expect(setup).toMatch(/function handleDiscard\(\) \{\s*setValues\(savedValues\);/);
     expect(setup.indexOf('className="setup-save-bar"')).toBeGreaterThan(setup.indexOf('<ChartOfAccounts refreshKey'));
   });
