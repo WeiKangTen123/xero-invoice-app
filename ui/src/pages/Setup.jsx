@@ -896,6 +896,12 @@ export default function Setup() {
     setValues(prev => ({ ...prev, [key]: val }));
   }
 
+  // Back to what was last loaded or saved, without a reload: the form's
+  // values only, so a test result or a save error already on screen stays.
+  function handleDiscard() {
+    setValues(savedValues);
+  }
+
   async function handleSave(e) {
     e.preventDefault();
     setSaving(true);
@@ -1064,6 +1070,11 @@ export default function Setup() {
           {dirty
             ? <span style={{ fontSize: 12, color: 'var(--warning)', fontWeight: 600 }}>● Unsaved changes</span>
             : <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Secrets are hidden by default — click 👁 to reveal</span>}
+          {dirty && (
+            <button type="button" className="btn btn-outline" disabled={saving} onClick={handleDiscard}>
+              Discard
+            </button>
+          )}
           <button
             type="submit"
             form="setup-form"

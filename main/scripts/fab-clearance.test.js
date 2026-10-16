@@ -81,5 +81,12 @@ describe('the chat launcher and the bars pinned to the bottom', () => {
     expect(setup).toMatch(/\.\.\.\(dirty \? \{ position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none' \} : \{\}\)/);
     expect(setup).toMatch(/pointerEvents: 'auto', padding: '10px 10px 10px 16px'/);
     expect(setup).not.toMatch(/linear-gradient\(to top, var\(--bg-primary\) 80%, transparent\)/);
+    // It is the last thing on the page, outside the form it submits by name,
+    // and with unsaved changes it offers to drop them.
+    expect(setup).toMatch(/<form id="setup-form" onSubmit=\{handleSave\}>/);
+    expect(setup).toMatch(/type="submit"\s+form="setup-form"/);
+    expect(setup).toMatch(/\{dirty && \(\s*<button type="button" className="btn btn-outline" disabled=\{saving\} onClick=\{handleDiscard\}>/);
+    expect(setup).toMatch(/function handleDiscard\(\) \{\s*setValues\(savedValues\);/);
+    expect(setup.indexOf('className="setup-save-bar"')).toBeGreaterThan(setup.indexOf('<ChartOfAccounts refreshKey'));
   });
 });
