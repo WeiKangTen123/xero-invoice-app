@@ -1044,32 +1044,34 @@ export default function Setup() {
         <ChartOfAccounts refreshKey={xeroVersion} />
       </div>
 
-      {/* Save bar, the last thing on the page. With nothing to save it sits
-          in its place and covers nothing. With unsaved changes it is pinned
-          to the window's bottom as a small box on the right, not the
-          full-width dark band it was, which hid whatever field scrolled
-          behind it; the pinned strip lets clicks through everywhere but the
-          box. Pinned, it still takes its place in the page, so scrolled to
-          the end the last card sits clear above it. The right-hand room is
-          the chat launcher's corner (globals.css --fab-clearance): the
-          button is right-aligned and sat under it. It is outside the form,
-          after the Chart of Accounts, and submits it by name. */}
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'right', marginTop: 16 }}>
+        Secrets are hidden by default — click 👁 to reveal
+      </div>
+
+      {/* The Save box: pinned to the window's bottom, on the right, wherever
+          the page is scrolled, so Save is always one click away. A small box
+          and not the full-width dark band it once was, which hid whatever
+          field scrolled behind it; the pinned strip lets clicks through
+          everywhere but the box. It says the state outright: saved, saving,
+          unsaved (with Discard), or why a save failed, since the banners at
+          the top of the page are out of view from down here. It still takes
+          its place at the page's end, so scrolled there the last card sits
+          clear above it. The right-hand room is the chat launcher's corner
+          (globals.css --fab-clearance): the box is right-aligned and sat
+          under it. Outside the form, after the Chart of Accounts, and
+          submits it by name. */}
       <div className="setup-save-bar" style={{
         display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
         padding: '16px var(--fab-clearance) 16px 0',
-        ...(dirty ? { position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none' } : {}),
+        position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none',
       }}>
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 12,
-          ...(dirty ? {
-            pointerEvents: 'auto', padding: '10px 10px 10px 16px',
-            background: 'var(--bg-card)', border: '1px solid var(--border-card)',
-            borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-md)',
-          } : {}),
+          pointerEvents: 'auto', padding: '10px 10px 10px 16px', maxWidth: '100%',
+          background: 'var(--bg-card)', border: '1px solid var(--border-card)',
+          borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-md)',
         }}>
-          {dirty
-            ? <span style={{ fontSize: 12, color: 'var(--warning)', fontWeight: 600 }}>● Unsaved changes</span>
-            : <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Secrets are hidden by default — click 👁 to reveal</span>}
+          {saveState({ dirty, saving, saved, error: msgs._save })}
           {dirty && (
             <button type="button" className="btn btn-outline" disabled={saving} onClick={handleDiscard}>
               Discard
@@ -1090,4 +1092,16 @@ export default function Setup() {
       </div>
     </div>
   );
+}
+
+// What the Save box says beside its buttons: the one line that is true now.
+// A failed save names the reason here as well as in the banner at the top,
+// which is out of view from the box.
+function saveState({ dirty, saving, saved, error }) {
+  const line = (text, color, weight = 500) => <span style={{ fontSize: 12, color, fontWeight: weight }}>{text}</span>;
+  if (saving) return line('Saving…', 'var(--text-muted)');
+  if (dirty)  return line('● Unsaved changes', 'var(--warning)', 600);
+  if (error)  return line(`✕ Not saved: ${error.text}`, 'var(--danger)', 600);
+  if (saved)  return line('✓ Saved', 'var(--success)', 600);
+  return line('✓ All settings saved', 'var(--text-muted)');
 }

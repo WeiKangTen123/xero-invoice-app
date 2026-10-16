@@ -74,13 +74,16 @@ describe('the chat launcher and the bars pinned to the bottom', () => {
   });
 
   // Setup's bar was a full-width dark band pinned at all times, and hid
-  // whatever field scrolled behind it. Now it is pinned only with something
-  // to save, as a small box, and the strip around the box lets clicks through.
-  test('Setup\'s save bar is pinned only with unsaved changes, as a box and not a band', () => {
+  // whatever field scrolled behind it. Now it is a small box pinned at all
+  // times, saying the save state, and the strip around the box lets clicks
+  // through.
+  test('Setup\'s save bar is a pinned box that says its state, not a band', () => {
     const setup = read('pages/Setup.jsx');
-    expect(setup).toMatch(/\.\.\.\(dirty \? \{ position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none' \} : \{\}\)/);
+    expect(setup).toMatch(/position: 'sticky', bottom: 0, zIndex: 10, pointerEvents: 'none',/);
     expect(setup).toMatch(/pointerEvents: 'auto', padding: '10px 10px 10px 16px'/);
     expect(setup).not.toMatch(/linear-gradient\(to top, var\(--bg-primary\) 80%, transparent\)/);
+    expect(setup).toMatch(/\{saveState\(\{ dirty, saving, saved, error: msgs\._save \}\)\}/);
+    for (const text of ['Saving…', '● Unsaved changes', '✕ Not saved: ', '✓ Saved', '✓ All settings saved']) expect(setup).toContain(text);
     // It is the last thing on the page, outside the form it submits by name,
     // and with unsaved changes it offers to drop them.
     expect(setup).toMatch(/<form id="setup-form" onSubmit=\{handleSave\}>/);
