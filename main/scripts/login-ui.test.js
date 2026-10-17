@@ -242,12 +242,13 @@ describe('Admin › Users is wired to them', () => {
 
   test('the reset and create forms set a temporary password of twelve characters, and say what it is', () => {
     expect((admin.match(/They sign in with this once, within 24 hours, then must choose their own\./g) || []).length).toBe(2);
-    expect(admin).toMatch(/import \{ passwordProblem, passwordHint, PASSWORD_MIN_LENGTH \} from '\.\/account\/password-rules';/);
-    expect(admin).toMatch(/required minLength=\{PASSWORD_MIN_LENGTH\} autoFocus autoComplete="new-password"/);
-    expect(admin).toMatch(/required minLength=\{PASSWORD_MIN_LENGTH\}\s+style=/);
+    expect(admin).toMatch(/import \{ passwordProblem, passwordHint, PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH \} from '\.\/account\/password-rules';/);
+    // Twelve for a real account; a demo account's is shorter (its own describe below).
+    expect(admin).toMatch(/required minLength=\{demo \? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH\} autoFocus autoComplete="new-password"/);
+    expect(admin).toMatch(/required minLength=\{demo \? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH\}\s+style=/);
     expect(admin).toMatch(/disabled=\{saving \|\| !!problem\}/);
     // Create is also held while a demo account's mailbox copy has no sender (demo-ui.test.js).
-    expect(admin).toMatch(/disabled=\{!!passwordProblem\(pass, email\) \|\| !!createProblem\}/);
+    expect(admin).toMatch(/disabled=\{!!passwordProblem\(pass, email, \{ demo \}\) \|\| !!createProblem\}/);
   });
 });
 
@@ -255,4 +256,27 @@ test('nothing in the touched files still says eight characters', () => {
   for (const rel of ['pages/Login.jsx', 'pages/Admin.jsx', 'pages/Account.jsx', 'pages/account/ChangePasswordCard.jsx']) {
     expect(read(rel)).not.toMatch(/Min\. 8|minLength=\{8\}|minLength: 8|length < 8/);
   }
+});
+
+// A demo account's password is shorter by design (users.js
+// DEMO_PASSWORD_MIN_LENGTH); the Users page asks the rules with { demo }.
+describe('the password rules for a demo account', () => {
+  test('six characters, the email and common rules still holding', () => {
+    expect(rules.DEMO_PASSWORD_MIN_LENGTH).toBe(6);
+    expect(rules.passwordProblem('demo123', 'demo@gmail.com', { demo: true })).toBeNull();
+    expect(rules.passwordProblem('demo1', 'demo@gmail.com', { demo: true })).toBe('Password must be at least 6 characters');
+    expect(rules.passwordProblem('demo123', 'demo@gmail.com')).toBe('Password must be at least 12 characters');
+    expect(rules.passwordProblem('demo@gmail.com', 'demo@gmail.com', { demo: true })).toBe('Password must not be your email address');
+    expect(rules.passwordHint({ demo: true })).toBe('Min. 6 characters');
+    expect(rules.passwordHint()).toBe('Min. 12 characters');
+  });
+
+  test('the Users page asks with the demo flag on both forms and says the password is permanent', () => {
+    const admin = read('pages/Admin.jsx');
+    expect(admin).toMatch(/passwordProblem\(password, user\.email, \{ demo \}\)/);
+    expect(admin).toMatch(/disabled=\{!!passwordProblem\(pass, email, \{ demo \}\) \|\| !!createProblem\}/);
+    expect(admin).toMatch(/minLength=\{demo \? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH\}/);
+    expect(admin).toContain('A demo account keeps the password you set: it is permanent');
+    expect(admin).toContain('It is permanent: this account keeps the password you choose.');
+  });
 });

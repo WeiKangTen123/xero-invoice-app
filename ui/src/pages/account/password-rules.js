@@ -9,6 +9,10 @@
 // Imports nothing, so main/scripts/account-ui.test.js runs it as it is.
 
 export const PASSWORD_MIN_LENGTH = 12;
+// A demo account's password is shorter by design (users.js
+// DEMO_PASSWORD_MIN_LENGTH): it guards sample data, is typed in front of
+// people at a demonstration, and the lockout still stands.
+export const DEMO_PASSWORD_MIN_LENGTH = 6;
 
 // Twelve characters or more that a person types on purpose and a guesser tries
 // first. Shorter favourites ("password", "123456") already fail the length
@@ -36,9 +40,10 @@ function isPattern(lower) {
 // `email` is the account's address, which the password may not be — nor the
 // part of it before the @, which is what people type. Compared in lower case
 // and otherwise as typed, as the server compares them.
-export function passwordProblem(password, email) {
-  if (typeof password !== 'string' || password.length < PASSWORD_MIN_LENGTH) {
-    return `Password must be at least ${PASSWORD_MIN_LENGTH} characters`;
+export function passwordProblem(password, email, { demo = false } = {}) {
+  const min = demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH;
+  if (typeof password !== 'string' || password.length < min) {
+    return `Password must be at least ${min} characters`;
   }
   const lower = password.toLowerCase();
   if (typeof email === 'string' && email.trim()) {
@@ -52,6 +57,6 @@ export function passwordProblem(password, email) {
 }
 
 // The placeholder under a new-password field.
-export function passwordHint() {
-  return `Min. ${PASSWORD_MIN_LENGTH} characters`;
+export function passwordHint({ demo = false } = {}) {
+  return `Min. ${demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH} characters`;
 }

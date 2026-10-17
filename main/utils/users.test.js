@@ -275,6 +275,15 @@ describe('users store (SQLite)', () => {
       expect(users.passwordProblem('correct horse battery staple', 'jane@example.com')).toBeNull();
       expect(users.passwordProblem('twelve chars', 'jane@example.com')).toBeNull();
     });
+
+    test('a demo account\'s password may be short; the email and common rules still hold', () => {
+      expect(users.DEMO_PASSWORD_MIN_LENGTH).toBe(6);
+      expect(users.passwordProblem('demo123', 'demo@gmail.com', { demo: true })).toBeNull();
+      expect(users.passwordProblem('demo1', 'demo@gmail.com', { demo: true })).toBe('Password must be at least 6 characters');
+      expect(users.passwordProblem('demo123', 'demo@gmail.com')).toBe('Password must be at least 12 characters');
+      expect(users.passwordProblem('demo@gmail.com', 'demo@gmail.com', { demo: true })).toBe('Password must not be your email address');
+      expect(users.passwordProblem('123456', 'demo@gmail.com', { demo: true })).toBe('That password is too common; choose another');
+    });
   });
 
   // The rule on its own, with no database: five wrong passwords lock, each

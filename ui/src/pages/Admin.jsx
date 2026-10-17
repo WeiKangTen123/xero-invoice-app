@@ -11,7 +11,7 @@ import { fmtMoney } from '../utils/format';
 import { staggerIn } from '../utils/stagger';
 import ActivityPanel from './admin/ActivityPanel';
 import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem } from './admin/users';
-import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
+import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH } from './account/password-rules';
 
 const ADMIN_TABS = [
   { key: 'users',      label: '👥 Users' },
@@ -54,8 +54,11 @@ function ResetPasswordDialog({ user, onClose, onDone }) {
   const [show,     setShow]     = useState(false);
   const [error,    setError]    = useState('');
   const [saving,   setSaving]   = useState(false);
-  // The server's rules (pages/account/password-rules.js), said as typed.
-  const problem = passwordProblem(password, user.email);
+  // The server's rules (pages/account/password-rules.js), said as typed. A
+  // demo account's password is shorter and permanent: the admin's to choose
+  // and keep, since it guards sample data and is typed in front of people.
+  const demo    = !!user.demo;
+  const problem = passwordProblem(password, user.email, { demo });
 
   async function submit(e) {
     e.preventDefault();
@@ -73,21 +76,24 @@ function ResetPasswordDialog({ user, onClose, onDone }) {
     <Modal onClose={onClose} busy={saving} label={`Reset password for ${user.email}`}>
       <div className="card-title">Reset password</div>
       <div className="card-subtitle">
-        Set a temporary password for <strong>{user.email}</strong> and pass it on to them.
-        They sign in with this once, within 24 hours, then must choose their own.
-        The current one cannot be shown. Every session they have open is signed out.
+        {demo
+          ? <>Set the password for the demo account <strong>{user.email}</strong>. It is permanent: this account keeps the password you choose.
+              The current one cannot be shown. Every session it has open is signed out.</>
+          : <>Set a temporary password for <strong>{user.email}</strong> and pass it on to them.
+              They sign in with this once, within 24 hours, then must choose their own.
+              The current one cannot be shown. Every session they have open is signed out.</>}
       </div>
       <form onSubmit={submit}>
         <div className="form-group">
-          <label htmlFor="reset-password" className="form-label">Temporary password</label>
+          <label htmlFor="reset-password" className="form-label">{demo ? 'Password' : 'Temporary password'}</label>
           <div style={{ position: 'relative' }}>
             <input id="reset-password"
               type={show ? 'text' : 'password'}
               className="form-input"
-              placeholder={passwordHint()}
+              placeholder={passwordHint({ demo })}
               value={password}
               onChange={e => setPassword(e.target.value)}
-              required minLength={PASSWORD_MIN_LENGTH} autoFocus autoComplete="new-password"
+              required minLength={demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH} autoFocus autoComplete="new-password"
               style={{ paddingRight: 38 }}
             />
             <button type="button" onClick={() => setShow(v => !v)} style={EYE_BUTTON}
@@ -467,7 +473,9 @@ export default function Admin() {
             </div>
           </div>
           <div className="card-subtitle">
-            The password you set is temporary. They sign in with this once, within 24 hours, then must choose their own.
+            {demo
+              ? 'A demo account keeps the password you set: it is permanent, and may be short, since it guards sample data.'
+              : 'The password you set is temporary. They sign in with this once, within 24 hours, then must choose their own.'}
           </div>
 
           <form onSubmit={handleCreate}>
@@ -484,15 +492,15 @@ export default function Admin() {
             </div>
 
             <div className="form-group">
-              <label htmlFor="admin-password" className="form-label">Temporary password</label>
+              <label htmlFor="admin-password" className="form-label">{demo ? 'Password' : 'Temporary password'}</label>
               <div style={{ position: 'relative' }}>
                 <input id="admin-password"
                   type={showPass ? 'text' : 'password'}
                   className="form-input"
-                  placeholder={passwordHint()}
+                  placeholder={passwordHint({ demo })}
                   value={pass}
                   onChange={e => setPass(e.target.value)}
-                  required minLength={PASSWORD_MIN_LENGTH}
+                  required minLength={demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH}
                   style={{ paddingRight: 38 }}
                 />
                 <button
@@ -504,8 +512,8 @@ export default function Admin() {
                   {showPass ? '🙈' : '👁'}
                 </button>
               </div>
-              {pass && passwordProblem(pass, email) && (
-                <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }}>{passwordProblem(pass, email)}</div>
+              {pass && passwordProblem(pass, email, { demo }) && (
+                <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }}>{passwordProblem(pass, email, { demo })}</div>
               )}
             </div>
 
@@ -589,7 +597,7 @@ export default function Admin() {
             <button
               type="submit"
               className="btn btn-primary"
-              disabled={!!passwordProblem(pass, email) || !!createProblem}
+              disabled={!!passwordProblem(pass, email, { demo }) || !!createProblem}
               title={createProblem || undefined}
               style={{ width: '100%', justifyContent: 'center', padding: '11px 0', fontSize: 14 }}
             >
@@ -604,7 +612,9 @@ export default function Admin() {
           user={resetting}
           onClose={() => setResetting(null)}
           onDone={() => {
-            showSuccess(`Temporary password for ${resetting.email} set. It works once, within 24 hours; their other sessions were signed out.`, 6000);
+            showSuccess(resetting.demo
+              ? `Password for the demo account ${resetting.email} set; its other sessions were signed out.`
+              : `Temporary password for ${resetting.email} set. It works once, within 24 hours; their other sessions were signed out.`, 6000);
             setResetting(null);
           }}
         />

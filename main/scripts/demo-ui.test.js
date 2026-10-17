@@ -188,7 +188,7 @@ describe('Admin › Users is wired to them', () => {
     expect(admin).toContain('const createProblem = addUserProblem(form);');
     expect(admin).toContain('if (createProblem) { setError(createProblem); return; }');
     expect(admin).toContain("await api.post('/admin/users', addUserPayload(form));");
-    expect(admin).toMatch(/disabled=\{!!passwordProblem\(pass, email\) \|\| !!createProblem\}\s+title=\{createProblem \|\| undefined\}/);
+    expect(admin).toMatch(/disabled=\{!!passwordProblem\(pass, email, \{ demo \}\) \|\| !!createProblem\}\s+title=\{createProblem \|\| undefined\}/);
     // The form starts over after a create, demo block included.
     expect(admin).toContain("setDemo(false); setCopyFrom(copyDefaults()); setFilterFrom('');");
   });

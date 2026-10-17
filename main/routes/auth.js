@@ -233,7 +233,7 @@ router.post('/change-password', requireAuth, changePasswordLimiter, asyncHandler
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Current and new password are required' });
     }
-    const problem = passwordProblem(newPassword, req.user.email);
+    const problem = passwordProblem(newPassword, req.user.email, { demo: !!req.user.demo });
     if (problem) return res.status(400).json({ error: problem });
     const verifiedHash = await verifiedPasswordHash(req.user.id, currentPassword);
     if (!verifiedHash) {

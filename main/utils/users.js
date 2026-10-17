@@ -323,9 +323,16 @@ async function validatePassword(email, password) {
 // is the account's, for the second rule; without it that rule is skipped.
 const PASSWORD_MIN_LENGTH = 12;
 
-function passwordProblem(password, email = null) {
-  if (typeof password !== 'string' || password.length < PASSWORD_MIN_LENGTH) {
-    return `Password must be at least ${PASSWORD_MIN_LENGTH} characters`;
+// A demo account's password is shorter by design: it guards sample data,
+// is typed in front of people at a demonstration, and the sign-in lockout
+// still stands between it and a guesser. The owner picks it, and it is not
+// temporary (routes/admin.js). The email and common-password rules still hold.
+const DEMO_PASSWORD_MIN_LENGTH = 6;
+
+function passwordProblem(password, email = null, { demo = false } = {}) {
+  const min = demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH;
+  if (typeof password !== 'string' || password.length < min) {
+    return `Password must be at least ${min} characters`;
   }
   if (typeof email === 'string' && email.trim()) {
     const pw   = password.toLowerCase();
@@ -457,7 +464,7 @@ async function verifiedPasswordHash(id, password) {
 async function setPassword(id, newPassword, { ifCurrentHash = null, temporary = false } = {}) {
   const user = findById(id);
   if (!user) throw new Error('User not found');
-  const problem = passwordProblem(newPassword, user.email);
+  const problem = passwordProblem(newPassword, user.email, { demo: !!user.is_demo });
   if (problem) throw new Error(problem);
   const hash = await bcrypt.hash(newPassword, 10);
   const now  = Date.now();
@@ -636,7 +643,7 @@ function ensureUserDirectories() {
 
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
-  passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, isDemoUser, PASSWORD_MIN_LENGTH,
+  passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, isDemoUser, PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH,
   lockStatus, lockAfterFailure, recordFailedLogin, recordSuccessfulLogin, unlockAccount, temporaryPasswordExpired,
   LOCK_AFTER_FAILURES, LOCK_BASE_MS, LOCK_MAX_MS, TEMP_PASSWORD_TTL_MS,
   getAllUsers, updateUserRole, deleteUser, readUsers,

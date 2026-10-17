@@ -67,6 +67,31 @@ describe('POST /api/admin/users — demo accounts and copied settings', () => {
     expect(users.findByEmail('new@outlook.com')).toBeNull();
   });
 
+  // A demo account's password is the admin's to choose and keep: it guards
+  // sample data and is typed in front of people, so it may be short and it
+  // is not temporary. Any other account's stays twelve characters and
+  // temporary.
+  test('a demo account takes a short, permanent password; a real account does not', async () => {
+    const res = await create({ email: 'demo@gmail.com', password: 'demo123', demo: true }).expect(201);
+    expect(res.body.user).toMatchObject({ email: 'demo@gmail.com', demo: true, mustChangePassword: false });
+    expect(users.findByEmail('demo@gmail.com')).toMatchObject({ must_change_password: 0, temp_password_expires_at: null });
+    expect(await users.validatePassword('demo@gmail.com', 'demo123')).toMatchObject({ email: 'demo@gmail.com' });
+    expect((await create({ password: 'demo123' }).expect(400)).body.error).toBe('Password must be at least 12 characters');
+    expect((await create({ email: 'demo2@gmail.com', password: 'demo1', demo: true }).expect(400)).body.error).toBe('Password must be at least 6 characters');
+  });
+
+  test('a reset on a demo account is permanent and may be short; on a real account temporary', async () => {
+    const demo = (await create({ email: 'demo@gmail.com', password: 'demo123', demo: true }).expect(201)).body.user;
+    const real = (await create({}).expect(201)).body.user;
+    const reset = (id, password) => request(serverFor(app)).patch(`/api/admin/users/${id}/password`).set('Authorization', auth()).send({ password });
+    await reset(demo.id, 'demo456').expect(200);
+    expect(users.findByEmail('demo@gmail.com')).toMatchObject({ must_change_password: 0, temp_password_expires_at: null });
+    expect(await users.validatePassword('demo@gmail.com', 'demo456')).toMatchObject({ email: 'demo@gmail.com' });
+    expect((await reset(real.id, 'demo456').expect(400)).body.error).toBe('Password must be at least 12 characters');
+    await reset(real.id, 'Another-temp-2026').expect(200);
+    expect(users.findByEmail('new@outlook.com').must_change_password).toBe(1);
+  });
+
   test('copyFrom.llm copies the legacy key and every key of the list', async () => {
     const res = await create({ copyFrom: { llm: true } }).expect(201);
     expect(res.body.copied).toEqual(['llm']);
