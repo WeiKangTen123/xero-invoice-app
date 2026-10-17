@@ -255,8 +255,10 @@ function touchLastSeen(userId) {
 // (passwordProblem) is applied by every route before it gets here, so the
 // tests can make accounts with short fixture passwords without a bcrypt-cost
 // password each. `temporary` marks the password as one an admin chose, to be
-// replaced at the first sign-in and dead after a day (schema.sql).
-async function createUser(email, password, role = 'user', { temporary = false } = {}) {
+// replaced at the first sign-in and dead after a day (schema.sql). `demo`
+// makes a demo account: one that never connects to Xero and runs against the
+// generated Demo Company instead (users.is_demo; see isDemoUser).
+async function createUser(email, password, role = 'user', { temporary = false, demo = false } = {}) {
   const hash = await bcrypt.hash(password, 10);
 
   const create = db.transaction(() => {
@@ -279,11 +281,12 @@ async function createUser(email, password, role = 'user', { temporary = false } 
       createdAt: new Date(now).toISOString(),
       mustChangePassword:    temporary ? 1 : 0,
       tempPasswordExpiresAt: temporary ? new Date(now + TEMP_PASSWORD_TTL_MS).toISOString() : null,
+      isDemo:    demo ? 1 : 0,
     };
 
     db.prepare(`
-      INSERT INTO users (id, email, password, role, created_at, must_change_password, temp_password_expires_at)
-      VALUES (@id, @email, @password, @role, @createdAt, @mustChangePassword, @tempPasswordExpiresAt)
+      INSERT INTO users (id, email, password, role, created_at, must_change_password, temp_password_expires_at, is_demo)
+      VALUES (@id, @email, @password, @role, @createdAt, @mustChangePassword, @tempPasswordExpiresAt, @isDemo)
     `).run(user);
 
     // Pre-create the user's credentials row so every account has one from day one
@@ -504,6 +507,16 @@ function isActive(id) {
   return !!user && !user.disabled_at;
 }
 
+// Whether this is a demo account (createUser's `demo`): one whose every Xero
+// call goes to the generated Demo Company (xero/demo/api.js) and which has
+// no Xero connection to make, refresh, keep alive or poll. One primary-key
+// read; the callers that ask on every Xero call (utils/token-cache.js) are
+// already on a database round trip.
+function isDemoUser(id) {
+  const user = findById(id);
+  return !!(user && user.is_demo);
+}
+
 function getAllUsers() {
   return db.prepare('SELECT * FROM users ORDER BY created_at').all().map(sanitize);
 }
@@ -529,7 +542,8 @@ function readUsers() {
 // The account as the client sees it: never the hash, and the lockout and
 // temporary-password state in words the Admin page and the sign-in response
 // use. lockedUntil is only given while the lock is in force; the column keeps
-// its old value after the lock ends, until the next sign-in clears it.
+// its old value after the lock ends, until the next sign-in clears it. `demo`
+// is the flag the client hides the Xero connection behind (users.is_demo).
 function sanitize(u) {
   const lastSeenAt  = u.last_seen_at ?? u.lastSeenAt ?? null;
   const lockedUntil = lockStatus({ locked_until: u.locked_until ?? u.lockedUntil ?? null });
@@ -541,6 +555,7 @@ function sanitize(u) {
     lockedUntil:        lockedUntil ? lockedUntil.lockedUntil : null,
     mustChangePassword: !!(u.must_change_password ?? u.mustChangePassword),
     lastLoginAt:        u.last_login_at ?? u.lastLoginAt ?? null,
+    demo:               !!(u.is_demo ?? u.isDemo ?? u.demo),
   };
 }
 
@@ -561,8 +576,11 @@ function getSetupStatus(userId) {
   const imap   = getImapSettings(userId, config).ready;
   // Either connection method counts as "configured" — Custom Connection (client ID +
   // secret) or OAuth (connection type flipped to 'oauth' once a user has completed
-  // the consent flow; see xero/oauth.js).
-  const xero   = !!(config.XERO_CLIENT_ID && config.XERO_CLIENT_SECRET) || config.XERO_CONNECTION_TYPE === 'oauth';
+  // the consent flow; see xero/oauth.js). A demo account has nothing to
+  // configure: its Xero is the Demo Company, always there, so its mailbox
+  // watcher (routes/process.js _missingForWatcher) can start.
+  const xero   = isDemoUser(userId)
+    || !!(config.XERO_CLIENT_ID && config.XERO_CLIENT_SECRET) || config.XERO_CONNECTION_TYPE === 'oauth';
   // Legacy single-field fallback covers an account that hasn't added a key through
   // the multi-key UI yet but still has the old single Gemini_API_KEY column set.
   const llm    = getGeminiKeys(userId).length > 0 || !!config.Gemini_API_KEY;
@@ -618,7 +636,7 @@ function ensureUserDirectories() {
 
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
-  passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, PASSWORD_MIN_LENGTH,
+  passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, isDemoUser, PASSWORD_MIN_LENGTH,
   lockStatus, lockAfterFailure, recordFailedLogin, recordSuccessfulLogin, unlockAccount, temporaryPasswordExpired,
   LOCK_AFTER_FAILURES, LOCK_BASE_MS, LOCK_MAX_MS, TEMP_PASSWORD_TTL_MS,
   getAllUsers, updateUserRole, deleteUser, readUsers,

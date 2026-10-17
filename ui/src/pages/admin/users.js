@@ -59,3 +59,62 @@ export function failedNote(row, now = Date.now()) {
 export function mustSetNote(row) {
   return row?.mustChangePassword === true ? 'must set a password at next sign-in' : '';
 }
+
+// ── Demo accounts ────────────────────────────────────────────────────────────
+// A demo account (GET /api/admin/users rows carry `demo`) shows sample data
+// this app generates in place of a Xero connection. The Add User form offers
+// to copy this admin's keys, defaults and mailbox to it, so it works at once;
+// main/scripts/demo-ui.test.js runs what is below.
+
+// The muted badge on a demo row, or null.
+export function demoBadge(row) {
+  if (row?.demo !== true) return null;
+  return { text: 'demo', title: 'Demo account: sample data, no Xero connection' };
+}
+
+// The settings the form offers to copy, in the order the boxes show, keyed as
+// POST /api/admin/users takes them under `copyFrom`.
+const COPY_BOXES = [
+  { key: 'llm',      label: 'LLM keys' },
+  { key: 'defaults', label: 'Invoice defaults' },
+  { key: 'mailbox',  label: 'Mailbox (IMAP)' },
+];
+
+export function copyBoxes() {
+  return COPY_BOXES.map(b => ({ key: b.key, label: b.label }));
+}
+
+// The boxes' starting ticks once Demo account is ticked: all of them, since a
+// demo account needs keys to parse with and defaults to fill in, and the
+// mailbox is what makes it show something arriving.
+export function copyDefaults() {
+  const out = {};
+  for (const b of COPY_BOXES) out[b.key] = true;
+  return out;
+}
+
+// What the form sends, from its fields: { email, password, role, demo,
+// copyFrom: { llm, defaults, mailbox }, mailboxFilterFrom }. The copy boxes
+// are only shown for a demo account, so their ticks only travel with one;
+// the sender address only travels with the mailbox, trimmed.
+export function addUserPayload(form) {
+  const f = form || {};
+  const demo = f.demo === true;
+  const ticks = (demo && f.copyFrom) || {};
+  const copyFrom = {};
+  for (const b of COPY_BOXES) copyFrom[b.key] = ticks[b.key] === true;
+  const payload = { email: f.email, password: f.password, role: f.role, demo, copyFrom };
+  if (copyFrom.mailbox) payload.mailboxFilterFrom = String(f.mailboxFilterFrom || '').trim();
+  return payload;
+}
+
+// Why the form cannot be sent yet, or null. Two accounts watching one mailbox
+// must watch different senders, so the mailbox copy needs the address the
+// demo account processes emails from; the server refuses it without one.
+export function addUserProblem(form) {
+  const p = addUserPayload(form);
+  if (p.copyFrom.mailbox && !p.mailboxFilterFrom) {
+    return 'Mailbox needs a sender address: the demo account only processes emails from that sender';
+  }
+  return null;
+}

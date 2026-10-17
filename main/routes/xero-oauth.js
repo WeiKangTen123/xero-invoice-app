@@ -5,9 +5,18 @@ const asyncHandler = require('../middleware/async-handler');
 const oauthState  = require('../utils/oauth-state');
 const xeroOAuth    = require('../xero/oauth');
 const tokenCache   = require('../utils/token-cache');
-const { getConnectionStatus } = require('../xero/reconnect');
-const { getUserConfig, saveUserConfig } = require('../utils/users');
+const { getConnectionStatus, DEMO_NO_XERO_MESSAGE } = require('../xero/reconnect');
+const { getUserConfig, saveUserConfig, isDemoUser } = require('../utils/users');
 const logger = require('../utils/logger');
+
+// A demo account has no Xero connection to make, finish or drop: every route
+// that would is refused with the one message, before anything is minted,
+// exchanged or cleared. Answers true when the request has been refused.
+function _refusedDemo(req, res) {
+  if (!isDemoUser(req.user.id)) return false;
+  res.status(400).json({ error: DEMO_NO_XERO_MESSAGE });
+  return true;
+}
 
 // Where Xero's redirect callback sends the browser back to after completing (or
 // failing) the connection. Express doesn't serve the SPA in dev — only Vite does —
@@ -32,6 +41,7 @@ function _extrasFrom(query) {
 // since asking for it lands the person on Xero's "invalid_scope" page, which
 // never comes back. Answers { url, requested, excluded }.
 router.get('/oauth/connect', requireAuth, asyncHandler(async (req, res) => {
+  if (_refusedDemo(req, res)) return;
   try {
     const { url, requested, excluded } = await xeroOAuth.authorizeFor(req.user.id, {
       extras: _extrasFrom(req.query), force: req.query.force === 'true',
@@ -98,6 +108,7 @@ router.get('/oauth/callback', (req, res) => {
 // connection. Rejects unless the caller is the same user `state` was minted for —
 // this is the check that closes the hijack described above.
 router.post('/oauth/complete', requireAuth, asyncHandler(async (req, res) => {
+  if (_refusedDemo(req, res)) return;
   const { code, state } = req.body;
   if (!code || !state) return res.status(400).json({ error: 'Missing code or state' });
 
@@ -129,6 +140,7 @@ router.post('/oauth/complete', requireAuth, asyncHandler(async (req, res) => {
 // person disconnecting — so its outcome is logged, and the local state is
 // cleared either way.
 router.delete('/oauth/disconnect', requireAuth, asyncHandler(async (req, res) => {
+  if (_refusedDemo(req, res)) return;
   let revoked = false;
   try {
     revoked = await xeroOAuth.revokeRefreshToken(req.user.id);
@@ -154,9 +166,17 @@ router.delete('/oauth/disconnect', requireAuth, asyncHandler(async (req, res) =>
 // probe (three requests to Xero's authorize page, no API call) without
 // waiting; the next poll reports the answer. ?force=true asks again and
 // waits — Setup's "Check again".
+//
+// A demo account answers the same keys with method 'demo' (connected, every
+// optional group granted, no probe) plus `demo: true` and `tenants`, the
+// Demo Company, so Setup can show what it is connected to without a second
+// call. A real account's answer is unchanged: neither key is on it.
 router.get('/connection', requireAuth, asyncHandler(async (req, res) => {
   const userId = req.user.id;
   const force  = req.query.force === 'true';
+  if (isDemoUser(userId)) {
+    return res.json({ ...getConnectionStatus(userId), demo: true, tenants: tokenCache.getPersistedTenants(userId) });
+  }
   if (getConnectionStatus(userId).method === 'oauth') {
     // Returns at once with the last answer while it is fresh; otherwise asks
     // Xero, shared with any probe already running for this user.
@@ -185,7 +205,7 @@ router.get('/connection', requireAuth, asyncHandler(async (req, res) => {
 router.get('/tenants', requireAuth, (req, res) => {
   const config = getUserConfig(req.user.id);
   res.json({
-    connectionType: config.XERO_CONNECTION_TYPE || 'custom',
+    connectionType: isDemoUser(req.user.id) ? 'demo' : (config.XERO_CONNECTION_TYPE || 'custom'),
     tenants:        tokenCache.getPersistedTenants(req.user.id),
   });
 });

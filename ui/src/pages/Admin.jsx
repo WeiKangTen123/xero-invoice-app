@@ -10,7 +10,7 @@ import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney } from '../utils/format';
 import { staggerIn } from '../utils/stagger';
 import ActivityPanel from './admin/ActivityPanel';
-import { lockBadge, failedNote, mustSetNote } from './admin/users';
+import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem } from './admin/users';
 import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
 
 const ADMIN_TABS = [
@@ -142,6 +142,12 @@ export default function Admin() {
   const [pass,    setPass]    = useState('');
   const [showPass, setShowPass] = useState(false);
   const [role,    setRole]    = useState('user');
+  // A demo account (pages/admin/users.js): sample data in place of a Xero
+  // connection, with this admin's settings copied over so it works at once.
+  // The copy boxes only show, and only count, once Demo account is ticked.
+  const [demo,       setDemo]       = useState(false);
+  const [copyFrom,   setCopyFrom]   = useState(() => copyDefaults());
+  const [filterFrom, setFilterFrom] = useState('');
   const [error,   setError]   = useState('');
   const [success, setSuccess] = useState('');
   // Which account's controls are open, which control is in flight (`key:id`),
@@ -173,13 +179,20 @@ export default function Admin() {
     fetchUsers().finally(() => setLoading(false));
   }, []);
 
+  // The Add User form as a whole, for the helpers that say what it sends and
+  // why it cannot be sent yet (the mailbox copy needs a sender address).
+  const form = { email, password: pass, role, demo, copyFrom, mailboxFilterFrom: filterFrom };
+  const createProblem = addUserProblem(form);
+
   async function handleCreate(e) {
     e.preventDefault();
     setError(''); setSuccess('');
+    if (createProblem) { setError(createProblem); return; }
     try {
-      await api.post('/admin/users', { email, password: pass, role });
+      await api.post('/admin/users', addUserPayload(form));
       setEmail(''); setPass(''); setRole('user');
-      showSuccess(`User ${email} created.`);
+      setDemo(false); setCopyFrom(copyDefaults()); setFilterFrom('');
+      showSuccess(`${demo ? 'Demo account' : 'User'} ${email} created.`);
       await fetchUsers();
     } catch (err) {
       setError(err.message);
@@ -318,6 +331,7 @@ export default function Admin() {
                 const lock    = lockBadge(u, now, { timeZone: me?.timezone });
                 const failed  = failedNote(u, now);
                 const mustSet = mustSetNote(u);
+                const isDemo  = demoBadge(u);
                 return (
                   <div key={u.id} style={{ animation: staggerIn(i, 40, '0.25s') }}>
                     {/* Clicking a row opens its controls below it. Your own row has
@@ -367,6 +381,9 @@ export default function Admin() {
                           <span className={`badge ${u.role === 'admin' ? 'badge-yellow' : 'badge-gray'}`}>
                             {u.role === 'admin' ? '★ ' : ''}{u.role}
                           </span>
+                          {isDemo && (
+                            <span className="badge badge-gray" title={isDemo.title}>{isDemo.text}</span>
+                          )}
                           {u.disabledAt && (
                             <span className="badge badge-red" title={`Disabled ${formatDateTime(u.disabledAt, me?.timezone)}`}>⏸ Disabled</span>
                           )}
@@ -516,10 +533,64 @@ export default function Admin() {
               </div>
             </div>
 
+            {/* A demo account shows sample data this app generates, and makes
+                no Xero connection. Ticking it offers this admin's own keys,
+                defaults and mailbox for the account (pages/admin/users.js),
+                all ticked to start. The mailbox copy needs a sender: two
+                accounts watching one mailbox must watch different senders,
+                and the server refuses the copy without one. */}
+            <div className="form-group" style={{ marginBottom: 22 }}>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                <input
+                  type="checkbox" checked={demo} style={{ marginTop: 3 }}
+                  onChange={e => { setDemo(e.target.checked); setCopyFrom(copyDefaults()); setFilterFrom(''); }}
+                />
+                <span><strong>Demo account</strong> — sample data, no Xero connection</span>
+              </label>
+              {demo && (
+                <div style={{ marginTop: 10, paddingLeft: 22 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                    Copy my settings to this account:
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', fontSize: 13 }}>
+                    {copyBoxes().map(({ key, label }) => (
+                      <label key={key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox" checked={!!copyFrom[key]}
+                          onChange={e => setCopyFrom(prev => ({ ...prev, [key]: e.target.checked }))}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                  {copyFrom.mailbox && (
+                    <div style={{ marginTop: 10 }}>
+                      <label htmlFor="admin-filter-from" className="form-label">
+                        Only process emails from
+                        <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }}>(needed with Mailbox)</span>
+                      </label>
+                      <input id="admin-filter-from"
+                        type="email"
+                        className="form-input"
+                        placeholder="sender address"
+                        value={filterFrom}
+                        onChange={e => setFilterFrom(e.target.value)}
+                        required
+                      />
+                      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
+                        Two accounts watching one mailbox must watch different senders: the demo account only processes emails from this address.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <button
               type="submit"
               className="btn btn-primary"
-              disabled={!!passwordProblem(pass, email)}
+              disabled={!!passwordProblem(pass, email) || !!createProblem}
+              title={createProblem || undefined}
               style={{ width: '100%', justifyContent: 'center', padding: '11px 0', fontSize: 14 }}
             >
               Create account

@@ -204,7 +204,8 @@ function describeAdminEvent(action, details, targetEmail) {
       : `Sign-in failed for ${d.email || 'an unknown address'}: no such account`;
     case 'login.locked':          return `Locked for ${_lockLength(d.lockMinutes)} after ${d.failures || 5} failed attempts`;
     case 'login.unlocked':        return `Unlocked ${who}`;
-    case 'user.create':           return `Created ${who}${d.role === 'admin' ? ' as an admin' : ''}`;
+    case 'user.create':           return `Created ${who}${d.role === 'admin' ? ' as an admin' : ''}${d.demo ? ' as a demo account' : ''}`
+      + (Array.isArray(d.copied) && d.copied.length ? ` with the ${d.copied.join(', ')} settings copied` : '');
     case 'user.delete':           return `Deleted ${who}${d.role === 'admin' ? ' (an admin)' : ''}`;
     case 'user.role':             return `Changed ${who} from ${d.from || '?'} to ${d.to || '?'}`;
     case 'user.password_reset':   return `Reset the password of ${who}`;

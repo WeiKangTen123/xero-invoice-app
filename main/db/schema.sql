@@ -41,7 +41,12 @@ CREATE TABLE IF NOT EXISTS users (
   temp_password_expires_at TEXT,
   -- When the account last signed in with its password (not when it was last
   -- seen: a session lasts a day and renews while in use).
-  last_login_at TEXT
+  last_login_at TEXT,
+  -- 1 for a demo account: it never connects to Xero. Every Xero call it makes
+  -- goes to the generated "Demo Company Pte Ltd" instead (xero/demo/api.js,
+  -- chosen by xero/api-client.js from the token utils/token-cache.js mints
+  -- for it). Set once at creation (routes/admin.js); never changed.
+  is_demo INTEGER NOT NULL DEFAULT 0
 );
 
 -- 1:1 with users — Xero/IMAP/LLM credentials (was data/users/<id>/config.json)

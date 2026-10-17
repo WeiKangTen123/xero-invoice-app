@@ -11,7 +11,7 @@ import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
 import { useUnsavedChanges } from '../utils/useUnsavedChanges';
-import { boxState, defaultBoxes, extrasParam, optionalBoxes } from './setup/connect';
+import { boxState, defaultBoxes, extrasParam, optionalBoxes, connectionView, demoCard } from './setup/connect';
 import { companiesView, companyBadge } from './setup/company-status';
 
 const HELP = {
@@ -388,7 +388,7 @@ function DefaultTenantPicker({ tenants }) {
 // and OAuth2 "Web app" (new — connect via Xero's consent screen) are both shown at
 // once; whichever the user successfully completes becomes the active method
 // (config.xero.connectionType, decided server-side by which one actually succeeds).
-function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs, onTest, onConnectionChange }) {
+function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing, msgs, onTest, onConnectionChange }) {
   const confirm = useConfirm();
   const [tenants, setTenants]       = useState(null); // null = loading
   // Whether the last read of the companies, or of the connection's state,
@@ -540,6 +540,33 @@ function XeroConnectionCard({ idx, values, onChange, sectionData, testing, msgs,
     } finally {
       setDisconnecting(false);
     }
+  }
+
+  // A demo account has sample data this app generates in place of a Xero
+  // connection (setup/connect.js): nothing to connect, test or disconnect,
+  // and no credentials to enter, so the card says what the dashboard shows
+  // and leaves it there. Known from the account before any request answers,
+  // or from the connection answer's own `demo`.
+  if (connectionView(connection, user) === 'demo') {
+    const card = demoCard(connection);
+    return (
+      <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 8 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>
+            🔗
+          </div>
+          <div>
+            <div className="card-title">Xero Connection</div>
+            <div className="card-subtitle" style={{ marginBottom: 0 }}>{card.note}</div>
+          </div>
+        </div>
+        <div style={{ height: 1, background: 'var(--border)', margin: '12px 0 16px' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', fontSize: 13 }}>
+          <span className="badge badge-green" title="Sample data: documents are not sent to Xero">{card.status}</span>
+          {card.company}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -1012,7 +1039,7 @@ export default function Setup() {
       <form id="setup-form" onSubmit={handleSave}>
         {config.xero && (
           <XeroConnectionCard
-            idx={0} sectionData={config.xero}
+            idx={0} user={user} sectionData={config.xero}
             values={values} onChange={handleChange} testing={testing} msgs={msgs} onTest={runTest}
             onConnectionChange={() => setXeroVersion(v => v + 1)}
           />

@@ -11,6 +11,8 @@
 // left to lapse, like everything else done in the background for it. Only
 // OAuth: a Custom Connection has no refresh token to keep alive. A connection
 // already known to need reconnecting is skipped — a refresh cannot fix it.
+// Never a demo account (users.isDemoUser): it has no connection at all,
+// whatever its config says.
 //
 // One account at a time, and never throws: a failure for one account is
 // logged and the run moves on, and nothing escapes to the timer (index.js
@@ -61,7 +63,7 @@ async function _run(now) {
     const userId = account && account.id;
     if (!userId) continue;
     try {
-      if (!users.isActive(userId)) continue;
+      if (!users.isActive(userId) || users.isDemoUser(userId)) continue;
       const config = users.getUserConfig(userId) || {};
       if (config.XERO_CONNECTION_TYPE !== 'oauth' || !config.XERO_OAUTH_REFRESH_TOKEN) continue;
       summary.checked++;

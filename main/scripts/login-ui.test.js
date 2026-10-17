@@ -220,7 +220,8 @@ describe('Admin › Users is wired to them', () => {
   const admin = read('pages/Admin.jsx');
 
   test('the badge, the notes and the last sign-in on each row', () => {
-    expect(admin).toMatch(/import \{ lockBadge, failedNote, mustSetNote \} from '\.\/admin\/users';/);
+    // The demo-account helpers (demo-ui.test.js) share the import.
+    expect(admin).toMatch(/import \{ lockBadge, failedNote, mustSetNote\b[^}]*\} from '\.\/admin\/users';/);
     expect(admin).toMatch(/const lock\s+= lockBadge\(u, now, \{ timeZone: me\?\.timezone \}\);/);
     expect(admin).toMatch(/const failed\s+= failedNote\(u, now\);/);
     expect(admin).toMatch(/const mustSet = mustSetNote\(u\);/);
@@ -245,7 +246,8 @@ describe('Admin › Users is wired to them', () => {
     expect(admin).toMatch(/required minLength=\{PASSWORD_MIN_LENGTH\} autoFocus autoComplete="new-password"/);
     expect(admin).toMatch(/required minLength=\{PASSWORD_MIN_LENGTH\}\s+style=/);
     expect(admin).toMatch(/disabled=\{saving \|\| !!problem\}/);
-    expect(admin).toMatch(/disabled=\{!!passwordProblem\(pass, email\)\}/);
+    // Create is also held while a demo account's mailbox copy has no sender (demo-ui.test.js).
+    expect(admin).toMatch(/disabled=\{!!passwordProblem\(pass, email\) \|\| !!createProblem\}/);
   });
 });
 

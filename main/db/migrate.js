@@ -82,6 +82,9 @@ function run() {
     ['must_change_password', 'must_change_password INTEGER NOT NULL DEFAULT 0'],
     ['temp_password_expires_at', 'temp_password_expires_at TEXT'], ['last_login_at', 'last_login_at TEXT'],
   ]) _ensureColumn('users', col, ddl);
+  // A demo account runs against generated data instead of Xero (schema.sql).
+  // Defaults to 0, so every existing account stays a real one.
+  _ensureColumn('users', 'is_demo', 'is_demo INTEGER NOT NULL DEFAULT 0');
   for (const [col, ddl] of [
     ['receipt_file', 'receipt_file TEXT'], ['receipt_mime', 'receipt_mime TEXT'], ['receipt_box', 'receipt_box TEXT'],
     ['receipt_page', 'receipt_page INTEGER'], ['receipt_group', 'receipt_group TEXT'], ['received_at', 'received_at TEXT'],

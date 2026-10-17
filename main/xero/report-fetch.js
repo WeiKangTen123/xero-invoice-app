@@ -1,4 +1,4 @@
-const { AccountingApi }  = require('xero-node');
+const { apiFor }         = require('./api-client');
 const { withRetry }      = require('./xero-utils');
 const logger             = require('../utils/logger');
 const { DIRECTORY_TTL_MS, _cacheGet, _cacheSet, _dedupe } = require('./report-cache');
@@ -11,11 +11,10 @@ const { DIRECTORY_TTL_MS, _cacheGet, _cacheSet, _dedupe } = require('./report-ca
 // Shared by every report module, so a list is paged, capped and logged the
 // same way wherever it is read.
 
-function _apiFor(token) {
-  const api = new AccountingApi();
-  api.accessToken = token;
-  return api;
-}
+// The client is made in api-client.js (the SDK for a real token, the demo
+// facade for a demo account's); kept under this name because every report
+// module and their tests reach it here.
+const _apiFor = apiFor;
 
 // Xero returns at most 100 invoices per page and `page=1` was never followed
 // up, so every KPI built on invoices — receivables, overdue, DSO, the

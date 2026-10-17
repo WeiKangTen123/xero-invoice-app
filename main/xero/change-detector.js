@@ -32,7 +32,7 @@
 // How often a company is looked at is decided here (due) and done by the
 // job (jobs/xero-change-detector.js): one someone had a report of on screen
 // in the last ten minutes every two minutes, any other every fifteen.
-const { AccountingApi } = require('xero-node');
+const { apiFor } = require('./api-client');
 const db     = require('../db');
 const logger = require('../utils/logger');
 const {
@@ -81,9 +81,13 @@ const REASONS = Object.freeze({
   refused:       'Xero does not allow this app the journals permission, so live updates are off',
   declined:      'Live updates were left unticked when Xero was connected; tick them in Setup and connect again',
   allowance:     'daily allowance low',
+  // A demo account's books are generated once (xero/demo/api.js): there is
+  // nothing to notice, so it is never looked at and no cursor row is kept.
+  demo:          'Demo data does not change',
 });
 
 const _key = (userId, tenantId) => `${userId}:${tenantId}`;
+const _isDemo = userId => require('../utils/users').isDemoUser(userId);
 
 // ── The cursor row ──────────────────────────────────────────────────────────
 
@@ -202,9 +206,7 @@ async function _budgetsUpdated(api, tenantId) {
 }
 
 async function _poll(userId, tenantId, row, now) {
-  const token = await require('../utils/token-cache').forUser(userId).getValidToken(tenantId);
-  const api   = new AccountingApi();
-  api.accessToken = token;
+  const api = apiFor(await require('../utils/token-cache').forUser(userId).getValidToken(tenantId));
 
   // Taken before the first call: a journal Xero posts while this runs is
   // after it, and the next look picks it up.
@@ -267,6 +269,7 @@ async function _poll(userId, tenantId, row, now) {
  * it was, and keeps the company out of the next looks for a while.
  */
 async function pollTenant(userId, tenantId, { now = () => new Date() } = {}) {
+  if (_isDemo(userId)) return { live: false, liveReason: REASONS.demo, changed: false, reason: null, calls: 0 };
   const at  = now().getTime();
   const row = _row(userId, tenantId);
   try {
@@ -296,6 +299,7 @@ async function pollTenant(userId, tenantId, { now = () => new Date() } = {}) {
  * failure or a skip is being left alone.
  */
 function due(userId, tenantId, now = Date.now()) {
+  if (_isDemo(userId)) return false;
   const at = now instanceof Date ? now.getTime() : Number(now);
   const until = _notBefore.get(_key(userId, tenantId));
   if (until && at < until) return false;
@@ -309,9 +313,13 @@ function due(userId, tenantId, now = Date.now()) {
 
 /**
  * What the page polls: { changedAt, changeReason, checkedAt, live,
- * liveReason }. One read, no Xero call.
+ * liveReason }. One read, no Xero call. A demo account is answered without
+ * the read: nothing ever changed, checked just now, not live and why.
  */
-function version(userId, tenantId) {
+function version(userId, tenantId, now = () => new Date()) {
+  if (_isDemo(userId)) {
+    return { changedAt: null, changeReason: null, checkedAt: now().toISOString(), live: false, liveReason: REASONS.demo };
+  }
   const row = _row(userId, tenantId);
   const live = !!(row && row.live);
   return {

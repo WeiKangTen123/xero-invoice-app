@@ -1,4 +1,4 @@
-const { AccountingApi }          = require('xero-node');
+const { apiFor }                 = require('./api-client');
 const { withRetry }              = require('./xero-utils');
 const logger                     = require('../utils/logger');
 
@@ -124,10 +124,7 @@ async function resolveContact(userId, tenantId, { vendorName, address, phone, em
   if (!cleanName) throw new Error(NO_NAME_MSG);
 
   const cache = require('../utils/token-cache').forUser(userId);
-  const token = await cache.getValidToken(tenantId);
-
-  const accountingApi       = new AccountingApi();
-  accountingApi.accessToken = token;
+  const accountingApi = apiFor(await cache.getValidToken(tenantId));
 
   const found = await _findContact(accountingApi, tenantId, cleanName);
   if (found) {

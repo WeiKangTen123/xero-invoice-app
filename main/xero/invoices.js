@@ -1,4 +1,4 @@
-const { AccountingApi }              = require('xero-node');
+const { apiFor, isDemoToken }        = require('./api-client');
 const fs                             = require('fs');
 const path                           = require('path');
 const crypto                         = require('crypto');
@@ -492,6 +492,13 @@ function _asXeroError(err) {
 
 async function _uploadAttachment(cache, tenantId, invoiceID, file) {
   const token = await cache.getValidToken(tenantId);
+  // A demo account's document is in the Demo Company, not in Xero, and this
+  // is the one send that bypasses the SDK client (see api-client.js), so it
+  // is answered here: the file counts as attached, and nothing leaves.
+  if (isDemoToken(token)) {
+    logger.info('Demo account: attachment not sent to Xero', { invoiceID, file: file.name });
+    return;
+  }
   const url = `https://api.xero.com/api.xro/2.0/Invoices/${encodeURIComponent(invoiceID)}/Attachments/${encodeURIComponent(file.name)}`;
   await withRetry(() => axios.put(url, file.read(), {
     headers: {
@@ -614,6 +621,12 @@ function _recordNotes(userId, invoiceData, notes, invoiceID) {
 // rejects it.
 async function _setDeliveryAddress(cache, tenantId, invoiceID, address) {
   const freshToken = await cache.getValidToken(tenantId);
+  // The other direct call (see _uploadAttachment): done, as far as a demo
+  // account is concerned.
+  if (isDemoToken(freshToken)) {
+    logger.info('Demo account: delivery address not sent to Xero', { invoiceID });
+    return;
+  }
   await axios.post(
     `https://api.xero.com/api.xro/2.0/Invoices/${invoiceID}`,
     {
@@ -630,13 +643,11 @@ async function _setDeliveryAddress(cache, tenantId, invoiceID, address) {
   );
 }
 
-// Create a fresh AccountingApi instance per call so concurrent users cannot
+// A fresh client per call (api-client.js) so concurrent users cannot
 // contaminate each other's token state on a shared singleton.
 async function createDraftInvoice(userId, tenantId, invoiceData) {
-  const cache                = require('../utils/token-cache').forUser(userId);
-  const token                = await cache.getValidToken(tenantId);
-  const accountingApi        = new AccountingApi();
-  accountingApi.accessToken  = token;
+  const cache         = require('../utils/token-cache').forUser(userId);
+  const accountingApi = apiFor(await cache.getValidToken(tenantId));
 
   const { invoiceBody, currencyCode, payee } = await _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi);
   const idempotencyKey = createIdempotencyKey(invoiceData._invoiceStoreId || invoiceData.id, tenantId, invoiceBody);
@@ -686,10 +697,8 @@ async function createDraftInvoice(userId, tenantId, invoiceData) {
 // status there) — if it's since been approved/paid in Xero itself, this will throw
 // and the caller surfaces the Xero error as-is.
 async function updateDraftInvoice(userId, tenantId, xeroInvoiceId, invoiceData) {
-  const cache                = require('../utils/token-cache').forUser(userId);
-  const token                = await cache.getValidToken(tenantId);
-  const accountingApi        = new AccountingApi();
-  accountingApi.accessToken  = token;
+  const cache         = require('../utils/token-cache').forUser(userId);
+  const accountingApi = apiFor(await cache.getValidToken(tenantId));
 
   const { invoiceBody, currencyCode, payee } = await _buildInvoiceBody(userId, tenantId, invoiceData, accountingApi);
 

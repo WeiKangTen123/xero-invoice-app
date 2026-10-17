@@ -181,7 +181,9 @@ function requireAuth(req, res, next) {
   if (live.must_change_password && !allowedBeforePasswordChange(req.method, req.originalUrl || req.url)) {
     return res.status(403).json(PASSWORD_CHANGE_REQUIRED);
   }
-  req.user = { ...claims, id: live.id, email: live.email, role: live.role, mustChangePassword: !!live.must_change_password };
+  // `demo` rides along for GET /api/auth/me: the client hides the Xero
+  // connection behind it (users.js isDemoUser).
+  req.user = { ...claims, id: live.id, email: live.email, role: live.role, mustChangePassword: !!live.must_change_password, demo: !!live.is_demo };
   renewSession(res, live, claims);
   // Throttled to at most one DB write per user per minute — see
   // users.js#touchLastSeen. Failure here must never turn into a 401 — it's

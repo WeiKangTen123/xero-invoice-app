@@ -4,8 +4,10 @@
 // due: one someone is watching every two minutes, any other every fifteen).
 //
 // Only active accounts (users.isActive): nothing is done in the background
-// for a disabled one. One account, and one company, at a time, so this
-// never adds more than two calls to Xero's per-minute allowance at once.
+// for a disabled one. Never a demo account (users.isDemoUser): its Demo
+// Company never changes, and the detector would only record that. One
+// account, and one company, at a time, so this never adds more than two
+// calls to Xero's per-minute allowance at once.
 //
 // Never throws: a failure for one account is logged and the tick moves on,
 // and nothing escapes to the timer (index.js treats an unhandled rejection
@@ -46,7 +48,7 @@ async function _run(now) {
     const userId = account && account.id;
     if (!userId) continue;
     try {
-      if (!users.isActive(userId)) continue;
+      if (!users.isActive(userId) || users.isDemoUser(userId)) continue;
       summary.accounts++;
       // The companies on file, not a fresh list from Xero: listing them
       // would be a call of its own, every minute.

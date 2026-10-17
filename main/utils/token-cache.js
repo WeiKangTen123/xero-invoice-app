@@ -23,6 +23,30 @@ function _getCache(userId) {
   return _userCaches.get(userId);
 }
 
+// ── Demo accounts ─────────────────────────────────────────────────────────────
+//
+// A demo account (users.is_demo) never has a Xero token: its token is
+// 'demo:<userId>', which xero/api-client.js turns into the demo facade, and
+// its one organisation is the Demo Company (xero/demo/api.js DEMO_TENANT),
+// listed here without an xero_tenants row so nothing — a disconnect, a prune,
+// a reconnect — can ever remove or replace it. Its connection health reads as
+// a Web app connection granted every scope, so nothing asks it to reconnect,
+// nothing refreshes it and every optional feature is on.
+//
+// The account row, or null for a real account (and for an id no account has,
+// which the tests use freely). users.js is required at call time: several
+// tests stub it with only what they need, and a stub without isDemoUser is a
+// real account.
+function _demoUser(userId) {
+  const users = require('./users');
+  if (typeof users.isDemoUser !== 'function' || !users.isDemoUser(userId)) return null;
+  return users.findById(userId);
+}
+
+function _demoTenant() {
+  return require('../xero/demo/api').DEMO_TENANT;
+}
+
 // userId -> in-flight refresh promise; see getValidToken.
 const _refreshing = new Map();
 
@@ -66,6 +90,9 @@ function forUser(userId) {
   }
 
   async function getValidToken(tenantId) {
+    // Before the cache is looked at: a demo account's cache is always cold,
+    // and a cold cache is what starts a reconnect.
+    if (_demoUser(userId)) return `${require('../xero/demo/api').DEMO_TOKEN_PREFIX}${userId}`;
     let mem = cache.tokens[tenantId];
     if (!mem) {
       let inFlight = _reconnecting.get(userId);
@@ -127,7 +154,16 @@ function forUser(userId) {
     }
   }
 
-  function getAllTenants() { return cache.tenants; }
+  // The in-memory shape (tenant_id, tenant_name), which queue/processor.js
+  // chooses the org from. A demo account's is the Demo Company, whatever
+  // was cached or cleared.
+  function getAllTenants() {
+    if (_demoUser(userId)) {
+      const t = _demoTenant();
+      return [{ tenant_id: t.tenantId, tenant_name: t.tenantName }];
+    }
+    return cache.tenants;
+  }
 
   function clear() { cache.tokens = {}; cache.tenants = []; }
 
@@ -137,7 +173,10 @@ function forUser(userId) {
 // Read-only: the last-known connected orgs for a user, persisted across restarts.
 // Used only for display (Admin Monitoring tab) — never for deciding whether a live
 // token is available, since access tokens themselves are never persisted.
+// A demo account's is the Demo Company, connected since the account was made.
 function getPersistedTenants(userId) {
+  const demo = _demoUser(userId);
+  if (demo) return [{ ..._demoTenant(), connectedAt: demo.created_at }];
   return db.prepare('SELECT tenant_id AS tenantId, tenant_name AS tenantName, connected_at AS connectedAt FROM xero_tenants WHERE user_id = ? ORDER BY connected_at')
     .all(userId);
 }
@@ -218,6 +257,17 @@ function _rowToHealth(row) {
  * see saveScopeProbe), lastRefreshedAt (ISO or null) }.
  */
 function getHealth(userId) {
+  const demo = _demoUser(userId);
+  if (demo) {
+    // Every scope a Web app connection can carry, offline_access included,
+    // as oauth.js records them from a token response; refreshed when the
+    // account was made, which is the only connecting it ever did.
+    const { OAUTH_SCOPES } = require('../xero/xero-utils');
+    return {
+      ...EMPTY_HEALTH, method: 'demo', grantedScopes: ['offline_access', ...OAUTH_SCOPES.split(' ').filter(Boolean)],
+      lastRefreshedAt: demo.created_at,
+    };
+  }
   if (_health.has(userId)) return { ..._health.get(userId) };
   let record = { ...EMPTY_HEALTH };
   try {

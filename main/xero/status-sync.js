@@ -54,7 +54,7 @@
 //
 // One run per user at a time: a second call while one is running gets that
 // run (the 3-hourly job and the Refresh button can meet).
-const { AccountingApi } = require('xero-node');
+const { apiFor } = require('./api-client');
 const db     = require('../db');
 const logger = require('../utils/logger');
 const {
@@ -274,9 +274,7 @@ async function _syncTenant(userId, tenantId, rows, counts, now) {
   if (spent) throw spent;
 
   const store = require('../utils/invoice-store').forUser(userId);
-  const token = await require('../utils/token-cache').forUser(userId).getValidToken(tenantId);
-  const api   = new AccountingApi();
-  api.accessToken = token;
+  const api   = apiFor(await require('../utils/token-cache').forUser(userId).getValidToken(tenantId));
 
   // Taken before the first call: a change Xero records while this runs is
   // then after it, and the next read picks it up.

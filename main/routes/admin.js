@@ -7,6 +7,7 @@ const asyncHandler     = require('../middleware/async-handler');
 const {
   getAllUsers, createUser, updateUserRole, deleteUser, readUsers, findById, getSetupStatus, isOnline,
   passwordProblem, setPassword, invalidateSessions, setDisabled, unlockAccount, getUserDefaults, isKnownTimezone,
+  getUserConfig, saveUserConfig, getImapSettings, getGeminiKeys, addGeminiKey,
 } = require('../utils/users');
 const invoiceStore     = require('../utils/invoice-store');
 const settingsStore    = require('../utils/settings-store');
@@ -47,21 +48,105 @@ router.get('/users', requireAdmin, (_req, res) => {
   res.json({ users: getAllUsers() });
 });
 
+// ── Copying the admin's own settings onto a new account ──────────────────────
+// What each group of `copyFrom` carries over. Never a Xero credential or
+// token: the new account connects its own Xero, or, as a demo account, none.
+const COPY_GROUPS = ['llm', 'defaults', 'mailbox'];
+const DEFAULT_KEYS = [
+  'DEFAULT_ACCOUNT_CODE', 'DEFAULT_CURRENCY', 'ZERO_TAX_RATE', 'CLAIM_PAYEE_NAME',
+  'MILEAGE_RATE', 'MILEAGE_ACCOUNT_CODE', 'PER_DIEM_RATE', 'PER_DIEM_ACCOUNT_CODE', 'TIMEZONE',
+];
+const MAILBOX_FILTER_REQUIRED = 'A sender filter is required when the mailbox is copied: two accounts watching one '
+  + 'mailbox must watch different senders, because the watcher marks an email it has processed as read, '
+  + 'so whichever account reads a message first takes it from the other.';
+
+// The groups asked for, as { llm, defaults, mailbox } of booleans. Anything
+// that is not an object, or a key that is not a group, asks for nothing.
+function _copyGroups(copyFrom) {
+  const asked = copyFrom && typeof copyFrom === 'object' ? copyFrom : {};
+  return Object.fromEntries(COPY_GROUPS.map(g => [g, asked[g] === true]));
+}
+
+// Copies the chosen groups of `fromId`'s settings onto `toId`, and returns
+// the groups that had something to copy. The mailbox goes over as the
+// settings the watcher resolves for the source account (users.getImapSettings)
+// rather than as typed: a box the admin left blank is filled from the
+// admin's own sign-in address, and copied blank it would be filled from the
+// new account's, which is a different mailbox. The sender filter is the new
+// account's own, never the source's (see MAILBOX_FILTER_REQUIRED).
+function _copySettings(fromId, toId, groups, mailboxFilterFrom) {
+  const source = getUserConfig(fromId);
+  const patch  = {};
+  const copied = [];
+
+  if (groups.llm) {
+    // The legacy single key and every key of the multi-key list (Setup's
+    // LLM keys card, users.getGeminiKeys), each under its own label.
+    let any = false;
+    if (source.Gemini_API_KEY) { patch.Gemini_API_KEY = source.Gemini_API_KEY; any = true; }
+    for (const key of getGeminiKeys(fromId)) { addGeminiKey(toId, key.apiKey, key.label); any = true; }
+    if (any) copied.push('llm');
+  }
+  if (groups.defaults) {
+    let any = false;
+    for (const key of DEFAULT_KEYS) {
+      if (source[key] === undefined || source[key] === null || source[key] === '') continue;
+      patch[key] = source[key]; any = true;
+    }
+    if (any) copied.push('defaults');
+  }
+  if (groups.mailbox) {
+    const resolved = getImapSettings(fromId, source);
+    const values = {
+      IMAP_HOST: resolved.host, IMAP_PORT: resolved.port, IMAP_USER: resolved.user, IMAP_PASS: resolved.password,
+      IMAP_POLL_INTERVAL_MS: source.IMAP_POLL_INTERVAL_MS, IMAP_LOOKBACK_DAYS: source.IMAP_LOOKBACK_DAYS,
+    };
+    let any = false;
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined || value === null || value === '') continue;
+      patch[key] = String(value); any = true;
+    }
+    patch.IMAP_FILTER_FROM = String(mailboxFilterFrom).trim();
+    if (any) copied.push('mailbox');
+  }
+
+  if (Object.keys(patch).length) saveUserConfig(toId, patch);
+  return copied;
+}
+
 // POST /api/admin/users — create new user. The password an admin types is
 // temporary: it must be replaced at the first sign-in and dies after a day,
 // so the admin never ends up knowing a password someone is actually using.
+//
+// Body: { email, password, role, demo, copyFrom: { llm, defaults, mailbox },
+// mailboxFilterFrom }. `demo` makes a demo account, which runs against the
+// generated Demo Company instead of Xero (users.js isDemoUser). `copyFrom`
+// names which groups of the creating admin's own settings to copy onto the
+// new account (see _copySettings): the LLM keys, the posting defaults, the
+// mailbox — which needs `mailboxFilterFrom`, the sender the new account
+// watches for. Answers { success, user, copied }, `copied` being the groups
+// that had something to copy. The audit event records `demo` and `copied`,
+// never a value.
 router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
   try {
-    const { email, password, role } = req.body;
+    const { email, password, role, demo, copyFrom, mailboxFilterFrom } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
     const problem = passwordProblem(password, email);
     if (problem) return res.status(400).json({ error: problem });
-    const user = await createUser(email, password, role === 'admin' ? 'admin' : 'user', { temporary: true });
-    recordAdmin(req, user, 'user.create', { role: user.role });
-    logger.info('Admin created user', { email, role: user.role, by: req.user.email });
-    res.status(201).json({ success: true, user });
+    if (demo !== undefined && typeof demo !== 'boolean') {
+      return res.status(400).json({ error: 'demo must be true or false' });
+    }
+    const groups = _copyGroups(copyFrom);
+    if (groups.mailbox && !String(mailboxFilterFrom ?? '').trim()) {
+      return res.status(400).json({ error: MAILBOX_FILTER_REQUIRED });
+    }
+    const user   = await createUser(email, password, role === 'admin' ? 'admin' : 'user', { temporary: true, demo: demo === true });
+    const copied = _copySettings(req.user.id, user.id, groups, mailboxFilterFrom);
+    recordAdmin(req, user, 'user.create', { role: user.role, demo: user.demo, copied });
+    logger.info('Admin created user', { email, role: user.role, demo: user.demo, copied, by: req.user.email });
+    res.status(201).json({ success: true, user, copied });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -392,6 +477,7 @@ router.get('/monitoring', requireAdmin, (_req, res) => {
       email:          u.email,
       role:           u.role,
       disabled:       !!u.disabled_at,
+      demo:           !!u.is_demo,
       watcherRunning: watcherRegistry.isRunning(u.id),
       autoProcess:    settingsStore.forUser(u.id).get('autoProcess'),
       queue:          emailQueue.getStats(u.id),

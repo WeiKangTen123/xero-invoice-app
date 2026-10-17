@@ -51,7 +51,17 @@ export function oldestRead(stamps) {
 // and when it cannot ask, that live updates are off and why. `formatTime`
 // turns a stamp into a clock time in the reader's timezone. `reconnect` says
 // the reason is cured by reconnecting, so the line can offer the way there.
-export function liveLabel({ fetchedAt, checkedAt, live, liveReason } = {}, formatTime) {
+// `demo` is the signed-in account's flag (user.demo).
+export function liveLabel({ fetchedAt, checkedAt, live, liveReason, demo } = {}, formatTime) {
+  // A demo account's figures are sample data this app generated: nothing is
+  // read from Xero and nothing changes, so there is no read time, no check
+  // and nothing to reconnect. Said as what it is — "· does not change" in
+  // the same muted line — not as live updates being off, which reads as a
+  // fault. Known from the account, or from the version route's own reason
+  // ("Demo data does not change") when that is all the page has.
+  if (demo === true || (live === false && /\bdemo\b/i.test(liveReason || ''))) {
+    return { asOf: 'Sample data', checked: null, off: '· does not change', reason: liveReason || null, reconnect: false, demo: true };
+  }
   // A company the detector has not reached yet (its first poll is due within
   // two minutes of the first view) is not "off": saying so on every first
   // visit would send readers to Setup for nothing. It is pending.

@@ -5,7 +5,7 @@ const path    = require('path');
 const { requireAuth, requireAdmin } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
 const {
-  getUserConfig, saveUserConfig, getSetupStatus, getImapSettings,
+  getUserConfig, saveUserConfig, getSetupStatus, getImapSettings, isDemoUser,
   getGeminiKeys, addGeminiKey, removeGeminiKey, checkAllowanceSettings, defaultsFrom, timezoneProblem,
 } = require('../utils/users');
 const logger  = require('../utils/logger');
@@ -234,8 +234,13 @@ router.delete('/llm-keys/:id', requireAuth, (req, res) => {
 // on success, so an OAuth user pressing Test was silently moved off OAuth —
 // see xero/reconnect.js testConnection.
 router.post('/test/xero', requireAuth, asyncHandler(async (req, res) => {
-  const { testConnection } = require('../xero/reconnect');
+  const { testConnection, DEMO_NO_XERO_MESSAGE } = require('../xero/reconnect');
   const { xeroErrMsg }     = require('../xero/xero-utils');
+  // Nothing to test for a demo account. `message` is what the Test button
+  // shows; `error` is what every other refusal of a demo account carries.
+  if (isDemoUser(req.user.id)) {
+    return res.status(400).json({ success: false, error: DEMO_NO_XERO_MESSAGE, message: DEMO_NO_XERO_MESSAGE });
+  }
   try {
     const { method } = await testConnection(req.user.id);
     const via = method === 'oauth' ? 'via Xero login (OAuth)' : 'via Custom Connection';

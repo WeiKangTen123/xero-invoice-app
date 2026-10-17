@@ -1,8 +1,25 @@
+// What a demo account is told wherever a Xero connection would be made,
+// tested or dropped (routes/xero-oauth.js, routes/setup.js): it has none, by
+// design, and its data is the generated Demo Company (xero/demo/api.js).
+const DEMO_NO_XERO_MESSAGE = 'Demo account: sample data, no Xero connection.';
+
+// Whether this is a demo account (users.js isDemoUser). users.js is required
+// at call time, as everywhere in this file, and several tests stub it with
+// only what they need: a stub without isDemoUser is a real account.
+function _isDemo(userId) {
+  const users = require('../utils/users');
+  return typeof users.isDemoUser === 'function' && users.isDemoUser(userId);
+}
+
 // Dispatches to whichever Xero connection method a user actually has active, so
 // callers that just need "make sure this user has a live Xero connection" (invoice
 // submission's reconnect-on-empty-cache path) don't need to know or care which one.
+// A demo account is always connected, to the Demo Company, with nothing to
+// call: the token cache never asks for it to be reconnected, and anything
+// else that does gets the company list a reconnect would give.
 async function reconnectXero(userId) {
   const { getUserConfig } = require('../utils/users');
+  if (_isDemo(userId)) return [{ ...require('./demo/api').DEMO_TENANT }];
   const config = getUserConfig(userId);
   return config.XERO_CONNECTION_TYPE === 'oauth'
     ? require('./oauth').reconnect(userId)
@@ -67,9 +84,27 @@ function _groupStatus(scopes, health, probed) {
   return 'unknown';
 }
 
+// A demo account's status: method 'demo', connected, nothing missing,
+// refused or declined, every optional group granted (the Demo Company
+// answers every report), and no probe, since there is no Web app to ask
+// about. Whatever its config says: a Client ID typed into a demo account's
+// Setup must not turn it into a Custom Connection.
+function _demoStatus() {
+  const { OPTIONAL_SCOPE_GROUPS } = require('./xero-utils');
+  const optional = {};
+  for (const [key, group] of Object.entries(OPTIONAL_SCOPE_GROUPS)) {
+    optional[key] = { label: group.label, scopes: [...group.scopes], status: 'granted' };
+  }
+  return {
+    method: 'demo', connected: true, needsReconnect: false, reason: null, missingScopes: [], refusedScopes: [], refusedMessage: null,
+    optional, probe: null,
+  };
+}
+
 function getConnectionStatus(userId) {
   const { getUserConfig } = require('../utils/users');
   const tokenCache = require('../utils/token-cache');
+  if (_isDemo(userId)) return _demoStatus();
   const config = getUserConfig(userId) || {};
   const method = connectionMethod(config);
   const none = {
@@ -147,6 +182,9 @@ function getConnectionStatus(userId) {
 // these credentials before — a person pressing Test wants a fresh answer.
 async function testConnection(userId) {
   const { getUserConfig } = require('../utils/users');
+  // Nothing to test, and nothing a test could set: a demo account's Setup
+  // must not record a Custom Connection on it.
+  if (_isDemo(userId)) throw new Error(DEMO_NO_XERO_MESSAGE);
   const method = connectionMethod(getUserConfig(userId) || {});
   const tenants = method === 'oauth'
     ? await require('./oauth').reconnect(userId, { force: true })
@@ -154,4 +192,6 @@ async function testConnection(userId) {
   return { method: method || 'custom', tenants };
 }
 
-module.exports = { reconnectXero, getConnectionStatus, testConnection, connectionMethod, REFUSED_SCOPES_MESSAGE };
+module.exports = {
+  reconnectXero, getConnectionStatus, testConnection, connectionMethod, REFUSED_SCOPES_MESSAGE, DEMO_NO_XERO_MESSAGE,
+};
