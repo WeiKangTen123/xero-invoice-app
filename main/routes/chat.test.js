@@ -125,3 +125,96 @@ describe('POST /api/chat — the company and period the answer is about', () => 
     await ask({ period: { from: '2026-01' } }).expect(400);
   });
 });
+
+// ── The rows of the list on screen ──────────────────────────────────────────
+// The screen sends the AR & AP list's rows, [{ n, id }], so "#5" can be read
+// as a row of it. The list is checked here: a malformed one is a 400, and a
+// row whose invoice is another account's never reaches the assistant.
+describe('POST /api/chat — the invoice list on screen', () => {
+  let app, token, user, chatAgent, store;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    require('../db/migrate').run();
+    const users = require('../utils/users');
+    const invoiceStore = require('../utils/invoice-store');
+    chatAgent = require('../utils/chat-agent');
+    const { jwtSecret } = require('../middleware/auth-middleware');
+    const chatRoutes = require('./chat');
+
+    user  = await users.createUser(`chat-list-${Date.now()}@test.com`, 'password123', 'user');
+    token = jwt.sign({ id: user.id, email: user.email, role: user.role }, jwtSecret());
+    store = invoiceStore.forUser(user.id);
+    for (const id of ['mine-1', 'mine-2', 'mine-3']) store.add({ id, status: 'pending', vendorName: `Vendor ${id}`, invoiceNumber: id.toUpperCase(), totalAmount: 10 });
+    const other = await users.createUser(`chat-list-other-${Date.now()}@test.com`, 'password123', 'user');
+    invoiceStore.forUser(other.id).add({ id: 'theirs', status: 'pending', vendorName: 'Someone Else', invoiceNumber: 'X-1', totalAmount: 99 });
+
+    app = express();
+    app.use(express.json());
+    app.use('/api/chat', chatRoutes);
+  });
+
+  const ask = body => request(serverFor(app)).post('/api/chat').set('Authorization', `Bearer ${token}`).send({ message: 'check #2', ...body });
+  const sent = () => chatAgent.respond.mock.calls[0][1];
+
+  test('the rows are passed on as sent, in their order', async () => {
+    const rows = [{ n: 1, id: 'mine-3' }, { n: 2, id: 'mine-1' }, { n: 3, id: 'mine-2' }];
+    await ask({ visibleInvoices: rows }).expect(200);
+    expect(sent().visibleInvoices).toEqual(rows);
+  });
+
+  test('a row whose invoice is another account\'s, or no invoice at all, is dropped', async () => {
+    await ask({ visibleInvoices: [{ n: 1, id: 'mine-1' }, { n: 2, id: 'theirs' }, { n: 3, id: 'ghost' }, { n: 4, id: 'mine-2' }] }).expect(200);
+    expect(sent().visibleInvoices).toEqual([{ n: 1, id: 'mine-1' }, { n: 4, id: 'mine-2' }]);
+  });
+
+  test('extra fields on a row are not passed on', async () => {
+    await ask({ visibleInvoices: [{ n: 1, id: 'mine-1', vendorName: 'injected' }] }).expect(200);
+    expect(sent().visibleInvoices).toEqual([{ n: 1, id: 'mine-1' }]);
+  });
+
+  test('no list, or null, is passed on as null; an empty list as empty', async () => {
+    await ask({}).expect(200);
+    expect(sent().visibleInvoices).toBeNull();
+    chatAgent.respond.mockClear();
+    await ask({ visibleInvoices: null }).expect(200);
+    expect(sent().visibleInvoices).toBeNull();
+    chatAgent.respond.mockClear();
+    await ask({ visibleInvoices: [] }).expect(200);
+    expect(sent().visibleInvoices).toEqual([]);
+  });
+
+  // Two tests of six requests: the chat limiter allows 12 a minute.
+  const refused = async bad => {
+    for (const visibleInvoices of bad) {
+      const res = await ask({ visibleInvoices }).expect(400);
+      expect(res.body.error).toMatch(/invoice list .* could not be read/);
+    }
+    expect(chatAgent.respond).not.toHaveBeenCalled();
+  };
+
+  test('a list of the wrong shape is a 400 and the assistant is not asked', () => refused([
+    'mine-1',                                                              // not a list
+    { n: 1, id: 'mine-1' },                                                // not a list
+    Array.from({ length: 201 }, (_, i) => ({ n: i + 1, id: 'mine-1' })),  // over 200 rows
+    [null],
+    [{ n: 1, id: 'mine-1' }, { n: 1, id: 'mine-2' }],                      // each n once
+    [{ n: 1, id: 'x'.repeat(129) }],
+  ]));
+
+  test('a row with a bad number or id is a 400 and the assistant is not asked', () => refused([
+    [{ n: 0, id: 'mine-1' }],                                              // n from 1
+    [{ n: -2, id: 'mine-1' }],
+    [{ n: 1.5, id: 'mine-1' }],                                            // whole numbers only
+    [{ n: '1', id: 'mine-1' }],                                            // a number, not a string
+    [{ n: 1, id: 42 }],                                                    // id a string
+    [{ n: 1, id: '' }],
+  ]));
+
+  test('200 rows are accepted', async () => {
+    const rows = Array.from({ length: 200 }, (_, i) => ({ n: i + 1, id: i === 0 ? 'mine-1' : `ghost-${i}` }));
+    await ask({ visibleInvoices: rows }).expect(200);
+    expect(sent().visibleInvoices).toEqual([{ n: 1, id: 'mine-1' }]);
+  });
+});

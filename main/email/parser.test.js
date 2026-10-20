@@ -1,3 +1,6 @@
+// The model reader is stubbed for the Indian GST tests at the end; nothing
+// above them calls it.
+jest.mock('./llm-parser', () => ({ extractWithRetry: jest.fn() }));
 const { _ensureSubtotalTax, _parseTaxPercent, _detectCurrency } = require('./parser');
 
 describe('_ensureSubtotalTax', () => {
@@ -332,5 +335,195 @@ describe('parseTemplateFormat — tax-inclusive and tax-exclusive amounts', () =
   test('inclusive with no tax percentage: the lines are the total and there is no tax', () => {
     const p = parseTemplateFormat(template('Inclusive', [['Water cartons', '500', '', '']]), email, defaults);
     expect(p).toMatchObject({ lineAmountTypes: 'Inclusive', totalAmount: 500, taxAmount: 0, subTotal: 500 });
+  });
+});
+
+// ── Indian GST bills ────────────────────────────────────────────────────────
+// J. Sagar Associates, Bengaluru. BLR/26-27/2078 was read with the taxable
+// value as the total (held, by the subtotal check). BLR/26-27/2056 was read
+// twice: once like that, once with no tax at all, which added up and sat
+// ready to post with the GST missing. The PDF's own text is now checked: GST
+// printed but none read, or an amount in words that is not the total, holds
+// the bill. The figures are never changed. The text around the figures is
+// invented; the figures are the production ones.
+describe('Indian GST bills: the reading is checked against the PDF text', () => {
+  const { extractWithRetry } = require('./llm-parser');
+  const { parsePDFWithLLM, _gstCharged, _amountsInWords } = require('./parser');
+  const EMAIL    = { subject: 'Invoice', date: '2026-10-05T04:00:00Z', from: { text: 'accounts@jsa.example', value: [{ address: 'accounts@jsa.example' }] } };
+  const DEFAULTS = { currency: 'SGD', accountCode: '310' };
+  const GST_HOLD = 'the PDF shows GST (CGST/SGST/IGST) but no tax was read; check the tax and the total';
+
+  // Intra-state (Karnataka to Karnataka): CGST + SGST.
+  const BILL_2078 = [
+    'TAX INVOICE',
+    'J. SAGAR ASSOCIATES',
+    'Advocates & Solicitors, Bengaluru',
+    'GSTIN: 29AAAFJ0000A1Z5',
+    'Invoice No: BLR/26-27/2078        Date: 02/10/2026',
+    'Professional fees   998212   1,01,316.00',
+    'Taxable Value                1,01,316.00',
+    'CGST @ 9%                      9,118.44',
+    'SGST @ 9%                      9,118.44',
+    'Round Off                          0.12',
+    'Total Invoice Value          1,19,553.00',
+    'Amount in words: Rupees One Lakh Nineteen Thousand Five Hundred Fifty Three Only',
+  ].join('\n');
+  // Inter-state: IGST.
+  const BILL_2056 = [
+    'TAX INVOICE',
+    'J. SAGAR ASSOCIATES',
+    'Invoice No: BLR/26-27/2056        Date: 28/09/2026',
+    'Professional fees   998212   95,959.00',
+    'Taxable Value                95,959.00',
+    'IGST @ 18%                   17,272.62',
+    'Round Off                         0.38',
+    'Grand Total                1,13,232.00',
+    'Rupees One Lakh Thirteen Thousand Two Hundred Thirty Two Only',
+  ].join('\n');
+  const noWords = t => t.split('\n').filter(l => !/Only$/.test(l)).join('\n');
+
+  const reading = (over = {}) => ({
+    vendorName: 'J. Sagar Associates', invoiceNumber: 'BLR/26-27/2078', invoiceDate: '2026-10-02', currency: 'INR',
+    documentType: 'invoice', confidence: 'high',
+    lineItems: [{ description: 'Professional fees', amount: 101316 }],
+    subTotal: 101316, taxAmount: 18237, totalAmount: 119553, ...over,
+  });
+  const read = async (text, over) => {
+    extractWithRetry.mockResolvedValue(reading(over));
+    return parsePDFWithLLM(text, EMAIL, 'BLR-26-27-2078.pdf', 'u1', DEFAULTS);
+  };
+
+  beforeEach(() => extractWithRetry.mockReset());
+
+  test('a correct reading of the CGST + SGST bill is not held', async () => {
+    const r = await read(BILL_2078);
+    expect(r.reviewReason).toBeNull();
+    expect(r.confidence).toBe('high');
+  });
+
+  test('CGST + SGST printed but no tax read: held, the figures kept as read', async () => {
+    const r = await read(noWords(BILL_2078), { subTotal: 101316, taxAmount: 0, totalAmount: 101316 });
+    expect(r.reviewReason).toBe(GST_HOLD);
+    expect(r).toMatchObject({ subTotal: 101316, taxAmount: 0, totalAmount: 101316 });
+    expect(r.confidence).toBe('low');
+  });
+
+  test('IGST printed but no tax read (null): held', async () => {
+    const r = await read(noWords(BILL_2056), { lineItems: [{ description: 'Professional fees', amount: 95959 }], subTotal: 95959, taxAmount: null, totalAmount: 95959 });
+    expect(r.reviewReason).toBe(GST_HOLD);
+  });
+
+  test('the second reading of BLR/26-27/2056 (no tax, taxable value as total) is now held twice over', async () => {
+    const r = await read(BILL_2056, { invoiceNumber: 'BLR/26-27/2056', lineItems: [{ description: 'Professional fees', amount: 95959 }], subTotal: 95959, taxAmount: 0, totalAmount: 95959 });
+    expect(r.reviewReason).toBe(`${GST_HOLD}; the amount in words on the PDF is INR 113,232.00, but the total read is INR 95,959.00`);
+    expect(r).toMatchObject({ subTotal: 95959, taxAmount: 0, totalAmount: 95959 });
+  });
+
+  test('the reading of BLR/26-27/2078 (taxable value as the total) also says what the words say', async () => {
+    const r = await read(BILL_2078, { subTotal: 101316, taxAmount: 18237, totalAmount: 101316 });
+    expect(r.reviewReason).toMatch(/plus tax INR 18,237\.00 comes to INR 119,553\.00, but the total is INR 101,316\.00/);
+    expect(r.reviewReason).toMatch(/the amount in words on the PDF is INR 119,553\.00, but the total read is INR 101,316\.00/);
+    expect(r.totalAmount).toBe(101316);
+  });
+
+  test('a total that matches the words is not held for them', async () => {
+    const r = await read(BILL_2056, { lineItems: [{ description: 'Professional fees', amount: 95959 }], subTotal: 95959, taxAmount: 17273, totalAmount: 113232 });
+    expect(r.reviewReason).toBeNull();
+  });
+
+  test('the tax in words (Tally prints it under the total) is not taken for the total', async () => {
+    const tally = [
+      'CGST 9,118.44', 'SGST 9,118.44', 'Total 1,19,553.00',
+      'Amount Chargeable (in words)', 'INR One Lakh Nineteen Thousand Five Hundred Fifty Three Only',
+      'Tax Amount (in words) : INR Eighteen Thousand Two Hundred Thirty Seven Only',
+    ].join('\n');
+    expect(_amountsInWords(tally)).toEqual([119553]);
+    expect((await read(tally)).reviewReason).toBeNull();
+  });
+
+  test('a "GST @ 18%" line with an amount counts as GST printed', async () => {
+    const text = 'Taxable Value 1,01,316.00\nGST @ 18% 18,236.88\nTotal 1,19,552.88';
+    const r = await read(text, { subTotal: 101316, taxAmount: 0, totalAmount: 101316 });
+    expect(r.reviewReason).toBe(GST_HOLD);
+  });
+
+  test.each([
+    ['CGST and SGST on their own lines',      'CGST @ 9% 9,118.44\nSGST @ 9% 9,118.44', true],
+    ['IGST',                                   'IGST (18%) : 17,272.62', true],
+    ['UTGST',                                  'CGST 9% 900.00\nUTGST 9% 900.00', true],
+    ['cells run together by the PDF reader',   'Taxable Value 1,01,316.00CGST@9%9,118.44', true],
+    ['the amount on the line under the label', 'CGST @ 9%\n9,118.44', true],
+    ['GST 9% (Singapore)',                     'GST 9% 90.00', true],
+    ['IGST at 0% on an export',                'IGST @ 0% on 1,01,316.00 0.00', false],
+    ['GST amounts of zero',                    'CGST 0.00\nSGST 0.00', false],
+    ['the GSTIN only',                         'GSTIN: 29AAAFJ0000A1Z5\nTotal 1,000.00', false],
+    ['IGST named without an amount',           'Supply without payment of IGST under LUT\nTotal 1,01,316.00', false],
+    ['no GST at all',                          'Total 1,000.00', false],
+  ])('GST charged: %s → %s', (_, text, expected) => {
+    expect(_gstCharged(text)).toBe(expected);
+  });
+
+  test('no GST printed and no tax read is not held', async () => {
+    const r = await read('Professional fees 1,000.00\nTotal 1,000.00', { lineItems: [{ description: 'Fees', amount: 1000 }], subTotal: 1000, taxAmount: 0, totalAmount: 1000 });
+    expect(r.reviewReason).toBeNull();
+  });
+});
+
+describe('_amountInWords — Indian numbering', () => {
+  const { _amountInWords } = require('./parser');
+
+  test.each([
+    ['Rupees One Lakh Nineteen Thousand Five Hundred Fifty Three Only',        119553],
+    ['Rupees Ninety Five Thousand Nine Hundred Fifty Nine and Fifty Paise Only', 95959.5],
+    ['Rupees One Lakh Nineteen Thousand Five Hundred and Fifty Three Only',     119553],
+    ['INR Two Crore Fifty Lakh Three Thousand and Five Only',                    25003005],
+    ['Rupees One Hundred Twenty Crore Only',                                     1200000000],
+    ['Indian Rupees Five Lakhs Only',                                            500000],
+    ['One Lakh Rupees and Paise Twelve Only',                                    100000.12],
+    ['Rs. Fifty-Three Thousand Only',                                            53000],
+    ['Rupees Fifty Paise Only',                                                  0.5],
+  ])('%s → %s', (words, expected) => {
+    expect(_amountInWords(words)).toBe(expected);
+  });
+
+  test.each([
+    'Rupees Only',
+    'Rupees One Lakh Banana Only',
+    'Rupees Three Fifty Only',                          // not how a number is written
+    'Rupees Five Thousand Two Lakh Only',               // scales out of order
+    'Rupees One Lakh One Hundred Twenty Thousand Only', // a thousand group too big under a lakh
+    'Rupees Hundred Only',
+    'Rupees Ten and Hundred Paise Only',
+  ])('malformed: %s → null', words => {
+    expect(_amountInWords(words)).toBeNull();
+  });
+});
+
+describe('_nameCase — a vendor name read in capitals', () => {
+  const { _nameCase } = require('./parser');
+
+  test.each([
+    ['J. SAGAR ASSOCIATES',        'J. Sagar Associates'],
+    ['ABC PTE LTD',                'ABC Pte Ltd'],
+    ['3M SINGAPORE PTE LTD',       '3M Singapore Pte Ltd'],
+    ['KL TRADING SDN BHD',         'KL Trading Sdn Bhd'],
+    ['SAGAR & CO LLP',             'Sagar & Co LLP'],
+    ['RELIANCE RETAIL PVT LTD',    'Reliance Retail Pvt Ltd'],
+    ['THE BLACK AND WHITE STUDIO', 'The Black and White Studio'],
+  ])('%s → %s', (name, expected) => {
+    expect(_nameCase(name)).toBe(expected);
+  });
+
+  test.each(['J. Sagar Associates', 'iCloud Services', '3M', 'ACME', 'IBM'])('left as read: %s', name => {
+    expect(_nameCase(name)).toBe(name);
+  });
+
+  test('the bill reader stores the title-cased name as vendor and contact', async () => {
+    const { extractWithRetry } = require('./llm-parser');
+    const { parsePDFWithLLM } = require('./parser');
+    extractWithRetry.mockResolvedValue({ vendorName: 'J. SAGAR ASSOCIATES', invoiceNumber: 'BLR/26-27/2056', totalAmount: 10, lineItems: [] });
+    const r = await parsePDFWithLLM('text', { date: '2026-10-05T04:00:00Z' }, 'a.pdf', 'u1', { currency: 'INR', accountCode: '310' });
+    expect(r.vendorName).toBe('J. Sagar Associates');
+    expect(r.contactName).toBe('J. Sagar Associates');
   });
 });

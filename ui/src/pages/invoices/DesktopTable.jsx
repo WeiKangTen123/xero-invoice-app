@@ -43,14 +43,22 @@ function SortHeader({ field, label, sort, onSort }) {
   );
 }
 
-export default function DesktopTable({ user, openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup, sort, onSort, today, showDue }) {
+// The # column: each row's place in the list as shown (rowNumbers, from
+// Invoices.jsx), the number the chat assistant knows it by. Narrow and quiet.
+const ROW_NO = {
+  width: 1, paddingLeft: 12, paddingRight: 2, textAlign: 'right', whiteSpace: 'nowrap',
+  fontVariantNumeric: 'tabular-nums',
+};
+
+export default function DesktopTable({ user, openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup, sort, onSort, today, showDue, rowNumbers }) {
   // Expense claims have no due date, so their tab has no Due column.
-  const columns = showDue ? 11 : 10;
+  const columns = showDue ? 12 : 11;
   return (
           <div style={{ overflowX: 'auto' }}>
             <table className="data-table">
               <thead>
                 <tr>
+                  <th scope="col" style={ROW_NO} title='Row number. Ask the assistant about a row by it, e.g. "#5".'>#</th>
                   <th style={{ width: 36, paddingRight: 0 }}>
                     <input
                       type="checkbox"
@@ -121,6 +129,9 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                       }}
                       onClick={() => openRecord(inv.id)}
                     >
+                      <td style={{ ...ROW_NO, fontSize: 11.5, color: 'var(--text-muted)' }}>
+                        {rowNumbers?.get(inv.id)}
+                      </td>
                       <td style={{ paddingRight: 0 }} onClick={e => toggleSelect(inv.id, e)}>
                         <input
                           type="checkbox"

@@ -27,6 +27,7 @@ import { SORT_FIELDS, formatSort, nextSort, overdueDays, parseSort, receivedCoun
 import { csvFilename, invoiceCsv } from './invoices/csv';
 import { BULK_MAX, bulkConfirm, stillSelected, summarise } from './invoices/bulk';
 import { DEFAULT_TIMEZONE } from '../utils/formatDate';
+import { setVisibleInvoices } from '../utils/visible-invoices';
 
 // What "Clear all" did, in the server's words. The server decides what is kept
 // (anything in Xero or mid-send) and replies { removed, kept, message }, so its
@@ -465,6 +466,20 @@ export default function Invoices() {
       }));
   }, [filtered, sort]);
 
+  // Every row the list holds, in the order it shows them (tab, filters,
+  // search, then the sort or the arrival groups), numbered from 1 in the #
+  // column. Rows in a collapsed group keep their numbers, so opening one does
+  // not renumber the rest. The same order is what "#5" means to the chat
+  // assistant, here and on a record opened from here (visible-invoices.js).
+  const shownRows  = useMemo(() => groups.flatMap(g => g.rows), [groups]);
+  const rowNumbers = useMemo(() => new Map(shownRows.map((inv, i) => [inv.id, i + 1])), [shownRows]);
+  // Stored again on leaving the list, so its half hour counts from when it was
+  // last on screen rather than from its last change.
+  useEffect(() => {
+    setVisibleInvoices(shownRows);
+    return () => setVisibleInvoices(shownRows);
+  }, [shownRows]);
+
   // "Export CSV": exactly the rows the list holds now (tab, filters, search),
   // in the order it shows them, including any in a collapsed group. Built
   // here rather than asked of the server, so the file cannot disagree with
@@ -892,7 +907,7 @@ export default function Invoices() {
                     : 'They arrive as the emailed template — or type one in, or import a spreadsheet, above'}
             </div>
           </div>
-        ) : isMobile ? <MobileList openRecord={openRecord} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} filtered={filtered} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} sortValue={formatSort(sort)} sortOptions={sortOptions} onSortChange={v => setSort(parseSort(v))} today={today} /> : <DesktopTable user={user} openRecord={openRecord} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} sort={sort} onSort={sortBy} today={today} showDue={tab !== 'claims'} />}
+        ) : isMobile ? <MobileList openRecord={openRecord} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} filtered={filtered} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} sortValue={formatSort(sort)} sortOptions={sortOptions} onSortChange={v => setSort(parseSort(v))} today={today} rowNumbers={rowNumbers} /> : <DesktopTable user={user} openRecord={openRecord} rowNumbers={rowNumbers} invoices={invoices} selected={selected} deleteTarget={deleteTarget} deleteLoading={deleteLoading} promptDeleteOne={promptDeleteOne} toggleSelect={toggleSelect} allFilteredSelected={allFilteredSelected} toggleSelectAll={toggleSelectAll} groups={groups} isOpen={isOpen} toggleGroup={toggleGroup} sort={sort} onSort={sortBy} today={today} showDue={tab !== 'claims'} />}
       </div>
 
       {/* Floating Mobile Selection Bar, with room left under the list so it

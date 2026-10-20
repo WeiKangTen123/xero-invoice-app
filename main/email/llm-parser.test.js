@@ -43,6 +43,19 @@ test('the model is asked what kind of document this is', () => {
   for (const t of ['invoice', 'receipt', 'statement', 'credit_note', 'quote', 'other']) expect(SYSTEM_PROMPT).toContain(`"${t}"`);
 });
 
+// An Indian GST bill (J. Sagar Associates, BLR/26-27/2078) was read with its
+// taxable value as the total. The prompt now says how GST adds up, with the
+// Indian labels, and that an amount in words is the total payable.
+test('the model is told how GST adds up, with the Indian labels', () => {
+  expect(SYSTEM_PROMPT).toMatch(/total payable = amount before tax \+ tax/);
+  expect(SYSTEM_PROMPT).toMatch(/GST and VAT work this way everywhere/);
+  for (const label of ['Taxable Value', 'Assessable Value', 'CGST', 'SGST', 'UTGST', 'IGST', 'cess',
+    'Grand Total', 'Invoice Total', 'Total Invoice Value', 'Amount Payable', 'Rupees … Only', 'reverse charge']) {
+    expect(SYSTEM_PROMPT).toContain(label);
+  }
+  expect(SYSTEM_PROMPT).toMatch(/Never return the taxable value as totalAmount/);
+});
+
 test('a reply cut off even after the client\'s larger retry is not sent again identically', async () => {
   callGemini.mockRejectedValue(Object.assign(new Error('cut off'), { code: 'GEMINI_TRUNCATED' }));
   await expect(extractWithRetry('text', 'a.pdf', 'u1')).rejects.toMatchObject({ code: 'GEMINI_TRUNCATED' });

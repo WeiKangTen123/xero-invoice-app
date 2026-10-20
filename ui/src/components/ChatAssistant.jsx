@@ -3,6 +3,17 @@ import { useLocation, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useViewMode } from '../context/ViewModeContext';
 import { fmtMoney } from '../utils/format';
+import { getVisibleInvoices } from '../utils/visible-invoices';
+import { chatMode, DOCK_MIN_VIEWPORT, EXPANDED_KEY } from './chat-layout';
+
+// The ⤢ choice, remembered on this browser. Storage can be refused (a private
+// window, blocked site data); the chat then opens at its usual width.
+function readExpanded() {
+  try { return localStorage.getItem(EXPANDED_KEY) === '1'; } catch (_) { return false; }
+}
+function saveExpanded(on) {
+  try { localStorage.setItem(EXPANDED_KEY, on ? '1' : '0'); } catch (_) { /* kept for this visit only */ }
+}
 
 // react-markdown + remark-gfm are the heaviest dependency in the bundle and are
 // only needed once an assistant reply is on screen, so the renderer loads on
@@ -87,7 +98,7 @@ function ActionCard({ proposal, invoiceId }) {
   return (
     <div style={{
       background: 'var(--bg-card)', border: '1px solid var(--border-card)', borderRadius: 12,
-      boxShadow: 'var(--shadow-sm)', padding: '12px 13px', maxWidth: '94%',
+      boxShadow: 'var(--shadow-sm)', padding: '12px 13px', maxWidth: '94%', alignSelf: 'stretch',
       display: 'flex', flexDirection: 'column', gap: 9,
       ...(isXero ? { borderColor: 'rgba(245,158,11,0.35)', background: 'var(--warning-subtle)' } : {}),
     }}>
@@ -176,13 +187,44 @@ function ActionCard({ proposal, invoiceId }) {
 }
 
 // ── Panel ─────────────────────────────────────────────────────────────────────
-export default function ChatAssistant() {
+// onDockChange(width) tells Layout how much room to keep free on the right of
+// the page: the chat's width while it is docked beside the page, else 0.
+export default function ChatAssistant({ onDockChange }) {
   const { isMobile } = useViewMode();
   const location = useLocation();
   const params   = useParams();
   const pinnedId = location.pathname.startsWith('/invoices/') ? params.id : null;
 
   const [open,     setOpen]     = useState(false);
+  const [expanded, setExpanded] = useState(readExpanded);
+  // The window's width, read again only when it crosses the docking width:
+  // that is all chatMode asks of it, and a resize listener would re-render
+  // every message on each pixel of a drag.
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return undefined;
+    const mql  = window.matchMedia(`(min-width: ${DOCK_MIN_VIEWPORT}px)`);
+    const sync = () => setViewportWidth(window.innerWidth);
+    sync();
+    mql.addEventListener('change', sync);
+    return () => mql.removeEventListener('change', sync);
+  }, []);
+
+  // Docked (a column beside the page, which makes room for it), floating over
+  // the page, or the whole screen on a phone (chat-layout.js). `shape` is how
+  // it looks open, kept while it slides away after closing.
+  const layout = chatMode({ open, isMobile, viewportWidth, expanded });
+  const shape  = chatMode({ open: true, isMobile, viewportWidth, expanded });
+  const docked = layout.mode === 'docked';
+  const dockWidth = docked ? layout.width : 0;
+  useEffect(() => { onDockChange?.(dockWidth); }, [onDockChange, dockWidth]);
+  useEffect(() => () => onDockChange?.(0), [onDockChange]);
+
+  function toggleExpanded() {
+    const next = !expanded;
+    setExpanded(next);
+    saveExpanded(next);
+  }
   const [pinInfo,  setPinInfo]  = useState(null);
   const [messages, setMessages] = useState([]); // { role, content, proposals? }
   const [input,    setInput]    = useState('');
@@ -228,17 +270,21 @@ export default function ChatAssistant() {
   // choice rather than failing every message.
   const activeTenantId = companies && tenantId && !companies.some(c => c.tenantId === tenantId) ? '' : tenantId;
 
-  // Close when pressing 'Escape' or clicking outside the chat panel
+  // Close when pressing 'Escape' or clicking outside the chat panel. Docked,
+  // the chat sits beside the page rather than over it, so working on the page
+  // leaves it open, and only an Escape pressed inside the chat closes it (one
+  // pressed on the page is for the page, such as closing one of its dialogs).
   useEffect(() => {
     if (!open) return;
 
     function handleKeyDown(e) {
-      if (e.key === 'Escape') {
-        setOpen(false);
-      }
+      if (e.key !== 'Escape') return;
+      if (docked && !panelRef.current?.contains(document.activeElement)) return;
+      setOpen(false);
     }
 
     function handleClickOutside(e) {
+      if (docked) return;
       if (
         panelRef.current && !panelRef.current.contains(e.target) &&
         buttonRef.current && !buttonRef.current.contains(e.target)
@@ -253,7 +299,7 @@ export default function ChatAssistant() {
       window.removeEventListener('keydown', handleKeyDown);
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [open]);
+  }, [open, docked]);
 
   // Focus follows the panel: into the message box when it opens, back to the
   // launcher when it closes — but only if focus was inside the panel, so
@@ -289,11 +335,15 @@ export default function ChatAssistant() {
     setSending(true);
 
     try {
+      // visibleInvoices: the AR & AP list as last shown, so "#5" is its row 5
+      // (utils/visible-invoices.js), asked from the list or from a record
+      // opened from it.
       const d = await api.post('/chat', {
         message: text, history,
         invoiceId: pinnedId || undefined,
         tenantId:  activeTenantId || undefined,
         period:    period || undefined,
+        visibleInvoices: getVisibleInvoices(),
       });
       setMessages(prev => [...prev, { role: 'assistant', content: d.reply, proposals: d.proposals || [] }]);
     } catch (err) {
@@ -356,36 +406,52 @@ export default function ChatAssistant() {
           and message box were still reached by Tab — focus vanished off the
           edge of the screen. `visibility: hidden` takes it out of the Tab
           order and away from screen readers; it flips only after the slide
-          out has finished, so closing still animates. */}
+          out has finished, so closing still animates.
+
+          On the web it starts under the header, which stays whole above it:
+          the page's own controls there (Setup's Save box) are never covered.
+          Docked, it is a column beside the page and Layout keeps its width
+          free (onDockChange); floating, it is over the page with a shadow.
+          zIndex 201 either way: over the header (50), sidebar (100) and phone
+          nav (90), and under the admin's account window (300/301), the
+          dialogs (Modal, 1000) and the toasts (1200), which all open over it. */}
       <div
         ref={panelRef}
-        role="dialog"
+        role={shape.mode === 'docked' ? 'complementary' : 'dialog'}
         aria-label="Invoice assistant"
         aria-hidden={!open}
         style={{
         visibility: open ? 'visible' : 'hidden',
         position: 'fixed',
-        top: 0,
+        top: shape.mode === 'fullscreen' ? 0 : 'var(--header-height)',
         right: 0,
         bottom: 0,
-        width: isMobile ? '100vw' : 400,
-        maxWidth: isMobile ? '100vw' : '92vw',
+        width: shape.width,
+        maxWidth: shape.mode === 'overlay' ? '92vw' : '100vw',
         background: 'var(--bg-card)',
-        borderLeft: isMobile ? 'none' : '1px solid var(--border)',
-        boxShadow: '-12px 0 40px rgba(0,0,0,0.25)',
+        borderLeft: shape.mode === 'fullscreen' ? 'none' : '1px solid var(--border)',
+        boxShadow: shape.mode === 'docked' ? 'none' : '-12px 0 40px rgba(0,0,0,0.25)',
         display: 'flex',
         flexDirection: 'column',
         transform: open ? 'translateX(0)' : 'translateX(100%)',
         transition: open
-          ? 'transform 0.25s cubic-bezier(0.4,0,0.2,1), visibility 0s'
-          : 'transform 0.25s cubic-bezier(0.4,0,0.2,1), visibility 0s linear 0.25s',
+          ? 'transform 0.25s cubic-bezier(0.4,0,0.2,1), width 0.2s ease, visibility 0s'
+          : 'transform 0.25s cubic-bezier(0.4,0,0.2,1), width 0.2s ease, visibility 0s linear 0.25s',
         zIndex: 201,
       }}>
         <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
             <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 7 }}>
               <span style={{ color: 'var(--accent)' }}>✦</span> Invoice Assistant
             </h2>
+            {/* Wider for a wide table, and back; docked only, where the page
+                makes room for it. Remembered on this browser. */}
+            {shape.mode === 'docked' && (
+              <button type="button" onClick={toggleExpanded} aria-pressed={expanded}
+                      aria-label={expanded ? 'Make the assistant narrower' : 'Make the assistant wider'}
+                      title={expanded ? 'Narrower' : 'Wider'}
+                      style={{ marginLeft: 'auto', background: expanded ? 'var(--accent-subtle)' : 'none', border: 'none', borderRadius: 6, cursor: 'pointer', color: expanded ? 'var(--accent)' : 'var(--text-muted)', fontSize: 15, padding: '2px 6px' }}>⤢</button>
+            )}
             <button onClick={() => setOpen(false)} aria-label="Close the assistant" title="Close"
                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 15 }}>✕</button>
           </div>
@@ -409,22 +475,27 @@ export default function ChatAssistant() {
           )}
         </div>
 
-        <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 11 }}>
+        {/* Never scrolls sideways: a wide table scrolls inside its own box
+            (MarkdownMessage.jsx), and every flex item on the way down may
+            shrink (minWidth 0) rather than grow to the table's width. */}
+        <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 11 }}>
           {messages.length === 0 && (
             <div style={{ fontSize: 12.5, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-              Ask me to look up or change invoice details — e.g. "change the invoice number to 2026099", or "show me pending invoices from Branworks". I'll always show you the exact change before anything is saved.
+              Ask me to look up or change invoice details — e.g. "change the invoice number to 2026099", "show me pending invoices from Branworks", or "what is #5?" (a row of the AR &amp; AP list, by its # number). I'll always show you the exact change before anything is saved.
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+            <div key={i} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start', minWidth: 0 }}>
               {m.role === 'user' ? (
-                <div style={{ maxWidth: '84%', padding: '8px 12px', borderRadius: 14, borderBottomRightRadius: 4, fontSize: 13, lineHeight: 1.5, background: 'var(--accent-gradient)', color: '#fff' }}>
+                <div style={{ maxWidth: '84%', minWidth: 0, overflowWrap: 'anywhere', padding: '8px 12px', borderRadius: 14, borderBottomRightRadius: 4, fontSize: 13, lineHeight: 1.5, background: 'var(--accent-gradient)', color: '#fff' }}>
                   {m.content}
                 </div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: '100%' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, flex: 1, minWidth: 0 }}>
                   {m.content && (
-                    <div style={{ maxWidth: '94%', padding: '8px 12px', borderRadius: 14, borderBottomLeftRadius: 4, fontSize: 13, lineHeight: 1.5, background: 'var(--bg-hover)', color: 'var(--text-primary)' }}>
+                    // Clipped only top and bottom, to its rounded corners;
+                    // anything wide still scrolls rather than being cut off.
+                    <div style={{ maxWidth: '94%', minWidth: 0, overflowX: 'auto', overflowY: 'hidden', padding: '8px 12px', borderRadius: 14, borderBottomLeftRadius: 4, fontSize: 13, lineHeight: 1.5, background: 'var(--bg-hover)', color: 'var(--text-primary)' }}>
                       <Suspense fallback={<div className="chat-md" style={{ whiteSpace: 'pre-wrap' }}>{m.content}</div>}>
                         <MarkdownMessage content={m.content} />
                       </Suspense>
@@ -459,7 +530,7 @@ export default function ChatAssistant() {
               ref={taRef}
               rows={1}
               value={input}
-              placeholder="e.g. change the invoice number to 2026099"
+              placeholder={pinnedId ? 'Ask about this invoice' : 'e.g. change the invoice number to 2026099'}
               onChange={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 90) + 'px'; }}
               onKeyDown={onKeyDown}
               aria-label="Message the assistant"
@@ -488,17 +559,29 @@ export default function ChatAssistant() {
         .chat-md li { margin-bottom: 2px; }
         .chat-md li:last-child { margin-bottom: 0; }
         .chat-md code { background: var(--bg-input); border-radius: 4px; padding: 1px 5px; font-size: 12px; font-family: ui-monospace, 'SF Mono', Consolas, monospace; }
+        .chat-md p, .chat-md li { overflow-wrap: anywhere; }
+        .chat-md pre { overflow-x: auto; max-width: 100%; }
+
+        /* A table fills the bubble, and when its columns cannot fit it
+           scrolls inside this box instead of being squeezed or cut off. */
+        .chat-md-table { max-width: 100%; overflow-x: auto; margin: 4px 0 2px; }
         .chat-md table {
-          border-collapse: collapse; width: 100%; margin: 4px 0 2px; font-size: 12.5px;
+          border-collapse: collapse; min-width: 100%; font-size: 12.5px;
           font-variant-numeric: tabular-nums;
         }
         .chat-md th, .chat-md td {
-          text-align: left; padding: 6px 9px; border: 1px solid var(--border);
+          text-align: left; padding: 6px 9px; border: 1px solid var(--border); vertical-align: top;
         }
         .chat-md th {
-          background: var(--bg-secondary); font-weight: 700; font-size: 11px;
+          background: var(--bg-secondary); font-weight: 700; font-size: 11px; white-space: nowrap;
           text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted);
         }
+        /* Amounts, dates and references on one line, amounts to the right;
+           a sentence wraps, but no thinner than a few words. */
+        .chat-md td { min-width: 6em; }
+        .chat-md td.cell-num { text-align: right; white-space: nowrap; }
+        .chat-md td.cell-short { white-space: nowrap; }
+        .chat-md td.cell-long { min-width: 12em; }
         .chat-md tr:nth-child(even) td { background: var(--bg-secondary); }
       `}</style>
     </>

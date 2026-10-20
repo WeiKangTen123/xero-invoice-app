@@ -26,6 +26,8 @@ const PROPOSAL_TYPES = new Set([
 // invoice number to INV-999" shipped someone's bank account to a third party
 // for no reason. Now a turn carries what its question can use:
 //
+//   * the invoices the question picks by their row in the list on screen
+//     ("#5", "ref 5", "the 5th"), first;
 //   * the invoices the question names — by number, vendor, date, amount or
 //     status — or, when it names none, the 20 most recent;
 //   * counts by status, so "how many are pending?" is not answered from a
@@ -61,16 +63,24 @@ function _asksAboutPayment(text) {
   return PAYMENT_QUESTION.test(String(text || ''));
 }
 
-function _summarize(inv) {
-  return {
-    id: inv.id, vendorName: inv.vendorName, invoiceNumber: inv.invoiceNumber,
+// `listNumber` is the invoice's row in the list on screen, when it is there.
+// The review note (errorMsg) goes too when there is one: "is everything
+// correct?" about a listed invoice cannot be answered without it.
+function _summarize(inv, listNumber) {
+  const out = { id: inv.id };
+  if (listNumber) out.listNumber = listNumber;
+  Object.assign(out, {
+    vendorName: inv.vendorName, invoiceNumber: inv.invoiceNumber,
     status: inv.status, totalAmount: inv.totalAmount, currency: inv.currency,
     invoiceDate: inv.invoiceDate,
-  };
+  });
+  if (inv.errorMsg) out.errorMsg = inv.errorMsg;
+  return out;
 }
 
-function _fullDetail(inv, { payment = false } = {}) {
+function _fullDetail(inv, { payment = false, listNumber = null } = {}) {
   const out = { id: inv.id, status: inv.status };
+  if (listNumber) out.listNumber = listNumber;
   for (const field of EDITABLE_FIELDS) {
     if (!payment && PAYMENT_FIELDS.has(field)) continue;
     out[field] = inv[field];
@@ -154,12 +164,236 @@ function _named(inv, q) {
 //
 // The caller reads the question together with the user's last two turns, so
 // "the payroll one" after "show me the Branworks invoice" still finds Branworks.
-function _relevantInvoices(pool, text) {
+//
+// `first` are the invoices the question picked by number ("#5", "ref 6"),
+// already read (_readRefs below); they lead, and count as named.
+function _relevantInvoices(pool, text, first = []) {
   const q = _questionTerms(text);
-  let picked = pool.filter(inv => _named(inv, q));
-  if (!picked.length && q.statuses.size) picked = pool.filter(inv => q.statuses.has(inv.status));
+  const already = new Set(first.map(inv => inv.id));
+  let picked = pool.filter(inv => !already.has(inv.id) && _named(inv, q));
+  if (!picked.length && !first.length && q.statuses.size) picked = pool.filter(inv => q.statuses.has(inv.status));
+  picked = [...first, ...picked];
   if (picked.length) return { invoices: picked.slice(0, MATCHED_INVOICES_LIMIT), matched: true };
   return { invoices: pool.slice(0, RECENT_INVOICES_LIMIT), matched: false };
+}
+
+// ── Numbers from the list on screen ─────────────────────────────────────────
+//
+// The AR & AP list numbers its rows in a "#" column, and the chat screen sends
+// those rows with each message: visibleInvoices, [{ n, id }], checked and
+// narrowed to this user's own invoices by routes/chat.js. Nothing else in the
+// app is numbered, so "#5", "ref 5" or "the 5th" can only mean a row of that
+// list. On the review page of one invoice a user asked "check the ref 6 and
+// ref 5 invoice"; with no list to read them from, the model took the pinned
+// invoice and another from the same vendor and checked those. A number is now
+// read off the list here, in code, and one that cannot be is asked about
+// before the model is called.
+//
+// "row 5" and "the 5th" can only be rows. "#5", "no. 5", "number 5", "ref 5",
+// "item 5" and "invoice 5" could also be an invoice's own number, and that is
+// tried first: an invoice numbered "5" (or "005") is the one meant, whatever
+// row it is on, and the model is told so it can say which it took. "item 2"
+// on a pinned invoice with two or more lines is its second line, not a row.
+
+// Up to three digits, no leading zero: "#0042" or "invoice 2026099" is an
+// invoice's own number, never a row.
+const ROW_NUM = String.raw`[1-9]\d{0,2}`;
+const ORDINAL = String.raw`st|nd|rd|th`;
+const ROW_MARKER = String.raw`#|no\.|nos\.|num(?:ber)?s?\.?|rows?|ref(?:erence)?s?\.?|items?|invoices?|bills?`;
+// Not the start of a longer number ("#5,000", "5.5"), a word or a percentage.
+const NUM_END = String.raw`(?![\w%]|[.,]\d)`;
+// "#5", "ref 6", "invoice #5", "row 12", "the 5th". Not inside a word or an
+// invoice number ("INV#5", "26-27/2078").
+const REF_START = String.raw`(?<![\w#/.-])(?:(${ROW_MARKER})\s*(?:#\s*)?(${ROW_NUM})${NUM_END}|(${ROW_NUM})(${ORDINAL})${NUM_END})`;
+// What can follow it: "and 6", ", ref 7", "-#9", "to #9", "and the 6th".
+const REF_MORE = String.raw`\s*(,\s*(?:and|or)?|&|and|or|-|–|—|to|through|thru)\s*(?:the\s+)?(?:(${ROW_MARKER})\s*(?:#\s*)?)?(${ROW_NUM})(${ORDINAL})?${NUM_END}`;
+// A plural marker makes "to" a range: "rows 5 to 7". After a singular one,
+// "set #5 to 150" is a new value, not rows 5 to 150.
+const PLURAL_MARKER = /^(?:nos\.|num(?:ber)?s\.?|rows|ref(?:erence)?s\.?|items|invoices|bills)$/;
+// An ordinal that is a date or a time, not a row: "on the 5th", "Oct 5th",
+// "the 5th of May", "5th June", "the 1st quarter", "the 2nd line".
+const MONTH_NAME = String.raw`jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?`;
+const ORDINAL_DATE_BEFORE = new RegExp(String.raw`(?:\b(?:${MONTH_NAME}|may)\.?|\b(?:on|from|since|before|after|until|till|by|dated|due))(?:\s+the)?\s*$`, 'i');
+// Not bare "may": "the 5th may be wrong" is about a row.
+const ORDINAL_DATE_AFTER = new RegExp(String.raw`^\s*(?:of\b|(?:${MONTH_NAME})\b|may\s+\d{4}\b|(?:quarters?|qtrs?|q[1-4]|half|halves|weeks?|months?|years?|days?|times?|lines?|pages?|places?|attempts?|reminders?|instal+ments?|payments?|periods?|floors?|editions?)\b)`, 'i');
+
+// Pure; exported for testing. The numbers `text` picks invoices by, in the
+// order written — [{ n, row }], `row` when it can only be a list row — and
+// the text with those phrases taken out, so "#5" is not also read as an
+// amount of 5.00 by _named. `lineCount` is the pinned invoice's number of
+// lines, for "item 2".
+function _listRefs(text, { lineCount = 0 } = {}) {
+  const s = String(text || '');
+  const refs = new Map();
+  const start = new RegExp(REF_START, 'gi');
+  const more  = new RegExp(REF_MORE, 'iy');
+  let rest = '';
+  let from = 0;
+  let m;
+  while ((m = start.exec(s)) !== null) {
+    const marker = (m[1] || '').toLowerCase();
+    const ordinal = !!m[4];
+    if (ordinal && (ORDINAL_DATE_BEFORE.test(s.slice(Math.max(0, m.index - 30), m.index)) || ORDINAL_DATE_AFTER.test(s.slice(start.lastIndex)))) continue;
+
+    const found = [{ n: Number(m[2] || m[3]), row: ordinal || /^rows?$/.test(marker) }];
+    const ranges = ordinal || PLURAL_MARKER.test(marker);
+    let end = start.lastIndex;
+    more.lastIndex = end;
+    let c;
+    while ((c = more.exec(s)) !== null) {
+      const sep = c[1].toLowerCase();
+      const word = /^(?:to|through|thru)$/.test(sep);
+      if (word && !c[2] && !c[4] && !ranges) break;
+      const n = Number(c[3]);
+      if (word || /^[-–—]$/.test(sep)) {
+        // A range: every row in it.
+        const prev = found[found.length - 1];
+        prev.row = true;
+        for (let k = Math.min(prev.n, n); k <= Math.max(prev.n, n); k++) if (k !== prev.n) found.push({ n: k, row: true });
+      } else {
+        found.push({ n, row: !!c[4] || /^rows?$/i.test(c[2] || '') || (!c[2] && found[0].row) });
+      }
+      end = more.lastIndex;
+    }
+    start.lastIndex = end;
+
+    // "item 2" while looking at an invoice with two or more lines.
+    if (/^items?$/.test(marker) && Math.max(...found.map(f => f.n)) <= lineCount) continue;
+
+    for (const f of found) refs.set(f.n, !!refs.get(f.n) || f.row);
+    rest += `${s.slice(from, m.index)} `;
+    from = end;
+  }
+  rest += s.slice(from);
+  return { refs: [...refs].map(([n, row]) => ({ n, row })), text: rest };
+}
+
+// The list as sent: which invoice each row number is, and each invoice's row.
+// Null when the screen sent no list.
+function _listRows(visibleInvoices) {
+  if (!Array.isArray(visibleInvoices)) return null;
+  const idAt = new Map();
+  const rowOf = new Map();
+  for (const r of visibleInvoices) {
+    if (!r || !Number.isSafeInteger(r.n) || r.n < 1 || typeof r.id !== 'string') continue;
+    if (!idAt.has(r.n)) idAt.set(r.n, r.id);
+    if (!rowOf.has(r.id)) rowOf.set(r.id, r.n);
+  }
+  return { idAt, rowOf };
+}
+
+function _isNumbered(inv, n) {
+  const own = _fold(inv.invoiceNumber);
+  return own === String(n) || (/^\d+$/.test(own) && Number(own) === n);
+}
+
+// Which invoice each number picks: an invoice with that number of its own,
+// unless it can only be a row; otherwise that row of the list. `missing` are
+// the numbers that pick nothing — no list was sent, or no such row.
+function _readRefs(refs, { pool, poolById, rows, store }) {
+  const found = [];
+  const missing = [];
+  for (const { n, row } of refs) {
+    const numbered = row ? [] : pool.filter(inv => _isNumbered(inv, n));
+    if (numbered.length) {
+      for (const inv of numbered) found.push({ n, inv, readAs: 'invoice number' });
+      continue;
+    }
+    const id = rows ? rows.idAt.get(n) : undefined;
+    const inv = id ? (poolById.get(id) || store.getById(id)) : null;
+    if (inv) found.push({ n, inv, readAs: 'list row' });
+    else missing.push(n);
+  }
+  return { found, missing };
+}
+
+function _uniqueInvoices(invoices) {
+  const seen = new Set();
+  return invoices.filter(inv => !seen.has(inv.id) && seen.add(inv.id));
+}
+
+// "#5, #6 and #8–#12".
+function _refNames(ns) {
+  const sorted = [...new Set(ns)].sort((a, b) => a - b);
+  const parts = [];
+  for (let i = 0; i < sorted.length;) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+    if (j - i >= 2) parts.push(`#${sorted[i]}–#${sorted[j]}`);
+    else for (let k = i; k <= j; k++) parts.push(`#${sorted[k]}`);
+    i = j + 1;
+  }
+  return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0];
+}
+
+const _mdText = s => String(s).replace(/[\\`*_[\]<>|]/g, '\\$&');
+
+// A few invoices to name in a clarifying question: the top of the list when
+// there is one, otherwise the pinned invoice and the newest.
+function _examples({ rows, pool, poolById, pinned, store }, limit = 5) {
+  const out = [];
+  if (rows && rows.idAt.size) {
+    for (const n of [...rows.idAt.keys()].sort((a, b) => a - b)) {
+      const id = rows.idAt.get(n);
+      const inv = poolById.get(id) || store.getById(id);
+      if (inv) out.push({ n, inv });
+      if (out.length === limit) break;
+    }
+    return out;
+  }
+  const list = pinned ? [pinned, ...pool.filter(inv => inv.id !== pinned.id)] : pool;
+  return list.slice(0, limit).map(inv => ({ inv }));
+}
+
+// The reply when the numbers in a message cannot all be read off the list —
+// or would pick more invoices than one turn can carry — so the model is never
+// left to guess. Null when they can.
+function _askWhichInvoices(read, ctx) {
+  const { rows } = ctx;
+  if (read.missing.length) {
+    const several = read.missing.length > 1;
+    const names = _refNames(read.missing);
+    const shown = rows ? [...rows.idAt.keys()] : [];
+    let why;
+    if (!rows) why = `I can't see the numbers of your invoice list from here, so I can't tell which invoice${several ? 's' : ''} ${names} ${several ? 'are' : 'is'}.`;
+    else if (!shown.length) why = `Your invoice list is empty right now, so I can't tell which invoice${several ? 's' : ''} ${names} ${several ? 'are' : 'is'}.`;
+    else {
+      const lo = Math.min(...shown);
+      const hi = Math.max(...shown);
+      why = `I can't find ${names} in your invoice list — it shows ${lo === hi ? `only #${lo}` : `#${lo}–#${hi}`}.`;
+    }
+    const examples = _examples(ctx).map(({ n, inv }) => {
+      const label = `${n ? `#${n} · ` : ''}${inv.invoiceNumber || 'no invoice number'}`;
+      return `- **${_mdText(label)}** · ${_mdText(inv.vendorName || inv.contactName || 'Unknown vendor')}`;
+    });
+    const ask = several
+      ? 'Which invoices do you mean? Tell me their invoice numbers or vendors'
+      : 'Which invoice do you mean? Tell me its invoice number or vendor';
+    return `${why}\n\n${ask}${examples.length ? `, for example:\n\n${examples.join('\n')}` : '.'}`;
+  }
+  const picked = new Set(read.found.map(f => f.inv.id)).size;
+  if (picked > MATCHED_INVOICES_LIMIT) {
+    return `That's ${picked} invoices at once — I can look at up to ${MATCHED_INVOICES_LIMIT} in one message. Ask about fewer at a time.`;
+  }
+  return null;
+}
+
+// The reply is markdown, where a single line break is only a space: the lines
+// of one record's block ("**#5 · BLR/26-27/2078** · J. Sagar Associates", its
+// amount, its review note) would run together into one line. A line break the
+// model wrote inside a paragraph is made a hard break; tables, lists,
+// headings, quotes and code are left as they are.
+const MD_BLOCK_LINE = /^\s*(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|\||```|~~~)/;
+function _hardBreaks(text) {
+  const lines = String(text).split('\n');
+  let fenced = false;
+  return lines.map((line, i) => {
+    if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; return line; }
+    const next = lines[i + 1];
+    if (fenced || next === undefined || !line.trim() || !next.trim()) return line;
+    if (MD_BLOCK_LINE.test(line) || MD_BLOCK_LINE.test(next) || / {2}$|\\$/.test(line)) return line;
+    return `${line}  `;
+  }).join('\n');
 }
 
 function _systemPrompt() {
@@ -173,7 +407,15 @@ TWO DIFFERENT DATA SETS — DO NOT CONFUSE THEM:
 
 WHAT THE INVOICE DATA HOLDS:
 - "recentInvoices" is NOT the whole pipeline: it holds only the invoices this question appears to be about, or the ${RECENT_INVOICES_LIMIT} most recent when it names none. "invoiceCounts" gives the true number of invoices in each status — use it for any count. If the invoice the user means is not in the data, ask for its invoice number or vendor rather than guessing.
+- "listNumber" is the invoice's number in the "#" column of the user's invoice list — the only numbering the user can see. "#5", "no. 5", "row 5", "ref 5", "item 5" or "the 5th" mean the invoice whose listNumber is 5. Never number invoices yourself, and never read a number as a position in this data.
+- "numberReferences", when present, is how the app already read each such number in this message: readAs "list row" is the invoice with that listNumber; readAs "invoice number" is an invoice whose own invoice number is that number — say so in the reply (e.g. "invoice 5, which is #12 in your list") so the user can correct it. Take these as given.
+- "errorMsg" is the review note this app wrote on an invoice — see REVIEW NOTES.
 - Payment details (paymentReference — bank, account number, PayNow, SWIFT, beneficiary) are left out unless the user's message asks about payment details. If they are absent, never guess them; tell the user to ask about the payment details if they need them.
+
+REVIEW NOTES ARE THIS APP'S OWN CHECKS:
+- "errorMsg" and the "review-needed" status are written by this app, never by the supplier: they are this app's own checks on the figures it READ from the document (on an "error" invoice, what went wrong sending it to Xero). A note that the figures don't add up means the figures as read don't add up — often one of them was misread — not that the supplier's invoice is wrong.
+- Phrase it as: "the figures read from the PDF don't add up: <the note in plain words>; open the PDF to see which is right." Never call it the supplier's mistake or a math error on the invoice, and never say the invoice itself is incorrect.
+- Never propose changing an amount to "fix" a review note until the user has said which figure is right.
 
 FINANCIAL ANSWERS:
 - Use ONLY the figures given in xeroFinancials.figures. Never calculate, estimate, derive or extrapolate a number that is not there — not a ratio, not a total, not a projection.
@@ -189,6 +431,7 @@ STRICT BOUNDARY:
 - "Post to Xero" and "mark reviewed" are the only non-field actions you may propose (submit_to_xero / mark_reviewed types).
 - Only ever reference an invoiceId that actually appears in the invoice data given to you below. Never invent one.
 - If a request is ambiguous (which invoice, which value), ask a clarifying question in "reply" and return an empty "proposals" array instead of guessing.
+- WHICH INVOICES: act on or answer about an invoice only when the user's words pick out exactly that invoice in the data — the pinned invoice ("this invoice"), a listNumber or numberReferences match, its invoice number, or a vendor with only one invoice in the data. If they don't — a number with no matching listNumber, "the other one", a vendor with several invoices in the data, a description that fits more than one — ask which they mean, naming the candidates by invoice number and vendor, with an empty "proposals" array. Never stand the pinned invoice, or another invoice from the same vendor, in for one you can't identify.
 
 LINE ITEMS & TOTALS:
 - totalAmount is normally the sum of every lineItems[].unitAmount (plus taxAmount, if the invoice has one). It is NOT an independent number you can change on its own without the line items becoming inconsistent with it.
@@ -197,7 +440,16 @@ LINE ITEMS & TOTALS:
 - Once you know which line item, propose it as a "field_update" on the "lineItems" field, where "newValue" is the COMPLETE lineItems array (copy every item from the invoice data unchanged, except the one being changed) — never drop or invent items. Pair it with a "field_update" on "totalAmount" in the same response so the two stay consistent.
 - If the user instead names a specific line item directly (e.g. "change the payroll line to 150"), no clarifying question is needed — go straight to the same two-proposal pattern.
 
-FORMATTING: the "reply" text is rendered as markdown (GitHub-flavored, tables included). When you're presenting several fields of ONE record — e.g. summarizing an invoice's details, reviewing what was extracted — use a markdown table with "Field" and "Value" columns instead of a bulleted list; it's far easier to scan. Keep a short sentence before or after the table, not inside it. For simple short answers (one fact, a status, a yes/no) plain text is fine — don't force a table where there's nothing to compare.
+FORMATTING: the "reply" text is rendered as markdown (GitHub-flavored, tables included) in a narrow chat panel, about 400px wide — a wide table is crushed and cut off there.
+- ONE record with several fields — e.g. summarizing an invoice's details, reviewing what was extracted: a markdown table with two columns, "Field" and "Value", instead of a bulleted list. Keep a short sentence before or after the table, not inside it.
+- TWO OR MORE records: NO table. Write one short block per record, its lines separated by a line break and the blocks by a blank line, like this:
+**#5 · BLR/26-27/2078** · J. Sagar Associates · 5 Oct 2026
+INR 101,316.00 · Review needed
+⚠ <the review note in plain words>
+Start the first line with "#<listNumber> · " only when the invoice has a listNumber, and leave out the ⚠ line when it has no review note.
+- Never a table wider than 3 columns.
+- Dates as "5 Oct 2026", never "2026-10-05". Amounts with the currency and two decimals: "INR 101,316.00". Statuses in words: "Review needed", not "review-needed".
+- For simple short answers (one fact, a status, a yes/no) plain text is fine — don't force a table or blocks where there's nothing to compare.
 IMPORTANT: a table cell is delimited by "|" — if a value itself contains a "|" character (this happens with paymentReference, which often looks like "PayNow ID: X | Beneficiary: Y"), you MUST escape every "|" inside that cell as "\\|", or the table's columns will misalign when rendered.
 
 You must respond with ONLY one JSON object — no markdown fences, no text outside the JSON:
@@ -225,7 +477,7 @@ Response: {"reply": "This will mark 2 invoices as reviewed:", "proposals": [{"ty
 
 EXAMPLE 4 — pinned invoice is {"id": "abc123", "vendorName": "Acme Corp", "invoiceNumber": "INV-001", "invoiceDate": "2026-04-21", "totalAmount": 400, "currency": "USD", "paymentReference": "PayNow ID: 202016196Z | Beneficiary: Acme Corp"}.
 User: "review the details of this invoice"
-Response: {"reply": "Here's what was extracted:\\n\\n| Field | Value |\\n|---|---|\\n| Vendor | Acme Corp |\\n| Invoice # | INV-001 |\\n| Invoice Date | 2026-04-21 |\\n| Total | USD 400.00 |\\n| Payment Reference | PayNow ID: 202016196Z \\\\| Beneficiary: Acme Corp |\\n\\nAnything you'd like to correct?", "proposals": []}
+Response: {"reply": "Here's what was extracted:\\n\\n| Field | Value |\\n|---|---|\\n| Vendor | Acme Corp |\\n| Invoice # | INV-001 |\\n| Invoice Date | 21 Apr 2026 |\\n| Total | USD 400.00 |\\n| Payment Reference | PayNow ID: 202016196Z \\\\| Beneficiary: Acme Corp |\\n\\nAnything you'd like to correct?", "proposals": []}
 
 EXAMPLE 5 — pinned invoice is {"id": "abc123", "vendorName": "Branworks Pte Ltd", "totalAmount": 400, "currency": "USD", "lineItems": [{"description": "Accounting - April 2026", "unitAmount": 300}, {"description": "Payroll - April 2026 (1 Person)", "unitAmount": 100}]}.
 User: "change the total amount to 450"
@@ -234,7 +486,15 @@ User (follow-up): "the payroll one"
 Response: {"reply": "Here's the change:", "proposals": [
   {"type": "field_update", "invoiceId": "abc123", "field": "lineItems", "label": "Line items", "oldValue": [{"description": "Accounting - April 2026", "unitAmount": 300}, {"description": "Payroll - April 2026 (1 Person)", "unitAmount": 100}], "newValue": [{"description": "Accounting - April 2026", "unitAmount": 300}, {"description": "Payroll - April 2026 (1 Person)", "unitAmount": 150}]},
   {"type": "field_update", "invoiceId": "abc123", "field": "totalAmount", "label": "Total amount", "oldValue": "400", "newValue": "450"}
-]}`;
+]}
+
+EXAMPLE 6 — recentInvoices includes {"id": "id5", "listNumber": 5, "vendorName": "J. Sagar Associates", "invoiceNumber": "BLR/26-27/2078", "invoiceDate": "2026-10-05", "totalAmount": 101316, "currency": "INR", "status": "review-needed", "errorMsg": "the subtotal INR 101,316.00 plus tax INR 18,237.00 comes to INR 119,553.00, but the total is INR 101,316.00"} and {"id": "id6", "listNumber": 6, "vendorName": "Acme Corp", "invoiceNumber": "INV-001", "invoiceDate": "2026-10-07", "totalAmount": 400, "currency": "USD", "status": "pending"}; numberReferences reads 5 and 6 as list rows.
+User: "check ref 5 and ref 6, everything correct?"
+Response: {"reply": "**#5 · BLR/26-27/2078** · J. Sagar Associates · 5 Oct 2026\\nINR 101,316.00 · Review needed\\n⚠ The figures read from the PDF don't add up: subtotal INR 101,316.00 plus tax INR 18,237.00 comes to INR 119,553.00, but the total read is INR 101,316.00. Open the PDF to see which is right.\\n\\n**#6 · INV-001** · Acme Corp · 7 Oct 2026\\nUSD 400.00 · Pending\\nNothing flagged in what was read.", "proposals": []}
+
+EXAMPLE 7 — no invoice pinned; recentInvoices includes {"id": "s1", "vendorName": "J. Sagar Associates", "invoiceNumber": "BLR/26-27/2078", ...} and {"id": "s2", "vendorName": "J. Sagar Associates", "invoiceNumber": "BLR/26-27/2079", ...}.
+User: "change the Sagar invoice's due date to 30 Nov 2026"
+Response (two invoices fit — ask, propose nothing): {"reply": "There are two J. Sagar Associates invoices — which one?\\n\\n- **BLR/26-27/2078**\\n- **BLR/26-27/2079**", "proposals": []}`;
 }
 
 function _isEditableField(field) {
@@ -330,7 +590,10 @@ function _replyFromUnparsed(raw, truncated) {
 }
 
 // history: [{ role: 'user'|'assistant', content: string }]
-async function respond(userId, { message, history = [], invoiceId = null, tenantId = null, period = null, timezone = 'UTC' }) {
+// visibleInvoices: [{ n, id }] — the rows of the invoice list on screen, n the
+// number in its "#" column, already narrowed to this user's invoices by the
+// route. Null when the screen sent none.
+async function respond(userId, { message, history = [], invoiceId = null, tenantId = null, period = null, timezone = 'UTC', visibleInvoices = null }) {
   const store = invoiceStore.forUser(userId);
 
   const pinned = invoiceId ? store.getById(invoiceId) : null;
@@ -338,9 +601,30 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
   // earlier turn did.
   const payment = _asksAboutPayment(message);
   const lastAsked = history.filter(m => m && m.role !== 'assistant').slice(-2).map(m => String(m.content || ''));
-  const { invoices, matched } = _relevantInvoices(store.getRecent(SEARCH_POOL), [...lastAsked, message].join('\n'));
-  const recent = invoices.map(_summarize);
-  logger.info('Chat context', { userId, invoices: recent.length, matched, pinned: !!pinned, payment });
+  const pool = store.getRecent(SEARCH_POOL);
+  const poolById = new Map(pool.map(inv => [inv.id, inv]));
+  const rows = _listRows(visibleInvoices);
+  const lineCount = Array.isArray(pinned?.lineItems) ? pinned.lineItems.length : 0;
+  const lookup = { pool, poolById, rows, store, pinned };
+
+  // "#5" that the list cannot answer is asked about here, not left to the
+  // model: it once checked the pinned invoice in place of one it could not
+  // find.
+  const asked = _listRefs(message, { lineCount });
+  const read = _readRefs(asked.refs, lookup);
+  const which = _askWhichInvoices(read, lookup);
+  if (which) {
+    logger.info('Chat asked which invoices a number means', { userId, missing: read.missing.length, picked: read.found.length, list: !!rows });
+    return { reply: which, proposals: [] };
+  }
+  // Rows picked in the last two turns stay in view, as named invoices do, so
+  // a follow-up about "#5" still has it. One no longer on the list is dropped.
+  const earlier = lastAsked.map(t => _listRefs(t, { lineCount }));
+  const first = _uniqueInvoices([...read.found, ...earlier.flatMap(e => _readRefs(e.refs, lookup).found)].map(f => f.inv));
+  const { invoices, matched } = _relevantInvoices(pool, [...earlier.map(e => e.text), asked.text].join('\n'), first);
+  const rowOf = id => (rows ? rows.rowOf.get(id) : undefined);
+  const recent = invoices.map(inv => _summarize(inv, rowOf(inv.id)));
+  logger.info('Chat context', { userId, invoices: recent.length, matched, byNumber: read.found.length, pinned: !!pinned, payment });
 
   // Only fetched when the question sounds financial. A cold cash-flow read costs
   // several Xero calls and billed egress, and "change the invoice number to
@@ -352,8 +636,11 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
   const { allowed: allowedFigures = [], ...financials } = fetched || {};
 
   const contextBlock = JSON.stringify({
-    pinnedInvoice: pinned ? _fullDetail(pinned, { payment }) : null,
+    pinnedInvoice: pinned ? _fullDetail(pinned, { payment, listNumber: rowOf(pinned.id) }) : null,
     recentInvoices: recent,
+    // How the numbers in this message were read — by the code above, not
+    // left to the model.
+    ...(read.found.length ? { numberReferences: read.found.map(f => ({ number: f.n, invoiceId: f.inv.id, readAs: f.readAs })) } : {}),
     // Totals, so a count is never read off the sample above.
     invoiceCounts: store.countByStatus(),
     // The BOOKS, from Xero — distinct from recentInvoices, which is this app's
@@ -417,10 +704,11 @@ async function respond(userId, { message, history = [], invoiceId = null, tenant
     }
   }
 
-  return { reply, proposals };
+  return { reply: _hardBreaks(reply), proposals };
 }
 
 module.exports = {
   respond, PROPOSAL_TYPES, _replyFromUnparsed, _relevantInvoices, _asksAboutPayment, _fullDetail,
+  _listRefs, _hardBreaks, _systemPrompt,
   RECENT_INVOICES_LIMIT, MATCHED_INVOICES_LIMIT,
 };

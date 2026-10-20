@@ -20,9 +20,10 @@ Extract these fields:
 - dueDate: YYYY-MM-DD (null if not stated)
 - currency: the invoice's actual currency as a 3-letter ISO code (USD, SGD, AUD, GBP, EUR, MYR, etc.) — read explicit codes or symbols on the invoice ("S$" or "PayNow" implies SGD; "£" implies GBP; "€" implies EUR; "A$" implies AUD). If only a bare "$" appears with no other currency signal anywhere on the invoice, return null rather than guessing.
 - lineItems: array of { description, quantity, unitPrice, amount } — description as printed (full multi-line), quantity and unitPrice as plain numbers when the invoice shows them (null otherwise), amount = the line total
-- totalAmount: total due as a plain number (no commas, no symbols)
-- subTotal: pre-tax subtotal as a plain number, only if explicitly shown on the invoice (null if not shown)
-- taxAmount: total tax/GST/VAT amount as a plain number, only if explicitly shown (null if not shown; 0 if the invoice explicitly states no tax applies)
+- totalAmount: the total payable, tax included, as a plain number (no commas, no symbols). An amount written in words ("Rupees … Only") is the total payable
+- subTotal: pre-tax subtotal (the taxable value) as a plain number, only if explicitly shown on the invoice (null if not shown)
+- taxAmount: total tax/GST/VAT amount as a plain number, every tax component added together, only if explicitly shown (null if not shown; 0 if the invoice explicitly states no tax applies)
+  Tax is added on top: total payable = amount before tax + tax (+ any round-off line). GST and VAT work this way everywhere. On an Indian GST tax invoice the amount before tax is the "Taxable Value", "Sub Total" or "Assessable Value"; the tax is CGST + SGST (or UTGST) within a state, or IGST between states, plus any cess; the total payable is the "Total", "Grand Total", "Invoice Total", "Total Invoice Value" or "Amount Payable", often also in words ("Rupees … Only"). Never return the taxable value as totalAmount when the tax is added to it. GST marked as payable by the recipient under reverse charge is not added: then the total is as printed and taxAmount is 0
 - paymentReference: combine all payment details — PayNow ID, bank name, account number, SWIFT, beneficiary — format: "Bank: OCBC | Acct: 601-493935-001 | Swift: OCBCSGSG | Beneficiary: Denise Teo" — null if none
 - projectName: artist or project name this invoice relates to (null if not applicable)
 - description: ONE line, at most 120 characters, saying what this invoice is for, written from the line items (e.g. "Notarial certificate, witnessing, true-copy certification and SAL authentication"). Not the vendor name, not the invoice number, not the email subject.

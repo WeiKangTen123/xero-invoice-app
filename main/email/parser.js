@@ -514,6 +514,196 @@ function _moneyMismatch({ lineItems, subTotal, taxAmount, totalAmount, currency 
   return problems.length ? problems.join('; ') : null;
 }
 
+// ── What the PDF's own text says about the money ─────────────────────────────
+// The reading is checked against the text it came from, in ways the model
+// cannot skip. One Indian GST bill (BLR/26-27/2056) was read twice: once with
+// its tax, once with the taxable value as the total and no tax at all. The
+// second reading added up, so it passed every check above and sat ready to
+// post with the GST missing. Like _moneyMismatch, these only hold the bill;
+// the figures stay as read.
+
+// The GST components an Indian tax invoice prints: CGST and SGST (or UTGST)
+// within a state, IGST between states. No word boundaries, because the PDF
+// reader runs table cells together ("Taxable ValueCGST@9%9,118.44"); none of
+// these occurs inside an ordinary word, and GSTIN (the registration number)
+// is left out.
+const GST_COMPONENT = /(?:UT|[CSI])GST(?!IN)/i;
+// "GST @ 18%", "GST 9%", "GST (9%)".
+const GST_AT_RATE   = /(?<![A-Za-z])GST\s*(?:@\s*)?\(?\s*\d+(?:\.\d+)?\s*%/i;
+// A money figure: comma-grouped (Indian "1,01,316.00" too) or with decimals.
+// A bare integer is too often a rate, an HSN/SAC code or a quantity.
+const MONEY_FIGURE  = /\d{1,3}(?:,\d{2,3})+(?:\.\d{1,2})?|\d+\.\d{1,2}/g;
+const RATE          = /\d+(?:\.\d+)?\s*%/g;
+const BARE_FIGURE   = /^\s*(?:₹|Rs\.?|INR)?\s*(\d{1,3}(?:,\d{2,3})+(?:\.\d{1,2})?|\d+\.\d{1,2})\s*$/i;
+
+// Whether the text charges GST: a CGST/SGST/UTGST/IGST or "GST @ n%" line with
+// an amount above zero on it, or on the next line when the PDF reader split
+// the row after the label. A line whose only rate is 0% (an export under LUT,
+// a zero-rated supply) charges nothing.
+function _gstCharged(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(GST_COMPONENT) || lines[i].match(GST_AT_RATE);
+    if (!m) continue;
+    const from    = lines[i].slice(m.index);
+    const rates   = (from.match(RATE) || []).map(r => parseFloat(r));
+    let   amounts = (from.replace(RATE, ' ').match(MONEY_FIGURE) || []).map(a => Number(a.replace(/,/g, '')));
+    const tail = lines[i].slice(m.index + m[0].length).replace(RATE, '').replace(/\b(?:Rs|INR)\b\.?|₹/gi, '');
+    if (!amounts.length && !/[A-Za-z]/.test(tail)) {
+      const below = (lines[i + 1] || '').match(BARE_FIGURE);
+      if (below) amounts = [Number(below[1].replace(/,/g, ''))];
+    }
+    if (rates.length && rates.every(r => r === 0)) continue;
+    if (amounts.some(a => a > 0)) return true;
+  }
+  return false;
+}
+
+// ── Amounts in words ──
+// Indian bills print the total payable in words: "Rupees One Lakh Nineteen
+// Thousand Five Hundred Fifty Three Only". Read in Indian numbering (thousand,
+// lakh, crore) with paise. Null for anything that is not plainly a number in
+// words, so a phrase it cannot read is never compared.
+const WORD_VALUES = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+  twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+};
+const WORD_SCALES = { thousand: 1e3, lakh: 1e5, lakhs: 1e5, lac: 1e5, lacs: 1e5, crore: 1e7, crores: 1e7 };
+const PAISE = /^pais[ae]$/;
+const RUPEE = /^rupees?$/;
+
+// ["one", "lakh", "nineteen", "thousand", …] → 119553. Scales must come in
+// descending order, each group must fit below the scale before it, and the
+// words of a group in the usual order ("fifty three", never "three fifty").
+function _wordsToNumber(words) {
+  const ws = words.filter(w => w !== 'and');
+  if (ws.length === 1 && ws[0] === 'zero') return 0;
+  let total = 0, lastScale = Infinity, hundreds = 0, rest = 0, seen = false;
+  for (const w of ws) {
+    if (Object.prototype.hasOwnProperty.call(WORD_VALUES, w)) {
+      const v = WORD_VALUES[w];
+      if (v < 10 ? rest && (rest < 20 || rest % 10) : rest) return null;
+      rest += v;
+      seen = true;
+    } else if (w === 'hundred') {
+      if (hundreds || !(rest >= 1 && rest <= 9)) return null;
+      hundreds = rest * 100;
+      rest = 0;
+    } else if (Object.prototype.hasOwnProperty.call(WORD_SCALES, w)) {
+      const scale = WORD_SCALES[w];
+      const group = hundreds + rest;
+      if (!group || scale >= lastScale || group * scale >= lastScale) return null;
+      total += group * scale;
+      lastScale = scale;
+      hundreds = rest = 0;
+    } else {
+      return null;
+    }
+  }
+  return seen ? total + hundreds + rest : null;
+}
+
+// "Rupees Ninety Five Thousand Nine Hundred Fifty Nine and Fifty Paise Only"
+// → 95959.5. Takes "… and Fifty Paise", "… and Paise Fifty", and "Rupees" on
+// either side of the number.
+function _amountInWords(phrase) {
+  const tokens = String(phrase || '').toLowerCase().split(/[^a-z]+/)
+    .filter(t => t && !['only', 'inr', 'rs', 'indian'].includes(t));
+  const at = tokens.findIndex(t => PAISE.test(t));
+  let rupeeWords = tokens, paiseWords = [];
+  if (at >= 0) {
+    if (tokens.slice(at + 1).some(t => PAISE.test(t))) return null;
+    if (at < tokens.length - 1) {
+      rupeeWords = tokens.slice(0, at);
+      paiseWords = tokens.slice(at + 1);
+    } else {
+      // The paise are the one or two words before "Paise", after the last
+      // "and" or "Rupees" when there is one close enough.
+      const before = tokens.slice(0, at);
+      const cut    = Math.max(before.lastIndexOf('and'), ...before.map((t, i) => (RUPEE.test(t) ? i : -1)));
+      const near   = at - cut - 1;
+      const n      = cut >= 0 && near >= 1 && near <= 2 ? near
+        : [2, 1].find(k => k <= before.length && _wordsToNumber(before.slice(-k)) !== null) || 0;
+      if (!n) return null;
+      rupeeWords = before.slice(0, before.length - n);
+      paiseWords = before.slice(-n);
+    }
+  }
+  rupeeWords = rupeeWords.filter(t => !RUPEE.test(t));
+  paiseWords = paiseWords.filter(t => !RUPEE.test(t));
+  const rupees = rupeeWords.some(t => t !== 'and') ? _wordsToNumber(rupeeWords) : (paiseWords.length ? 0 : null);
+  const paise  = paiseWords.length ? _wordsToNumber(paiseWords) : 0;
+  if (rupees === null || paise === null || paise >= 100) return null;
+  return _money2(rupees + paise / 100);
+}
+
+const IN_WORDS_VOCAB = [...Object.keys(WORD_VALUES), ...Object.keys(WORD_SCALES), 'zero', 'hundred', 'and', 'paise', 'paisa', 'rupees', 'rupee', 'indian', 'inr', 'rs'].join('|');
+const IN_WORDS_RUN   = new RegExp(`(?:(?:₹|\\b(?:${IN_WORDS_VOCAB})\\b)[\\s:.,-]*)+(?=only\\b)`, 'gi');
+
+// Every total the text states in words: a run of number words ending in
+// "Only", named as rupees (Rupees, INR, Rs, ₹) or labelled "in words". A run
+// labelled as the tax ("Tax Amount (in words)", which Tally prints under the
+// total) is not the total and is left out.
+function _amountsInWords(text) {
+  const s = String(text || '');
+  const found = [];
+  for (const m of s.matchAll(IN_WORDS_RUN)) {
+    const lineStart = s.lastIndexOf('\n', m.index - 1) + 1;
+    let label = s.slice(lineStart, m.index);
+    if (!/[A-Za-z]/.test(label)) {
+      const prev = s.slice(s.lastIndexOf('\n', lineStart - 2) + 1, Math.max(lineStart - 1, 0));
+      if (!/\d/.test(prev)) label = prev;
+    }
+    if (/\btax\b|gst/i.test(label) && !/total|grand|payable|chargeable|invoice|incl/i.test(label)) continue;
+    if (!/₹|\b(?:rupees?|inr|rs)\b/i.test(m[0]) && !/in\s*words/i.test(label)) continue;
+    const amount = _amountInWords(m[0]);
+    if (amount !== null && amount > 0) found.push(amount);
+  }
+  return found;
+}
+
+// Reasons to hold the bill from the PDF's own text, or [] when it agrees.
+function _textMismatch(text, { taxAmount, totalAmount, currency }) {
+  const reasons = [];
+  if (!(Number(taxAmount) > 0) && _gstCharged(text)) {
+    reasons.push('the PDF shows GST (CGST/SGST/IGST) but no tax was read; check the tax and the total');
+  }
+  const total = Number(totalAmount) || 0;
+  // A stated amount equal to the tax read is the tax in words, not the total.
+  const said = _amountsInWords(text).filter(a => !(Number(taxAmount) > 0 && Math.abs(a - taxAmount) <= MONEY_TOLERANCE));
+  if (said.length && !said.some(a => Math.abs(a - total) <= MONEY_TOLERANCE)) {
+    reasons.push(`the amount in words on the PDF is ${_fmt(Math.max(...said), currency)}, but the total read is ${_fmt(total, currency)}`);
+  }
+  return reasons;
+}
+
+// ── Vendor name case ──
+// The same supplier was read as "J. Sagar Associates" from one copy of a bill
+// and "J. SAGAR ASSOCIATES" from another. A name read in capitals is stored as
+// people write it, so the list shows one supplier one way. Matching already
+// ignores case (xero/contacts.js _nameKey, invoice-store _normalizeVendor), so
+// this is display only. Two- and three-letter words stay as acronyms (ABC),
+// words with digits as written (3M), company suffixes in their usual case.
+const NAME_SUFFIXES = { pte: 'Pte', ltd: 'Ltd', pvt: 'Pvt', pty: 'Pty', sdn: 'Sdn', bhd: 'Bhd', llp: 'LLP', llc: 'LLC', plc: 'PLC', inc: 'Inc', co: 'Co', corp: 'Corp', gmbh: 'GmbH' };
+const NAME_SMALL    = new Set(['and', 'of', 'the', 'for']);
+
+function _nameCase(name) {
+  const s = String(name || '');
+  if ((s.match(/\p{Lu}/gu) || []).length <= 4 || /\p{Ll}/u.test(s)) return s;
+  let first = true;
+  return s.replace(/\S+/g, token => {
+    if (/\d/.test(token)) { first = false; return token; }
+    return token.replace(/\p{L}+/gu, run => {
+      const lower = run.toLowerCase();
+      const cap   = run[0] + lower.slice(1);
+      const out   = NAME_SUFFIXES[lower] || (NAME_SMALL.has(lower) ? (first ? cap : lower) : run.length <= 3 ? run : cap);
+      first = false;
+      return out;
+    });
+  });
+}
+
 async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   let llm;
   try {
@@ -542,9 +732,11 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     .map(({ description, unitAmount, discountRate }) => ({ description, unitAmount, discountRate }));
   const itemsRead = lineItems.length > 0;
 
+  const vendorName = _nameCase(llm.vendorName || 'Unknown Vendor').slice(0, 255);
+
   if (!lineItems.length) {
     lineItems.push({
-      description:  cleanSubject(email.subject) || `Invoice from ${llm.vendorName}`,
+      description:  cleanSubject(email.subject) || `Invoice from ${vendorName}`,
       unitAmount:   intake.money(llm.totalAmount) ?? 0,
       discountRate: 0,
     });
@@ -565,6 +757,8 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   if (documentType && DOCUMENT_TYPES[documentType]) reasons.push(DOCUMENT_TYPES[documentType]);
   const mismatch = _moneyMismatch({ lineItems, subTotal, taxAmount, totalAmount, currency }, { itemsRead });
   if (mismatch) reasons.push(mismatch);
+  const unlikeText = _textMismatch(text, { taxAmount, totalAmount, currency });
+  reasons.push(...unlikeText);
   if (llm.textTruncated) {
     reasons.push(`the PDF is long, and only its first ${llm.textTruncated.sentChars.toLocaleString('en-US')} of ${llm.textTruncated.totalChars.toLocaleString('en-US')} characters were read; a total or line on a later page may be missing`);
   }
@@ -575,10 +769,10 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
   return {
     // When the EMAIL arrived, not when we got round to reading it.
     receivedAt:       email.date ? new Date(email.date).toISOString() : null,
-    contactName:      (llm.vendorName || 'Unknown Vendor').slice(0, 255),
+    contactName:      vendorName,
     contactEmail:     llm.vendorEmail   || email.from?.value?.[0]?.address || '',
     contactAddress:   _vendorAddress(llm),
-    vendorName:       (llm.vendorName || 'Unknown Vendor').slice(0, 255),
+    vendorName,
     vendorPhone:      llm.vendorPhone   || '',
     invoiceNumber:    String(llm.invoiceNumber || `INV-${Date.now()}`).slice(0, 100),
     invoiceDate,
@@ -603,13 +797,14 @@ async function parsePDFWithLLM(text, email, pdfFilename, userId, defaults) {
     reviewReason: reasons.length ? reasons.join('; ') : null,
     // What the bill is for, read from its items — not the subject line the
     // sender typed to forward it ("create AP invoice").
-    description:      (_oneLine(llm.description) || _describeItems(lineItems) || cleanSubject(email.subject) || `Invoice from ${llm.vendorName}`).slice(0, 500),
+    description:      (_oneLine(llm.description) || _describeItems(lineItems) || cleanSubject(email.subject) || `Invoice from ${vendorName}`).slice(0, 500),
     sourceEmail:      email.from?.text || '',
     accountCode:      defaults.accountCode,
     paymentReference: llm.paymentReference || '',
     projectName:      llm.projectName      || '',
-    // How sure the reader says it is, when it says.
-    confidence:       _confidence(llm.confidence),
+    // How sure the reader says it is, when it says. Figures the PDF's own text
+    // contradicts are low, as llm-parser marks figures that do not add up.
+    confidence:       unlikeText.length ? 'low' : _confidence(llm.confidence),
   };
 }
 
@@ -802,4 +997,4 @@ async function parseInvoice(email, userId) {
   return invoices.length > 0 ? invoices : null;
 }
 
-module.exports = { parseInvoice, parseImageBill, sanitizeFilename, IMAGE_SOURCE, parseTemplateFormat, parsePDFWithLLM, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _isPaymentSchedule, _describeItems, _vendorAddress, _moneyMismatch, _documentType }; // helpers exposed for tests
+module.exports = { parseInvoice, parseImageBill, sanitizeFilename, IMAGE_SOURCE, parseTemplateFormat, parsePDFWithLLM, _ensureSubtotalTax, _parseTaxPercent, _detectCurrency, cleanSubject, _isPaymentSchedule, _describeItems, _vendorAddress, _moneyMismatch, _documentType, _gstCharged, _amountInWords, _amountsInWords, _textMismatch, _nameCase }; // helpers exposed for tests

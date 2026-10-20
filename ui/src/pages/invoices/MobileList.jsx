@@ -11,7 +11,7 @@ import { claimKindLabel, claimSourceBadge } from '../../components/receipts/allo
 // sortValue is the URL form of the sort ('' for the list grouped by arrival)
 // and sortOptions the choices for this tab; on a phone there are no column
 // headings to click, so the order is a select beside Select all.
-export default function MobileList({ openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, filtered, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup, sortValue, sortOptions, onSortChange, today }) {
+export default function MobileList({ openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, filtered, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup, sortValue, sortOptions, onSortChange, today, rowNumbers }) {
   // Whether to tag a record posted to the Demo Company (xero-status.js).
   const { user } = useAuth();
   return (
@@ -103,6 +103,12 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                       {/* Top Row: Checkbox, Vendor info & Amount */}
                       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+                          {/* Its place in the list, as the # column numbers it
+                              on the web: the number the assistant knows it by. */}
+                          <span title={`Row ${rowNumbers?.get(inv.id) ?? ''}`}
+                                style={{ fontSize: 11, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums', minWidth: 14, textAlign: 'right', flexShrink: 0 }}>
+                            {rowNumbers?.get(inv.id)}
+                          </span>
                           <input
                             type="checkbox"
                             checked={isSelected}

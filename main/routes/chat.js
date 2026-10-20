@@ -8,6 +8,7 @@ const tokenCache = require('../utils/token-cache');
 const settingsStore = require('../utils/settings-store');
 const { getUserConfig, DEFAULT_TIMEZONE } = require('../utils/users');
 const { _periodFromQueryParams, _isPeriodError } = require('../xero/periods');
+const db        = require('../db');
 const logger    = require('../utils/logger');
 
 // The company a chat request is about. The dashboard switches company with
@@ -37,6 +38,40 @@ function _periodFromBody(period) {
   if (period === undefined || period === null || period === '') return undefined;
   const q = typeof period === 'string' ? { preset: period } : (typeof period === 'object' ? period : { preset: String(period) });
   return _periodFromQueryParams({ preset: q.preset, from: q.from, to: q.to }, undefined);
+}
+
+// The rows of the AR & AP list as the screen shows them, so "#5" or "ref 5"
+// in a message can be read as a row of it (utils/chat-agent.js). Only the
+// screen knows that order: the user's sort and filter decide it.
+//
+// [{ n, id }] — n the number in the list's "#" column, a whole number from 1,
+// each n once; id the invoice; at most 200 rows. Absent or null means the
+// screen sent no list. A malformed one is a 400, as a bad period is: a list
+// read wrongly would point "#5" at the wrong invoice.
+//
+// Rows whose invoice is not this account's are dropped — the rule every
+// invoice lookup keeps (invoice-store's forUser: id AND user_id) — so no id
+// can put another account's invoice in front of the model. One query for the
+// whole list, not a full record read per row.
+const VISIBLE_INVOICES_LIMIT = 200;
+const BAD_VISIBLE_INVOICES = 'The invoice list sent with this message could not be read. Reload the page and ask again.';
+
+function _visibleInvoicesFromBody(userId, rows) {
+  if (rows === undefined || rows === null) return { list: null };
+  if (!Array.isArray(rows) || rows.length > VISIBLE_INVOICES_LIMIT) return { error: BAD_VISIBLE_INVOICES };
+  const numbers = new Set();
+  for (const row of rows) {
+    const ok = row && typeof row === 'object'
+      && Number.isSafeInteger(row.n) && row.n >= 1 && !numbers.has(row.n)
+      && typeof row.id === 'string' && row.id.length >= 1 && row.id.length <= 128;
+    if (!ok) return { error: BAD_VISIBLE_INVOICES };
+    numbers.add(row.n);
+  }
+  if (!rows.length) return { list: [] };
+  const ids = [...new Set(rows.map(r => r.id))];
+  const owned = new Set(db.prepare(`SELECT id FROM invoices WHERE user_id = ? AND id IN (${ids.map(() => '?').join(',')})`)
+    .all(userId, ...ids).map(r => r.id));
+  return { list: rows.filter(r => owned.has(r.id)).map(r => ({ n: r.n, id: r.id })) };
 }
 
 // The global app-wide rate limit (500 req/15min) is far looser than Gemini's own
@@ -81,6 +116,8 @@ router.post('/', requireAuth, chatLimiter, asyncHandler(async (req, res, next) =
       if (_isPeriodError(err)) return res.status(400).json({ error: err.message });
       throw err;
     }
+    const visible = _visibleInvoicesFromBody(req.user.id, body.visibleInvoices);
+    if (visible.error) return res.status(400).json({ error: visible.error });
     const timezone = getUserConfig(req.user.id).TIMEZONE || DEFAULT_TIMEZONE;
 
     const result = await chatAgent.respond(req.user.id, {
@@ -90,6 +127,7 @@ router.post('/', requireAuth, chatLimiter, asyncHandler(async (req, res, next) =
       tenantId,
       period,
       timezone,
+      visibleInvoices: visible.list,
     });
 
     res.json(result);
