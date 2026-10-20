@@ -13,6 +13,7 @@ import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
 import { useUnsavedChanges } from '../utils/useUnsavedChanges';
 import { boxState, defaultBoxes, extrasParam, optionalBoxes, connectionView, demoCard } from './setup/connect';
 import { companiesView, companyBadge } from './setup/company-status';
+import { secretView, secretNote, changeNote, CHANGE_PLACEHOLDER, keyListEmptyText, legacyKeyText, legacyKeyTitle } from './setup/secrets';
 
 const HELP = {
   XERO_CLIENT_ID:        'Your Xero Custom Connection client ID. Found in developer.xero.com → My Apps → your app.',
@@ -95,10 +96,41 @@ const ALLOWANCE_ACCOUNT_FIELDS = new Set(['MILEAGE_ACCOUNT_CODE', 'PER_DIEM_ACCO
 
 function Field({ name, meta, value, onChange }) {
   const [show, setShow] = useState(false);
+  // Changing a stored secret: the box opens empty to type a new one.
+  const [editing, setEditing] = useState(false);
   const isSecret  = isSecretKey(name);
   const isReadOnly = !!meta.readOnly;
   // The server sends a plain label for a key that does not explain itself.
   const label = meta.label || name;
+  // Back to the saved view once a new secret has been saved (its last four
+  // characters change).
+  useEffect(() => { setEditing(false); }, [meta.masked]);
+
+  // A stored secret, shown as stored: the server's dots and last four
+  // characters, Saved, and Change (pages/setup/secrets.js). The value itself
+  // never reaches the browser.
+  if (isSecret && meta.masked !== undefined && secretView(meta, value, editing).mode === 'saved') {
+    const note = secretNote(name, meta);
+    return (
+      <div className="form-group">
+        <label className="form-label">
+          {label}
+          {HELP[name] && <HelpTooltip text={HELP[name]} />}
+        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div className="form-input" role="status" aria-label={`${label}: saved, ending ${String(meta.masked).slice(-4)}`}
+            style={{ flex: 1, minWidth: 0, fontFamily: 'monospace', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', cursor: 'default', userSelect: 'none', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+            {secretView(meta, value, editing).masked}
+          </div>
+          <span className="badge badge-green" style={{ flexShrink: 0 }}>✓ Saved</span>
+          {!isReadOnly && (
+            <button type="button" className="btn btn-outline btn-sm" style={{ flexShrink: 0 }} onClick={() => setEditing(true)}>Change</button>
+          )}
+        </div>
+        {note && <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>{note}</div>}
+      </div>
+    );
+  }
 
   if (RATE_FIELDS[name]) {
     const rate = RATE_FIELDS[name];
@@ -181,12 +213,13 @@ function Field({ name, meta, value, onChange }) {
           id={`setting-${name}`}
           type={isSecret && !show ? 'password' : 'text'}
           className="form-input"
-          // A stored secret never comes back from the server; the field is
-          // blank and a blank save keeps it. Say so, or it looks unset.
-          // Three states: a stored secret the server will not send back, a value
-          // that will be worked out if this is left blank, and a plain empty box.
+          // A stored secret never comes back from the server; while it is
+          // being changed the box is blank and a blank save keeps it (the
+          // saved view above shows it otherwise). Three states: a stored
+          // secret being changed, a value that will be worked out if this is
+          // left blank, and a plain empty box.
           placeholder={
-            isSecret && meta.isSet ? 'Saved — leave blank to keep, or enter a new one'
+            isSecret && meta.isSet ? CHANGE_PLACEHOLDER
               : meta.auto           ? `${meta.auto} — used automatically`
               : `Enter ${name}`
           }
@@ -194,6 +227,7 @@ function Field({ name, meta, value, onChange }) {
           onChange={e => onChange(name, e.target.value)}
           readOnly={isReadOnly}
           autoComplete="new-password"
+          autoFocus={editing}
           style={{
             paddingRight: isSecret ? 38 : undefined,
             opacity:      isReadOnly ? 0.55 : 1,
@@ -219,6 +253,14 @@ function Field({ name, meta, value, onChange }) {
           </button>
         )}
       </div>
+      {isSecret && meta.isSet && !isReadOnly && (editing || String(value || '') !== '') && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6, fontSize: 11.5, color: 'var(--text-muted)' }}>
+          <span>{changeNote(name, meta)}</span>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => { onChange(name, ''); setEditing(false); }}>
+            Cancel, keep the saved one
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -726,8 +768,21 @@ function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing,
 // A separate resource (its own add/remove endpoints) rather than part of the
 // generic Setup form, since "a list the user can add to" doesn't fit the
 // one-value-per-field pattern the rest of this page uses.
+// The Gemini keys. Every key the account can be using is listed, in the
+// order invoice reading tries them (routes/setup.js GET /llm-keys): the added
+// ones, a key saved in the old single-key field, and, for an account with
+// none, whether the server's shared key stands in.
+//
+// The add box is NOT a <form>: this card sits inside the settings form, and a
+// form inside a form is not allowed. Chrome's answer to one was to run
+// neither form's handler and submit the page the old way, so "Add key"
+// reloaded Setup as /setup? and the key was never sent (seen in the server
+// log, and reproduced in headless Chrome with this app's React). Its button
+// is a plain button and Enter is caught on the inputs, which also keeps Enter
+// from submitting the settings form around it.
 function LlmKeysCard({ idx, testing, msgs, onTest }) {
   const [keys,    setKeys]    = useState(null);
+  const [serverKey, setServerKey] = useState(false);
   const [newKey,  setNewKey]  = useState('');
   const [newLabel, setNewLabel] = useState('');
   const [showNew, setShowNew] = useState(false);
@@ -739,15 +794,14 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
   // A failed load is not an empty list: "No API keys added yet" over keys
   // that are there would invite adding them all again.
   async function fetchKeys() {
-    try { const d = await api.get('/setup/llm-keys'); setKeys(d.keys); setLoadErr(''); }
+    try { const d = await api.get('/setup/llm-keys'); setKeys(d.keys); setServerKey(!!d.serverKey); setLoadErr(''); }
     catch (err) { setLoadErr(err.message || 'Could not load the keys'); }
   }
 
   useEffect(() => { fetchKeys(); }, []);
 
-  async function handleAdd(e) {
-    e.preventDefault();
-    if (!newKey.trim()) return;
+  async function handleAdd() {
+    if (!newKey.trim() || adding) return;
     setAdding(true); setError('');
     try {
       await api.post('/setup/llm-keys', { apiKey: newKey.trim(), label: newLabel.trim() || undefined });
@@ -759,6 +813,16 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
       setAdding(false);
     }
   }
+
+  // Enter adds the key, and goes no further: left alone it would submit the
+  // settings form this card sits in.
+  function addOnEnter(e) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    handleAdd();
+  }
+
+  function cancelAdd() { setShowNew(false); setNewKey(''); setNewLabel(''); }
 
   async function handleRemove(id) {
     setRemoving(id);
@@ -810,15 +874,18 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
       ) : keys.length === 0 && !showNew ? (
         <div className="empty-state" style={{ padding: '20px 0' }}>
           <div className="empty-state-icon">🔑</div>
-          <div>No API keys added yet</div>
+          <div>{keyListEmptyText(serverKey)}</div>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
           {keys.map((k, i) => (
-            <div key={k.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
+            <div key={k.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', opacity: k.inUse === false ? 0.7 : 1 }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', width: 18 }}>{i + 1}</span>
               <span style={{ fontFamily: 'monospace', fontSize: 13, flex: 1 }}>{k.keyMasked}</span>
               {k.label && <span className="badge badge-gray">{k.label}</span>}
+              {k.legacy && (
+                <span className="badge badge-gray" title={legacyKeyTitle(k)}>{legacyKeyText(k)}</span>
+              )}
               <button
                 type="button" className="btn btn-sm"
                 disabled={removing === k.id}
@@ -835,27 +902,27 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
       )}
 
       {showNew ? (
-        <form onSubmit={handleAdd} style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 12, borderRadius: 8, border: '1px dashed var(--border)' }}>
+        <div role="group" aria-label="Add a Gemini API key" style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: 12, borderRadius: 8, border: '1px dashed var(--border)' }}>
           <div style={{ display: 'flex', gap: 8 }}>
             <div style={{ position: 'relative', flex: 2 }}>
               <input
-                type="password" className="form-input" placeholder="AIza…"
-                value={newKey} onChange={e => setNewKey(e.target.value)} autoFocus
-                style={{ fontFamily: 'monospace' }}
+                type="password" className="form-input" placeholder="AIza…" aria-label="Gemini API key"
+                value={newKey} onChange={e => setNewKey(e.target.value)} onKeyDown={addOnEnter} autoFocus
+                autoComplete="off" style={{ fontFamily: 'monospace' }}
               />
             </div>
             <input
-              type="text" className="form-input" placeholder="Label (optional)"
-              value={newLabel} onChange={e => setNewLabel(e.target.value)} style={{ flex: 1 }}
+              type="text" className="form-input" placeholder="Label (optional)" aria-label="Label (optional)"
+              value={newLabel} onChange={e => setNewLabel(e.target.value)} onKeyDown={addOnEnter} style={{ flex: 1 }}
             />
           </div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button type="button" className="btn btn-outline btn-sm" onClick={() => { setShowNew(false); setNewKey(''); setNewLabel(''); }}>Cancel</button>
-            <button type="submit" className="btn btn-primary btn-sm" disabled={adding || !newKey.trim()}>
+            <button type="button" className="btn btn-outline btn-sm" onClick={cancelAdd}>Cancel</button>
+            <button type="button" className="btn btn-primary btn-sm" disabled={adding || !newKey.trim()} onClick={handleAdd}>
               {adding ? '...' : '✓ Add key'}
             </button>
           </div>
-        </form>
+        </div>
       ) : (
         <button type="button" className="btn btn-outline btn-sm" onClick={() => setShowNew(true)}>
           + Add another API key

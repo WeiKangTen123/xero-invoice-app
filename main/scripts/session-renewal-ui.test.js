@@ -177,6 +177,21 @@ describe('request() on a 403 password_change_required', () => {
   });
 });
 
+// Setup's Test buttons answer a failure as { success: false, message }. Read
+// only from `error`, every one of them showed "HTTP 400" and hid the reason
+// ("No Gemini API key configured — add one in Setup").
+describe('request() says why it failed', () => {
+  test('from `message` when there is no `error`; `error` first when both; the status only when neither', async () => {
+    const c = loadClient({ fetch: async () => reply(400, { success: false, message: 'No Gemini API key configured — add one in Setup' }), pathname: '/setup' });
+    c.store.set('token', token('u1', nowSec() + 1000));
+    await expect(c.api.post('/setup/test/llm')).rejects.toMatchObject({ status: 400, message: 'No Gemini API key configured — add one in Setup' });
+    const both = loadClient({ fetch: async () => reply(400, { error: 'Demo account: sample data, no Xero connection.', message: 'shown by the Test button' }), pathname: '/setup' });
+    await expect(both.api.post('/setup/test/xero')).rejects.toMatchObject({ message: 'Demo account: sample data, no Xero connection.' });
+    const bare = loadClient({ fetch: async () => reply(502, {}), pathname: '/setup' });
+    await expect(bare.api.get('/setup')).rejects.toMatchObject({ status: 502, message: 'HTTP 502' });
+  });
+});
+
 // Same origin today, so nothing is needed for the browser to read the header.
 // If the API is ever served cross-origin, fetch hides every response header not
 // listed in Access-Control-Expose-Headers, renewals silently stop reaching the

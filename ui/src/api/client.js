@@ -115,7 +115,12 @@ async function request(path, options = {}, retried = false) {
     // the caller never runs; on /login (no navigation) a wrong password used to
     // come back as `undefined` and blow up as "cannot read 'token'" instead of
     // the server's own message.
-    const err    = new Error(data.error || (res.status === 401 ? 'Your session has expired. Sign in again.' : `HTTP ${res.status}`));
+    // The reason is in `error` on most routes and in `message` on Setup's
+    // Test buttons (routes/setup.js answers { success: false, message }).
+    // Read either: reading only `error` showed every failed test as a bare
+    // "HTTP 400" and hid why it failed.
+    const reason = data.error || data.message;
+    const err    = new Error(reason || (res.status === 401 ? 'Your session has expired. Sign in again.' : `HTTP ${res.status}`));
     err.status   = res.status;
     // The body as well as its message: a 423 from sign-in carries when the
     // lock ends (lockedUntil, lockMinutes), which the login page counts down.

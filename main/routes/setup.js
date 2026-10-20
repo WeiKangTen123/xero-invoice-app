@@ -57,6 +57,18 @@ const ACCOUNT_FALLBACK_KEYS = new Set(['MILEAGE_ACCOUNT_CODE', 'PER_DIEM_ACCOUNT
 // post them back on every save.
 const SECRET_KEYS = new Set(['XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_SECRET', 'IMAP_PASS']);
 
+// How a stored secret is shown so a person can tell it is there and which
+// one it is: dots and its last four characters, as the Gemini keys are
+// listed. Never more: the browser has never been sent a stored secret, which
+// is what keeps one off a shared screen. One too short to spare four
+// characters shows dots only.
+const MASK_DOTS = '••••••••••••';
+function maskSecret(value) {
+  const v = String(value || '');
+  if (!v) return '';
+  return v.length >= 12 ? `${MASK_DOTS}${v.slice(-4)}` : MASK_DOTS;
+}
+
 const GLOBAL_SECTIONS = {
   optional:  ['SLACK_WEBHOOK_URL'],
   // A property of this server's deployment, not of any one user — every user's own
@@ -121,13 +133,21 @@ router.get('/', requireAuth, (req, res) => {
   const auto = automaticImapValues(req.user.email);
   const claimAccount = defaultsFrom(userConfig).accountCode.claim;
 
+  // The mailbox the stored password belongs to, so it can be reviewed as
+  // "the password for weikangten@gmail.com": the user typed, else the one
+  // worked out from the sign-in address, as the watcher resolves it.
+  const imapAccount = String(userConfig.IMAP_USER || auto.IMAP_USER || req.user.email || '');
+
   for (const [section, keys] of Object.entries(USER_SECTIONS)) {
     result[section] = {};
     for (const key of keys) {
       const val = String(userConfig[key] || '');
+      const secret = SECRET_KEYS.has(key);
       result[section][key] = {
-        value: SECRET_KEYS.has(key) ? '' : val,
+        value: secret ? '' : val,
         isSet: val.length > 0,
+        ...(secret && { masked: maskSecret(val) }),
+        ...(key === 'IMAP_PASS' && { account: imapAccount }),
         auto:  auto[key] ?? null,
         ...(FIELD_LABELS[key] && { label: FIELD_LABELS[key] }),
         ...(ACCOUNT_FALLBACK_KEYS.has(key) && { hint: `Blank uses your claim account (${claimAccount}).` }),
@@ -198,14 +218,30 @@ router.post('/', requireAuth, (req, res) => {
 // next, so adding a key here is real extra quota headroom, not just a spare.
 
 // GET /api/setup/llm-keys — list this user's keys (masked, never the raw value)
+//
+// Every key the account can be using, in the order gemini-client.js
+// (_resolveKeys) tries them: the added keys, then a key saved in the old
+// single-key field (Gemini_API_KEY), which is used only while no key is
+// added, then the server's shared key from .env for an account with none of
+// its own. The old field's key used to be left off this list, so an account
+// running on it read "No API keys added yet". `inUse` says which of them
+// reading invoices actually uses now; `serverKey` whether the shared one is
+// there to fall back on.
+const maskKey = key => (key.length > 8 ? `${key.slice(0, 4)}••••${key.slice(-4)}` : '••••');
 router.get('/llm-keys', requireAuth, (req, res) => {
-  const keys = getGeminiKeys(req.user.id).map(k => ({
+  const added  = getGeminiKeys(req.user.id);
+  const legacy = String(getUserConfig(req.user.id).Gemini_API_KEY || '');
+  const keys = added.map(k => ({
     id:        k.id,
     label:     k.label,
     createdAt: k.createdAt,
-    keyMasked: k.apiKey.length > 8 ? `${k.apiKey.slice(0, 4)}••••${k.apiKey.slice(-4)}` : '••••',
+    keyMasked: maskKey(k.apiKey),
+    inUse:     true,
   }));
-  res.json({ keys });
+  if (legacy) {
+    keys.push({ id: 'legacy', label: null, createdAt: null, keyMasked: maskKey(legacy), legacy: true, inUse: added.length === 0 });
+  }
+  res.json({ keys, serverKey: !added.length && !legacy && !!process.env.Gemini_API_KEY });
 });
 
 // POST /api/setup/llm-keys — add a new key
@@ -220,8 +256,14 @@ router.post('/llm-keys', requireAuth, (req, res) => {
   }
 });
 
-// DELETE /api/setup/llm-keys/:id
+// DELETE /api/setup/llm-keys/:id — `legacy` clears the old single-key field.
 router.delete('/llm-keys/:id', requireAuth, (req, res) => {
+  if (req.params.id === 'legacy') {
+    if (!getUserConfig(req.user.id).Gemini_API_KEY) return res.status(404).json({ error: 'Key not found' });
+    saveUserConfig(req.user.id, { Gemini_API_KEY: '' });
+    logger.info('Gemini API key removed', { by: req.user.email, legacy: true });
+    return res.json({ success: true });
+  }
   const removed = removeGeminiKey(req.user.id, Number(req.params.id));
   if (!removed) return res.status(404).json({ error: 'Key not found' });
   logger.info('Gemini API key removed', { by: req.user.email });
