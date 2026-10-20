@@ -31,7 +31,11 @@ const reply = (status, body, headers = {}) => new Response(JSON.stringify(body),
 
 describe('newerSessionToken: which token to keep', () => {
   const { newerSessionToken } = loadClient({ fetch: async () => reply(200, {}) });
-  const soon = token('u1', nowSec() + 1000), later = token('u1', nowSec() + 2000);
+  // One clock reading for every token here: read twice, the second can land
+  // a second later on a slow machine, and the "tie" below was then not one
+  // (seen in CI, run 39375797413).
+  const SOON = nowSec() + 1000;
+  const soon = token('u1', SOON), later = token('u1', SOON + 1000);
 
   test('the one that runs out last, whichever order they arrive in', () => {
     expect(newerSessionToken(soon, later)).toBe(later);
@@ -39,7 +43,7 @@ describe('newerSessionToken: which token to keep', () => {
   });
 
   test('the stored one on a tie, so nothing is rewritten for nothing', () => {
-    const twin = token('u1', nowSec() + 1000, { renewed: true });
+    const twin = token('u1', SOON, { renewed: true });
     expect(newerSessionToken(soon, twin)).toBe(soon);
   });
 
