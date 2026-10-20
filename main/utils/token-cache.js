@@ -31,7 +31,9 @@ function _getCache(userId) {
 // listed here without an xero_tenants row so nothing — a disconnect, a prune,
 // a reconnect — can ever remove or replace it. Its connection health reads as
 // a Web app connection granted every scope, so nothing asks it to reconnect,
-// nothing refreshes it and every optional feature is on.
+// nothing refreshes it and every optional feature is on. An admin's account
+// switched to sample data may still have a real connection underneath, kept
+// as it was for when it is switched back; getHealth's `stored` reads that.
 //
 // The account row, or null for a real account (and for an id no account has,
 // which the tests use freely). users.js is required at call time: several
@@ -255,9 +257,17 @@ function _rowToHealth(row) {
  * scopes the person chose to connect without; see markScopesDeclined),
  * scopeProbe (what Xero's authorize page said this app may ask for, or null;
  * see saveScopeProbe), lastRefreshedAt (ISO or null) }.
+ *
+ * `stored` reads the record kept for the account's real connection even
+ * while it is a demo account. An admin can switch their own account to
+ * sample data and back (routes/setup.js data-source), and the real
+ * connection waits underneath meanwhile; the keep-alive
+ * (jobs/xero-keepalive.js) must judge that one, not the stand-in below,
+ * which never needs reconnecting and always reads as refreshed when the
+ * account was made.
  */
-function getHealth(userId) {
-  const demo = _demoUser(userId);
+function getHealth(userId, { stored = false } = {}) {
+  const demo = stored ? null : _demoUser(userId);
   if (demo) {
     // Every scope a Web app connection can carry, offline_access included,
     // as oauth.js records them from a token response; refreshed when the
@@ -268,6 +278,15 @@ function getHealth(userId) {
       lastRefreshedAt: demo.created_at,
     };
   }
+  return _storedHealth(userId);
+}
+
+// The record itself, from memory or the table, whatever kind of account this
+// is now. Every change below builds on this rather than on getHealth: built
+// on the demo stand-in, a refresh of a dormant real connection (the
+// keep-alive, for an admin on sample data) would have replaced its recorded
+// scopes, refusals and probe with the stand-in's.
+function _storedHealth(userId) {
   if (_health.has(userId)) return { ..._health.get(userId) };
   let record = { ...EMPTY_HEALTH };
   try {
@@ -313,7 +332,7 @@ function _saveHealth(userId, record) {
 // credentialFingerprint) is what lets a later attempt with different
 // credentials through without anyone clearing this first.
 function markNeedsReconnect(userId, { method = null, reason, fingerprint = null } = {}) {
-  const prev = getHealth(userId);
+  const prev = _storedHealth(userId);
   return _saveHealth(userId, { ...prev, method: method || prev.method, needsReconnect: true, reason: reason || null, fingerprint });
 }
 
@@ -322,7 +341,7 @@ function markNeedsReconnect(userId, { method = null, reason, fingerprint = null 
 // and a scope the token carries is neither refused nor declined any more,
 // whatever was recorded: Xero granting it is the final word.
 function markRefreshed(userId, { method = null, grantedScopes = null, at = new Date() } = {}) {
-  const prev = getHealth(userId);
+  const prev = _storedHealth(userId);
   const granted = new Set(Array.isArray(grantedScopes) ? grantedScopes : []);
   return _saveHealth(userId, {
     ...prev,
@@ -351,7 +370,7 @@ function _without(list, scopes) {
 // the person declined: Xero made that choice for them. `reason` is for the
 // log — where the refusal was seen.
 function markScopesRefused(userId, scopes, { reason = null } = {}) {
-  const prev = getHealth(userId);
+  const prev = _storedHealth(userId);
   const added = (scopes || []).filter(s => !(prev.refusedScopes || []).includes(s));
   if (added.length) logger.warn('Xero refused these scopes for this app', { userId, scopes: added, reason: reason || undefined });
   const refusedScopes = [...new Set([...(prev.refusedScopes || []), ...(scopes || [])])];
@@ -363,7 +382,7 @@ function markScopesRefused(userId, scopes, { reason = null } = {}) {
 // without this, a forced re-probe could never let an app that Xero has since
 // allowed ask for them again short of a disconnect.
 function markScopesAllowed(userId, scopes) {
-  const prev = getHealth(userId);
+  const prev = _storedHealth(userId);
   if (!(scopes || []).some(s => (prev.refusedScopes || []).includes(s))) return { ...prev };
   return _saveHealth(userId, { ...prev, refusedScopes: _without(prev.refusedScopes, scopes) });
 }
@@ -375,7 +394,7 @@ function markScopesAllowed(userId, scopes) {
 // for any scope a later consent grants (markRefreshed), and never recorded
 // for a scope Xero refused, which is not a choice.
 function markScopesDeclined(userId, scopes) {
-  const prev = getHealth(userId);
+  const prev = _storedHealth(userId);
   const refused = new Set(prev.refusedScopes || []);
   const declinedScopes = [...new Set([...(prev.declinedScopes || []), ...(scopes || []).filter(s => !refused.has(s))])];
   return _saveHealth(userId, { ...prev, declinedScopes });
@@ -385,7 +404,7 @@ function markScopesDeclined(userId, scopes) {
 // probeOptionalScopes): { at, fingerprint, base, groups }. Replaces the last
 // probe; the probe itself decides when it is too old to trust.
 function saveScopeProbe(userId, probe) {
-  const prev = getHealth(userId);
+  const prev = _storedHealth(userId);
   return _saveHealth(userId, { ...prev, scopeProbe: probe ? { ...probe } : null });
 }
 

@@ -269,7 +269,7 @@ export default function UserDetailPanel({ user, isMe = false, lastAdmin = false,
     </Section>
   );
 
-  const workPart = work ? <WorkSection work={work} demo={acct.demo === true} now={now} /> : null;
+  const workPart = work ? <WorkSection work={work} demo={acct.demo === true} role={acct.role} now={now} /> : null;
 
   const activityPart = (
     <Section title="Activity">
@@ -474,9 +474,10 @@ export default function UserDetailPanel({ user, isMe = false, lastAdmin = false,
 
 // Plain lines: the watcher and auto-submit, the mailbox, Xero, the
 // documents (only the counts that are not zero), the queue and the storage.
-function WorkSection({ work, demo, now }) {
+// The role tells an admin's chosen sample data from a demo account's.
+function WorkSection({ work, demo, role, now }) {
   const watcher = watcherLine(work);
-  const xero    = xeroLine(work.xero, { demo, now });
+  const xero    = xeroLine(work.xero, { demo, role, now });
   const queue   = queueLine(work.queue);
   const storage = storageLine(work.storage, work.geminiKeys);
   const lastDoc = relativeTime(work.documents?.lastProcessedAt, now);

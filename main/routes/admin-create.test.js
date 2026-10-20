@@ -69,8 +69,8 @@ describe('POST /api/admin/users — demo accounts and copied settings', () => {
 
   // A demo account's password is the admin's to choose and keep: it guards
   // sample data and is typed in front of people, so it may be short and it
-  // is not temporary. Any other account's stays twelve characters and
-  // temporary.
+  // is not temporary. Any other account's, an admin's on sample data
+  // included, stays twelve characters and temporary.
   test('a demo account takes a short, permanent password; a real account does not', async () => {
     const res = await create({ email: 'demo@gmail.com', password: 'demo123', demo: true }).expect(201);
     expect(res.body.user).toMatchObject({ email: 'demo@gmail.com', demo: true, mustChangePassword: false });
@@ -90,6 +90,28 @@ describe('POST /api/admin/users — demo accounts and copied settings', () => {
     expect((await reset(real.id, 'demo456').expect(400)).body.error).toBe('Password must be at least 12 characters');
     await reset(real.id, 'Another-temp-2026').expect(200);
     expect(users.findByEmail('new@outlook.com').must_change_password).toBe(1);
+  });
+
+  // An admin can switch to real Xero (PUT /api/setup/data-source) and
+  // manages every account, so one made on sample data keeps the full rule
+  // and a temporary password, as any other account does.
+  test('an admin made on sample data needs the full-length password, and it is temporary', async () => {
+    expect((await create({ email: 'boss@gmail.com', password: 'demo123', role: 'admin', demo: true }).expect(400)).body.error)
+      .toBe('Password must be at least 12 characters');
+    expect(users.findByEmail('boss@gmail.com')).toBeNull();
+    const res = await create({ email: 'boss@gmail.com', password: 'Temp-pass-2026-x', role: 'admin', demo: true }).expect(201);
+    expect(res.body.user).toMatchObject({ email: 'boss@gmail.com', role: 'admin', demo: true, mustChangePassword: true });
+    expect(users.findByEmail('boss@gmail.com').temp_password_expires_at).not.toBeNull();
+  });
+
+  test('a reset of an admin on sample data is full-length and temporary', async () => {
+    const other = (await create({ email: 'boss@gmail.com', role: 'admin' }).expect(201)).body.user;
+    users.setDemo(other.id, true);
+    const reset = password => request(serverFor(app)).patch(`/api/admin/users/${other.id}/password`).set('Authorization', auth()).send({ password });
+    expect((await reset('demo456').expect(400)).body.error).toBe('Password must be at least 12 characters');
+    await reset('Another-temp-2026').expect(200);
+    expect(users.findByEmail('boss@gmail.com')).toMatchObject({ is_demo: 1, must_change_password: 1 });
+    expect(users.findByEmail('boss@gmail.com').temp_password_expires_at).not.toBeNull();
   });
 
   test('copyFrom.llm copies the legacy key and every key of the list', async () => {

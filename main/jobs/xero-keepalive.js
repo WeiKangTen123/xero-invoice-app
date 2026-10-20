@@ -11,8 +11,14 @@
 // left to lapse, like everything else done in the background for it. Only
 // OAuth: a Custom Connection has no refresh token to keep alive. A connection
 // already known to need reconnecting is skipped — a refresh cannot fix it.
-// Never a demo account (users.isDemoUser): it has no connection at all,
-// whatever its config says.
+// Never a demo account (users.isDemoUser), which has no connection at all,
+// whatever its config says — except an admin's. An admin can switch their
+// own account to sample data and back (PUT /api/setup/data-source), and the
+// real connection waits underneath, unused, for as long as that lasts; left
+// alone it would be dead after 60 days and switching back would mean Xero's
+// consent screen. Such an account is judged by its real connection's stored
+// health (token-cache getHealth `stored`), not the demo stand-in, which
+// always reads as connected and as refreshed the day the account was made.
 //
 // One account at a time, and never throws: a failure for one account is
 // logged and the run moves on, and nothing escapes to the timer (index.js
@@ -63,12 +69,16 @@ async function _run(now) {
     const userId = account && account.id;
     if (!userId) continue;
     try {
-      if (!users.isActive(userId) || users.isDemoUser(userId)) continue;
+      if (!users.isActive(userId)) continue;
+      if (users.isDemoUser(userId) && account.role !== 'admin') continue;
       const config = users.getUserConfig(userId) || {};
       if (config.XERO_CONNECTION_TYPE !== 'oauth' || !config.XERO_OAUTH_REFRESH_TOKEN) continue;
       summary.checked++;
 
-      const health = tokenCache.getHealth(userId) || {};
+      // The real connection's record, for every account: the same thing as
+      // getHealth for a real one, and the dormant connection's for an admin
+      // on sample data.
+      const health = tokenCache.getHealth(userId, { stored: true }) || {};
       if (health.needsReconnect) { summary.skipped++; continue; }
 
       const last = _lastRefreshedAt(health, config);

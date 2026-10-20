@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS users (
   -- 1 for a demo account: it never connects to Xero. Every Xero call it makes
   -- goes to the generated "Demo Company Pte Ltd" instead (xero/demo/api.js,
   -- chosen by xero/api-client.js from the token utils/token-cache.js mints
-  -- for it). Set once at creation (routes/admin.js); never changed.
+  -- for it). Set at creation (routes/admin.js); an admin may switch their own
+  -- account either way (PUT /api/setup/data-source), and its Xero credentials
+  -- are left untouched meanwhile, so switching back needs no reconnect.
   is_demo INTEGER NOT NULL DEFAULT 0
 );
 

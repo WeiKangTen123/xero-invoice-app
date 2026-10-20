@@ -1,10 +1,16 @@
 import { fmtMoney } from '../../utils/format';
 import AccountCodeSelect from '../../components/AccountCodeSelect';
 import { ALLOWANCE_KINDS, isAllowanceClaim } from '../../components/receipts/allowance';
+import { useAuth } from '../../context/AuthContext';
 import { AccountMiniField, MiniField, PrefillNote, accountFallbackText } from './bits';
 import { sourceLine } from '../invoices/source';
+import { demoCompanyTag } from '../invoices/xero-status';
 
 export default function SummaryCard({ id, inv, editing, form, updateField, isExpense, typeLabel, navigate, xeroCompany }) {
+  // Posted to the Demo Company, said to an admin beside the type, as the
+  // list says it beside the status (xero-status.js).
+  const { user } = useAuth();
+  const demoTag = demoCompanyTag(inv, user);
   // Mileage and per diem have no receipt, so no receipt date; the date is the
   // day driven or the first day away.
   const allowance = isAllowanceClaim(inv);
@@ -114,7 +120,10 @@ export default function SummaryCard({ id, inv, editing, form, updateField, isExp
                       )}
                       {prefilled.currency && note('currency', `Currency ${inv.currency}`)}
                     </div>
-                    <span className="badge badge-gray" style={{ fontSize: 11 }}>{typeLabel}</span>
+                    <span style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 6 }}>
+                      {demoTag && <span className="badge badge-gray" style={{ fontSize: 11 }} title={demoTag.title}>{demoTag.text}</span>}
+                      <span className="badge badge-gray" style={{ fontSize: 11 }}>{typeLabel}</span>
+                    </span>
                   </div>
                   {/* Compact 2-col grid instead of one full-width row per field */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px' }}>

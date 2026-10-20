@@ -179,6 +179,9 @@ const ADMIN_ACTIONS = {
   'user.watcher_stop':     'Stopped a mailbox watcher',
   'report.resolve':        'Resolved a report',
   'password.change':       'Changed own password',
+  // An admin moving their own account between Xero and sample data
+  // (routes/setup.js data-source); details { from, to }: 'xero' | 'demo'.
+  'account.data_source':   'Switched data source',
   // Sign-ins (routes/auth.js). The first three have no admin behind them:
   // success is the person's own, a failure and a lock are nobody's. They are
   // here, and not only in the log, so an admin can see a guesser at work
@@ -244,6 +247,7 @@ function describeAdminEvent(action, details, targetEmail) {
       return `Resolved the report on ${what} for ${who}`;
     }
     case 'password.change':       return 'Changed their own password';
+    case 'account.data_source':   return d.to === 'demo' ? 'Switched to sample data (Demo Company)' : 'Switched to Xero';
     default:                      return ADMIN_ACTIONS[action] || action;
   }
 }

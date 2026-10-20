@@ -12,6 +12,8 @@ import { useConfirm } from '../context/ConfirmContext';
 import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
 import { useUnsavedChanges } from '../utils/useUnsavedChanges';
 import { boxState, defaultBoxes, extrasParam, optionalBoxes, connectionView, demoCard } from './setup/connect';
+import { canChooseDataSource, sourceOptions } from './setup/data-source';
+import { useDataSource } from './setup/useDataSource';
 import { companiesView, companyBadge } from './setup/company-status';
 import { secretView, secretNote, changeNote, CHANGE_PLACEHOLDER, keyListEmptyText, legacyKeyText, legacyKeyTitle } from './setup/secrets';
 
@@ -425,6 +427,36 @@ function DefaultTenantPicker({ tenants }) {
   );
 }
 
+// ── Data source, for an admin ────────────────────────────────────────────────────
+// An admin may show their own Xero data or the Demo Company's sample data
+// (setup/data-source.js), so for them this stands in for the Xero card's
+// subtitle in either state: the first thing said about the card is which data
+// it is about. Two pills, as the Dashboard's receivables/payables switch; the
+// one not chosen asks before it switches (setup/useDataSource.js).
+function DataSourceChooser({ value, onChoose, disabled }) {
+  return (
+    <>
+      <div className="card-subtitle" style={{ marginBottom: 0 }}>
+        Show your own Xero data, or the Demo Company’s sample data.
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>Data source</span>
+        <div role="group" aria-label="Data source"
+             style={{ display: 'inline-flex', gap: 3, padding: 3, borderRadius: 9, background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}>
+          {sourceOptions().map(o => (
+            <button key={o.key} type="button" aria-pressed={value === o.key} className="tab-pill" disabled={disabled}
+                    onClick={() => { if (o.key !== value) onChoose(o.key); }} style={{
+              padding: '5px 12px', borderRadius: 7, border: 'none', cursor: disabled ? 'default' : 'pointer', fontSize: 12, fontWeight: 600,
+              background: value === o.key ? 'var(--accent-gradient)' : 'transparent',
+              color: value === o.key ? '#fff' : 'var(--text-muted)', whiteSpace: 'nowrap',
+            }}>{o.label}</button>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ── Xero Connection — two coexisting connection methods, not a flat field list ──
 // Custom Connection (existing Client ID/Secret fields + Test button, unchanged)
 // and OAuth2 "Web app" (new — connect via Xero's consent screen) are both shown at
@@ -432,6 +464,10 @@ function DefaultTenantPicker({ tenants }) {
 // (config.xero.connectionType, decided server-side by which one actually succeeds).
 function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing, msgs, onTest, onConnectionChange }) {
   const confirm = useConfirm();
+  // An admin chooses between Xero and the Demo Company's sample data for
+  // their own account; anyone else's card is whatever their account is.
+  const chooser = canChooseDataSource(user);
+  const { switching, switchTo } = useDataSource();
   const [tenants, setTenants]       = useState(null); // null = loading
   // Whether the last read of the companies, or of the connection's state,
   // failed: the rows then say "Couldn't check" rather than pass a failed
@@ -584,11 +620,25 @@ function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing,
     }
   }
 
+  // An admin's switch of data source. The card is then drawn afresh for the
+  // other source: the last answers are dropped, so neither the demo row nor
+  // the Xero companies stand in for the new source while it is read, and
+  // fetchTenants reads it, which also tells the chart of accounts below.
+  async function chooseSource(source) {
+    if (!(await switchTo(source))) return;
+    setConnection(null);
+    setConnectionFailed(false);
+    setTenants(null);
+    setTenantsFailed(false);
+    fetchTenants();
+  }
+
   // A demo account has sample data this app generates in place of a Xero
   // connection (setup/connect.js): nothing to connect, test or disconnect,
   // and no credentials to enter, so the card says what the dashboard shows
   // and leaves it there. Known from the account before any request answers,
-  // or from the connection answer's own `demo`.
+  // or from the connection answer's own `demo`. An admin on sample data sees
+  // the same row, under the choice that put it there and can take it back.
   if (connectionView(connection, user) === 'demo') {
     const card = demoCard(connection);
     return (
@@ -599,7 +649,9 @@ function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing,
           </div>
           <div>
             <div className="card-title">Xero Connection</div>
-            <div className="card-subtitle" style={{ marginBottom: 0 }}>{card.note}</div>
+            {chooser
+              ? <DataSourceChooser value="demo" onChoose={chooseSource} disabled={switching} />
+              : <div className="card-subtitle" style={{ marginBottom: 0 }}>{card.note}</div>}
           </div>
         </div>
         <div style={{ height: 1, background: 'var(--border)', margin: '12px 0 16px' }} />
@@ -607,6 +659,11 @@ function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing,
           <span className="badge badge-green" title="Sample data: documents are not sent to Xero">{card.status}</span>
           {card.company}
         </div>
+        {chooser && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.55 }}>
+            Your Xero connection is kept; switch back any time.
+          </div>
+        )}
       </div>
     );
   }
@@ -620,9 +677,13 @@ function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing,
           </div>
           <div>
             <div className="card-title">Xero Connection</div>
-            <div className="card-subtitle" style={{ marginBottom: 0 }}>
-              Connect via Custom Connection credentials, or via Xero login (OAuth) — either works
-            </div>
+            {chooser ? (
+              <DataSourceChooser value="xero" onChoose={chooseSource} disabled={switching} />
+            ) : (
+              <div className="card-subtitle" style={{ marginBottom: 0 }}>
+                Connect via Custom Connection credentials, or via Xero login (OAuth) — either works
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -35,6 +35,21 @@ describe('routes/auth — the demo flag', () => {
     expect((await me(real)).body.user).toMatchObject({ id: real.id, demo: false });
   });
 
+  // The short demo password is a non-admin demo account's only: an admin on
+  // sample data can switch back to Xero, so theirs keeps the full rule.
+  test('change-password allows the short password to a demo account and not to an admin on sample data', async () => {
+    const change = user => request(serverFor(app)).post('/api/auth/change-password')
+      .set('Authorization', `Bearer ${tokenFor(user)}`)
+      .send({ currentPassword: 'password1234', newPassword: 'kq7zp4' });
+    expect((await change(demo)).status).toBe(200);
+
+    const admin = await users.createUser('boss@test.com', 'password1234', 'admin');
+    users.setDemo(admin.id, true);
+    const res = await change(admin);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/12/);
+  });
+
   test('registration makes a real account', async () => {
     process.env.ALLOW_REGISTRATION = 'true';
     try {

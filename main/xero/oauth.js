@@ -326,7 +326,9 @@ async function _refresh(userId, { force }) {
   }
 
   const fingerprint = credentialFingerprint(clientId, clientSecret, refreshToken);
-  const health = tokenCache.getHealth(userId);
+  // The real connection's record, also for an admin on sample data, whose
+  // dormant connection the keep-alive refreshes (token-cache getHealth).
+  const health = tokenCache.getHealth(userId, { stored: true });
   if (!force && health.needsReconnect && health.fingerprint === fingerprint) {
     throw new XeroReconnectError(health.reason);
   }

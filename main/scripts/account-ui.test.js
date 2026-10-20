@@ -84,6 +84,29 @@ describe('the password rules the card mirrors', () => {
     // No complexity rule: twelve plain letters pass.
     expect(rules.passwordProblem('plainletters', 'me@test.com')).toBeNull();
   });
+
+  // As users.js shortPasswordAllowed: an admin can switch to Xero at any
+  // time, so an admin on sample data has the full-length rule.
+  test('the short demo password is for a demo account that is not an admin', () => {
+    expect(rules.shortPasswordAllowed({ demo: true, role: 'user' })).toBe(true);
+    expect(rules.shortPasswordAllowed({ demo: true })).toBe(true);
+    expect(rules.shortPasswordAllowed({ demo: true, role: 'admin' })).toBe(false);
+    expect(rules.shortPasswordAllowed({ demo: false, role: 'user' })).toBe(false);
+    expect(rules.shortPasswordAllowed({ demo: false, role: 'admin' })).toBe(false);
+    // Read strictly, and nothing at all is no demo account.
+    expect(rules.shortPasswordAllowed({ demo: 'true', role: 'user' })).toBe(false);
+    expect(rules.shortPasswordAllowed(null)).toBe(false);
+    expect(rules.shortPasswordAllowed(undefined)).toBe(false);
+  });
+
+  test('asked through it, a demo admin needs the full length and a demo user six', () => {
+    const ask = account => rules.passwordProblem('demo123', 'demo@gmail.com', { demo: rules.shortPasswordAllowed(account) });
+    expect(ask({ demo: true, role: 'user' })).toBeNull();
+    expect(ask({ demo: true, role: 'admin' })).toBe('Password must be at least 12 characters');
+    expect(ask({ demo: false, role: 'user' })).toBe('Password must be at least 12 characters');
+    expect(rules.passwordHint({ demo: rules.shortPasswordAllowed({ demo: true, role: 'admin' }) })).toBe('Min. 12 characters');
+    expect(rules.passwordHint({ demo: rules.shortPasswordAllowed({ demo: true, role: 'user' }) })).toBe('Min. 6 characters');
+  });
 });
 
 describe('the Account page is wired to them', () => {

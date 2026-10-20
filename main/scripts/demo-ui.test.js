@@ -99,10 +99,20 @@ describe('Admin › Users: the badge on a demo row (demoBadge)', () => {
   test('a muted "demo" with what it means; nothing on any other row', () => {
     expect(users.demoBadge({ id: 'u3', email: 'demo@nexsoss.com', demo: true }))
       .toEqual({ text: 'demo', title: 'Demo account: sample data, no Xero connection' });
+    expect(users.demoBadge({ id: 'u3', email: 'demo@nexsoss.com', role: 'user', demo: true }))
+      .toEqual({ text: 'demo', title: 'Demo account: sample data, no Xero connection' });
     expect(users.demoBadge({ demo: false })).toBeNull();
     expect(users.demoBadge({ demo: 'true' })).toBeNull();
     expect(users.demoBadge({})).toBeNull();
     expect(users.demoBadge(null)).toBeNull();
+  });
+
+  // An admin switches their own account to sample data and back
+  // (PUT /api/setup/data-source); the row says it is their choice.
+  test('an admin on sample data: their choice, their Xero connection kept', () => {
+    expect(users.demoBadge({ id: 'u1', email: 'owner@nexsoss.com', role: 'admin', demo: true }))
+      .toEqual({ text: 'sample data', title: 'On sample data by their own choice; their Xero connection is kept' });
+    expect(users.demoBadge({ role: 'admin', demo: false })).toBeNull();
   });
 });
 
@@ -188,7 +198,7 @@ describe('Admin › Users is wired to them', () => {
     expect(admin).toContain('const createProblem = addUserProblem(form);');
     expect(admin).toContain('if (createProblem) { setError(createProblem); return; }');
     expect(admin).toContain("await api.post('/admin/users', addUserPayload(form));");
-    expect(admin).toMatch(/disabled=\{!!passwordProblem\(pass, email, \{ demo \}\) \|\| !!createProblem\}\s+title=\{createProblem \|\| undefined\}/);
+    expect(admin).toMatch(/disabled=\{!!passProblem \|\| !!createProblem\}\s+title=\{createProblem \|\| undefined\}/);
     // The form starts over after a create, demo block included.
     expect(admin).toContain("setDemo(false); setCopyFrom(copyDefaults()); setFilterFrom('');");
   });
@@ -206,6 +216,34 @@ describe('Admin › Users is wired to them', () => {
   test('a demo row carries the muted badge', () => {
     expect(admin).toMatch(/const isDemo\s+= demoBadge\(u\);/);
     expect(admin).toMatch(/\{isDemo && \(\s+<span className="badge badge-gray" title=\{isDemo\.title\}>\{isDemo\.text\}<\/span>/);
+  });
+
+  // The short, permanent password is for a demo account that is not an
+  // admin (password-rules.js shortPasswordAllowed, run in account-ui.test.js);
+  // the server refuses a short one for a demo admin, and makes theirs temporary.
+  test('both password forms take the short rule from shortPasswordAllowed, not from the demo flag alone', () => {
+    expect(admin).toMatch(/import \{ passwordProblem, passwordHint, shortPasswordAllowed, PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH \} from '\.\/account\/password-rules';/);
+    const reset = admin.slice(admin.indexOf('function ResetPasswordDialog('), admin.indexOf('export default function Admin('));
+    expect(reset).toContain('const demoRule = shortPasswordAllowed(user);');
+    expect(reset).toContain('passwordProblem(password, user.email, { demo: demoRule })');
+    expect(reset).toContain('placeholder={passwordHint({ demo: demoRule })}');
+    expect(reset).toContain('required minLength={demoRule ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH} autoFocus');
+    expect(reset).toMatch(/\{demoRule\s+\? <>Set the password for the demo account/);
+    expect(reset).toContain("{demoRule ? 'Password' : 'Temporary password'}");
+    expect(reset).not.toMatch(/\{ demo \}|!!user\.demo/);
+
+    expect(admin).toContain('const demoRule    = shortPasswordAllowed({ demo, role });');
+    expect(admin).toContain('const passProblem = passwordProblem(pass, email, { demo: demoRule });');
+    const create = admin.slice(admin.indexOf('{/* Create form */}'), admin.indexOf('Create account'));
+    expect(create).toContain('placeholder={passwordHint({ demo: demoRule })}');
+    expect(create).toMatch(/required minLength=\{demoRule \? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH\}\s+style=/);
+    expect(create).toContain("{demoRule ? 'Password' : 'Temporary password'}");
+    expect(create).toMatch(/\{demoRule\s+\? 'A demo account keeps the password you set: it is permanent/);
+    expect(create).toContain(`{demo && !demoRule && " An admin's is temporary on sample data too, since they can switch to Xero."}`);
+    expect(create).not.toMatch(/passwordProblem\(|\{ demo \}/);
+
+    // The toast after a reset says what kind of password was set, by the same rule.
+    expect(admin).toMatch(/toast\.success\(shortPasswordAllowed\(resetting\)\s+\? `Password for the demo account/);
   });
 });
 

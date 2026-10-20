@@ -1,16 +1,19 @@
 import { fmtMoney } from '../../utils/format';
 import { TypeBadge, ConfidenceBadge, XeroStatusBadge } from '../../components/Badges';
+import { useAuth } from '../../context/AuthContext';
 import { statusMeta, ATTENTION_STATUSES } from '../../utils/badges';
 import { totalsLabel } from './helpers';
 import { dueInfo } from './list-view';
 import { sourceBadge } from './source';
-import { xeroStatusNote } from './xero-status';
+import { xeroStatusNote, demoCompanyTag } from './xero-status';
 import { claimKindLabel, claimSourceBadge } from '../../components/receipts/allowance';
 
 // sortValue is the URL form of the sort ('' for the list grouped by arrival)
 // and sortOptions the choices for this tab; on a phone there are no column
 // headings to click, so the order is a select beside Select all.
 export default function MobileList({ openRecord, invoices, selected, deleteTarget, deleteLoading, promptDeleteOne, toggleSelect, filtered, allFilteredSelected, toggleSelectAll, groups, isOpen, toggleGroup, sortValue, sortOptions, onSortChange, today }) {
+  // Whether to tag a record posted to the Demo Company (xero-status.js).
+  const { user } = useAuth();
   return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {/* Mobile Select-all row if items exist */}
@@ -79,6 +82,7 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                   const src = allowanceSrc
                     ? { ...allowanceSrc, short: allowanceSrc.text.split(' ')[0] }
                     : sourceBadge(inv);
+                  const demoTag = demoCompanyTag(inv, user);
 
                   return (
                     <div
@@ -181,6 +185,7 @@ export default function MobileList({ openRecord, invoices, selected, deleteTarge
                           ) : (
                             <span className={`badge ${cls}`} title={xeroStatusNote(inv) || undefined}>{label}</span>
                           )}
+                          {demoTag && <span className="badge badge-gray" title={demoTag.title}>{demoTag.text}</span>}
                           <XeroStatusBadge invoice={inv} />
                         </div>
 

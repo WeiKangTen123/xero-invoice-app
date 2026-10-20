@@ -131,8 +131,16 @@ describe('the head of the panel (statusLine)', () => {
     expect(line({ demo: true }).badges).toEqual([{ key: 'demo', text: 'demo', title: 'Demo account: sample data, no Xero connection' }]);
     const admin = line({ role: 'admin', demo: true });
     expect(admin.summary).toBe('Active · admin · joined 3 Sep 2026');
-    expect(admin.badges.map(b => b.text)).toEqual(['demo', '★ admin']);
+    expect(admin.badges.map(b => b.text)).toEqual(['sample data', '★ admin']);
+    expect(line({ role: 'admin' }).badges.map(b => b.text)).toEqual(['★ admin']);
     expect(line({ demo: 'true' }).badges).toEqual([]);
+  });
+
+  // An admin switches their own account between Xero and sample data; the
+  // panel says it is their choice, as the Users row does (demoBadge).
+  test('an admin on sample data: their choice, their Xero connection kept', () => {
+    expect(line({ role: 'admin', demo: true }).badges[0])
+      .toEqual({ key: 'demo', text: 'sample data', title: 'On sample data by their own choice; their Xero connection is kept' });
   });
 
   test('a temporary password still to be replaced: when it expires, or that it has', () => {
@@ -287,6 +295,16 @@ describe('the Work lines', () => {
     expect(d.xeroLine({ connected: true, method: 'demo', organisations: ['Demo Company Pte Ltd'] }, { now: NOW })).toEqual(line);
     expect(d.xeroLine({ connected: false }, { demo: true, now: NOW })).toEqual(line);
     expect(d.xeroLine({ connected: true, method: 'demo', organisations: ['Sample Co'] }, { now: NOW }).text).toBe('Sample Co · sample data, no Xero connection');
+    expect(d.xeroLine({ connected: false }, { demo: true, role: 'user', now: NOW })).toEqual(line);
+  });
+
+  test('an admin on sample data: their choice, and nothing said of a missing connection', () => {
+    const line = { text: 'Demo Company Pte Ltd · sample data (their choice)', tone: 'gray' };
+    expect(d.xeroLine({ connected: true, method: 'demo', organisations: ['Demo Company Pte Ltd'] }, { role: 'admin', now: NOW })).toEqual(line);
+    expect(d.xeroLine({ connected: false }, { demo: true, role: 'admin', now: NOW })).toEqual(line);
+    // An admin on Xero reads as anyone on Xero.
+    expect(d.xeroLine({ connected: true, method: 'oauth', organisations: ['Nexsoss Pte Ltd'] }, { demo: false, role: 'admin', now: NOW }).text)
+      .toBe('Nexsoss Pte Ltd · OAuth');
   });
 
   test('documents: only the counts that are not zero, in the order a document moves', () => {
@@ -363,6 +381,17 @@ describe('the controls the panel offers (panelActions)', () => {
     expect(keys(d.panelActions({ user: { ...jane, lockedUntil: inMin(-1) }, now: NOW }))[0][1]).not.toContain('unlock');
     expect(find(d.panelActions({ user: { ...jane, role: 'admin' }, now: NOW }), 'role').label).toBe('◦ Make user');
     expect(find(d.panelActions({ user: { ...jane, disabledAt: '2026-10-18T04:00:00.000Z' }, now: NOW }), 'disabled').label).toBe('✓ Enable');
+  });
+
+  // A demo account that is not an admin keeps the password set for it; an
+  // admin's is temporary, on sample data or not (password-rules.js
+  // shortPasswordAllowed).
+  test('Reset password says which kind of password it sets', () => {
+    const title = user => find(d.panelActions({ user: { ...jane, ...user }, now: NOW }), 'reset').title;
+    expect(title({ demo: true })).toBe('Set the password for this demo account');
+    expect(title({ demo: true, role: 'admin' })).toBe('Set a temporary password for this account');
+    expect(title({ demo: false })).toBe('Set a temporary password for this account');
+    expect(title({ role: 'admin' })).toBe('Set a temporary password for this account');
   });
 
   test('the last admin cannot be demoted, disabled or deleted, and each button says so', () => {
@@ -487,6 +516,12 @@ describe('the panel', () => {
     for (const name of ['statusLine', 'signInRow', 'sessionRow', 'sessionsNote', 'xeroLine', 'documentsLine', 'storageLine', 'panelActions', 'attributionOf']) {
       expect(panel).toMatch(new RegExp(`\\b${name}\\(`));
     }
+  });
+
+  test('the Xero line is told the role, to tell an admin\'s chosen sample data from a demo account\'s', () => {
+    expect(panel).toContain('<WorkSection work={work} demo={acct.demo === true} role={acct.role} now={now} />');
+    expect(panel).toContain('function WorkSection({ work, demo, role, now }) {');
+    expect(panel).toContain('xeroLine(work.xero, { demo, role, now })');
   });
 
   test('is a modal dialog named by its heading: a centred two-column window on the web, a full-screen sheet with tabs on a phone', () => {

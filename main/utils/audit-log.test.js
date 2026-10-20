@@ -308,6 +308,13 @@ describe('audit trail (store, context, retention)', () => {
       expect(describeAdminEvent('session.revoke', { sid: 'abc' }, 'jane@test.com')).toBe('Ended a session of jane@test.com');
     });
 
+    test('an admin switching their own data source has a label and a sentence', () => {
+      const { ADMIN_ACTIONS, describeAdminEvent } = auditLog;
+      expect(ADMIN_ACTIONS['account.data_source']).toBe('Switched data source');
+      expect(describeAdminEvent('account.data_source', { from: 'xero', to: 'demo' }, 'jane@test.com')).toBe('Switched to sample data (Demo Company)');
+      expect(describeAdminEvent('account.data_source', { from: 'demo', to: 'xero' }, 'jane@test.com')).toBe('Switched to Xero');
+    });
+
     test('listSignInEvents gives the browser, and why a sign-in was refused', () => {
       auditLog.recordAdminEvent({ actor: null, target: owner, action: 'login.refused', details: { reason: 'disabled', ip: '10.0.0.1', ua: 'Firefox' } });
       auditLog.recordAdminEvent({ actor: owner, target: owner, action: 'logout', details: { ip: '10.0.0.1', ua: 'Firefox' } });   // not a sign-in

@@ -2,7 +2,7 @@ const express = require('express');
 const router  = express.Router();
 const rateLimit = require('express-rate-limit');
 const {
-  hasUsers, findByEmail, createUser, validatePassword, verifiedPasswordHash, passwordProblem, setPassword, invalidateSessions,
+  hasUsers, findByEmail, createUser, validatePassword, verifiedPasswordHash, passwordProblem, shortPasswordAllowed, setPassword, invalidateSessions,
   lockStatus, recordFailedLogin, recordSuccessfulLogin, temporaryPasswordExpired, LOCK_AFTER_FAILURES,
   getUserConfig, DEFAULT_TIMEZONE,
 } = require('../utils/users');
@@ -390,7 +390,9 @@ router.post('/change-password', requireAuth, changePasswordLimiter, asyncHandler
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Current and new password are required' });
     }
-    const problem = passwordProblem(newPassword, req.user.email, { demo: !!req.user.demo });
+    const problem = passwordProblem(newPassword, req.user.email, {
+      demo: shortPasswordAllowed({ is_demo: req.user.demo, role: req.user.role }),
+    });
     if (problem) return res.status(400).json({ error: problem });
     const verifiedHash = await verifiedPasswordHash(req.user.id, currentPassword);
     if (!verifiedHash) {

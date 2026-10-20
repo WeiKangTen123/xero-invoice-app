@@ -6,7 +6,7 @@ import { staggerIn } from '../../utils/stagger';
 import { receivedLabel, totalsLabel } from './helpers';
 import { SORT_FIELDS, dueInfo } from './list-view';
 import { sourceBadge } from './source';
-import { xeroStatusNote } from './xero-status';
+import { xeroStatusNote, demoCompanyTag } from './xero-status';
 import { claimKindLabel, claimSourceBadge } from '../../components/receipts/allowance';
 
 // Reset so the group heading's button looks like the row it always was; the
@@ -106,6 +106,8 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                   // A mileage or per diem claim by its kind; anything else by
                   // where it came from (source.js).
                   const src           = claimSourceBadge(inv) || sourceBadge(inv);
+                  // Posted to the Demo Company, said to an admin (xero-status.js).
+                  const demoTag       = demoCompanyTag(inv, user);
                   return (
                     <tr
                       key={inv.id}
@@ -216,6 +218,9 @@ export default function DesktopTable({ user, openRecord, invoices, selected, del
                           </span>
                         ) : (
                           <span className={`badge ${cls}`} title={xeroStatusNote(inv) || undefined}>{label}</span>
+                        )}
+                        {demoTag && (
+                          <span className="badge badge-gray" title={demoTag.title} style={{ marginLeft: 4, fontSize: 10.5 }}>{demoTag.text}</span>
                         )}
                         {/* What became of it in Xero, under the app's own status;
                             until Xero has been asked, the badge above says so. */}

@@ -1,6 +1,8 @@
-// A demo account (users.is_demo): made with createUser's `demo`, read by
-// isDemoUser, shown to the client as `demo`, and counted as Xero-configured
-// so its mailbox watcher can start. Real users and database.
+// A demo account (users.is_demo): made with createUser's `demo`, or by an
+// admin switching their own account (setDemo), read by isDemoUser, shown to
+// the client as `demo`, and counted as Xero-configured so its mailbox watcher
+// can start. Its short password is for a demo account that is not an admin
+// (shortPasswordAllowed). Real users and database.
 describe('users — demo accounts', () => {
   let users, db;
 
@@ -47,6 +49,46 @@ describe('users — demo accounts', () => {
     expect(users.updateUserRole(demo.id, 'admin').demo).toBe(true);
     expect(users.setDisabled(demo.id, true).demo).toBe(true);
     expect(users.unlockAccount(demo.id).demo).toBe(true);
+  });
+
+  // An admin's own switch (PUT /api/setup/data-source): only the flag moves.
+  test('setDemo switches the flag either way and leaves the account\'s settings alone', async () => {
+    const admin = await users.createUser('ada@test.com', 'password1234', 'admin');
+    users.saveUserConfig(admin.id, { XERO_CONNECTION_TYPE: 'oauth', XERO_OAUTH_REFRESH_TOKEN: 'rt-live', IMAP_PASS: 'app-pass' });
+    const config = users.getUserConfig(admin.id);
+
+    expect(users.setDemo(admin.id, true)).toMatchObject({ id: admin.id, role: 'admin', demo: true });
+    expect(users.findById(admin.id).is_demo).toBe(1);
+    expect(users.isDemoUser(admin.id)).toBe(true);
+    expect(users.setDemo(admin.id, false)).toMatchObject({ id: admin.id, demo: false });
+    expect(users.findById(admin.id).is_demo).toBe(0);
+    expect(users.getUserConfig(admin.id)).toEqual(config);
+    expect(() => users.setDemo('nobody', true)).toThrow('User not found');
+  });
+
+  // The short, permanent demo password is for a demo account that is not an
+  // admin: an admin can switch back to real Xero and manages every account.
+  test('shortPasswordAllowed: a demo account that is not an admin, from the raw row', async () => {
+    expect(users.shortPasswordAllowed({ is_demo: 1, role: 'user' })).toBe(true);
+    expect(users.shortPasswordAllowed({ is_demo: 1, role: 'admin' })).toBe(false);
+    expect(users.shortPasswordAllowed({ is_demo: 0, role: 'user' })).toBe(false);
+    expect(users.shortPasswordAllowed({ is_demo: 0, role: 'admin' })).toBe(false);
+    expect(users.shortPasswordAllowed(null)).toBe(false);
+    const demo = await users.createUser('demo@test.com', 'demo123', 'user', { demo: true });
+    expect(users.shortPasswordAllowed(users.findById(demo.id))).toBe(true);
+    users.updateUserRole(demo.id, 'admin');
+    expect(users.shortPasswordAllowed(users.findById(demo.id))).toBe(false);
+  });
+
+  test('setPassword keeps the full rule for an admin on sample data; a demo user may still have a short one', async () => {
+    const admin = await users.createUser('ada@test.com', 'password1234', 'admin');
+    const demo  = await users.createUser('demo@test.com', 'demo123', 'user', { demo: true });
+    users.setDemo(admin.id, true);
+    await expect(users.setPassword(admin.id, 'demo456')).rejects.toThrow('Password must be at least 12 characters');
+    await expect(users.setPassword(admin.id, 'a-long-enough-one')).resolves.toBe(true);
+    expect(await users.validatePassword('ada@test.com', 'a-long-enough-one')).toMatchObject({ id: admin.id });
+    await expect(users.setPassword(demo.id, 'demo456')).resolves.toBe(true);
+    expect(await users.validatePassword('demo@test.com', 'demo456')).toMatchObject({ id: demo.id });
   });
 
   // A demo account has no Xero to set up: the watcher's "setup complete"

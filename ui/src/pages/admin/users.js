@@ -66,9 +66,15 @@ export function mustSetNote(row) {
 // to copy this admin's keys, defaults and mailbox to it, so it works at once;
 // main/scripts/demo-ui.test.js runs what is below.
 
-// The muted badge on a demo row, or null.
+// The muted badge on a demo row, or null. An admin switches their own account
+// between Xero and sample data (PUT /api/setup/data-source), so an admin on
+// sample data is there by choice and keeps their Xero connection; anyone
+// else's demo account is locked to sample data and has none.
 export function demoBadge(row) {
   if (row?.demo !== true) return null;
+  if (row.role === 'admin') {
+    return { text: 'sample data', title: 'On sample data by their own choice; their Xero connection is kept' };
+  }
   return { text: 'demo', title: 'Demo account: sample data, no Xero connection' };
 }
 

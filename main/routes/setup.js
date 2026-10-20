@@ -5,7 +5,7 @@ const path    = require('path');
 const { requireAuth, requireAdmin } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
 const {
-  getUserConfig, saveUserConfig, getSetupStatus, getImapSettings, isDemoUser,
+  getUserConfig, saveUserConfig, getSetupStatus, getImapSettings, isDemoUser, setDemo,
   getGeminiKeys, addGeminiKey, removeGeminiKey, checkAllowanceSettings, defaultsFrom, timezoneProblem,
 } = require('../utils/users');
 const logger  = require('../utils/logger');
@@ -291,6 +291,72 @@ router.post('/test/xero', requireAuth, asyncHandler(async (req, res) => {
     res.status(400).json({ success: false, message: xeroErrMsg(err) });
   }
 }));
+
+// ── PUT /api/setup/data-source — real Xero or sample data ────────────────────
+// An admin chooses, for their own account only, between their Xero ('xero')
+// and the generated Demo Company ('demo'), and may switch back and forth.
+// Every Xero call follows users.is_demo (utils/token-cache.js), so flipping
+// it is the whole switch: the account's Xero credentials, refresh token and
+// connection health are left as they are, and switching back needs no
+// reconnect. Every other account stays as an admin made it.
+//
+// Body { source: 'xero' | 'demo' }; answers { source, demo }. Asking for the
+// mode the account is already in changes nothing and records nothing.
+//
+// Refused (409, code BUSY) while anything could be posted across the switch.
+// Posting follows the mode, so a watcher left running on sample data would
+// "post" real bills into the Demo Company (marked Posted, never reaching
+// Xero), and the other way round would post the sample emails into the real
+// books. So the mailbox watcher must be off — not only disconnected: one
+// waiting out a reconnect has no connection and comes back on its own, which
+// is what watcherEnabled says — and every queued document finished.
+const DATA_SOURCES = ['xero', 'demo'];
+
+function _dataSourceBusy(userId) {
+  const watching = require('../email/watcher-registry').isRunning(userId)
+    || require('../utils/settings-store').forUser(userId).watcherEnabled();
+  if (watching) return 'Stop the email watcher on Automation first, then switch.';
+  const n = require('../queue/email-queue').getPending(userId).length
+    + require('../claims/claim-queue').getPending(userId).length;
+  if (n > 0) return `${n} ${n === 1 ? 'document is' : 'documents are'} still being processed. Switch once they finish.`;
+  return null;
+}
+
+router.put('/data-source', requireAuth, (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only an admin can choose sample data for their own account.' });
+  }
+  const { source } = req.body || {};
+  if (!DATA_SOURCES.includes(source)) {
+    return res.status(400).json({ error: "source must be 'xero' or 'demo'" });
+  }
+  const userId = req.user.id;
+  const from   = isDemoUser(userId) ? 'demo' : 'xero';
+  const answer = { source, demo: source === 'demo' };
+  if (from === source) return res.json(answer);
+
+  const busy = _dataSourceBusy(userId);
+  if (busy) return res.status(409).json({ error: busy, code: 'BUSY' });
+
+  setDemo(userId, source === 'demo');
+  // Report figures cached for the account came from the other company; the
+  // same clear a disconnect makes (routes/xero-oauth.js). The switch has
+  // happened by now, so a failure here is a warning, not a failed request.
+  try {
+    require('../xero/reports').clearCache(userId);
+  } catch (err) {
+    logger.warn('Could not clear cached reports after a data source switch', { userId, error: err.message });
+  }
+  const auditLog = require('../utils/audit-log');
+  auditLog.safely(() => auditLog.recordAdminEvent({
+    actor:  { id: userId, email: req.user.email },
+    target: { id: userId, email: req.user.email },
+    action: 'account.data_source',
+    details: { from, to: source },
+  }), 'Data source switch');
+  logger.info('Data source switched', { from, to: source, by: req.user.email });
+  res.json(answer);
+});
 
 // ── POST /api/setup/test/imap — test this user's IMAP connection ──────────────
 router.post('/test/imap', requireAuth, asyncHandler(async (req, res) => {

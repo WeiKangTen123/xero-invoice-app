@@ -65,6 +65,21 @@ export function repostBlockedReason(inv) {
   return LOCKED_BECAUSE[key] ? `${LOCKED_BECAUSE[key]}, so it can no longer be changed from here` : null;
 }
 
+// The Demo Company's tenant id (main/xero/demo/api.js DEMO_TENANT): a record
+// posted while its account was on sample data went there, not to Xero.
+export const DEMO_TENANT_ID = 'demo-company';
+
+// The muted tag beside the status of a record posted to the Demo Company, as
+// { text, title }, or null. Only for an admin: they can switch their account
+// between Xero and sample data, so once back on Xero a demo post must not
+// pass for a real one. A demo account locked to sample data posts everything
+// there, and the tag on every row would only be noise.
+export function demoCompanyTag(inv, user) {
+  if (!user || user.role !== 'admin') return null;
+  if (!inv || !inv.xeroInvoiceId || inv.xeroTenantId !== DEMO_TENANT_ID) return null;
+  return { text: 'Demo Company', title: 'Posted to the Demo Company (sample data), not to Xero' };
+}
+
 // "checked 2 hours ago": how old the status is. Recent checks read as an
 // interval; anything over a week reads as a date, since by then the interval
 // is not the useful part.

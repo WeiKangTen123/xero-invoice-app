@@ -1,7 +1,8 @@
 // A demo account in the token cache: its token is 'demo:<userId>' with no
 // reconnect and no refresh, its one organisation is the Demo Company with no
 // xero_tenants row behind it, and its connection health is a Web app
-// connection granted everything. Real users and database; the Xero
+// connection granted everything, with the real record of an account switched
+// to sample data kept underneath. Real users and database; the Xero
 // reconnects are replaced so a real account's path can be seen taken, and
 // the demo folder is stubbed to its contract.
 jest.mock('../xero/connect',   () => ({ refreshClientCredentialsToken: jest.fn() }));
@@ -84,5 +85,34 @@ describe('token-cache — demo accounts', () => {
     // A real account's record is its own.
     tokenCache.markNeedsReconnect(real.id, { method: 'oauth', reason: 'revoked' });
     expect(tokenCache.getHealth(real.id)).toMatchObject({ needsReconnect: true, reason: 'revoked', grantedScopes: null });
+  });
+
+  // An admin can switch their own account to sample data and back
+  // (PUT /api/setup/data-source). The real connection's record waits
+  // underneath: `stored` reads it, every mark builds on it rather than on the
+  // stand-in, and it is what the account reads as once switched back.
+  test('stored: the real connection under an account switched to sample data', () => {
+    const { JOURNALS_SCOPE } = require('../xero/xero-utils');
+    tokenCache.markRefreshed(real.id, { method: 'oauth', grantedScopes: ['offline_access', 'accounting.invoices'], at: new Date('2026-10-01T00:00:00Z') });
+    tokenCache.markScopesRefused(real.id, [JOURNALS_SCOPE]);
+    tokenCache.saveScopeProbe(real.id, { at: '2026-10-01T00:00:00.000Z', fingerprint: 'fp', base: 'available', groups: {} });
+    const before = tokenCache.getHealth(real.id);
+    expect(tokenCache.getHealth(real.id, { stored: true })).toEqual(before);
+
+    users.setDemo(real.id, true);
+    expect(tokenCache.getHealth(real.id)).toMatchObject({ method: 'demo', refusedScopes: [], scopeProbe: null });
+    expect(tokenCache.getHealth(real.id, { stored: true })).toEqual(before);
+
+    // A refresh while on sample data (the keep-alive's) updates the real
+    // record and keeps what it said; the stand-in is untouched.
+    tokenCache.markRefreshed(real.id, { method: 'oauth', grantedScopes: ['offline_access', 'accounting.invoices'], at: new Date('2026-10-20T00:00:00Z') });
+    const after = tokenCache.getHealth(real.id, { stored: true });
+    expect(after).toEqual({ ...before, lastRefreshedAt: '2026-10-20T00:00:00.000Z' });
+    expect(tokenCache.getHealth(real.id)).toMatchObject({ method: 'demo', lastRefreshedAt: real.createdAt });
+
+    users.setDemo(real.id, false);
+    expect(tokenCache.getHealth(real.id)).toEqual(after);
+    // A demo account made as one has no real record underneath.
+    expect(tokenCache.getHealth(demo.id, { stored: true })).toMatchObject({ method: null, lastRefreshedAt: null, needsReconnect: false });
   });
 });

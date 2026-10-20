@@ -114,8 +114,14 @@ export function statusLine(user, now = Date.now(), opts = {}) {
   const summary = [state.label, u.role === 'admin' ? 'admin' : 'user'];
   if (u.createdAt && fullDate(u.createdAt, o)) summary.push(`joined ${fullDate(u.createdAt, o)}`);
 
+  // An admin on sample data chose it and can switch back to Xero; anyone
+  // else's demo account is locked to it (as admin/users.js demoBadge says).
   const badges = [];
-  if (u.demo === true) badges.push({ key: 'demo', text: 'demo', title: 'Demo account: sample data, no Xero connection' });
+  if (u.demo === true) {
+    badges.push(u.role === 'admin'
+      ? { key: 'demo', text: 'sample data', title: 'On sample data by their own choice; their Xero connection is kept' }
+      : { key: 'demo', text: 'demo', title: 'Demo account: sample data, no Xero connection' });
+  }
   if (u.role === 'admin') badges.push({ key: 'admin', text: '★ admin', title: 'Sees every account and this page' });
 
   const seen = [];
@@ -281,14 +287,18 @@ const METHODS = { oauth: 'OAuth', custom: 'Custom Connection', demo: 'Demo' };
 
 // Xero: the companies, how it connects and when the token was last
 // refreshed; or why it is not connected. A demo account names its Demo
-// Company and says nothing goes to Xero.
+// Company and says nothing goes to Xero. An admin on sample data chose it
+// and keeps their Xero connection to switch back to, so theirs says so
+// (`opts.role` is the account's).
 export function xeroLine(xero, opts = {}) {
   const x = xero || {};
   const now = opts.now ?? Date.now();
   const orgs = Array.isArray(x.organisations) ? x.organisations.filter(Boolean) : [];
   const names = orgs.length > 2 ? `${orgs.slice(0, 2).join(', ')} +${orgs.length - 2} more` : orgs.join(', ');
   if (opts.demo === true || x.method === 'demo') {
-    return { text: `${orgs[0] || 'Demo Company Pte Ltd'} · sample data, no Xero connection`, tone: 'gray' };
+    const company = orgs[0] || 'Demo Company Pte Ltd';
+    if (opts.role === 'admin') return { text: `${company} · sample data (their choice)`, tone: 'gray' };
+    return { text: `${company} · sample data, no Xero connection`, tone: 'gray' };
   }
   if (x.connected !== true) {
     return { text: x.reason ? `Not connected · ${x.reason}` : 'Not connected', tone: 'gray' };
@@ -403,9 +413,12 @@ export function panelActions({ user, isMe = false, lastAdmin = false, now = Date
       title: u.role === 'admin' ? 'Back to an ordinary user' : 'Give them this page',
       blocked: lastAdmin ? 'Cannot demote the last admin' : null,
     });
+    // A demo account that is not an admin keeps the password set for it; an
+    // admin's, on sample data or not, is temporary (account/password-rules.js
+    // shortPasswordAllowed, which this file cannot import).
     account.push({
       key: 'reset', busyKey: 'reset', label: '🔑 Reset password',
-      title: u.demo === true ? 'Set the password for this demo account' : 'Set a temporary password for this account',
+      title: u.demo === true && u.role !== 'admin' ? 'Set the password for this demo account' : 'Set a temporary password for this account',
     });
   }
   if (account.length) groups.push({ key: 'account', label: 'Account', actions: account });

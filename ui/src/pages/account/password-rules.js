@@ -14,6 +14,15 @@ export const PASSWORD_MIN_LENGTH = 12;
 // people at a demonstration, and the lockout still stands.
 export const DEMO_PASSWORD_MIN_LENGTH = 6;
 
+// Who may have that short password, permanent rather than temporary: a demo
+// account that is not an admin (users.js shortPasswordAllowed). An admin can
+// switch their own account from sample data to Xero at any time, and manages
+// every account either way, so theirs is the full length even on sample
+// data. Takes a user, a Users row or the Add User form: { demo, role }.
+export function shortPasswordAllowed(account) {
+  return account?.demo === true && account?.role !== 'admin';
+}
+
 // Twelve characters or more that a person types on purpose and a guesser tries
 // first. Shorter favourites ("password", "123456") already fail the length
 // rule. Compared in lower case.
@@ -39,7 +48,8 @@ function isPattern(lower) {
 // The rule a password breaks, in the server's words, or null when it passes.
 // `email` is the account's address, which the password may not be — nor the
 // part of it before the @, which is what people type. Compared in lower case
-// and otherwise as typed, as the server compares them.
+// and otherwise as typed, as the server compares them. `demo` asks for the
+// short rule: pass shortPasswordAllowed(account), not the demo flag alone.
 export function passwordProblem(password, email, { demo = false } = {}) {
   const min = demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH;
   if (typeof password !== 'string' || password.length < min) {

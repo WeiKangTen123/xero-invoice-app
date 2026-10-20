@@ -257,7 +257,8 @@ function touchLastSeen(userId) {
 // password each. `temporary` marks the password as one an admin chose, to be
 // replaced at the first sign-in and dead after a day (schema.sql). `demo`
 // makes a demo account: one that never connects to Xero and runs against the
-// generated Demo Company instead (users.is_demo; see isDemoUser).
+// generated Demo Company instead (users.is_demo; see isDemoUser). An admin
+// may later switch their own account either way (setDemo).
 async function createUser(email, password, role = 'user', { temporary = false, demo = false } = {}) {
   const hash = await bcrypt.hash(password, 10);
 
@@ -329,7 +330,17 @@ const PASSWORD_MIN_LENGTH = 12;
 // is typed in front of people at a demonstration, and the sign-in lockout
 // still stands between it and a guesser. The owner picks it, and it is not
 // temporary (routes/admin.js). The email and common-password rules still hold.
+// Never an admin's, demo or not: see shortPasswordAllowed.
 const DEMO_PASSWORD_MIN_LENGTH = 6;
+
+// Whether this account may have the short, permanent demo password: a demo
+// account that is not an admin. An admin can switch their own account back to
+// real Xero at any time (setDemo) and manages every other account, so their
+// password keeps the full rule even while they are on sample data. Takes the
+// raw row (is_demo, role).
+function shortPasswordAllowed(user) {
+  return !!(user && user.is_demo) && user.role !== 'admin';
+}
 
 function passwordProblem(password, email = null, { demo = false } = {}) {
   const min = demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH;
@@ -468,7 +479,7 @@ async function verifiedPasswordHash(id, password) {
 async function setPassword(id, newPassword, { ifCurrentHash = null, temporary = false } = {}) {
   const user = findById(id);
   if (!user) throw new Error('User not found');
-  const problem = passwordProblem(newPassword, user.email, { demo: !!user.is_demo });
+  const problem = passwordProblem(newPassword, user.email, { demo: shortPasswordAllowed(user) });
   if (problem) throw new Error(problem);
   const hash = await bcrypt.hash(newPassword, 10);
   const now  = Date.now();
@@ -518,14 +529,30 @@ function isActive(id) {
   return !!user && !user.disabled_at;
 }
 
-// Whether this is a demo account (createUser's `demo`): one whose every Xero
-// call goes to the generated Demo Company (xero/demo/api.js) and which has
-// no Xero connection to make, refresh, keep alive or poll. One primary-key
-// read; the callers that ask on every Xero call (utils/token-cache.js) are
-// already on a database round trip.
+// Whether this is a demo account (createUser's `demo`, or an admin's own
+// switch, setDemo): one whose every Xero call goes to the generated Demo
+// Company (xero/demo/api.js) and which has no Xero connection to make,
+// refresh or poll. An admin's account switched to sample data may still have
+// a real connection on file, untouched and unused until it is switched back;
+// only the keep-alive (jobs/xero-keepalive.js) looks after it meanwhile. One
+// primary-key read; the callers that ask on every Xero call
+// (utils/token-cache.js) are already on a database round trip.
 function isDemoUser(id) {
   const user = findById(id);
   return !!(user && user.is_demo);
+}
+
+// Switches an account between the generated Demo Company (on) and its own
+// Xero (off): PUT /api/setup/data-source, an admin's own account only. Only
+// the flag moves. The account's Xero credentials, refresh token and
+// connection health stay exactly as they were, so switching back needs no
+// reconnect. Returns the account as the client sees it.
+function setDemo(id, on) {
+  const user = findById(id);
+  if (!user) throw new Error('User not found');
+  const flag = on ? 1 : 0;
+  db.prepare('UPDATE users SET is_demo = ? WHERE id = ?').run(flag, id);
+  return sanitize({ ...user, is_demo: flag });
 }
 
 function getAllUsers() {
@@ -662,7 +689,8 @@ function ensureUserDirectories() {
 
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
-  passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, isDemoUser, PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH,
+  passwordProblem, shortPasswordAllowed, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, isDemoUser, setDemo,
+  PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH,
   lockStatus, lockAfterFailure, recordFailedLogin, recordSuccessfulLogin, unlockAccount, temporaryPasswordExpired,
   LOCK_AFTER_FAILURES, LOCK_BASE_MS, LOCK_MAX_MS, TEMP_PASSWORD_TTL_MS,
   getAllUsers, updateUserRole, deleteUser, readUsers,

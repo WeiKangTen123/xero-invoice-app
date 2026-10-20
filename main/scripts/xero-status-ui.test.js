@@ -90,6 +90,40 @@ describe('the status badge', () => {
   });
 });
 
+// A record posted while an admin's account was on sample data went to the
+// Demo Company; once they switch back to Xero it must not pass for a real
+// post. A demo account locked to sample data gets no tag: every record of
+// theirs went there.
+describe('the Demo Company tag (demoCompanyTag)', () => {
+  const { demoCompanyTag, DEMO_TENANT_ID } = loadXeroStatus();
+  const admin = { id: 'u1', role: 'admin' };
+  const posted = extra => ({ status: 'posted', xeroInvoiceId: 'x-1', xeroTenantId: 'demo-company', ...extra });
+  const TAG = { text: 'Demo Company', title: 'Posted to the Demo Company (sample data), not to Xero' };
+
+  test('is the server\'s Demo Company tenant id', () => {
+    expect(DEMO_TENANT_ID).toBe(require('../xero/demo/api').DEMO_TENANT.tenantId);
+  });
+
+  test('an admin\'s record posted to the Demo Company carries it', () => {
+    expect(demoCompanyTag(posted(), admin)).toEqual(TAG);
+    expect(demoCompanyTag(posted({ status: 'reviewed' }), admin)).toEqual(TAG);
+  });
+
+  test('nothing for a record not posted, or posted to a real Xero company', () => {
+    expect(demoCompanyTag(posted({ xeroInvoiceId: null, status: 'reviewed' }), admin)).toBeNull();
+    expect(demoCompanyTag(posted({ xeroTenantId: 'a1b2c3-real-tenant' }), admin)).toBeNull();
+    expect(demoCompanyTag(posted({ xeroTenantId: null }), admin)).toBeNull();
+    expect(demoCompanyTag(null, admin)).toBeNull();
+  });
+
+  test('nothing for anyone but an admin', () => {
+    expect(demoCompanyTag(posted(), { id: 'u3', role: 'user', demo: true })).toBeNull();
+    expect(demoCompanyTag(posted(), { id: 'u3' })).toBeNull();
+    expect(demoCompanyTag(posted(), null)).toBeNull();
+    expect(demoCompanyTag(posted(), undefined)).toBeNull();
+  });
+});
+
 describe('the pages use it', () => {
   test('both re-post buttons are disabled by the rule, with the reason as their title', () => {
     for (const f of ['pages/invoice-review/TopBar.jsx', 'pages/invoice-review/StickyActionBar.jsx']) {
@@ -106,6 +140,28 @@ describe('the pages use it', () => {
     for (const f of ['pages/invoices/DesktopTable.jsx', 'pages/invoices/MobileList.jsx', 'pages/invoice-review/TopBar.jsx']) {
       expect(read(f)).toContain('<XeroStatusBadge invoice={inv}');
     }
+  });
+
+  test('the Demo Company tag is a muted badge on list rows, mobile rows and the review summary, for the signed-in user', () => {
+    const desktop = read('pages/invoices/DesktopTable.jsx');
+    const mobile  = read('pages/invoices/MobileList.jsx');
+    const summary = read('pages/invoice-review/SummaryCard.jsx');
+    // The table is handed the user by the AR & AP page; the others ask for it.
+    expect(desktop).toMatch(/export default function DesktopTable\(\{ user,/);
+    expect(desktop).toContain('const demoTag       = demoCompanyTag(inv, user);');
+    expect(mobile).toContain('const demoTag = demoCompanyTag(inv, user);');
+    expect(summary).toContain('const demoTag = demoCompanyTag(inv, user);');
+    for (const src of [mobile, summary]) {
+      expect(src).toMatch(/import \{ useAuth \} from '\.\.\/\.\.\/context\/AuthContext';/);
+      expect(src).toContain('const { user } = useAuth();');
+    }
+    for (const src of [desktop, mobile, summary]) {
+      expect(src).toMatch(/import \{[^}]*\bdemoCompanyTag\b[^}]*\} from '(\.\/|\.\.\/invoices\/)xero-status';/);
+      expect(src).toMatch(/\{demoTag && \(?\s*<span className="badge badge-gray"[^>]*title=\{demoTag\.title\}[^>]*>\{demoTag\.text\}<\/span>/);
+    }
+    // Beside the status, ahead of what Xero says of it.
+    expect(desktop.indexOf('{demoTag &&')).toBeLessThan(desktop.indexOf('<XeroStatusBadge invoice={inv}'));
+    expect(mobile.indexOf('{demoTag &&')).toBeLessThan(mobile.indexOf('<XeroStatusBadge invoice={inv}'));
   });
 
   test('the AR & AP page has a Refresh from Xero button that calls the endpoint', () => {
