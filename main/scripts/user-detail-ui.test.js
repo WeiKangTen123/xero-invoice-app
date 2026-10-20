@@ -489,13 +489,32 @@ describe('the panel', () => {
     }
   });
 
-  test('is a modal dialog named by its heading, a side panel on the web and a full-screen sheet on a phone', () => {
+  test('is a modal dialog named by its heading: a centred two-column window on the web, a full-screen sheet with tabs on a phone', () => {
     expect(panel).toMatch(/role="dialog"\s+aria-modal="true"\s+aria-labelledby=\{TITLE_ID\}/);
     expect(panel).toMatch(/<h2 id=\{TITLE_ID\}/);
     expect(panel).toMatch(/const \{ isMobile \} = useViewMode\(\);/);
-    expect(panel).toMatch(/width: isMobile \? '100vw' : 480/);
+    expect(panel).toMatch(/display: 'flex', alignItems: 'center', justifyContent: 'center',/);
+    expect(panel).toMatch(/width: isMobile \? '100vw' : 'min\(960px, calc\(100vw - 32px\)\)'/);
+    expect(panel).toMatch(/maxHeight: isMobile \? '100dvh' : '85vh'/);
     // Below the confirm and reset dialogs (Modal, zIndex 1000 and up), which open over it.
     expect(panel).toMatch(/zIndex: 301/);
+    // Web: sessions and sign-ins on the left, work and activity on the right.
+    expect(panel).toMatch(/gridTemplateColumns: '1fr 1fr'/);
+    expect(panel).toMatch(/\{sessionsPart\}\s+\{signInsPart\}\s+<\/div>\s+<div style=\{column\}>\s+\{workPart\}\s+\{activityPart\}/);
+    // Phone: one part at a time under tabs.
+    expect(panel).toMatch(/role="tablist" aria-label="Parts of this account"/);
+    expect(panel).toMatch(/\{PARTS\[phoneTab\]\}/);
+  });
+
+  test('Prev and Next (and the arrow keys) move through the list without closing', () => {
+    expect(panel).toMatch(/aria-label="Previous account"/);
+    expect(panel).toMatch(/aria-label="Next account"/);
+    expect(panel).toMatch(/if \(e\.key === 'ArrowLeft' \|\| e\.key === 'ArrowRight'\)/);
+    expect(panel).toMatch(/if \(!typing && !over && step\) \{ e\.preventDefault\(\); step\(\); \}/);
+    expect(panel).toMatch(/useEffect\(\(\) => \{ setDetail\(null\); setAllSignIns\(false\); setPhoneTab\('sessions'\); \}, \[user\.id\]\);/);
+    const admin = read('pages/Admin.jsx');
+    expect(admin).toMatch(/const detailPrev  = detailIndex > 0 \? \(\) => openDetail\(users\[detailIndex - 1\]\.id\) : null;/);
+    expect(admin).toMatch(/onPrev=\{detailPrev\}\s+onNext=\{detailNext\}/);
   });
 
   test('fetches the detail on open and after every control, with a loading state and a Retry', () => {

@@ -321,6 +321,11 @@ export default function Admin() {
   const isLastAdmin = u => u.role === 'admin' && !u.disabledAt && admins.length <= 1;
   // The open panel's account, as the list holds it; gone once it is deleted.
   const detailUser = detailId ? users.find(u => u.id === detailId) : null;
+  // The accounts before and after it, in the list's order, for the window's
+  // Prev and Next (and the arrow keys); null at either end.
+  const detailIndex = detailUser ? users.indexOf(detailUser) : -1;
+  const detailPrev  = detailIndex > 0 ? () => openDetail(users[detailIndex - 1].id) : null;
+  const detailNext  = detailIndex >= 0 && detailIndex < users.length - 1 ? () => openDetail(users[detailIndex + 1].id) : null;
   // One reading of the clock for every row's lock badge; a refetch re-renders.
   const now = Date.now();
 
@@ -644,6 +649,8 @@ export default function Admin() {
           refreshKey={detailRefresh}
           actions={userActions}
           onClose={closeDetail}
+          onPrev={detailPrev}
+          onNext={detailNext}
         />
       )}
 
