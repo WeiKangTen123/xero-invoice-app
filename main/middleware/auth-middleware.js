@@ -60,12 +60,21 @@ const SESSION_TOKEN_HEADER        = 'X-Session-Token';
 // what someone coming back the next day meets.
 const SESSION_EXPIRED_MESSAGE = 'Your session ended after 24 hours away. Sign in again.';
 
+// What a 401 says when the session was ended on purpose: Sign out, an admin
+// ending it, a password change or "sign out everywhere".
+const SIGNED_OUT_MESSAGE = 'You have been signed out. Sign in again.';
+
 // Every session token is signed here: sign-in, registration, a password
 // change, a renewal. Only the id is relied on; email and role ride along for
 // the client, and sessionUser reads both from the database on every request.
 // A renewal is marked as one, for the cutoff check in sessionUser.
-function signSession(user, { renewed = false } = {}) {
+//
+// `sid` names the session the token belongs to (utils/sessions.js): a new one
+// at each sign-in, the same one for a renewal or the token a password change
+// hands back, since those are the same session on the same device.
+function signSession(user, { renewed = false, sid = null } = {}) {
   const claims = { id: user.id, email: user.email, role: user.role };
+  if (sid) claims.sid = String(sid);
   if (renewed) claims.renewed = true;
   return jwt.sign(claims, jwtSecret(), { expiresIn: SESSION_TTL_SECONDS });
 }
@@ -117,8 +126,17 @@ function sessionUser(token) {
   if (live.sessions_valid_from && claims.iat !== undefined) {
     const cutoff = Math.floor(Date.parse(live.sessions_valid_from) / 1000);
     if (claims.iat < cutoff || (claims.renewed && claims.iat === cutoff)) {
-      return { error: 'You have been signed out. Sign in again.' };
+      return { error: SIGNED_OUT_MESSAGE };
     }
+  }
+  // A token minted at a sign-in names its session, and is good only while
+  // that session is: Sign out or an admin ending it ends the token with it,
+  // where before a copy of a signed-out token worked for the rest of its day.
+  // A token with no sid was issued before sessions were kept; it is accepted
+  // as before and runs out within a day. One primary-key read, like the one
+  // above. Lazily required, as users.js is.
+  if (claims.sid !== undefined && !require('../utils/sessions').isSessionLive(claims.sid)) {
+    return { error: SIGNED_OUT_MESSAGE };
   }
   return { user: live, claims };
 }
@@ -129,7 +147,8 @@ function sessionUser(token) {
 // cutoff is never renewed: those got their 401 first. The cutoff is not
 // touched, and the old token stays good until it runs out, so requests already
 // in flight with it still succeed. Revocation still reaches renewed tokens: a
-// password change or "sign out everywhere" moves the cutoff past them too.
+// password change or "sign out everywhere" moves the cutoff past them too,
+// and the renewal keeps the session's sid, so ending the session ends it.
 //
 // Skipped when the new token would run out no later than the one presented.
 // That is only true of the seven-day tokens issued before this change; they
@@ -143,7 +162,7 @@ function renewSession(res, live, claims) {
   const now = Math.floor(Date.now() / 1000);
   if (now - claims.iat < SESSION_RENEW_AFTER_SECONDS) return;
   if (now + SESSION_TTL_SECONDS <= claims.exp) return;
-  try { res.set(SESSION_TOKEN_HEADER, signSession(live, { renewed: true })); } catch {}
+  try { res.set(SESSION_TOKEN_HEADER, signSession(live, { renewed: true, sid: claims.sid })); } catch {}
 }
 
 // ── A temporary password must be replaced first ──────────────────────────────
@@ -182,13 +201,23 @@ function requireAuth(req, res, next) {
     return res.status(403).json(PASSWORD_CHANGE_REQUIRED);
   }
   // `demo` rides along for GET /api/auth/me: the client hides the Xero
-  // connection behind it (users.js isDemoUser).
-  req.user = { ...claims, id: live.id, email: live.email, role: live.role, mustChangePassword: !!live.must_change_password, demo: !!live.is_demo };
+  // connection behind it (users.js isDemoUser). `sid` is the session this
+  // request belongs to (null for a token from before sessions were kept), for
+  // Sign out and for the routes that keep this session while ending others.
+  req.user = {
+    ...claims, id: live.id, email: live.email, role: live.role, mustChangePassword: !!live.must_change_password,
+    demo: !!live.is_demo, sid: claims.sid || null,
+  };
   renewSession(res, live, claims);
   // Throttled to at most one DB write per user per minute — see
   // users.js#touchLastSeen. Failure here must never turn into a 401 — it's
   // presence tracking, not auth.
   try { require('../utils/users').touchLastSeen(req.user.id); } catch {}
+  // The session's own last use and address, throttled the same way
+  // (sessions.js#touchSession), and as harmless to skip.
+  if (req.user.sid) {
+    try { require('../utils/sessions').touchSession(req.user.sid, { ip: req.ip || null }); } catch {}
+  }
   // Everything this request goes on to do runs as this person, so a record
   // it changes says who changed it (utils/audit-context.js).
   require('../utils/audit-context').runForRequest(req, next);
@@ -205,6 +234,6 @@ function requireAdmin(req, res, next) {
 
 module.exports = {
   requireAuth, requireAdmin, sessionUser, signSession, jwtSecret, jwtSecretProblem, MIN_JWT_SECRET_LENGTH,
-  SESSION_TTL_SECONDS, SESSION_RENEW_AFTER_SECONDS, SESSION_TOKEN_HEADER, SESSION_EXPIRED_MESSAGE,
+  SESSION_TTL_SECONDS, SESSION_RENEW_AFTER_SECONDS, SESSION_TOKEN_HEADER, SESSION_EXPIRED_MESSAGE, SIGNED_OUT_MESSAGE,
   allowedBeforePasswordChange, PASSWORD_CHANGE_ALLOWED, PASSWORD_CHANGE_REQUIRED,
 };

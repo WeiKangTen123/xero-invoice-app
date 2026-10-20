@@ -17,6 +17,7 @@ const emailWorker      = require('../queue/email-worker');
 const claimWorker      = require('../claims/claim-worker');
 const watcherRegistry  = require('../email/watcher-registry');
 const tokenCache       = require('../utils/token-cache');
+const sessions         = require('../utils/sessions');
 const db               = require('../db');
 const logger       = require('../utils/logger');
 const auditLog     = require('../utils/audit-log');
@@ -42,8 +43,9 @@ const LOGS_DIR = process.env.LOGS_DIR || path.join(__dirname, '../../logs');
 const LOG_FILES = { combined: 'combined.log', error: 'error.log' };
 
 // GET /api/admin/users — every account, with its lockout and temporary-
-// password state (users.js#sanitize: failedLogins, lockedUntil,
-// mustChangePassword, lastLoginAt).
+// password state (users.js#sanitize: failedLogins, lockedUntil, lockCount,
+// lastLockedAt, mustChangePassword, tempPasswordExpiresAt, lastLoginAt,
+// passwordChangedAt).
 router.get('/users', requireAdmin, (_req, res) => {
   res.json({ users: getAllUsers() });
 });
@@ -191,6 +193,20 @@ router.delete('/users/:id', requireAdmin, (req, res) => {
 });
 
 // ── Account controls ─────────────────────────────────────────────────────────
+// Ends every session of an account an admin has just signed out, reset or
+// disabled (utils/sessions.js), saying why and which admin. Their tokens are
+// already refused by the cutoff the change moved (users.js); this is so the
+// sessions say they ended, and why, rather than stay in the list until they
+// run out. A failure is a warning: the account is signed out either way.
+function endSessionsOf(req, target, reason) {
+  try {
+    return sessions.endAllSessions(target.id, reason, { endedBy: req.user.id });
+  } catch (err) {
+    logger.warn('Could not end the sessions of an account', { email: target.email, reason, error: err.message });
+    return 0;
+  }
+}
+
 // Admins who could not sign in do not count towards "is anyone left to undo
 // this": a disabled admin is no safeguard.
 function activeAdmins() {
@@ -276,6 +292,7 @@ router.patch('/users/:id/password', requireAdmin, asyncHandler(async (req, res) 
     const target = findTarget(req, res, 'Change your own password from the Account page');
     if (!target) return;
     await setPassword(target.id, req.body.password, { temporary: !target.is_demo });
+    endSessionsOf(req, target, 'password_changed');
     // That it was reset, and by whom. Never the password.
     recordAdmin(req, target, 'user.password_reset');
     logger.info('Admin reset user password', { email: target.email, by: req.user.email });
@@ -305,8 +322,33 @@ router.post('/users/:id/sign-out', requireAdmin, (req, res) => {
   const target = findTarget(req, res, 'Use Sign out for your own session');
   if (!target) return;
   invalidateSessions(target.id);
+  endSessionsOf(req, target, 'signed_out_everywhere');
   recordAdmin(req, target, 'user.sign_out');
   logger.info('Admin signed user out everywhere', { email: target.email, by: req.user.email });
+  res.json({ success: true });
+});
+
+// POST /api/admin/users/:id/sessions/:sid/revoke — ends one session of an
+// account (utils/sessions.js): for one device lost or left signed in, without
+// signing the person out everywhere else. Its tokens are refused from the next
+// request (auth-middleware.js). Allowed on your own account's other sessions,
+// as signing out a forgotten laptop is; not on the session making the
+// request, which is ended with Sign out, the one that also stops the watcher
+// and the phone links. A sid that is not one of this account's is a 404, the
+// same as an unknown one, so the route cannot be used to ask about another
+// account's sessions. One already ended is left as it ended.
+router.post('/users/:id/sessions/:sid/revoke', requireAdmin, (req, res) => {
+  const target = findById(req.params.id);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  const session = sessions.getSession(req.params.sid);
+  if (!session || session.userId !== String(target.id)) return res.status(404).json({ error: 'Session not found' });
+  if (req.user.sid && session.sid === req.user.sid) {
+    return res.status(400).json({ error: 'Use Sign out to end this session' });
+  }
+  if (sessions.endSession(session.sid, 'revoked', req.user.id)) {
+    recordAdmin(req, target, 'session.revoke', { sid: session.sid });
+    logger.info('Admin ended a session', { email: target.email, by: req.user.email });
+  }
   res.json({ success: true });
 });
 
@@ -326,6 +368,7 @@ router.patch('/users/:id/disabled', requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'Cannot disable the last admin account' });
   }
   const user = setDisabled(target.id, disabled);
+  if (disabled) endSessionsOf(req, target, 'disabled');
   const watcherStopped = disabled ? stopAutomation(target.id) : false;
   recordAdmin(req, target, disabled ? 'user.disable' : 'user.enable', disabled ? { watcherStopped } : null);
   logger.info(disabled ? 'Admin disabled user' : 'Admin enabled user', { email: target.email, watcherStopped, by: req.user.email });

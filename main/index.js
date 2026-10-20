@@ -100,6 +100,7 @@ const setupRoutes   = require('./routes/setup');
 const processRoutes = require('./routes/process');
 const invoiceRoutes = require('./routes/invoices');
 const adminRoutes   = require('./routes/admin');
+const adminUserDetailRoutes = require('./routes/admin-user-detail');
 const dashRoutes    = require('./routes/dashboard');
 const chatRoutes    = require('./routes/chat');
 const xeroOAuthRoutes = require('./routes/xero-oauth');
@@ -233,6 +234,9 @@ app.use('/api/setup',    setupRoutes);
 app.use('/api/process',  processRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/admin',    adminRoutes);
+// One account on one page for the Admin screen (GET /api/admin/users/:id/detail),
+// in a file of its own; requireAdmin is on the route, as in admin.js.
+app.use('/api/admin',    adminUserDetailRoutes);
 app.use('/api/chat',     chatRoutes);
 app.use('/api/xero',     xeroOAuthRoutes);
 app.use('/api/xero-reports', xeroReportsRoutes);
@@ -497,6 +501,8 @@ const server = app.listen(PORT, HOST, () => {
   Promise.resolve().then(() => require('./jobs/xero-status-sync').start()).catch(err => logger.warn('Xero status sync start failed', { error: err?.message || String(err) }));
   // Looks for changes in Xero every minute so the reports refresh themselves (jobs/xero-change-detector.js); guarded the same way.
   Promise.resolve().then(() => require('./jobs/xero-change-detector').start()).catch(err => logger.warn('Xero change detector start failed', { error: err?.message || String(err) }));
+  // Fetches the IP-location databases when missing or a month old, two minutes after boot and then daily (jobs/geoip-refresh.js); it never runs under the test suite, and is guarded the same way.
+  Promise.resolve().then(() => require('./jobs/geoip-refresh').start()).catch(err => logger.warn('IP location refresh start failed', { error: err?.message || String(err) }));
 });
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────

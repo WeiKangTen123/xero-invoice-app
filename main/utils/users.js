@@ -282,11 +282,13 @@ async function createUser(email, password, role = 'user', { temporary = false, d
       mustChangePassword:    temporary ? 1 : 0,
       tempPasswordExpiresAt: temporary ? new Date(now + TEMP_PASSWORD_TTL_MS).toISOString() : null,
       isDemo:    demo ? 1 : 0,
+      // The account's first password was set when the account was made.
+      passwordChangedAt: new Date(now).toISOString(),
     };
 
     db.prepare(`
-      INSERT INTO users (id, email, password, role, created_at, must_change_password, temp_password_expires_at, is_demo)
-      VALUES (@id, @email, @password, @role, @createdAt, @mustChangePassword, @tempPasswordExpiresAt, @isDemo)
+      INSERT INTO users (id, email, password, role, created_at, must_change_password, temp_password_expires_at, is_demo, password_changed_at)
+      VALUES (@id, @email, @password, @role, @createdAt, @mustChangePassword, @tempPasswordExpiresAt, @isDemo, @passwordChangedAt)
     `).run(user);
 
     // Pre-create the user's credentials row so every account has one from day one
@@ -447,7 +449,9 @@ async function verifiedPasswordHash(id, password) {
 // Sets a new password and signs the user out everywhere. Tokens are stateless,
 // live 24 hours and renew while in use (auth-middleware.js), so without the
 // cutoff a reset would leave an active old session valid indefinitely — the
-// opposite of what a reset is for.
+// opposite of what a reset is for. (The session rows are ended by the routes,
+// which know which session to keep and who did it: utils/sessions.js.) When
+// it happened is kept in password_changed_at, for the Admin page.
 //
 // `ifCurrentHash` makes the write conditional on the password still being the
 // one just verified. Changing your own password checks the current one and
@@ -474,15 +478,15 @@ async function setPassword(id, newPassword, { ifCurrentHash = null, temporary = 
     : { must: 0, expires: null };
   if (ifCurrentHash) {
     const { changes } = db.prepare(`
-      UPDATE users SET password = ?, sessions_valid_from = ?, must_change_password = ?, temp_password_expires_at = ?
+      UPDATE users SET password = ?, sessions_valid_from = ?, must_change_password = ?, temp_password_expires_at = ?, password_changed_at = ?
       WHERE id = ? AND password = ?
-    `).run(hash, at, marks.must, marks.expires, id, ifCurrentHash);
+    `).run(hash, at, marks.must, marks.expires, at, id, ifCurrentHash);
     return changes > 0;
   }
   db.prepare(`
-    UPDATE users SET password = ?, sessions_valid_from = ?, must_change_password = ?, temp_password_expires_at = ?
+    UPDATE users SET password = ?, sessions_valid_from = ?, must_change_password = ?, temp_password_expires_at = ?, password_changed_at = ?
     WHERE id = ?
-  `).run(hash, at, marks.must, marks.expires, id);
+  `).run(hash, at, marks.must, marks.expires, at, id);
   if (temporary) unlockAccount(id);
   return true;
 }
@@ -539,7 +543,13 @@ function deleteUser(id) {
   // ON DELETE CASCADE removes user_credentials/user_settings/invoices/invoice_reports/
   // xero_tenants rows automatically. PDFs on disk are not touched here — callers that
   // need the data directory removed (routes/admin.js) do that separately via fs.
-  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  // The account's sessions have no foreign key to cascade by (schema.sql), so
+  // they go here, in the same transaction: an IP address kept for an account
+  // that no longer exists serves nobody's security.
+  db.transaction(() => {
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(String(id));
+    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  })();
 }
 
 function readUsers() {
@@ -551,6 +561,11 @@ function readUsers() {
 // use. lockedUntil is only given while the lock is in force; the column keeps
 // its old value after the lock ends, until the next sign-in clears it. `demo`
 // is the flag the client hides the Xero connection behind (users.is_demo).
+// lockCount and lastLockedAt are the current run of locks (lockAfterFailure),
+// passwordChangedAt when the password was last set, and
+// tempPasswordExpiresAt when a temporary one stops working: for the Admin
+// page's account detail. Nothing here is a secret from the account's owner,
+// who is the only other reader (the sign-in response).
 function sanitize(u) {
   const lastSeenAt  = u.last_seen_at ?? u.lastSeenAt ?? null;
   const lockedUntil = lockStatus({ locked_until: u.locked_until ?? u.lockedUntil ?? null });
@@ -563,6 +578,10 @@ function sanitize(u) {
     mustChangePassword: !!(u.must_change_password ?? u.mustChangePassword),
     lastLoginAt:        u.last_login_at ?? u.lastLoginAt ?? null,
     demo:               !!(u.is_demo ?? u.isDemo ?? u.demo),
+    lockCount:             u.lock_count ?? u.lockCount ?? 0,
+    lastLockedAt:          u.last_locked_at ?? u.lastLockedAt ?? null,
+    passwordChangedAt:     u.password_changed_at ?? u.passwordChangedAt ?? null,
+    tempPasswordExpiresAt: u.temp_password_expires_at ?? u.tempPasswordExpiresAt ?? null,
   };
 }
 

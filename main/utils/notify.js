@@ -43,17 +43,41 @@ async function notifyError({ context, error, email }) {
 const THROTTLE_WINDOW_MS = 10 * 60 * 1000;
 const _lastSent = new Map();
 
-function notifyErrorThrottled({ key, windowMs = THROTTLE_WINDOW_MS, now = Date.now(), ...alert }) {
-  const k = key ?? String(alert.error);
+// Whether a message under this key may go now, and if so marks it sent.
+function _due(k, now, windowMs) {
   const last = _lastSent.get(k);
-  if (last !== undefined && now - last < windowMs) return Promise.resolve(false);
+  if (last !== undefined && now - last < windowMs) return false;
   _lastSent.set(k, now);
   // Messages that carry an id are each distinct, so the map is swept of
   // expired keys as it grows rather than kept for the life of the process.
   if (_lastSent.size > 500) {
     for (const [old, at] of _lastSent) if (now - at >= windowMs) _lastSent.delete(old);
   }
+  return true;
+}
+
+function notifyErrorThrottled({ key, windowMs = THROTTLE_WINDOW_MS, now = Date.now(), ...alert }) {
+  if (!_due(key ?? String(alert.error), now, windowMs)) return Promise.resolve(false);
   return notifyError(alert).then(() => true);
 }
 
-module.exports = { notifyInvoiceCreated, notifyError, notifyErrorThrottled, THROTTLE_WINDOW_MS };
+// A security alert, posted as written (routes/auth.js: an account locked by
+// failed sign-ins, a sign-in from a country the account has not used in 90
+// days). Throttled per message like notifyErrorThrottled: the same alert
+// twice inside ten minutes is one message, so the channel stays readable
+// when someone is working at an account. Never throws and never rejects: an
+// alert that cannot be sent must not fail the sign-in that raised it (a Slack
+// failure is a warning in the log, from notifySlack). Resolves false when
+// throttled or empty, true otherwise.
+function notifySecurity(text, { windowMs = THROTTLE_WINDOW_MS, now = Date.now() } = {}) {
+  try {
+    const message = String(text ?? '');
+    if (!message || !_due(`security:${message}`, now, windowMs)) return Promise.resolve(false);
+    logger.warn('Security alert', { text: message });
+    return notifySlack(message).then(() => true, () => false);
+  } catch (_) {
+    return Promise.resolve(false);
+  }
+}
+
+module.exports = { notifyInvoiceCreated, notifyError, notifyErrorThrottled, notifySecurity, THROTTLE_WINDOW_MS };

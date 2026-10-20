@@ -53,6 +53,26 @@ describe('auth-middleware secrets', () => {
     expect(auth.PASSWORD_CHANGE_REQUIRED).toEqual({ error: 'Set a new password to continue.', code: 'password_change_required' });
   });
 
+  // A sign-in's token names its session; the session must still be live.
+  // A token from before sessions were kept names none and is accepted.
+  test('sessionUser: a token whose session has ended, or does not exist, is signed out; one with no sid is accepted', async () => {
+    process.env.NODE_ENV = 'test';
+    require('../db/migrate').run();
+    const users    = require('../utils/users');
+    const sessions = require('../utils/sessions');
+    const u   = await users.createUser('mw@test.com', 'password123', 'user');
+    const sid = sessions.startSession(u.id);
+    const token = auth.signSession(u, { sid });
+    expect(jwt.decode(token)).toMatchObject({ id: u.id, sid });
+    expect(jwt.decode(auth.signSession(u)).sid).toBeUndefined();
+    expect(auth.sessionUser(token)).toMatchObject({ user: { id: u.id }, claims: { sid } });
+    sessions.endSession(sid, 'logout');
+    expect(auth.sessionUser(token)).toEqual({ error: 'You have been signed out. Sign in again.' });
+    expect(auth.SIGNED_OUT_MESSAGE).toBe('You have been signed out. Sign in again.');
+    expect(auth.sessionUser(auth.signSession(u, { sid: 'f'.repeat(32) }))).toEqual({ error: auth.SIGNED_OUT_MESSAGE });
+    expect(auth.sessionUser(auth.signSession(u))).toMatchObject({ user: { id: u.id } });
+  });
+
   test('jwtSecretProblem: missing is fatal; short or published is only a warning', () => {
     expect(auth.jwtSecretProblem(undefined)).toEqual({ fatal: expect.stringMatching(/^JWT_SECRET is not set/) });
     expect(auth.jwtSecretProblem('')).toEqual({ fatal: expect.stringMatching(/^JWT_SECRET is not set/) });

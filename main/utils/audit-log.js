@@ -19,6 +19,14 @@ const auditContext = require('./audit-context');
 // (main/index.js); an indexed range DELETE, so cheap however large the tables.
 const RETENTION_DAYS = 730;
 
+// Sign-in records are kept 90 days, not two years: each holds the IP address
+// a sign-in came from and the browser that made it, which are personal data
+// under Singapore's PDPA, and they are kept only as long as they serve
+// security: long enough to see a guesser at work, or a sign-in the account's
+// owner does not recognise. Which actions count: SIGN_IN_ACTION_SQL.
+const SIGN_IN_RETENTION_DAYS = 90;
+const SIGN_IN_ACTION_SQL = "(action LIKE 'login.%' OR action = 'logout' OR action LIKE 'session.%')";
+
 // One page of history. The review page shows a record's whole life in one
 // page nearly always; the cap is what keeps a pathological record (an import
 // edited a thousand times) from being one enormous answer.
@@ -180,6 +188,20 @@ const ADMIN_ACTIONS = {
   'login.failed':          'Failed to sign in',
   'login.locked':          'Locked out after failed sign-ins',
   'login.unlocked':        'Unlocked an account',
+  // A right password turned away (a disabled account, a temporary password
+  // that has run out) or any attempt on a locked account, with details.reason
+  // saying which: locked | disabled | expired_temporary.
+  'login.refused':         'Sign-in refused',
+  // Sign out, the person's own; ending one session is an admin's (details.sid).
+  'logout':                'Signed out',
+  'session.revoke':        'Ended a session',
+};
+
+// What a refused sign-in's reason is called in its sentence.
+const REFUSED_REASONS = {
+  locked:            'account locked',
+  disabled:          'account disabled',
+  expired_temporary: 'temporary password expired',
 };
 
 // A lock's length in words: minutes until it is whole hours.
@@ -204,6 +226,9 @@ function describeAdminEvent(action, details, targetEmail) {
       : `Sign-in failed for ${d.email || 'an unknown address'}: no such account`;
     case 'login.locked':          return `Locked for ${_lockLength(d.lockMinutes)} after ${d.failures || 5} failed attempts`;
     case 'login.unlocked':        return `Unlocked ${who}`;
+    case 'login.refused':         return REFUSED_REASONS[d.reason] ? `Sign-in refused: ${REFUSED_REASONS[d.reason]}` : 'Sign-in refused';
+    case 'logout':                return 'Signed out';
+    case 'session.revoke':        return `Ended a session of ${who}`;
     case 'user.create':           return `Created ${who}${d.role === 'admin' ? ' as an admin' : ''}${d.demo ? ' as a demo account' : ''}`
       + (Array.isArray(d.copied) && d.copied.length ? ` with the ${d.copied.join(', ')} settings copied` : '');
     case 'user.delete':           return `Deleted ${who}${d.role === 'admin' ? ' (an admin)' : ''}`;
@@ -248,36 +273,81 @@ function listAdminEvents({ targetUserId = null, action = null, from = null, to =
 }
 
 // One person's own sign-in history (GET /api/auth/sign-ins): the newest
-// `limit` login.* events on their account, each as when, which and from
-// where, and for a lock how long it was for. Nothing else: the address typed
-// on a failure is theirs anyway, and the page that shows the list writes its
-// own words for each kind.
+// `limit` login.* events on their account, each as when, which, from where
+// and in which browser (ua: the User-Agent, null for events from before it
+// was kept), for a lock how long it was for, and for a refusal why. Nothing
+// else: the address typed on a failure is theirs anyway, and the page that
+// shows the list writes its own words for each kind.
 function listSignInEvents(userId, { limit = 20 } = {}) {
   const n = Math.min(Math.max(Number(limit) || 20, 1), PAGE_MAX);
   return db.prepare("SELECT at, action, details FROM admin_events WHERE target_user_id = ? AND action LIKE 'login.%' ORDER BY id DESC LIMIT ?")
     .all(String(userId), n)
     .map(r => {
       const d = _parse(r.details) || {};
-      const event = { at: r.at, action: r.action, ip: d.ip ? String(d.ip) : null };
+      const event = { at: r.at, action: r.action, ip: d.ip ? String(d.ip) : null, ua: d.ua ? String(d.ua) : null };
       if (r.action === 'login.locked' && Number.isFinite(Number(d.lockMinutes))) event.lockMinutes = Number(d.lockMinutes);
+      if (r.action === 'login.refused' && d.reason) event.reason = String(d.reason);
       return event;
     });
 }
 
+// Whether an event of this kind on this account was recorded at or after
+// `since` (an ISO instant) with details matching every field of `match`. For
+// an event kept at most once a minute (routes/auth.js: an attempt on a locked
+// account is turned away before any password check, so a guesser can make as
+// many as the per-IP limit allows from as many addresses as they have, and
+// one row each would bury everything else). An indexed range read.
+function recordedSince({ targetUserId, action, since, match = {} }) {
+  const rows = db.prepare('SELECT details FROM admin_events WHERE target_user_id = ? AND at >= ? AND action = ?')
+    .all(String(targetUserId), String(since), String(action));
+  return rows.some(r => {
+    const d = _parse(r.details) || {};
+    return Object.entries(match).every(([k, v]) => d[k] === v);
+  });
+}
+
+// The addresses this account signed in from (login.success) at or after
+// `since`, most recent first, each once, at most `limit`. For the new-country
+// alert (routes/auth.js), which looks up where each one is rather than keep
+// a country with every sign-in.
+function signInAddressesSince(userId, since, { limit = 20 } = {}) {
+  const rows = db.prepare("SELECT details FROM admin_events WHERE target_user_id = ? AND at >= ? AND action = 'login.success' ORDER BY id DESC LIMIT 1000")
+    .all(String(userId), String(since));
+  const seen = [];
+  for (const r of rows) {
+    const ip = (_parse(r.details) || {}).ip;
+    if (ip && !seen.includes(String(ip))) seen.push(String(ip));
+    if (seen.length >= limit) break;
+  }
+  return seen;
+}
+
 // ── Retention ────────────────────────────────────────────────────────────────
 
-// Deletes events older than the retention period from both tables. Returns
-// how many went. Never throws: a prune that fails is tried again next boot.
-function pruneOldEvents({ days = RETENTION_DAYS, now = Date.now() } = {}) {
-  const cutoff = new Date(now - days * 24 * 60 * 60 * 1000).toISOString();
+// Deletes events older than the retention period from both tables, sign-in
+// records (SIGN_IN_ACTION_SQL) older than SIGN_IN_RETENTION_DAYS, and the
+// sessions (utils/sessions.js, 30 days) that hold the same addresses.
+// Returns how many went. Never throws: a prune that fails is tried again next
+// boot, and the sessions are pruned even when the events cannot be.
+function pruneOldEvents({ days = RETENTION_DAYS, signInDays = SIGN_IN_RETENTION_DAYS, now = Date.now() } = {}) {
+  const day    = 24 * 60 * 60 * 1000;
+  const cutoff = new Date(now - days * day).toISOString();
+  const signInCutoff = new Date(now - signInDays * day).toISOString();
+  let sessions = 0;
+  try {
+    sessions = require('./sessions').pruneSessions(now);
+  } catch (err) {
+    logger.warn('Old sessions could not be pruned', { error: err.message });
+  }
   try {
     const invoices = db.prepare('DELETE FROM invoice_events WHERE at < ?').run(cutoff).changes;
-    const admin    = db.prepare('DELETE FROM admin_events WHERE at < ?').run(cutoff).changes;
-    if (invoices || admin) logger.info('Old audit events pruned', { invoices, admin, olderThan: cutoff });
-    return { invoices, admin };
+    const admin    = db.prepare('DELETE FROM admin_events WHERE at < ?').run(cutoff).changes
+      + db.prepare(`DELETE FROM admin_events WHERE at < ? AND ${SIGN_IN_ACTION_SQL}`).run(signInCutoff).changes;
+    if (invoices || admin || sessions) logger.info('Old audit events pruned', { invoices, admin, sessions, olderThan: cutoff, signInsOlderThan: signInCutoff });
+    return { invoices, admin, sessions };
   } catch (err) {
     logger.warn('Audit events could not be pruned', { error: err.message });
-    return { invoices: 0, admin: 0 };
+    return { invoices: 0, admin: 0, sessions };
   }
 }
 
@@ -294,5 +364,6 @@ const BULK_LABELS = {
 
 module.exports = {
   recordInvoiceEvent, recordAdminEvent, safely, listInvoiceEvents, listAdminEvents, listSignInEvents, describeAdminEvent,
-  pruneOldEvents, ADMIN_ACTIONS, BULK_LABELS, RETENTION_DAYS, PAGE_MAX,
+  recordedSince, signInAddressesSince,
+  pruneOldEvents, ADMIN_ACTIONS, BULK_LABELS, RETENTION_DAYS, SIGN_IN_RETENTION_DAYS, PAGE_MAX,
 };

@@ -328,9 +328,12 @@ describe('routes/auth sign-in lockout, temporary passwords and the Account page'
       expect(right.body).toEqual({ error: 'Too many failed attempts. This account is locked.', lockedUntil: locked.body.lockedUntil, lockMinutes: 15 });
       await login('lock@test.com', 'wrong').expect(423);
       expect(row(u.id)).toMatchObject({ failed_logins: 0, lock_count: 1, locked_until: locked.body.lockedUntil, last_login_at: null });
-      // Five failures and the lock in the trail; the attempts during it are not.
-      expect(adminEvents().map(e => e.action)).toEqual([...Array(5).fill('login.failed'), 'login.locked']);
-      expect(adminEvents().pop().details).toEqual({ ip: expect.any(String), lockedUntil: locked.body.lockedUntil, lockMinutes: 15, failures: 5 });
+      // Five failures and the lock in the trail, and the two attempts made
+      // during it as one refusal: at most one a minute is kept.
+      expect(adminEvents().map(e => e.action)).toEqual([...Array(5).fill('login.failed'), 'login.locked', 'login.refused']);
+      const [lockEvent, refused] = adminEvents().slice(-2);
+      expect(lockEvent.details).toEqual({ ip: expect.any(String), ua: null, lockedUntil: locked.body.lockedUntil, lockMinutes: 15, failures: 5 });
+      expect(refused).toMatchObject({ actor_id: null, target_user_id: u.id, details: { reason: 'locked', ip: expect.any(String), ua: null } });
     });
 
     test('once the lock has ended the right password signs in and clears the record', async () => {
@@ -390,7 +393,10 @@ describe('routes/auth sign-in lockout, temporary passwords and the Account page'
       const res = await login('old@test.com', PW).expect(401);
       expect(res.body.error).toBe('This temporary password has expired. Ask your administrator for a new one.');
       expect(row(u.id)).toMatchObject({ failed_logins: 0, last_login_at: null });
-      expect(adminEvents()).toEqual([]);
+      // Recorded as refused, not failed, so the admin can see they tried.
+      expect(adminEvents().map(e => [e.action, e.details])).toEqual([
+        ['login.refused', { reason: 'expired_temporary', ip: expect.any(String), ua: null }],
+      ]);
       // A wrong password is still a wrong password.
       await login('old@test.com', 'wrong').expect(401);
       expect(row(u.id).failed_logins).toBe(1);
@@ -406,7 +412,11 @@ describe('routes/auth sign-in lockout, temporary passwords and the Account page'
       await as(token, 'get', '/api/auth/me').expect(200);
       await as(token, 'get', '/api/auth/sign-ins').expect(200);
       await as(token, 'get', '/api/auth/sign-ins?x=1').expect(200);
-      await as(token, 'post', '/api/auth/logout').expect(200);
+      // Sign out too. It ends the session it is sent with, so it is tried
+      // with a second sign-in's token.
+      const { body: { token: second } } = await login('gate@test.com', PW).expect(200);
+      await as(second, 'post', '/api/auth/logout').expect(200);
+      await as(second, 'get', '/api/auth/me').expect(401);
       const short = await as(token, 'post', '/api/auth/change-password').send({ currentPassword: PW, newPassword: 'elevenchars' }).expect(400);
       expect(short.body.error).toBe('Password must be at least 12 characters');
       const changed = await as(token, 'post', '/api/auth/change-password').send({ currentPassword: PW, newPassword: 'my-own-pass-2026' }).expect(200);
@@ -449,7 +459,7 @@ describe('routes/auth sign-in lockout, temporary passwords and the Account page'
       const { body: { token } } = await login('acct@test.com', PW).expect(200);
       const res = await as(token, 'get', '/api/auth/sign-ins').expect(200);
       expect(res.body.events.map(e => e.action)).toEqual(['login.success', 'login.failed']);
-      for (const e of res.body.events) expect(e).toEqual({ at: expect.any(String), action: expect.any(String), ip: expect.any(String) });
+      for (const e of res.body.events) expect(e).toEqual({ at: expect.any(String), action: expect.any(String), ip: expect.any(String), ua: null });
 
       const insert = db.prepare("INSERT INTO admin_events (at, target_user_id, target_email, action, details) VALUES (?, ?, ?, 'login.failed', ?)");
       for (let i = 0; i < 25; i++) insert.run(new Date(Date.now() + i).toISOString(), u.id, u.email, JSON.stringify({ email: u.email, ip: `10.0.0.${i}` }));

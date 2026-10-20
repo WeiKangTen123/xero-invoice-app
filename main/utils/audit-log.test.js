@@ -296,6 +296,53 @@ describe('audit trail (store, context, retention)', () => {
       expect(describeAdminEvent('login.unlocked', null, 'jane@test.com')).toBe('Unlocked jane@test.com');
     });
 
+    test('refusals, sign-outs and ending a session have a label and a sentence', () => {
+      const { ADMIN_ACTIONS, describeAdminEvent } = auditLog;
+      for (const a of ['login.refused', 'logout', 'session.revoke']) expect(ADMIN_ACTIONS[a]).toEqual(expect.any(String));
+      const refused = reason => describeAdminEvent('login.refused', { reason, ip: '1.2.3.4', ua: 'Firefox' }, 'jane@test.com');
+      expect(refused('locked')).toBe('Sign-in refused: account locked');
+      expect(refused('disabled')).toBe('Sign-in refused: account disabled');
+      expect(refused('expired_temporary')).toBe('Sign-in refused: temporary password expired');
+      expect(refused(undefined)).toBe('Sign-in refused');
+      expect(describeAdminEvent('logout', { ip: '1.2.3.4', ua: 'Firefox' }, 'jane@test.com')).toBe('Signed out');
+      expect(describeAdminEvent('session.revoke', { sid: 'abc' }, 'jane@test.com')).toBe('Ended a session of jane@test.com');
+    });
+
+    test('listSignInEvents gives the browser, and why a sign-in was refused', () => {
+      auditLog.recordAdminEvent({ actor: null, target: owner, action: 'login.refused', details: { reason: 'disabled', ip: '10.0.0.1', ua: 'Firefox' } });
+      auditLog.recordAdminEvent({ actor: owner, target: owner, action: 'logout', details: { ip: '10.0.0.1', ua: 'Firefox' } });   // not a sign-in
+      expect(auditLog.listSignInEvents(owner.id)).toEqual([
+        { at: expect.any(String), action: 'login.refused', ip: '10.0.0.1', ua: 'Firefox', reason: 'disabled' },
+      ]);
+    });
+
+    test('recordedSince: an event of a kind on an account since a moment, whose details match', () => {
+      const since = new Date(Date.now() - 60 * 1000).toISOString();
+      const asked = match => auditLog.recordedSince({ targetUserId: owner.id, action: 'login.refused', since, match });
+      expect(asked({ reason: 'locked' })).toBe(false);
+      auditLog.recordAdminEvent({ actor: null, target: owner, action: 'login.refused', details: { reason: 'disabled' } });
+      expect(asked({ reason: 'locked' })).toBe(false);
+      expect(asked({ reason: 'disabled' })).toBe(true);
+      expect(asked({})).toBe(true);
+      expect(auditLog.recordedSince({ targetUserId: other.id, action: 'login.refused', since, match: {} })).toBe(false);
+      expect(auditLog.recordedSince({ targetUserId: owner.id, action: 'login.refused', since: new Date(Date.now() + 1000).toISOString() })).toBe(false);
+    });
+
+    test('signInAddressesSince: the addresses of successful sign-ins since a moment, newest first, each once, capped', () => {
+      const ins = db.prepare("INSERT INTO admin_events (at, target_user_id, action, details) VALUES (?, ?, ?, ?)");
+      const ago = days => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      ins.run(ago(100), owner.id, 'login.success', JSON.stringify({ ip: '10.0.0.100' }));
+      ins.run(ago(5), owner.id, 'login.success', JSON.stringify({ ip: '10.0.0.1' }));
+      ins.run(ago(4), owner.id, 'login.failed', JSON.stringify({ ip: '10.0.0.66' }));
+      ins.run(ago(3), owner.id, 'login.success', JSON.stringify({ ip: '10.0.0.2' }));
+      ins.run(ago(2), owner.id, 'login.success', JSON.stringify({ ip: '10.0.0.1' }));
+      ins.run(ago(1), owner.id, 'login.success', JSON.stringify({}));
+      ins.run(ago(1), other.id, 'login.success', JSON.stringify({ ip: '10.0.0.77' }));
+      expect(auditLog.signInAddressesSince(owner.id, ago(90))).toEqual(['10.0.0.1', '10.0.0.2']);
+      expect(auditLog.signInAddressesSince(owner.id, ago(90), { limit: 1 })).toEqual(['10.0.0.1']);
+      expect(auditLog.signInAddressesSince(owner.id, ago(200))).toEqual(['10.0.0.1', '10.0.0.2', '10.0.0.100']);
+    });
+
     test('listSignInEvents: one account\'s login.* events, newest first, at most 20, as when, which and from where', () => {
       const rec = (target, action, details) => auditLog.recordAdminEvent({ actor: null, target, action, details });
       rec(owner, 'login.failed', { email: owner.email, ip: '10.0.0.1' });
@@ -306,10 +353,10 @@ describe('audit trail (store, context, retention)', () => {
       auditLog.recordAdminEvent({ actor: admin, target: owner, action: 'user.sign_out' });     // not a sign-in event
       auditLog.recordAdminEvent({ actor: admin, target: owner, action: 'login.unlocked' });
       expect(auditLog.listSignInEvents(owner.id)).toEqual([
-        { at: expect.any(String), action: 'login.unlocked', ip: null },
-        { at: expect.any(String), action: 'login.locked',   ip: '10.0.0.3', lockMinutes: 15 },   // how long, for the page to say
-        { at: expect.any(String), action: 'login.success',  ip: '10.0.0.2' },
-        { at: expect.any(String), action: 'login.failed',   ip: '10.0.0.1' },
+        { at: expect.any(String), action: 'login.unlocked', ip: null, ua: null },
+        { at: expect.any(String), action: 'login.locked',   ip: '10.0.0.3', ua: null, lockMinutes: 15 },   // how long, for the page to say
+        { at: expect.any(String), action: 'login.success',  ip: '10.0.0.2', ua: null },
+        { at: expect.any(String), action: 'login.failed',   ip: '10.0.0.1', ua: null },
       ]);
       for (let i = 0; i < 25; i++) rec(owner, 'login.failed', { email: owner.email, ip: `10.1.0.${i}` });
       const page = auditLog.listSignInEvents(owner.id);
@@ -328,14 +375,40 @@ describe('audit trail (store, context, retention)', () => {
       ins.run(old, 'old'); ins.run(recent, 'recent');
       const adm = db.prepare("INSERT INTO admin_events (at, action) VALUES (?, 'user.sign_out')");
       adm.run(old); adm.run(recent);
-      expect(auditLog.pruneOldEvents()).toEqual({ invoices: 1, admin: 1 });
+      expect(auditLog.pruneOldEvents()).toEqual({ invoices: 1, admin: 1, sessions: 0 });
       expect(db.prepare('SELECT summary FROM invoice_events').all().map(r => r.summary)).toEqual(['recent']);
       expect(db.prepare('SELECT COUNT(*) AS n FROM admin_events').get().n).toBe(1);
     });
 
+    test('sign-in records (login.*, logout, session.*) go after 90 days; every other admin event stays two years', () => {
+      const ago = days => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      const ins = db.prepare('INSERT INTO admin_events (at, action) VALUES (?, ?)');
+      const kinds = ['login.success', 'login.failed', 'login.locked', 'login.refused', 'login.unlocked', 'logout', 'session.revoke', 'user.sign_out', 'password.change'];
+      for (const action of kinds) { ins.run(ago(91), action); ins.run(ago(89), action); }
+      expect(auditLog.SIGN_IN_RETENTION_DAYS).toBe(90);
+      expect(auditLog.pruneOldEvents()).toEqual({ invoices: 0, admin: 7, sessions: 0 });
+      const left = db.prepare('SELECT action, at FROM admin_events ORDER BY id').all();
+      expect(left.filter(r => r.at < ago(90)).map(r => r.action)).toEqual(['user.sign_out', 'password.change']);
+      expect(left.filter(r => r.at > ago(90))).toHaveLength(kinds.length);
+    });
+
+    test('the sessions are pruned with the events, 30 days after they were last used', () => {
+      const sessions = require('./sessions');
+      const old = sessions.startSession(owner.id);
+      const fresh = sessions.startSession(owner.id);
+      db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').run(new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString(), old);
+      expect(auditLog.pruneOldEvents()).toEqual({ invoices: 0, admin: 0, sessions: 1 });
+      expect(db.prepare('SELECT id FROM sessions').all().map(r => r.id)).toEqual([fresh]);
+      // Pruned even when the events cannot be.
+      db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').run(new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString(), fresh);
+      db.exec('DROP TABLE admin_events');
+      expect(auditLog.pruneOldEvents()).toEqual({ invoices: 0, admin: 0, sessions: 1 });
+    });
+
     test('a prune that cannot run is a warning, not a crash', () => {
       db.exec('DROP TABLE admin_events');
-      expect(auditLog.pruneOldEvents()).toEqual({ invoices: 0, admin: 0 });
+      db.exec('DROP TABLE sessions');
+      expect(auditLog.pruneOldEvents()).toEqual({ invoices: 0, admin: 0, sessions: 0 });
     });
   });
 });

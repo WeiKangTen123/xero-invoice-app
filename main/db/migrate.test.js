@@ -18,6 +18,24 @@ describe('db/migrate', () => {
 
   // One invoice goes to one Xero company: the row records which, and the
   // account records which company new documents default to.
+  // Sessions (utils/sessions.js) and the password's date reach a database
+  // deployed before them on its next boot, and a run over them changes nothing.
+  test('a deployed database gains the sessions table and users.password_changed_at', () => {
+    run();
+    db.exec('DROP TABLE sessions');
+    db.exec('ALTER TABLE users DROP COLUMN password_changed_at');
+    db.prepare("INSERT INTO users (id, email, password, created_at) VALUES ('u1', 'old@test.com', 'x', '2026-01-01T00:00:00.000Z')").run();
+    run();
+    const cols = table => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+    expect(cols('users')).toContain('password_changed_at');
+    expect(cols('sessions')).toEqual(['id', 'user_id', 'created_at', 'last_seen_at', 'first_ip', 'last_ip', 'user_agent', 'ended_at', 'ended_reason', 'ended_by']);
+    expect(db.prepare('PRAGMA index_info(idx_sessions_user)').all().map(c => c.name)).toEqual(['user_id', 'last_seen_at']);
+    // Unknown for an account that existed before, not a guess.
+    expect(db.prepare("SELECT password_changed_at FROM users WHERE id = 'u1'").get().password_changed_at).toBeNull();
+    run();
+    expect(cols('sessions')).toHaveLength(10);
+  });
+
   test('invoices.xero_tenant_id and user_settings.default_tenant_id exist after a run', () => {
     run();
     const cols = table => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);

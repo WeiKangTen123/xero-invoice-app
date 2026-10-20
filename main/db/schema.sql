@@ -16,9 +16,9 @@ CREATE TABLE IF NOT EXISTS users (
   -- whether anyone is actually looking at the app.
   last_seen_at TEXT,
   -- Tokens issued before this instant are refused (auth-middleware.js). Moved
-  -- forward by a password change or reset and by an admin's "sign out
-  -- everywhere". JWTs are stateless and live seven days; this is the one
-  -- revocation lever.
+  -- forward by a password change or reset and by "sign out everywhere". The
+  -- lever for every token at once, including those minted before sessions
+  -- were kept (they carry no sid); one session is ended in `sessions` below.
   sessions_valid_from TEXT,
   -- Set while the account is disabled: sign-in and existing tokens are refused
   -- and the mailbox watcher is stopped. Rows and files stay. NULL = active.
@@ -42,12 +42,41 @@ CREATE TABLE IF NOT EXISTS users (
   -- When the account last signed in with its password (not when it was last
   -- seen: a session lasts a day and renews while in use).
   last_login_at TEXT,
+  -- When the password was last set: at creation, by the person's own change
+  -- or by an admin's reset (users.js createUser, setPassword). NULL for an
+  -- account whose password was set before this was kept.
+  password_changed_at TEXT,
   -- 1 for a demo account: it never connects to Xero. Every Xero call it makes
   -- goes to the generated "Demo Company Pte Ltd" instead (xero/demo/api.js,
   -- chosen by xero/api-client.js from the token utils/token-cache.js mints
   -- for it). Set once at creation (routes/admin.js); never changed.
   is_demo INTEGER NOT NULL DEFAULT 0
 );
+
+-- One row per sign-in (utils/sessions.js). Session tokens are still stateless
+-- JWTs (auth-middleware.js); each one minted at a sign-in carries the id of
+-- its row here as `sid`, renewals keep it, and a token whose row is ended is
+-- refused. So one device can be signed out without the rest, and a person or
+-- an admin can see where an account is signed in. last_seen_at and last_ip
+-- are written at most once a minute per session (sessions.js#touchSession).
+-- ended_reason: logout | revoked | signed_out_everywhere | password_changed |
+-- disabled | expired; ended_by the admin's id when an admin ended it. Rows
+-- go 30 days after their last use (sessions.js#pruneSessions): they hold IP
+-- addresses. No foreign key, so a write here can never fail on one; the rows
+-- go with the account in users.js#deleteUser.
+CREATE TABLE IF NOT EXISTS sessions (
+  id           TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  first_ip     TEXT,
+  last_ip      TEXT,
+  user_agent   TEXT,
+  ended_at     TEXT,
+  ended_reason TEXT,
+  ended_by     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, last_seen_at);
 
 -- 1:1 with users — Xero/IMAP/LLM credentials (was data/users/<id>/config.json)
 CREATE TABLE IF NOT EXISTS user_credentials (

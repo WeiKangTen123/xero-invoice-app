@@ -40,6 +40,7 @@ describe('the chat launcher and the bars pinned to the bottom', () => {
   const EXEMPT = new Set([
     'components/ChatAssistant.jsx',   // the launcher itself and its panel
     'components/AccountCodeSelect.jsx', // a list open under (or over) its field, only while open; not a bar
+    'pages/admin/UserDetailPanel.jsx', // a side panel the full height of the window, over the launcher while open; not a bar
     'components/layout/BottomNav.jsx', // the phone nav sits UNDER the launcher by design
     'components/layout/Layout.jsx',    // the sidebar backdrop covers the whole screen
     'components/Modal.jsx',            // a modal backdrop covers the whole screen

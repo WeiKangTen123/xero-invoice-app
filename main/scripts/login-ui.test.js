@@ -231,11 +231,16 @@ describe('Admin › Users is wired to them', () => {
     expect(admin).toMatch(/Last sign-in \{formatDateTime\(u\.lastLoginAt, me\?\.timezone\)\}/);
   });
 
-  test('Unlock is offered on a locked row, calls the route, refetches the list and says so in a toast', () => {
+  test('Unlock is offered on a locked account, calls the route, refetches the list and says so in a toast', () => {
     expect(admin).toMatch(/const toast\s+= useToast\(\);/);
     expect(admin).toMatch(/api\.post\(`\/admin\/users\/\$\{u\.id\}\/unlock`, \{\}\)/);
     expect(admin).toMatch(/if \(await control\('unlock', u, [^\n]*\)\) \{\s+toast\.success\(/);
-    expect(admin).toMatch(/\{lock && \(\s+<button className="btn btn-outline btn-sm" disabled=\{!!busy\}[^\n]*\n\s+onClick=\{\(\) => handleUnlock\(u\)\}>/);
+    // The button is in the account's detail panel, offered while it is
+    // locked (user-detail.js panelActions, run in user-detail-ui.test.js),
+    // and is this page's handler.
+    expect(admin).toMatch(/unlock: handleUnlock,/);
+    expect(read('pages/admin/UserDetailPanel.jsx')).toMatch(/unlock:\s+\(\) => actions\.unlock\(user\),/);
+    expect(read('pages/admin/user-detail.js')).toMatch(/if \(isLocked\(u, now\)\) \{\s+account\.push\(\{ key: 'unlock', busyKey: 'unlock', label: '🔓 Unlock'/);
     // control() says whether the request went through, for the toast.
     expect(admin).toMatch(/await fetchUsers\(\);\s+return true;/);
   });

@@ -11,7 +11,7 @@
 //
 // Every function here records and returns nothing, and callers run them
 // through auditLog.safely: a mistake in describing a change must never undo
-// the change.
+// the change. The one reader, listForUser, is at the end.
 const db       = require('../db');
 const auditLog = require('./audit-log');
 const { SYSTEM } = require('./audit-context');
@@ -438,7 +438,30 @@ function xeroStatus(userId, id, before, after, currency = null) {
   });
 }
 
+// ── Reading ──────────────────────────────────────────────────────────────────
+
+// Who acted, as a record's History names them to someone other than that
+// person (ui/src/utils/audit.js actorLabel).
+function _by(r) {
+  if (r.actor_type === 'system') return 'System';
+  if (r.actor_type === 'admin') return `Admin ${r.actor_email || ''}`.trim();
+  return r.actor_email || 'The account owner';
+}
+
+// The newest events across every record of one account, newest first, for
+// an admin's view of the account (routes/admin-user-detail.js). Each says
+// what its record's History says, since the sentence is stored as written,
+// and a record since deleted keeps its events. idx_invoice_events_record
+// (user_id, invoice_id, at) finds the account's rows; newest is highest id,
+// as audit-log.js pages them.
+function listForUser(userId, { limit = 50 } = {}) {
+  const n = Math.min(Math.max(Math.floor(Number(limit)) || 50, 1), auditLog.PAGE_MAX);
+  return db.prepare('SELECT invoice_id, at, actor_type, actor_email, action, summary FROM invoice_events WHERE user_id = ? ORDER BY id DESC LIMIT ?')
+    .all(String(userId), n)
+    .map(r => ({ at: r.at, recordId: r.invoice_id, action: r.action, summary: r.summary, by: _by(r) }));
+}
+
 module.exports = {
   created, updated, reported, merged, deleted, xeroSent, xeroNotSent, xeroFailed, interrupted, xeroStatus,
-  TRACKED,
+  listForUser, TRACKED,
 };

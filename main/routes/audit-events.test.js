@@ -28,6 +28,7 @@ jest.mock('../utils/token-cache', () => {
 jest.mock('../xero/reconnect', () => ({ reconnectXero: jest.fn(async () => {}) }));
 jest.mock('../utils/notify', () => ({
   notifyError: jest.fn(async () => {}), notifyInvoiceCreated: jest.fn(async () => {}), notifyErrorThrottled: jest.fn(async () => {}),
+  notifySecurity: jest.fn(async () => true),
 }));
 jest.mock('../utils/receipt-parser', () => ({
   parseReceiptImage: jest.fn().mockResolvedValue(null),
@@ -386,7 +387,7 @@ describe('audit trail through the routes', () => {
         ...Array(5).fill(`Wrong password for ${owner.email}`),
         'Signed in',
       ]);
-      expect(res.body.events[0].details).toEqual({ ip: expect.any(String), lockedUntil: expect.any(String), lockMinutes: 15, failures: 5 });
+      expect(res.body.events[0].details).toEqual({ ip: expect.any(String), ua: null, lockedUntil: expect.any(String), lockMinutes: 15, failures: 5 });
       expect(res.body.actions['login.locked']).toBe('Locked out after failed sign-ins');
       const failed = await api('get', '/api/admin/events?action=login.failed', admin).expect(200);
       expect(failed.body.events).toHaveLength(6);

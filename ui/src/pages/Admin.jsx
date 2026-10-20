@@ -10,6 +10,7 @@ import { formatDateTime, formatRelative } from '../utils/formatDate';
 import { fmtMoney } from '../utils/format';
 import { staggerIn } from '../utils/stagger';
 import ActivityPanel from './admin/ActivityPanel';
+import UserDetailPanel from './admin/UserDetailPanel';
 import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem } from './admin/users';
 import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH } from './account/password-rules';
 
@@ -44,6 +45,21 @@ const EYE_BUTTON = {
 // to know :focus-visible throws on the selector, and gets the ring every time.
 function keyboardFocused(el) {
   try { return el.matches(':focus-visible'); } catch (_) { return true; }
+}
+
+// Stop watcher and Turn off auto-submit, asked and sent the same way from
+// Monitoring's table and from an account's detail panel on Users.
+function stopWatcherAsk(u) {
+  return { title: `Stop ${u.email}'s mailbox watcher?`, message: 'Their inbox stops being polled until they start it again from their Dashboard.', confirmLabel: 'Stop watcher' };
+}
+function stopWatcherSend(u) {
+  return api.post(`/admin/users/${u.id}/watcher/stop`, {});
+}
+function autoSubmitOffAsk(u) {
+  return { title: `Turn off auto-submit for ${u.email}?`, message: 'New invoices wait for manual review instead of posting to Xero. Only they can turn it back on.', confirmLabel: 'Turn off', danger: true };
+}
+function autoSubmitOffSend(u) {
+  return api.patch(`/admin/users/${u.id}/auto-process`, { autoProcess: false });
 }
 
 // An admin cannot see a password (it is a bcrypt hash), only set a temporary
@@ -156,9 +172,14 @@ export default function Admin() {
   const [filterFrom, setFilterFrom] = useState('');
   const [error,   setError]   = useState('');
   const [success, setSuccess] = useState('');
-  // Which account's controls are open, which control is in flight (`key:id`),
-  // and the account the Reset password dialog is for.
-  const [selectedId, setSelectedId] = useState(null);
+  // Which account's detail panel is open, which control is in flight
+  // (`key:id`), and the account the Reset password dialog is for. A control
+  // is used from the panel, which covers the page, so its error is said in
+  // the panel (actionError) and its success in a toast; the panel asks the
+  // server again whenever detailRefresh moves.
+  const [detailId,      setDetailId]      = useState(null);
+  const [detailRefresh, setDetailRefresh] = useState(0);
+  const [actionError,   setActionError]   = useState('');
   const [busy,       setBusy]       = useState(null);
   const [resetting,  setResetting]  = useState(null);
   // One timer for the success banner. Each message used to start its own and
@@ -205,23 +226,27 @@ export default function Admin() {
     }
   }
 
-  // One request per control, then the list is refetched so the row shows the
-  // server's view rather than an optimistic guess. True when the request went
-  // through, for a caller with something to say after it.
+  // One request per control, then the list and the open panel are refetched
+  // so both show the server's view rather than an optimistic guess. True when
+  // the request went through, for a caller with something to say after it.
   async function control(key, u, send, done) {
-    setBusy(`${key}:${u.id}`); setError(''); setSuccess('');
+    setBusy(`${key}:${u.id}`); setActionError('');
     try {
       await send();
-      if (done) showSuccess(done);
+      if (done) toast.success(done);
+      setDetailRefresh(n => n + 1);
       await fetchUsers();
       return true;
     } catch (err) {
-      setError(err.message);
+      setActionError(err.message);
       return false;
     } finally {
       setBusy(null);
     }
   }
+
+  function openDetail(id) { setActionError(''); setDetailId(id); }
+  function closeDetail()  { setActionError(''); setDetailId(null); }
 
   // The lock ends on its own at lockedUntil; this ends it now, for the owner
   // who mistyped five times and is on the phone about it. The count of wrong
@@ -234,7 +259,10 @@ export default function Admin() {
 
   async function handleDelete(u) {
     if (!(await confirm({ title: `Delete ${u.email}?`, message: 'Their account, credentials and files are removed. This cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
-    await control('delete', u, () => api.delete(`/admin/users/${u.id}`), `${u.email} deleted.`);
+    // The account's panel has nothing left to show.
+    if (await control('delete', u, () => api.delete(`/admin/users/${u.id}`), `${u.email} deleted.`)) {
+      setDetailId(id => (id === u.id ? null : id));
+    }
   }
 
   async function handleRole(u) {
@@ -257,8 +285,42 @@ export default function Admin() {
     await control('disabled', u, () => api.patch(`/admin/users/${u.id}/disabled`, { disabled }), `${u.email} has been ${disabled ? 'disabled' : 'enabled'}.`);
   }
 
+  async function handleStopWatcher(u) {
+    if (!(await confirm(stopWatcherAsk(u)))) return;
+    await control('watcher', u, () => stopWatcherSend(u), `${u.email}'s mailbox watcher has stopped.`);
+  }
+
+  async function handleAutoSubmitOff(u) {
+    if (!(await confirm(autoSubmitOffAsk(u)))) return;
+    await control('auto', u, () => autoSubmitOffSend(u), `Auto-submit is off for ${u.email}. New invoices wait for review.`);
+  }
+
+  // One session (one device) of an account, from its detail panel; the
+  // others stay signed in. The server refuses the admin's own current
+  // session: that is Sign out. In flight as `revoke:<sid>:<user id>`.
+  async function handleRevokeSession(u, s) {
+    const where = [s.device, s.location].filter(Boolean).join(' · ');
+    if (!(await confirm({
+      title: `Revoke this session of ${u.email}?`,
+      message: `${where || 'This device'} is signed out. They can sign in again, and their other sessions stay signed in.`,
+      confirmLabel: 'Revoke',
+    }))) return;
+    await control(`revoke:${s.sid}`, u, () => api.post(`/admin/users/${u.id}/sessions/${encodeURIComponent(s.sid)}/revoke`, {}), 'Session revoked.');
+  }
+
+  // Every control the detail panel offers is one of the handlers above.
+  const userActions = {
+    unlock: handleUnlock, role: handleRole, reset: setResetting, signOut: handleSignOut,
+    disabled: handleDisabled, remove: handleDelete, stopWatcher: handleStopWatcher,
+    autoSubmitOff: handleAutoSubmitOff, revokeSession: handleRevokeSession,
+  };
+
   // A disabled admin cannot sign in, so they do not count as the last one.
   const admins = users.filter(u => u.role === 'admin' && !u.disabledAt);
+  // The server refuses these on the last admin too; the panel says why first.
+  const isLastAdmin = u => u.role === 'admin' && !u.disabledAt && admins.length <= 1;
+  // The open panel's account, as the list holds it; gone once it is deleted.
+  const detailUser = detailId ? users.find(u => u.id === detailId) : null;
   // One reading of the clock for every row's lock badge; a refetch re-renders.
   const now = Date.now();
 
@@ -327,50 +389,49 @@ export default function Admin() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               {users.map((u, i) => {
                 const isMe      = u.id === me?.id;
-                const open      = selectedId === u.id;
-                // The server refuses these too; dimming the button says why first.
-                const lastAdmin = u.role === 'admin' && !u.disabledAt && admins.length <= 1;
-                const inFlight  = key => busy === `${key}:${u.id}`;
-                // Sign-in state (pages/admin/users.js): locked, with a badge and
-                // an Unlock control; wrong passwords since the last sign-in; a
-                // temporary password still to be replaced.
+                const open      = detailId === u.id;
+                // Sign-in state (pages/admin/users.js): locked, with a badge (Unlock
+                // is in the account's panel); wrong passwords since the last
+                // sign-in; a temporary password still to be replaced.
                 const lock    = lockBadge(u, now, { timeZone: me?.timezone });
                 const failed  = failedNote(u, now);
                 const mustSet = mustSetNote(u);
                 const isDemo  = demoBadge(u);
                 return (
                   <div key={u.id} style={{ animation: staggerIn(i, 40, '0.25s') }}>
-                    {/* Clicking a row opens its controls below it. Your own row has
-                        none: every control here is refused on yourself, and your own
-                        password is changed from the Account page. The other rows are buttons to
-                        the keyboard and to a screen reader too, since the controls
-                        cannot be reached any other way. */}
+                    {/* Clicking a row opens the account's detail panel
+                        (admin/UserDetailPanel.jsx), with every control. Your own
+                        row opens it too, to look: the controls the server refuses
+                        on yourself are not offered there. Each row is a button to
+                        the keyboard and to a screen reader as well, since the
+                        controls cannot be reached any other way; the panel gives
+                        focus back to the row when it closes. */}
                     <div
-                      role={isMe ? undefined : 'button'}
-                      tabIndex={isMe ? undefined : 0}
-                      aria-expanded={isMe ? undefined : open}
-                      onClick={() => { if (!isMe) setSelectedId(open ? null : u.id); }}
+                      role="button"
+                      tabIndex={0}
+                      aria-haspopup="dialog"
+                      onClick={() => openDetail(u.id)}
                       onKeyDown={e => {
-                        if (isMe || (e.key !== 'Enter' && e.key !== ' ')) return;
+                        if (e.key !== 'Enter' && e.key !== ' ') return;
                         // Space would otherwise scroll the page as well.
                         e.preventDefault();
-                        setSelectedId(open ? null : u.id);
+                        openDetail(u.id);
                       }}
-                      onFocus={e => { if (!isMe && keyboardFocused(e.currentTarget)) e.currentTarget.style.outline = '2px solid var(--accent)'; }}
+                      onFocus={e => { if (keyboardFocused(e.currentTarget)) e.currentTarget.style.outline = '2px solid var(--accent)'; }}
                       onBlur={e => { e.currentTarget.style.outline = ''; }}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 12,
-                        padding: '11px 12px', borderRadius: open ? '10px 10px 0 0' : 10,
+                        padding: '11px 12px', borderRadius: 10,
                         background: isMe ? 'var(--accent-subtle)' : open ? 'var(--bg-hover)' : 'transparent',
                         border: isMe ? '1px solid rgba(99,102,241,0.2)' : '1px solid transparent',
-                        cursor: isMe ? 'default' : 'pointer',
+                        cursor: 'pointer',
                         opacity: u.disabledAt ? 0.65 : 1,
                         transition: 'all 0.15s',
                         outlineOffset: -2,
                       }}
                       onMouseEnter={e => { if (!isMe) e.currentTarget.style.background = 'var(--bg-hover)'; }}
                       onMouseLeave={e => { if (!isMe && !open) e.currentTarget.style.background = 'transparent'; }}
-                      title={isMe ? undefined : open ? 'Hide controls' : 'Show controls'}
+                      title="Open the account's details"
                     >
                       <Avatar email={u.email} />
 
@@ -418,43 +479,8 @@ export default function Admin() {
                         </div>
                       </div>
 
-                      {!isMe && <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{open ? '▴' : '▾'}</span>}
+                      <span aria-hidden="true" style={{ color: 'var(--text-muted)', fontSize: 14 }}>›</span>
                     </div>
-
-                    {open && !isMe && (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '8px 12px 10px', background: 'var(--bg-hover)', borderRadius: '0 0 10px 10px' }}>
-                        {lock && (
-                          <button className="btn btn-outline btn-sm" disabled={!!busy} title="End the lock now, so they can sign in again"
-                            onClick={() => handleUnlock(u)}>
-                            {inFlight('unlock') ? '…' : '🔓 Unlock'}
-                          </button>
-                        )}
-                        <button className="btn btn-outline btn-sm" disabled={!!busy || lastAdmin}
-                          title={lastAdmin ? 'Cannot demote the last admin' : u.role === 'admin' ? 'Back to an ordinary user' : 'Give them this page'}
-                          onClick={() => handleRole(u)}>
-                          {inFlight('role') ? '…' : u.role === 'admin' ? '◦ Make user' : '★ Make admin'}
-                        </button>
-                        <button className="btn btn-outline btn-sm" disabled={!!busy} title="Set a temporary password for this account"
-                          onClick={() => setResetting(u)}>
-                          🔑 Reset password
-                        </button>
-                        <button className="btn btn-outline btn-sm" disabled={!!busy} title="Every device they are signed in on is signed out"
-                          onClick={() => handleSignOut(u)}>
-                          {inFlight('signout') ? '…' : '⇥ Sign out everywhere'}
-                        </button>
-                        <button className="btn btn-outline btn-sm" disabled={!!busy || lastAdmin}
-                          title={lastAdmin ? 'Cannot disable the last admin' : u.disabledAt ? 'Let them sign in again' : 'Block sign-in and stop their watcher, keeping their data'}
-                          onClick={() => handleDisabled(u)}>
-                          {inFlight('disabled') ? '…' : u.disabledAt ? '✓ Enable' : '⏸ Disable'}
-                        </button>
-                        <button className="btn btn-sm" disabled={!!busy || lastAdmin}
-                          onClick={() => handleDelete(u)}
-                          style={{ marginLeft: 'auto', background: 'var(--danger-subtle)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
-                          title={lastAdmin ? 'Cannot delete the last admin' : 'Remove the account and everything in it'}>
-                          {inFlight('delete') ? '…' : '✕ Delete'}
-                        </button>
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -607,15 +633,32 @@ export default function Admin() {
         </div>
       </div>}
 
+      {tab === 'users' && detailUser && (
+        <UserDetailPanel
+          user={detailUser}
+          isMe={detailUser.id === me?.id}
+          lastAdmin={isLastAdmin(detailUser)}
+          timeZone={me?.timezone}
+          busy={busy}
+          error={actionError}
+          refreshKey={detailRefresh}
+          actions={userActions}
+          onClose={closeDetail}
+        />
+      )}
+
+      {/* Opened from the panel, and drawn over it (Modal sits above it). */}
       {resetting && (
         <ResetPasswordDialog
           user={resetting}
           onClose={() => setResetting(null)}
           onDone={() => {
-            showSuccess(resetting.demo
+            toast.success(resetting.demo
               ? `Password for the demo account ${resetting.email} set; its other sessions were signed out.`
-              : `Temporary password for ${resetting.email} set. It works once, within 24 hours; their other sessions were signed out.`, 6000);
+              : `Temporary password for ${resetting.email} set. It works once, within 24 hours; their other sessions were signed out.`);
             setResetting(null);
+            setDetailRefresh(n => n + 1);
+            fetchUsers();
           }}
         />
       )}
@@ -822,16 +865,18 @@ function MonitoringPanel({ timezone, onViewLogs }) {
     finally { setBusy(null); }
   }
 
+  // The question and the request are the ones the Users panel uses
+  // (stopWatcherAsk/Send, autoSubmitOffAsk/Send at the top of this file).
   async function stopWatcher(e, u) {
     e.stopPropagation();
-    if (!(await confirm({ title: `Stop ${u.email}'s mailbox watcher?`, message: 'Their inbox stops being polled until they start it again from their Dashboard.', confirmLabel: 'Stop watcher' }))) return;
-    await control(e, 'watcher', u, () => api.post(`/admin/users/${u.id}/watcher/stop`, {}));
+    if (!(await confirm(stopWatcherAsk(u)))) return;
+    await control(e, 'watcher', u, () => stopWatcherSend(u));
   }
 
   async function autoSubmitOff(e, u) {
     e.stopPropagation();
-    if (!(await confirm({ title: `Turn off auto-submit for ${u.email}?`, message: 'New invoices wait for manual review instead of posting to Xero. Only they can turn it back on.', confirmLabel: 'Turn off', danger: true }))) return;
-    await control(e, 'auto', u, () => api.patch(`/admin/users/${u.id}/auto-process`, { autoProcess: false }));
+    if (!(await confirm(autoSubmitOffAsk(u)))) return;
+    await control(e, 'auto', u, () => autoSubmitOffSend(u));
   }
 
   // `false` for a failed load, so the chart can say so rather than draw an

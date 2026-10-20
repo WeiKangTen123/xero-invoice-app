@@ -190,6 +190,18 @@ describe('every literal API path the UI calls exists on the server', () => {
     ]) expect(routes).toContainEqual(r);
   });
 
+  // Admin › Users › an account's detail panel (admin/UserDetailPanel.jsx)
+  // and its Revoke on one session (Admin.jsx handleRevokeSession), by
+  // shape, whatever the server names the session parameter.
+  test('the user detail and session revoke routes the UI calls exist', () => {
+    const missing = [
+      ['get',  '/admin/users/${}/detail'],
+      ['post', '/admin/users/${}/sessions/${}/revoke'],
+    ].filter(([verb, p]) => !routes.some(r => r.verb === verb && matches(uiSegments(p), r.path)))
+      .map(([verb, p]) => `${verb} ${p}`);
+    expect(missing).toEqual([]);
+  });
+
   test('each call resolves to a route with the same verb', () => {
     const bad = [];
     let checked = 0;

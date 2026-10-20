@@ -403,6 +403,37 @@ describe('users store (SQLite)', () => {
       expect(await users.validatePassword('temp@test.com', 'admin-reset-2026')).toMatchObject({ id: temp.id, mustChangePassword: true });
     });
 
+    test('the password\'s date: set at creation, moved by the person\'s own change and by an admin\'s reset, and shown', async () => {
+      const before = Date.now();
+      const u = await users.createUser('dated@test.com', 'password123', 'user');
+      const created = users.findById(u.id).password_changed_at;
+      expect(Date.parse(created)).toBeGreaterThanOrEqual(before);
+      expect(u.passwordChangedAt).toBe(created);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const hash = await users.verifiedPasswordHash(u.id, 'password123');
+      await users.setPassword(u.id, 'chosen-by-me-2026', { ifCurrentHash: hash });
+      const own = users.findById(u.id).password_changed_at;
+      expect(Date.parse(own)).toBeGreaterThan(Date.parse(created));
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await users.setPassword(u.id, 'admin-reset-2026', { temporary: true });
+      const reset = users.findById(u.id);
+      expect(Date.parse(reset.password_changed_at)).toBeGreaterThan(Date.parse(own));
+      // A change that lost the race wrote nothing, its date included.
+      expect(await users.setPassword(u.id, 'too-late-pass-2026', { ifCurrentHash: hash })).toBe(false);
+      expect(users.findById(u.id).password_changed_at).toBe(reset.password_changed_at);
+      expect(users.getAllUsers().find(x => x.id === u.id)).toMatchObject({
+        passwordChangedAt: reset.password_changed_at, tempPasswordExpiresAt: reset.temp_password_expires_at, lockCount: 0, lastLockedAt: null,
+      });
+    });
+
+    test('sanitize gives the run of locks, for the Admin page', async () => {
+      const u = await users.createUser('locks@test.com', 'password123', 'user');
+      for (let i = 0; i < 5; i++) users.recordFailedLogin(u.id);
+      const row = users.findById(u.id);
+      expect(users.getAllUsers().find(x => x.id === u.id)).toMatchObject({ lockCount: 1, lastLockedAt: row.last_locked_at });
+      expect(row.last_locked_at).toEqual(expect.any(String));
+    });
+
     test('setPassword applies the password rules, with the email rule for that account', async () => {
       const u = await users.createUser('rules@test.com', 'password123', 'user');
       await expect(users.setPassword(u.id, 'rules@test.com')).rejects.toThrow('Password must not be your email address');
