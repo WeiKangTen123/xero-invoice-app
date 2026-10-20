@@ -66,6 +66,8 @@ describe('sending to Xero', () => {
     invoiceStore = require('./invoice-store');
     settings     = require('./settings-store');
     const u = await require('./users').createUser(`send${Date.now()}-${n++}@test.com`, 'password123', 'user');
+    // Connected to Xero: auto-submit waits for a connection (invoice-handler).
+    require('./users').saveUserConfig(u.id, { XERO_CONNECTION_TYPE: 'oauth' });
     userId = u.id;
     store  = invoiceStore.forUser(userId);
     tokenCache._state.tenants = [{ tenant_id: 't-1', tenant_name: 'One' }];
@@ -185,6 +187,21 @@ describe('sending to Xero', () => {
     expect(xero.createDraftInvoice).toHaveBeenCalledTimes(1);
     expect(xero.createDraftInvoice.mock.calls[0][2]._invoiceStoreId).toBe(result.id);
     expect(store.getById(result.id)).toMatchObject({ status: 'posted', xeroInvoiceId: 'xero-new-1', xeroTenantId: 't-1' });
+  });
+
+  // The watcher runs without Xero now (routes/process.js), so auto-submit
+  // must not try to send with nowhere to send to: the document waits as
+  // pending for a person to post once Xero is connected.
+  test('with auto-submit on but no Xero connection, the document is stored pending and nothing is sent', async () => {
+    require('./users').saveUserConfig(userId, { XERO_CONNECTION_TYPE: '' });
+    settings.forUser(userId).set({ autoProcess: true });
+    const handler = handlerMod.createHandler(userId, { submitDelayMs: 10 });
+    const result = await handler.onInvoiceEmail({
+      vendorName: 'Gamma Pte Ltd', invoiceNumber: 'G-1', invoiceDate: '2026-09-04', totalAmount: 90, source: 'email',
+    });
+    await handler.whenIdle();
+    expect(xero.createDraftInvoice).not.toHaveBeenCalled();
+    expect(store.getById(result.id)).toMatchObject({ status: 'pending', xeroInvoiceId: null });
   });
 
   // A new post had no Xero status until the 3-hourly check, so a bill just

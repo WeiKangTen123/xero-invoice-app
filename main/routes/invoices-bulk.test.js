@@ -49,6 +49,7 @@ describe('bulk actions on a selection', () => {
     xero.updateDraftInvoice.mockReset().mockImplementation(async (_u, _t, id) => ({ invoiceID: id }));
 
     testUser = await users.createUser(`bulk${Date.now()}-${n++}@test.com`, 'password123', 'user');
+    users.saveUserConfig(testUser.id, { XERO_CONNECTION_TYPE: 'oauth' });   // posting needs a connection
     store    = require('../utils/invoice-store').forUser(testUser.id);
 
     app = express();
@@ -64,6 +65,34 @@ describe('bulk actions on a selection', () => {
   });
   const byId = res => Object.fromEntries(res.body.results.map(r => [r.id, r]));
   const sentIds = () => handler.submitInvoiceToXero.mock.calls.map(([, id]) => id);
+
+  // The watcher runs without Xero (routes/process.js), so a person can press
+  // Post on an account that cannot send. That used to leave the row pending
+  // with nothing said; every way of posting now answers at once, and the
+  // documents stay as they were.
+  describe('with no Xero connection', () => {
+    const NOT_CONNECTED = "Xero isn't connected. Connect it in Setup, then post.";
+    beforeEach(() => users.saveUserConfig(testUser.id, { XERO_CONNECTION_TYPE: '' }));
+
+    test('Post to Xero, Send to Xero on a selection and Submit all each say why, and nothing is sent', async () => {
+      add('a'); add('b');
+      const one = await request(serverFor(app)).post('/api/invoices/a/submit').set('Authorization', auth()).send({}).expect(409);
+      expect(one.body).toMatchObject({ error: NOT_CONNECTED, xeroConnected: false });
+      expect((await post('send', { ids: ['a', 'b'] }).expect(409)).body).toMatchObject({ error: NOT_CONNECTED });
+      expect((await request(serverFor(app)).post('/api/invoices/submit-all').set('Authorization', auth()).send({ ids: ['a', 'b'] }).expect(409)).body)
+        .toMatchObject({ error: NOT_CONNECTED });
+      expect(handler.submitInvoiceToXero).not.toHaveBeenCalled();
+      expect([store.getById('a').status, store.getById('b').status]).toEqual(['pending', 'pending']);
+    });
+
+    test('Mark reviewed and Delete still work: they do not need Xero', async () => {
+      add('c'); add('d');
+      await post('review', { ids: ['c'] }).expect(200);
+      await post('delete', { ids: ['d'] }).expect(200);
+      expect(store.getById('c').status).toBe('reviewed');
+      expect(store.getById('d')).toBeFalsy();
+    });
+  });
 
   describe('the request', () => {
     test.each(['review', 'send', 'delete'])('%s: ids must be a non-empty list of strings', async action => {

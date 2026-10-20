@@ -1,5 +1,5 @@
 const { enqueueInvoice }  = require('../queue/processor');
-const { getUserDefaults, isActive } = require('./users');
+const { getUserDefaults, isActive, getSetupStatus } = require('./users');
 const { newId } = require('./ids');
 const { reconnectXero }   = require('../xero/reconnect');
 const { xeroErrMsg }      = require('../xero/xero-utils');
@@ -291,7 +291,14 @@ function createHandler(userId, { submitDelayMs = XERO_SUBMIT_DELAY_MS } = {}) {
     // emailed bill may, a bill someone uploaded by hand never does — they have
     // it in front of them and will review it (intake/profiles.js).
     const mayAutoPost = profileFor(record.invoiceType).autoPost(record.source);
-    if (settingsUser.get('autoProcess') && mayAutoPost) {
+    // Auto-submit waits for a Xero connection. The watcher runs without one
+    // (routes/process.js _missingForWatcher), and a send with nowhere to go
+    // would only fail; the document stays pending in AR & AP instead, for a
+    // person to post once Xero is connected.
+    const xeroConnected = getSetupStatus(userId).xero.configured;
+    if (settingsUser.get('autoProcess') && mayAutoPost && !xeroConnected) {
+      logger.info('Auto-submit is on but Xero is not connected — stored as pending', { id, userId });
+    } else if (settingsUser.get('autoProcess') && mayAutoPost) {
       // What goes to Xero is the STORED row, read again when its turn comes —
       // the same payload a manual submit sends. The raw parser object used to
       // go instead, so the two paths could differ (and the PDF is read back

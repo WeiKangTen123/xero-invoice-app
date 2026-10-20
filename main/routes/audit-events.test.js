@@ -60,6 +60,7 @@ describe('audit trail through the routes', () => {
 
     const tag = `${Date.now()}-${n++}`;
     owner = await users.createUser(`owner${tag}@test.com`, 'password123', 'user');
+    users.saveUserConfig(owner.id, { XERO_CONNECTION_TYPE: 'oauth' });   // posting needs a connection
     other = await users.createUser(`other${tag}@test.com`, 'password123', 'user');
     admin = await users.createUser(`admin${tag}@test.com`, 'password123', 'admin');
     store = invoiceStore.forUser(owner.id);

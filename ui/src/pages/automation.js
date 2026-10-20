@@ -46,3 +46,20 @@ export function pipelineSummary(xero, recordCount) {
   if (p.total === 0) return Number(recordCount) > 0 ? 'Nothing waiting' : 'No invoices';
   return p.allPosted ? 'All posted' : `${p.posted}/${p.total} posted`;
 }
+
+// The line under the email watcher when nothing can be posted: the account
+// has no Xero connection. The watcher runs without one (routes/process.js),
+// so documents keep arriving and wait in AR & AP. Null when Xero is
+// connected, or before the status has said either way.
+export function xeroNotice(status) {
+  if (!status || status.xeroConnected !== false) return null;
+  return 'Not connected: documents wait in AR & AP until you post them.';
+}
+
+// The auto-submit row's line. With auto-submit on and no Xero connection,
+// nothing is sent (invoice-handler waits for a connection), and it says so.
+export function autoSubmitText(autoProcess, xeroConnected) {
+  if (!autoProcess) return 'Invoices are stored for manual review — not sent to Xero';
+  if (xeroConnected === false) return "On, but Xero isn't connected: invoices wait in AR & AP until it is";
+  return 'Invoices are pushed to Xero automatically on detection';
+}

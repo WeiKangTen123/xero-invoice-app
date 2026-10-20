@@ -8,7 +8,8 @@ import { formatDate, formatTime } from '../utils/formatDate';
 import { useVisiblePolling } from '../utils/useVisiblePolling';
 import ProcessToggle from '../components/ProcessToggle';
 import InvoiceTable from '../components/InvoiceTable';
-import { pipelineEmptyText, xeroPipeline } from './automation';
+import { pipelineEmptyText, xeroPipeline, xeroNotice, autoSubmitText } from './automation';
+import { Link } from 'react-router-dom';
 
 function StatCard({ label, value, sub, icon, iconBg, color, delay = 0 }) {
   return (
@@ -425,6 +426,18 @@ export default function Dashboard() {
             </span>
           </div>
           <ProcessToggle status={status} onUpdate={refreshStatus} />
+          {/* The watcher runs without Xero; what it reads waits in AR & AP
+              until Xero is connected and someone posts it. */}
+          {xeroNotice(status) && (
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
+              marginTop: 14, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
+              background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-secondary)',
+            }}>
+              <span><strong style={{ color: 'var(--text-primary)' }}>Xero</strong> · {xeroNotice(status)}</span>
+              <Link to="/setup" className="btn btn-outline btn-sm">Connect in Setup</Link>
+            </div>
+          )}
         </div>
 
         {/* Auto-process + rescan */}
@@ -450,9 +463,7 @@ export default function Dashboard() {
                 Auto-submit to Xero
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                {settings.autoProcess
-                  ? 'Invoices are pushed to Xero automatically on detection'
-                  : 'Invoices are stored for manual review — not sent to Xero'}
+                {autoSubmitText(settings.autoProcess, status?.xeroConnected)}
               </div>
             </div>
             <Toggle

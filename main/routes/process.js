@@ -71,6 +71,9 @@ router.get('/status', requireAuth, (req, res, next) => {
       lastActivity: _lastProcessedAt(userId),
       setupRequired: !setup.ready,
       missingConfig: setup.missingConfig,
+      // Whether posting can happen at all: without it, what the watcher reads
+      // waits in AR & AP until Xero is connected and someone posts it.
+      xeroConnected: setup.xero.configured,
       queue,
       xero,
       // Why the watcher is or is not watching (see watcher-registry getStatus):
@@ -81,9 +84,16 @@ router.get('/status', requireAuth, (req, res, next) => {
 });
 
 // The parts of setup a watcher cannot run without. The LLM key is optional.
+// What the watcher itself needs: a mailbox, and nothing else. Not Xero:
+// what it reads is stored in AR & AP whether or not Xero is connected, and
+// posting is a step of its own (invoice-handler's auto-submit waits for a
+// connection, and Post to Xero says when there is none), so an account
+// without Xero can still collect its documents. It used to need Xero, and
+// Start answered "configure xero" to an account that only wanted its inbox
+// read. Not the LLM key either: a template email is read without one, and a
+// PDF it cannot read is stored for review.
 function _missingForWatcher(userId) {
-  const setup = getSetupStatus(userId);
-  return setup.ready ? [] : setup.missingConfig.filter(s => s !== 'llm');
+  return getSetupStatus(userId).imap.configured ? [] : ['imap'];
 }
 
 // Starts this account's watcher and the worker behind it. Shared by Start and

@@ -33,6 +33,7 @@ describe('invoice routes and the Xero status', () => {
     statusSync.syncUser.mockReset().mockResolvedValue({ checked: 5, updated: 2, failedTenants: 1 });
 
     testUser = await users.createUser(`xst${++n}-${Date.now()}@test.com`, 'password123', 'user');
+    users.saveUserConfig(testUser.id, { XERO_CONNECTION_TYPE: 'oauth' });   // posting needs a connection
     store    = require('../utils/invoice-store').forUser(testUser.id);
 
     app = express();

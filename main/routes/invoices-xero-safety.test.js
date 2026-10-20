@@ -25,6 +25,7 @@ describe('invoice routes and records in Xero', () => {
     const invoiceRoutes = require('./invoices');
 
     testUser = await users.createUser(`xs${Date.now()}@test.com`, 'password123', 'user');
+    users.saveUserConfig(testUser.id, { XERO_CONNECTION_TYPE: 'oauth' });   // posting needs a connection
     store    = invoiceStore.forUser(testUser.id);
 
     app = express();

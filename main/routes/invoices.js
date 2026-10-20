@@ -4,7 +4,7 @@ const { decodeBase64 } = require('../utils/base64');
 const jwt          = require('jsonwebtoken');
 const { requireAuth, sessionUser, jwtSecret } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
-const { isActive }  = require('../utils/users');
+const { isActive, getSetupStatus } = require('../utils/users');
 const invoiceStore = require('../utils/invoice-store');
 const pdfStore     = require('../utils/pdf-store');
 const receiptStore = require('../utils/receipt-store');
@@ -451,6 +451,18 @@ router.patch('/:id', requireAuth, asyncHandler(async (req, res, next) => {
 // Null when it may go. Otherwise both forms of the answer: what the single
 // route replies ({ code, error, extra }) and what a row in a bulk result says
 // ({ outcome, message }, with skipped when there is nothing left to do).
+// Nothing can be posted while this account has no Xero connection. The
+// watcher runs without one and stores what it reads, so a person can press
+// Post to Xero on an account that cannot send; that used to leave the row
+// pending with nothing said. Asked before any row is looked at.
+const XERO_NOT_CONNECTED = {
+  code: 409, error: "Xero isn't connected. Connect it in Setup, then post.", extra: { xeroConnected: false },
+  outcome: "Xero isn't connected", message: 'Connect it in Setup, then post.',
+};
+function xeroRefusal(userId) {
+  return getSetupStatus(userId).xero.configured ? null : XERO_NOT_CONNECTED;
+}
+
 function submitRefusal(store, inv, { force = false } = {}) {
   if (!SUBMITTABLE_STATUSES.has(inv.status)) {
     const why = inv.status === 'duplicate'
@@ -511,7 +523,7 @@ router.post('/:id/submit', requireAuth, asyncHandler(async (req, res) => {
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
 
   const force   = req.body?.force === true;
-  const refusal = submitRefusal(invoiceStore.forUser(userId), inv, { force });
+  const refusal = xeroRefusal(userId) || submitRefusal(invoiceStore.forUser(userId), inv, { force });
   if (refusal) return res.status(refusal.code).json({ error: refusal.error, ...refusal.extra });
 
   // Fire submission in background — return 202 immediately so the UI doesn't hang.
@@ -705,6 +717,8 @@ router.post('/submit-all', requireAuth, asyncHandler(async (req, res) => {
   if (!Array.isArray(ids) || !ids.length || !ids.every(id => typeof id === 'string' && id)) {
     return res.status(400).json({ error: 'ids must be a non-empty list of invoice ids' });
   }
+  const notConnected = xeroRefusal(userId);
+  if (notConnected) return res.status(notConnected.code).json({ error: notConnected.error, ...notConnected.extra });
 
   const store   = invoiceStore.forUser(userId);
   const unique  = [...new Set(ids)];
@@ -907,6 +921,8 @@ router.post('/bulk/send', requireAuth, asyncHandler(async (req, res) => {
   const { ids, error } = _bulkIds(req.body);
   if (error) return res.status(400).json({ error });
   const userId  = req.user.id;
+  const notConnected = xeroRefusal(userId);
+  if (notConnected) return res.status(notConnected.code).json({ error: notConnected.error, ...notConnected.extra });
   const store   = invoiceStore.forUser(userId);
   const waiting = _sendQueue(userId).waiting;
   const results = [];

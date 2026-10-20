@@ -68,3 +68,22 @@ test('the recent table names an allowance claim by its kind and shows the source
   expect(table).toContain('{sourceWords(inv.source)}');
   expect(table).not.toContain("{inv.source || '—'}");
 });
+
+// The watcher runs without a Xero connection (routes/process.js), so the page
+// says what happens to what it reads, and auto-submit says it is waiting.
+test('with no Xero connection the watcher card says documents wait in AR & AP, and auto-submit says it is waiting', () => {
+  const a = load('pages/automation.js');
+  expect(a.xeroNotice({ xeroConnected: false })).toBe('Not connected: documents wait in AR & AP until you post them.');
+  expect(a.xeroNotice({ xeroConnected: true })).toBeNull();
+  expect(a.xeroNotice({})).toBeNull();          // a server from before the field: say nothing
+  expect(a.xeroNotice(null)).toBeNull();
+  expect(a.autoSubmitText(false, false)).toBe('Invoices are stored for manual review — not sent to Xero');
+  expect(a.autoSubmitText(true, false)).toBe("On, but Xero isn't connected: invoices wait in AR & AP until it is");
+  expect(a.autoSubmitText(true, true)).toBe('Invoices are pushed to Xero automatically on detection');
+  expect(a.autoSubmitText(true, undefined)).toBe('Invoices are pushed to Xero automatically on detection');
+
+  const page = read('pages/Dashboard.jsx');
+  expect(page).toMatch(/\{xeroNotice\(status\) && \(/);
+  expect(page).toContain('<Link to="/setup" className="btn btn-outline btn-sm">Connect in Setup</Link>');
+  expect(page).toContain('{autoSubmitText(settings.autoProcess, status?.xeroConnected)}');
+});

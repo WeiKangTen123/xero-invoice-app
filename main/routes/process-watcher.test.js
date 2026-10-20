@@ -55,6 +55,27 @@ describe('routes/process — the watcher survives a restart, and says why it sto
   const status = u => request(serverFor(app)).get('/api/process/status').set('Authorization', auth(u));
   const enabledInDb = id => db.prepare('SELECT watcher_enabled FROM user_settings WHERE user_id = ?').get(id)?.watcher_enabled;
 
+  // The watcher needs a mailbox, not Xero: what it reads waits in AR & AP
+  // until Xero is connected and someone posts it. Start used to answer
+  // "configure xero" to an account that only wanted its inbox read.
+  describe('Start needs only the mailbox', () => {
+    test('an account with a mailbox and no Xero starts, and its status says Xero is not connected', async () => {
+      const u = await users.createUser(`mail${Date.now()}-${seq++}@gmail.com`, 'password123', 'user');
+      users.saveUserConfig(u.id, { IMAP_PASS: 'app-pw' });
+      await post(u, 'start').expect(200);
+      expect(registry.isRunning(u.id)).toBe(true);
+      expect((await status(u).expect(200)).body).toMatchObject({ xeroConnected: false });
+    });
+
+    test('an account with no mailbox is still refused, naming only the mailbox', async () => {
+      const u = await users.createUser(`nomail${Date.now()}-${seq++}@test.com`, 'password123', 'user');
+      users.saveUserConfig(u.id, { XERO_CLIENT_ID: 'cid', XERO_CLIENT_SECRET: 'csecret' });
+      const res = await post(u, 'start').expect(400);
+      expect(res.body).toMatchObject({ error: 'Setup incomplete — configure imap before starting', missingConfig: ['imap'] });
+      expect(registry.isRunning(u.id)).toBe(false);
+    });
+  });
+
   describe('the owner\'s intent is saved', () => {
     test('Start saves it, Stop clears it', async () => {
       const u = await makeUser();
@@ -205,7 +226,7 @@ describe('routes/process — the watcher survives a restart, and says why it sto
         const res = await status(u).expect(200);
         expect(Object.keys(res.body).sort()).toEqual([
           'invoiceCount', 'lastActivity', 'lastScan', 'missingConfig', 'queue', 'running',
-          'setupRequired', 'startedAt', 'watcher', 'xero',
+          'setupRequired', 'startedAt', 'watcher', 'xero', 'xeroConnected',
         ]);
         expect(res.body.xero).toEqual({ pending: 2, submitting: 1, posted: 3, error: 1, reviewNeeded: 1, reviewed: 0 });
         expect(res.body).toMatchObject({ running: false, setupRequired: false, invoiceCount: 9 });
