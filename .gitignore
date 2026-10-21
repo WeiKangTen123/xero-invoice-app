@@ -40,3 +40,6 @@ sample_expenses/
 # Private business documents and real claim samples: never in the repo again (history was rewritten to remove them on 17 Sep 2026).
 report/
 sample_expenses/
+
+# Working guides kept on the owner's machine only (setup notes, internal how-tos).
+guide/
