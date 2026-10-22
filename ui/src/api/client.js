@@ -55,6 +55,18 @@ function storeRenewal(res) {
   if (keep !== stored) localStorage.setItem('token', keep);
 }
 
+// The pages open without a session (App.jsx): nothing on them needs one, so
+// a session that has ended is no reason to leave them. The set-password page
+// in particular: its address can still carry an invite or reset token in the
+// fragment while the session is checked, and sending it on as ?next= would
+// put the token in a URL the server logs.
+const PUBLIC_PATHS = ['/login', '/capture', '/set-password', '/forgot-password'];
+
+export function isPublicPath(path) {
+  const p = String(path || '');
+  return PUBLIC_PATHS.some(base => p === base || p.startsWith(`${base}/`) || p.startsWith(`${base}?`));
+}
+
 function clearSession() {
   localStorage.removeItem('token');
   // Hard-navigate to login so all React state is wiped — avoids stale UI
@@ -64,7 +76,7 @@ function clearSession() {
   // on it — tab, filters and all — instead of on the dashboard. Login checks it
   // is a path on this site before following it (utils/returnTo.js).
   const path = window.location.pathname;
-  if (!path.startsWith('/login') && !path.startsWith('/capture')) {
+  if (!isPublicPath(path)) {
     const here = `${path}${window.location.search}${window.location.hash}`;
     window.location.href = here === '/' ? '/login' : `/login?next=${encodeURIComponent(here)}`;
   }
@@ -79,7 +91,7 @@ function clearSession() {
 // it in a loop), as are the pages with no session to gate.
 function requirePasswordChange() {
   const path = window.location.pathname;
-  if (path.startsWith('/account') || path.startsWith('/login') || path.startsWith('/capture')) return;
+  if (path.startsWith('/account') || isPublicPath(path)) return;
   window.location.href = SET_PASSWORD_PATH;
 }
 

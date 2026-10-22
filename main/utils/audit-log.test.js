@@ -308,6 +308,25 @@ describe('audit trail (store, context, retention)', () => {
       expect(describeAdminEvent('session.revoke', { sid: 'abc' }, 'jane@test.com')).toBe('Ended a session of jane@test.com');
     });
 
+    test('invite and reset links have labels and sentences', () => {
+      const { ADMIN_ACTIONS, describeAdminEvent } = auditLog;
+      for (const a of ['user.invite', 'user.invite_revoke', 'user.reset_link', 'password.reset_requested', 'password.set_via_link']) {
+        expect(ADMIN_ACTIONS[a]).toEqual(expect.any(String));
+      }
+      const say = (action, details) => describeAdminEvent(action, details, 'jane@test.com');
+      expect(say('user.create', { role: 'user', copied: [], invited: true, emailed: true })).toBe('Created jane@test.com and invited them by email');
+      expect(say('user.create', { role: 'user', copied: [], invited: true, emailed: false })).toBe('Created jane@test.com and invited them (link handed over, not emailed)');
+      expect(say('user.create', { role: 'user', copied: [], temporary: true })).toBe('Created jane@test.com');
+      expect(say('user.invite', { emailed: true })).toBe('Sent jane@test.com a new invite by email');
+      expect(say('user.invite_revoke', { revoked: 1 })).toBe('Revoked the invite of jane@test.com');
+      expect(say('user.reset_link', { emailed: false })).toBe('Sent jane@test.com a password reset link (link handed over, not emailed)');
+      expect(say('password.reset_requested', { emailed: true })).toBe('Asked for a password reset; a link was emailed');
+      expect(say('password.reset_requested', { emailed: false, reason: 'disabled' })).toBe('Asked for a password reset; no email was sent (the account is disabled)');
+      expect(say('password.reset_requested', { emailed: false, reason: 'mail_off' })).toBe('Asked for a password reset; no email was sent (email is not set up)');
+      expect(say('password.set_via_link', { purpose: 'invite' })).toBe('Accepted the invite and chose a password');
+      expect(say('password.set_via_link', { purpose: 'reset' })).toBe('Set a new password from a reset link');
+    });
+
     test('an admin switching their own data source has a label and a sentence', () => {
       const { ADMIN_ACTIONS, describeAdminEvent } = auditLog;
       expect(ADMIN_ACTIONS['account.data_source']).toBe('Switched data source');
@@ -397,6 +416,15 @@ describe('audit trail (store, context, retention)', () => {
       const left = db.prepare('SELECT action, at FROM admin_events ORDER BY id').all();
       expect(left.filter(r => r.at < ago(90)).map(r => r.action)).toEqual(['user.sign_out', 'password.change']);
       expect(left.filter(r => r.at > ago(90))).toHaveLength(kinds.length);
+    });
+
+    // Both hold the address and browser of whoever was on the sign-in page.
+    test('a reset asked for and a password set from a link go after 90 days too; the admin\'s link events stay', () => {
+      const ago = days => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      const ins = db.prepare('INSERT INTO admin_events (at, action) VALUES (?, ?)');
+      for (const action of ['password.reset_requested', 'password.set_via_link', 'user.invite', 'user.reset_link']) ins.run(ago(91), action);
+      expect(auditLog.pruneOldEvents()).toEqual({ invoices: 0, admin: 2, sessions: 0 });
+      expect(db.prepare('SELECT action FROM admin_events ORDER BY id').all().map(r => r.action)).toEqual(['user.invite', 'user.reset_link']);
     });
 
     test('the sessions are pruned with the events, 30 days after they were last used', () => {

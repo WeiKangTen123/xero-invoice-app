@@ -303,12 +303,18 @@ function touchLastSeen(userId) {
 // Xero and runs against the generated Demo Company instead (users.is_demo;
 // see isDemoUser). An admin may later switch their own account either way
 // (setDemo).
+//
+// `invited` makes an account with no password at all (INVITED_PASSWORD,
+// which nothing matches): the person chooses one through the invite link
+// (utils/auth-tokens.js, routes/auth.js set-password) and cannot sign in
+// before. `password` is ignored then, and nothing about a password is dated.
 const REGISTRATION_CLOSED_MESSAGE = 'Public registration is disabled. Contact your administrator.';
-async function createUser(email, password, role = 'user', { temporary = false, demo = false, firstOnly = false } = {}) {
+async function createUser(email, password, role = 'user', { temporary = false, demo = false, firstOnly = false, invited = false } = {}) {
   const problem = emailProblem(email);
   if (problem) throw _refusal(problem, 'EMAIL_INVALID');
   const address = normalizeEmail(email);
-  const hash    = await hashPassword(password);
+  const hash    = invited ? INVITED_PASSWORD : await hashPassword(password);
+  const marked  = temporary && !invited;
 
   const create = db.transaction(() => {
     if (firstOnly && hasUsers()) throw _refusal(REGISTRATION_CLOSED_MESSAGE, 'REGISTRATION_CLOSED');
@@ -329,11 +335,12 @@ async function createUser(email, password, role = 'user', { temporary = false, d
       password:  hash,
       role:      actualRole,
       createdAt: new Date(now).toISOString(),
-      mustChangePassword:    temporary ? 1 : 0,
-      tempPasswordExpiresAt: temporary ? new Date(now + TEMP_PASSWORD_TTL_MS).toISOString() : null,
+      mustChangePassword:    marked ? 1 : 0,
+      tempPasswordExpiresAt: marked ? new Date(now + TEMP_PASSWORD_TTL_MS).toISOString() : null,
       isDemo:    demo ? 1 : 0,
-      // The account's first password was set when the account was made.
-      passwordChangedAt: new Date(now).toISOString(),
+      // The account's first password was set when the account was made;
+      // an invited account has none until the person chooses it.
+      passwordChangedAt: invited ? null : new Date(now).toISOString(),
     };
 
     try {
@@ -459,6 +466,18 @@ function passwordProblem(password, email = null) {
 const ARGON2_OPTIONS       = { memoryCost: 19456, timeCost: 2, parallelism: 1 };
 const BCRYPT_FALLBACK_COST = 12;
 
+// What an account made by invite holds in place of a hash until its owner
+// chooses a password through the link (createUser `invited`). Not a hash of
+// anything, so verifyPassword never matches it, whatever is typed: the
+// account cannot be signed in to before the invite is accepted.
+const INVITED_PASSWORD = '!';
+
+// Whether this account (a raw row) was made by invite and has not yet chosen
+// its password.
+function isInvited(row) {
+  return !!row && row.password === INVITED_PASSWORD;
+}
+
 let _argon2; // the module; false once it has failed to load
 function _argon2Module() {
   if (_argon2 === undefined) {
@@ -520,8 +539,17 @@ async function _checkOne(hash, password) {
 // Whether `password` is the one `hash` was made from — in NFC, or failing
 // that as typed (`asTyped`: an old bcrypt hash of a password not in NFC,
 // worth a new hash). Never throws.
+//
+// A stored value that is no hash at all (INVITED_PASSWORD) matches nothing,
+// after the same work as a real check (verifyDummy): answered at once, a
+// sign-in to an invited account would say by its speed that the address has
+// an account.
 async function _check(hash, password) {
   if (typeof hash !== 'string' || typeof password !== 'string') return { ok: false, asTyped: false };
+  if (!_isBcrypt(hash) && !_argon2Parts(hash)) {
+    await verifyDummy(password);
+    return { ok: false, asTyped: false };
+  }
   const nfc = password.normalize('NFC');
   if (await _checkOne(hash, nfc)) return { ok: true, asTyped: false };
   if (nfc !== password && await _checkOne(hash, password)) return { ok: true, asTyped: true };
@@ -718,14 +746,46 @@ async function setPassword(id, newPassword, { ifCurrentHash = null, temporary = 
       UPDATE users SET password = ?, sessions_valid_from = ?, must_change_password = ?, temp_password_expires_at = ?, password_changed_at = ?
       WHERE id = ? AND password = ?
     `).run(hash, at, marks.must, marks.expires, at, id, ifCurrentHash);
+    if (changes > 0) voidPendingLinks(id);
     return changes > 0;
   }
   db.prepare(`
     UPDATE users SET password = ?, sessions_valid_from = ?, must_change_password = ?, temp_password_expires_at = ?, password_changed_at = ?
     WHERE id = ?
   `).run(hash, at, marks.must, marks.expires, at, id);
+  voidPendingLinks(id);
   if (temporary) unlockAccount(id);
   return true;
+}
+
+// A password the person chose through an invite or reset link
+// (routes/auth.js set-password), already hashed: the route hashes before it
+// uses up the link, since the hash is slow and the link is used up inside a
+// transaction (auth-tokens.js#consume), which cannot wait. The temporary
+// marks come off, as for any password the person chose. Signing out and
+// unlocking are the route's, in the same transaction. Synchronous.
+function setPasswordHash(id, hash) {
+  const at = new Date().toISOString();
+  db.prepare(`
+    UPDATE users SET password = ?, must_change_password = 0, temp_password_expires_at = NULL, password_changed_at = ?
+    WHERE id = ?
+  `).run(hash, at, id);
+  voidPendingLinks(id);
+}
+
+// Every invite or reset link of this account not yet used stops working
+// (auth_tokens, auth-tokens.js). Called whenever the password is set, by any
+// route: a reset link asked for last week must not still work after the
+// person has changed their password, nor an invite after an admin has set
+// one. A link already used keeps its row, so it still reads as used. Never
+// fails the password change it follows; a failure is a warning.
+function voidPendingLinks(id) {
+  try {
+    return db.prepare('DELETE FROM auth_tokens WHERE user_id = ? AND used_at IS NULL').run(String(id)).changes;
+  } catch (err) {
+    require('./logger').warn('Could not void the pending links of an account', { userId: id, error: err.message });
+    return 0;
+  }
 }
 
 // The account must choose a new password before anything else (the same gate
@@ -803,6 +863,12 @@ function getAllUsers() {
   return db.prepare('SELECT * FROM users ORDER BY created_at').all().map(sanitize);
 }
 
+// One account as the client sees it (sanitize), or null.
+function getUser(id) {
+  const row = findById(id);
+  return row ? sanitize(row) : null;
+}
+
 function updateUserRole(id, role) {
   const user = findById(id);
   if (!user) throw new Error('User not found');
@@ -837,6 +903,25 @@ function readUsers() {
 // tempPasswordExpiresAt when a temporary one stops working: for the Admin
 // page's account detail. Nothing here is a secret from the account's owner,
 // who is the only other reader (the sign-in response).
+//
+// `invited` is an account made by invite that has not chosen its password
+// yet (INVITED_PASSWORD). For one, inviteExpiresAt is when its newest unused
+// invite link runs out (null when it has none: revoked, or superseded and
+// never re-sent) and inviteExpired whether no link of it works any more, so
+// the Users list can offer to send a new one. One indexed read per invited
+// account, none for the rest.
+function _inviteState(u) {
+  const invited = u.password !== undefined ? u.password === INVITED_PASSWORD : !!u.invited;
+  if (!invited) return { invited: false, inviteExpiresAt: null, inviteExpired: false };
+  let expiresAt = null;
+  try {
+    const row = db.prepare("SELECT expires_at FROM auth_tokens WHERE user_id = ? AND purpose = 'invite' AND used_at IS NULL ORDER BY id DESC LIMIT 1")
+      .get(String(u.id));
+    expiresAt = row ? row.expires_at : null;
+  } catch (_) { /* no links table yet: no link */ }
+  return { invited: true, inviteExpiresAt: expiresAt, inviteExpired: !expiresAt || Date.parse(expiresAt) <= Date.now() };
+}
+
 function sanitize(u) {
   const lastSeenAt  = u.last_seen_at ?? u.lastSeenAt ?? null;
   const lockedUntil = lockStatus({ locked_until: u.locked_until ?? u.lockedUntil ?? null });
@@ -854,6 +939,7 @@ function sanitize(u) {
     lastLockedAt:          u.last_locked_at ?? u.lastLockedAt ?? null,
     passwordChangedAt:     u.password_changed_at ?? u.passwordChangedAt ?? null,
     tempPasswordExpiresAt: u.temp_password_expires_at ?? u.tempPasswordExpiresAt ?? null,
+    ..._inviteState(u),
   };
 }
 
@@ -935,13 +1021,13 @@ function ensureUserDirectories() {
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
   normalizeEmail, emailProblem, EMAIL_MAX_LENGTH,
-  passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, isDemoUser, setDemo,
-  requirePasswordChange, passwordChangeReason,
+  passwordProblem, verifiedPasswordHash, setPassword, setPasswordHash, voidPendingLinks, invalidateSessions, setDisabled, isActive, isDemoUser, setDemo,
+  requirePasswordChange, passwordChangeReason, isInvited, INVITED_PASSWORD,
   hashPassword, verifyPassword, needsRehash, verifyDummy, ARGON2_OPTIONS,
   PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH,
   lockStatus, lockAfterFailure, recordFailedLogin, recordSuccessfulLogin, unlockAccount, temporaryPasswordExpired,
   LOCK_AFTER_FAILURES, LOCK_BASE_MS, LOCK_MAX_MS, TEMP_PASSWORD_TTL_MS,
-  getAllUsers, updateUserRole, deleteUser, readUsers,
+  getAllUsers, getUser, updateUserRole, deleteUser, readUsers,
   getUserConfig, saveUserConfig, getUserDefaults, defaultsFrom, getSetupStatus, getImapSettings, ensureUserDirectories,
   checkAllowanceSettings, allowanceSettingsFrom, getAllowanceSettings, formatRate,
   getGeminiKeys, addGeminiKey, removeGeminiKey,

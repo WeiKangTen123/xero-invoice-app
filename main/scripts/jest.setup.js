@@ -1,10 +1,13 @@
 // Tests must never write into the real data folder or the real logs. Every
 // file-writing module resolves its base through utils/paths.js, which reads
-// DATA_DIR at load; the logger goes silent under NODE_ENV=test.
+// DATA_DIR at load; the logger goes silent under NODE_ENV=test. Nor into the
+// real main/.env, which saving a server-wide setting rewrites
+// (routes/setup.js): ENV_FILE points that at a file of the test's own.
 {
   const fs = require('fs'), os = require('os'), path = require('path');
   process.env.DATA_DIR  = fs.mkdtempSync(path.join(os.tmpdir(), 'xero-test-'));
   process.env.LOG_LEVEL = 'silent';
+  process.env.ENV_FILE  = path.join(process.env.DATA_DIR, 'test.env');
 }
 
 // Runs before every test file (jest "setupFiles").

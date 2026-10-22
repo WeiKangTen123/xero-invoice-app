@@ -57,14 +57,28 @@ describe('jobs/account-retention', () => {
       const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
       jest.spyOn(auditLog, 'pruneOldEvents').mockImplementation(() => { throw new Error('no such table: admin_events'); });
       const sweep = jest.spyOn(cleanup, 'sweepOrphanFolders').mockReturnValue({ removed: ['x'], kept: [] });
-      expect(job.runOnce()).toEqual({ events: null, folders: { removed: ['x'], kept: [] } });
+      expect(job.runOnce()).toEqual({ events: null, links: 0, folders: { removed: ['x'], kept: [] } });
       expect(sweep).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith('Daily prune of old events and sessions failed', { error: 'no such table: admin_events' });
 
       auditLog.pruneOldEvents.mockReturnValue({ invoices: 0, admin: 0, sessions: 0 });
       sweep.mockImplementation(() => { throw new Error('EACCES'); });
-      expect(job.runOnce()).toEqual({ events: { invoices: 0, admin: 0, sessions: 0 }, folders: { removed: [], kept: [] } });
+      expect(job.runOnce()).toEqual({ events: { invoices: 0, admin: 0, sessions: 0 }, links: 0, folders: { removed: [], kept: [] } });
       expect(warn).toHaveBeenCalledWith('Daily sweep for the data folders of deleted accounts failed', { error: 'EACCES' });
+
+      jest.spyOn(require('../utils/auth-tokens'), 'prune').mockImplementation(() => { throw new Error('no such table: auth_tokens'); });
+      expect(job.runOnce().links).toBeNull();
+      expect(warn).toHaveBeenCalledWith('Daily prune of old invite and reset links failed', { error: 'no such table: auth_tokens' });
+    });
+
+    test('prunes invite and reset links used or run out more than 30 days ago', () => {
+      const authTokens = require('../utils/auth-tokens');
+      const live = authTokens.issue(owner.id, 'reset', { ttlMs: authTokens.RESET_TTL_MS });
+      const old  = authTokens.issue(owner.id, 'invite', { ttlMs: authTokens.INVITE_TTL_MS, now: Date.now() - 40 * DAY });
+      db.prepare("UPDATE auth_tokens SET used_at = ? WHERE purpose = 'invite'").run(new Date(Date.now() - 31 * DAY).toISOString());
+      expect(job.runOnce().links).toBe(1);
+      expect(db.prepare('SELECT token_hash FROM auth_tokens').all().map(r => r.token_hash)).toEqual([authTokens.hashToken(live)]);
+      expect(old).not.toBe(live);
     });
   });
 

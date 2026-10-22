@@ -6,7 +6,7 @@ const { requireAuth, requireAdmin } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
 const {
   getUserConfig, saveUserConfig, getSetupStatus, getImapSettings, isDemoUser, setDemo,
-  getGeminiKeys, addGeminiKey, removeGeminiKey, checkAllowanceSettings, defaultsFrom, timezoneProblem,
+  getGeminiKeys, addGeminiKey, removeGeminiKey, checkAllowanceSettings, defaultsFrom, timezoneProblem, emailProblem,
 } = require('../utils/users');
 const logger  = require('../utils/logger');
 const { automaticImapValues, resolveImapSettings } = require('../email/imap-settings');
@@ -43,6 +43,23 @@ const FIELD_LABELS = {
   MILEAGE_ACCOUNT_CODE:  'Mileage account',
   PER_DIEM_RATE:         'Per diem daily rate',
   PER_DIEM_ACCOUNT_CODE: 'Per diem account',
+  SMTP_HOST:             'Mail server (SMTP)',
+  SMTP_PORT:             'Port',
+  SMTP_USER:             'Send from (email address)',
+  SMTP_PASS:             'Password',
+  SMTP_FROM_NAME:        'Sender name',
+  APP_BASE_URL:          'App web address',
+};
+
+// A line of help under a server-wide field, for the ones whose value is not
+// obvious from the label (sent as `hint`, as the per-user ones are).
+const FIELD_HINTS = {
+  SMTP_HOST:      'For Gmail: smtp.gmail.com. Invites and password reset links are sent through this server.',
+  SMTP_PORT:      '465 (the default) or 587.',
+  SMTP_USER:      'The account the app signs in as; every email comes from this address.',
+  SMTP_PASS:      'For Gmail: an App Password (myaccount.google.com/apppasswords) for the address above.',
+  SMTP_FROM_NAME: 'The name emails come from. Blank uses "Financial Automation".',
+  APP_BASE_URL:   "This app's public address, such as https://app.example.com. Every link in an email starts with it.",
 };
 
 // What a blank account box codes the claim to, said beside the box: the claim
@@ -55,7 +72,7 @@ const ACCOUNT_FALLBACK_KEYS = new Set(['MILEAGE_ACCOUNT_CODE', 'PER_DIEM_ACCOUNT
 // the browser; a blank value on save means "keep what is stored". The page
 // used to receive the raw client secret and IMAP password on every load and
 // post them back on every save.
-const SECRET_KEYS = new Set(['XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_SECRET', 'IMAP_PASS']);
+const SECRET_KEYS = new Set(['XERO_CLIENT_SECRET', 'XERO_OAUTH_CLIENT_SECRET', 'IMAP_PASS', 'SMTP_PASS']);
 
 // How a stored secret is shown so a person can tell it is there and which
 // one it is: dots and its last four characters, as the Gemini keys are
@@ -74,11 +91,19 @@ const GLOBAL_SECTIONS = {
   // A property of this server's deployment, not of any one user — every user's own
   // Xero Web app (see USER_SECTIONS.xero above) registers this same redirect URI.
   xeroOAuth: ['XERO_OAUTH_REDIRECT_URI'],
+  // The one mail account the app sends invites and password reset links from
+  // (utils/mailer.js), and the public address the links start with. Read
+  // from process.env on every send, so a save here takes effect at once.
+  email:     ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM_NAME', 'APP_BASE_URL'],
 };
 
-const ENV_FILE = path.join(__dirname, '../.env');
+// ENV_FILE lets the tests point at a throwaway file instead of the real
+// main/.env, which a save here rewrites (see db/index.js for the same
+// DB_PATH pattern). Read on each use, so a test can set it after loading.
+const envFilePath = () => process.env.ENV_FILE || path.join(__dirname, '../.env');
 
 function readEnvFile() {
+  const ENV_FILE = envFilePath();
   try {
     if (!fs.existsSync(ENV_FILE)) return {};
     const lines = fs.readFileSync(ENV_FILE, 'utf8').split('\n');
@@ -94,7 +119,12 @@ function readEnvFile() {
   } catch { return {}; }
 }
 
+// Writes the values to main/.env, which the next boot loads (index.js), and
+// to process.env, which every reader of them consults at the time of use
+// (xero/oauth.js, utils/mailer.js, notify.js), so a saved value works at once
+// with no restart. A blank value is not written: it keeps what is there.
 function writeEnvFile(updates) {
+  const ENV_FILE = envFilePath();
   // Read the raw file to preserve blank lines and # comment lines.
   // Rewrite changed values in place; append new keys at the end.
   let raw = '';
@@ -155,15 +185,22 @@ router.get('/', requireAuth, (req, res) => {
     }
   }
 
-  // Global LLM section — visible to all but only writable by admin
+  // Server-wide sections — visible to all but only writable by admin. A
+  // secret among them (the mail password) is masked like the per-user ones,
+  // and for anyone but an admin shows only that it is there.
+  const admin = req.user.role === 'admin';
   for (const [section, keys] of Object.entries(GLOBAL_SECTIONS)) {
     result[section] = {};
     for (const key of keys) {
-      const val = globalEnv[key] || '';
+      const val = String(globalEnv[key] || '');
+      const secret = SECRET_KEYS.has(key);
       result[section][key] = {
-        value:    val,
+        value:    secret ? '' : val,
         isSet:    val.length > 0,
-        readOnly: req.user.role !== 'admin',
+        readOnly: !admin,
+        ...(secret && { masked: admin ? maskSecret(val) : (val ? MASK_DOTS : '') }),
+        ...(FIELD_LABELS[key] && { label: FIELD_LABELS[key] }),
+        ...(FIELD_HINTS[key] && { hint: FIELD_HINTS[key] }),
       };
     }
   }
@@ -187,6 +224,51 @@ function mailboxMovedWithoutPassword(userId, loginEmail, patch) {
   const after = resolveImapSettings({ ...config, ...patch }, loginEmail);
   const same  = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
   return !same(before.host, after.host) || !same(before.user, after.user);
+}
+
+// The server-wide values in a save, checked, as checkAllowanceSettings checks
+// the rates: { values, errors }, `values` trimmed and normalised, `errors`
+// one { field, error } per value refused. Every value is one line: main/.env
+// is a line per setting, so a line break in one would write a setting of the
+// sender's choosing. The mail settings must be usable as what they are: a
+// server name, a port, the address mail is sent from, and the app's address,
+// kept as its origin (scheme, host and port), since every link adds its own
+// path to it.
+function checkGlobalSettings(patch) {
+  const values = {};
+  const errors = [];
+  for (const [key, v] of Object.entries(patch)) {
+    if (v !== null && typeof v === 'object') { errors.push({ field: key, error: `${FIELD_LABELS[key] || key} must be text` }); continue; }
+    const raw = String(v ?? '');
+    if (/[\r\n]/.test(raw)) { errors.push({ field: key, error: `${FIELD_LABELS[key] || key} must be on one line` }); continue; }
+    // Trimmed, the password too: main/.env keeps no space at either end of
+    // a value, so one kept now would be gone after the next restart.
+    values[key] = raw.trim();
+  }
+  const blank = key => values[key] === undefined || values[key] === '';
+  if (!blank('SMTP_HOST') && !/^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(values.SMTP_HOST)) {
+    errors.push({ field: 'SMTP_HOST', error: 'Mail server must be a server name, such as smtp.gmail.com' });
+  }
+  if (!blank('SMTP_PORT')) {
+    const n = Number(values.SMTP_PORT);
+    if (!/^\d+$/.test(values.SMTP_PORT) || n < 1 || n > 65535) errors.push({ field: 'SMTP_PORT', error: 'Port must be a number such as 465 or 587' });
+  }
+  if (!blank('SMTP_USER') && emailProblem(values.SMTP_USER)) {
+    errors.push({ field: 'SMTP_USER', error: 'Send from must be the email address the app signs in as' });
+  }
+  if (!blank('SMTP_FROM_NAME') && values.SMTP_FROM_NAME.length > 100) {
+    errors.push({ field: 'SMTP_FROM_NAME', error: 'Sender name must be at most 100 characters' });
+  }
+  if (!blank('APP_BASE_URL')) {
+    let url = null;
+    try { url = new URL(values.APP_BASE_URL); } catch { /* refused below */ }
+    if (!url || (url.protocol !== 'https:' && url.protocol !== 'http:')) {
+      errors.push({ field: 'APP_BASE_URL', error: 'App web address must start with https://, such as https://app.example.com' });
+    } else {
+      values.APP_BASE_URL = url.origin;
+    }
+  }
+  return { values, errors };
 }
 
 // ── POST /api/setup — save updated values ─────────────────────────────────────
@@ -214,8 +296,11 @@ router.post('/', requireAuth, (req, res) => {
       if (problem) errors.push({ field: 'TIMEZONE', error: problem });
       else checkedPatch.TIMEZONE = String(userPatch.TIMEZONE ?? '').trim();
     }
+    const checkedGlobal = checkGlobalSettings(globalPatch);
+    errors.push(...checkedGlobal.errors);
     if (errors.length) return res.status(400).json({ error: errors[0].error, errors });
     Object.assign(userPatch, checkedPatch);
+    Object.assign(globalPatch, checkedGlobal.values);
 
     const cleared = [];
     if (mailboxMovedWithoutPassword(req.user.id, req.user.email, userPatch)) {
@@ -382,6 +467,24 @@ router.put('/data-source', requireAuth, (req, res) => {
   logger.info('Data source switched', { from, to: source, by: req.user.email });
   res.json(answer);
 });
+
+// ── POST /api/setup/test/email — send a test email (admin) ───────────────────
+// With the server-wide mail settings as saved (Setup -> Email), to the
+// admin's own sign-in address. Answers { success, message }; a send that
+// fails is a 400 with what the mail server said (never the password).
+router.post('/test/email', requireAdmin, asyncHandler(async (req, res) => {
+  const mailer = require('../utils/mailer');
+  if (!mailer.isConfigured()) {
+    const message = 'Email is not set up yet: fill in the mail server, the address to send from and its password, save, then test.';
+    return res.status(400).json({ success: false, message, error: message });
+  }
+  const to   = req.user.email;
+  const mail = require('../utils/mail-templates').test({ to, appUrl: mailer.appBaseUrl() });
+  const sent = await mailer.send({ to, ...mail });
+  if (!sent.sent) return res.status(400).json({ success: false, message: sent.error, error: sent.error });
+  logger.info('Test email sent', { to });
+  res.json({ success: true, message: `Test email sent to ${to} — check the inbox (and spam).` });
+}));
 
 // ── POST /api/setup/test/imap — test this user's IMAP connection ──────────────
 router.post('/test/imap', requireAuth, asyncHandler(async (req, res) => {

@@ -26,8 +26,11 @@ const RETENTION_DAYS = 730;
 // owner does not recognise. Which actions count: SIGN_IN_ACTION_SQL.
 const SIGN_IN_RETENTION_DAYS = 90;
 // A first-run registration (user.register) holds the same address and
-// browser, so it goes with them.
-const SIGN_IN_ACTION_SQL = "(action LIKE 'login.%' OR action = 'logout' OR action LIKE 'session.%' OR action = 'user.register')";
+// browser, so it goes with them, and so do a reset asked for on the sign-in
+// page and a password set through a link (password.reset_requested,
+// password.set_via_link).
+const SIGN_IN_ACTION_SQL = "(action LIKE 'login.%' OR action = 'logout' OR action LIKE 'session.%' OR action = 'user.register'"
+  + " OR action IN ('password.reset_requested', 'password.set_via_link'))";
 
 // One page of history. The review page shows a record's whole life in one
 // page nearly always; the cap is what keeps a pathological record (an import
@@ -183,6 +186,19 @@ const ADMIN_ACTIONS = {
   'user.watcher_stop':     'Stopped a mailbox watcher',
   'report.resolve':        'Resolved a report',
   'password.change':       'Changed own password',
+  // Links that let a person choose a password (utils/auth-tokens.js). An
+  // admin's: a new invite for an account still waiting on one (details
+  // { emailed, expiresAt }), revoking it (details { revoked }: how many
+  // links), and a reset link (details { emailed, expiresAt }).
+  'user.invite':           'Sent an invite',
+  'user.invite_revoke':    'Revoked an invite',
+  'user.reset_link':       'Sent a password reset link',
+  // The person's own, from the sign-in page: a reset asked for (no actor;
+  // details { ip, ua, emailed, reason } — why no email went: disabled,
+  // invited, mail_off or send_failed), and a password set through either kind
+  // of link (details { purpose, ip, ua }).
+  'password.reset_requested': 'Asked for a password reset',
+  'password.set_via_link':    'Set a password from a link',
   // An admin moving their own account between Xero and sample data
   // (routes/setup.js data-source); details { from, to }: 'xero' | 'demo'.
   'account.data_source':   'Switched data source',
@@ -211,6 +227,17 @@ const REFUSED_REASONS = {
   expired_temporary: 'temporary password expired',
 };
 
+// Why a reset asked for on the sign-in page sent no email, in its sentence.
+const NO_RESET_EMAIL_REASONS = {
+  disabled:    'the account is disabled',
+  invited:     'the invite has not been accepted yet',
+  mail_off:    'email is not set up',
+  send_failed: 'the email could not be sent',
+};
+
+// How an invite or reset link reached the person, for its sentence.
+const _delivered = d => (d.emailed ? ' by email' : d.emailed === false ? ' (link handed over, not emailed)' : '');
+
 // A lock's length in words: minutes until it is whole hours.
 function _lockLength(minutes) {
   const m = Number(minutes);
@@ -237,7 +264,15 @@ function describeAdminEvent(action, details, targetEmail) {
     case 'logout':                return 'Signed out';
     case 'session.revoke':        return `Ended a session of ${who}`;
     case 'user.create':           return `Created ${who}${d.role === 'admin' ? ' as an admin' : ''}${d.demo ? ' as a demo account' : ''}`
-      + (Array.isArray(d.copied) && d.copied.length ? ` with the ${d.copied.join(', ')} settings copied` : '');
+      + (Array.isArray(d.copied) && d.copied.length ? ` with the ${d.copied.join(', ')} settings copied` : '')
+      + (d.invited ? ` and invited them${_delivered(d)}` : '');
+    case 'user.invite':           return `Sent ${who} a new invite${_delivered(d)}`;
+    case 'user.invite_revoke':    return `Revoked the invite of ${who}`;
+    case 'user.reset_link':       return `Sent ${who} a password reset link${_delivered(d)}`;
+    case 'password.reset_requested':
+      return d.emailed ? 'Asked for a password reset; a link was emailed'
+        : `Asked for a password reset; no email was sent${NO_RESET_EMAIL_REASONS[d.reason] ? ` (${NO_RESET_EMAIL_REASONS[d.reason]})` : ''}`;
+    case 'password.set_via_link': return d.purpose === 'invite' ? 'Accepted the invite and chose a password' : 'Set a new password from a reset link';
     case 'user.register':         return `Registered ${who}${d.role === 'admin' ? ' as the first admin' : ''}`;
     case 'user.delete':           return `Deleted ${who}${d.role === 'admin' ? ' (an admin)' : ''}`;
     case 'user.role':             return `Changed ${who} from ${d.from || '?'} to ${d.to || '?'}`;

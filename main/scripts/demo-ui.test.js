@@ -4,7 +4,7 @@ const path = require('path');
 // Demo accounts on the screen side. A demo account shows sample data this app
 // generates in place of a Xero connection (GET /api/auth/me carries `demo`).
 // There is no React test setup in this project (see login-ui.test.js), so
-// the decisions — what the Add User form sends and when it cannot be sent,
+// the decisions — what the Invite a user form sends and when it cannot be sent,
 // the badge on a demo row, which Xero card Setup shows and what it says, the
 // live updates line for data that does not change — are plain functions in
 // files with no imports, loaded whole and run here; the wiring (the form
@@ -24,18 +24,19 @@ const users   = load('pages/admin/users.js');
 const connect = load('pages/setup/connect.js');
 const live    = load('pages/xero-insights/live.js');
 
-// The form as Admin.jsx holds it: the three fields it always had, the Demo
-// account tick, the copy boxes and the sender address.
+// The form as Admin.jsx holds it: the address and the role, the Demo account
+// tick, the copy boxes and the sender address. No password: the person sets
+// their own from the invite link.
 const form = extra => ({
-  email: 'demo@nexsoss.com', password: 'twelve chars at least', role: 'user',
+  email: 'demo@nexsoss.com', role: 'user',
   demo: true, copyFrom: { llm: true, defaults: true, mailbox: true }, mailboxFilterFrom: 'bills@vendor.com',
   ...extra,
 });
 
-describe('Admin › Add User: what the form sends (addUserPayload)', () => {
+describe('Admin › Invite a user: what the form sends (addUserPayload)', () => {
   test('a demo account carries the copy ticks and the sender address, trimmed', () => {
     expect(users.addUserPayload(form({ mailboxFilterFrom: '  bills@vendor.com ' }))).toEqual({
-      email: 'demo@nexsoss.com', password: 'twelve chars at least', role: 'user',
+      email: 'demo@nexsoss.com', role: 'user',
       demo: true, copyFrom: { llm: true, defaults: true, mailbox: true }, mailboxFilterFrom: 'bills@vendor.com',
     });
     expect(users.addUserPayload(form({ copyFrom: { llm: false, defaults: true, mailbox: true } })).copyFrom)
@@ -51,7 +52,7 @@ describe('Admin › Add User: what the form sends (addUserPayload)', () => {
   test('an ordinary account copies nothing, whatever the boxes held before Demo was unticked', () => {
     const p = users.addUserPayload(form({ demo: false }));
     expect(p).toEqual({
-      email: 'demo@nexsoss.com', password: 'twelve chars at least', role: 'user',
+      email: 'demo@nexsoss.com', role: 'user',
       demo: false, copyFrom: { llm: false, defaults: false, mailbox: false },
     });
     expect(p).not.toHaveProperty('mailboxFilterFrom');
@@ -64,9 +65,16 @@ describe('Admin › Add User: what the form sends (addUserPayload)', () => {
     expect(users.addUserPayload(form({ demo: 'true' })).demo).toBe(false);
     expect(users.addUserPayload(null)).toMatchObject({ demo: false, copyFrom: { llm: false, defaults: false, mailbox: false } });
   });
+
+  // An administrator never sets anyone's password, so none is sent, even
+  // from a form that still held one.
+  test('no password travels, whatever the form held', () => {
+    expect(users.addUserPayload(form({ password: 'twelve chars at least' }))).not.toHaveProperty('password');
+    expect(users.addUserPayload(form({ demo: false, password: 'x' }))).not.toHaveProperty('password');
+  });
 });
 
-describe('Admin › Add User: why it cannot be sent yet (addUserProblem)', () => {
+describe('Admin › Invite a user: why it cannot be sent yet (addUserProblem)', () => {
   test('the mailbox copy needs the sender the demo account processes emails from', () => {
     const problem = users.addUserProblem(form({ mailboxFilterFrom: '' }));
     expect(problem).toBe('Mailbox needs a sender address: the demo account only processes emails from that sender');
@@ -100,38 +108,41 @@ describe('Admin › Add User: why it cannot be sent yet (addUserProblem)', () =>
   });
 });
 
-describe('Admin › Add User: what the banner says once it is made (createdMessage)', () => {
+describe('Admin › Invite a user: what was copied, under the result (copiedNote)', () => {
   const sent = extra => users.addUserPayload(form(extra));
 
   test('names what was copied, from the answer, in the order the boxes show', () => {
-    expect(users.createdMessage(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['mailbox', 'llm', 'defaults'] }))
-      .toBe('Demo account demo@nexsoss.com created. Copied: LLM keys, invoice defaults, mailbox.');
+    expect(users.copiedNote(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['mailbox', 'llm', 'defaults'] }))
+      .toBe('Demo account: copied LLM keys, invoice defaults, mailbox.');
   });
 
   test('names a ticked group the answer did not copy: the admin had nothing in it', () => {
-    expect(users.createdMessage(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['llm', 'defaults'] }))
-      .toBe('Demo account demo@nexsoss.com created. Copied: LLM keys, invoice defaults. Not copied, as you have none set up: mailbox.');
-    expect(users.createdMessage(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: [] }))
-      .toBe('Demo account demo@nexsoss.com created. Not copied, as you have none set up: LLM keys, invoice defaults, mailbox.');
+    expect(users.copiedNote(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['llm', 'defaults'] }))
+      .toBe('Demo account: copied LLM keys, invoice defaults. Not copied, as you have none set up: mailbox.');
+    expect(users.copiedNote(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: [] }))
+      .toBe('Demo account. Not copied, as you have none set up: LLM keys, invoice defaults, mailbox.');
     // Unticked is not "not copied".
-    expect(users.createdMessage(sent({ copyFrom: { llm: true, defaults: false, mailbox: false } }), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['llm'] }))
-      .toBe('Demo account demo@nexsoss.com created. Copied: LLM keys.');
+    expect(users.copiedNote(sent({ copyFrom: { llm: true, defaults: false, mailbox: false } }), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['llm'] }))
+      .toBe('Demo account: copied LLM keys.');
   });
 
-  test('an ordinary account says only that it was made', () => {
-    expect(users.createdMessage(sent({ demo: false }), { user: { email: 'demo@nexsoss.com', demo: false }, copied: [] }))
-      .toBe('User demo@nexsoss.com created.');
+  test('an ordinary account has nothing to say: the invite result says it all', () => {
+    expect(users.copiedNote(sent({ demo: false }), { user: { email: 'demo@nexsoss.com', demo: false }, copied: [] })).toBe('');
   });
 
   test('an answer with nothing in it falls back to what was sent', () => {
-    expect(users.createdMessage(sent(), {})).toBe('Demo account demo@nexsoss.com created. Not copied, as you have none set up: LLM keys, invoice defaults, mailbox.');
-    expect(users.createdMessage(sent({ demo: false }), undefined)).toBe('User demo@nexsoss.com created.');
-    expect(users.createdMessage(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['xero', 'llm'] }))
-      .toBe('Demo account demo@nexsoss.com created. Copied: LLM keys. Not copied, as you have none set up: invoice defaults, mailbox.');
+    expect(users.copiedNote(sent(), {})).toBe('Demo account. Not copied, as you have none set up: LLM keys, invoice defaults, mailbox.');
+    expect(users.copiedNote(sent({ demo: false }), undefined)).toBe('');
+    expect(users.copiedNote(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['xero', 'llm'] }))
+      .toBe('Demo account: copied LLM keys. Not copied, as you have none set up: invoice defaults, mailbox.');
+  });
+
+  test('the banner that said "created" is gone: the invite result takes its place', () => {
+    expect(users.createdMessage).toBeUndefined();
   });
 });
 
-describe('Admin › Add User: the copy boxes', () => {
+describe('Admin › Invite a user: the copy boxes', () => {
   test('are the three settings the route copies, and all start ticked for a demo account', () => {
     expect(users.copyBoxes()).toEqual([
       { key: 'llm',      label: 'LLM keys' },
@@ -242,15 +253,16 @@ describe('Admin › Users is wired to them', () => {
   const admin = read('pages/Admin.jsx');
 
   test('the form sends demo, copyFrom and mailboxFilterFrom through the helper, and is held while it has a problem', () => {
-    expect(admin).toMatch(/import \{ lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, createdMessage \} from '\.\/admin\/users';/);
-    expect(admin).toContain('const form = { email, password: pass, role, demo, copyFrom, mailboxFilterFrom: filterFrom };');
+    expect(admin).toMatch(/import \{ lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, copiedNote, inviteNote, revokeInviteAsk \} from '\.\/admin\/users';/);
+    expect(admin).toContain('const form = { email, role, demo, copyFrom, mailboxFilterFrom: filterFrom };');
     expect(admin).toContain('const createProblem = addUserProblem(form);');
     expect(admin).toContain('if (createProblem) { setError(createProblem); return; }');
     expect(admin).toContain('const payload = addUserPayload(form);');
     expect(admin).toContain("const created = await api.post('/admin/users', payload);");
-    // The banner says what was copied, from the answer.
-    expect(admin).toContain('showSuccess(createdMessage(payload, created), 7000);');
-    expect(admin).toMatch(/disabled=\{!!passProblem \|\| !!createProblem\}\s+title=\{createProblem \|\| undefined\}/);
+    // The result says what was copied, from the answer, under the invite.
+    expect(admin).toContain('setInvited({ email: created.user?.email || payload.email, invite: created.invite || {}, copied: copiedNote(payload, created) });');
+    expect(admin).toContain('extra={invited.copied}');
+    expect(admin).toMatch(/disabled=\{inviting \|\| !!createProblem\}\s+title=\{createProblem \|\| undefined\}/);
     // The form starts over after a create, demo block included.
     expect(admin).toContain("setDemo(false); setCopyFrom(copyDefaults()); setFilterFrom('');");
   });
@@ -271,25 +283,16 @@ describe('Admin › Users is wired to them', () => {
   });
 
   // Demo accounts were once allowed a short, permanent password; the one used
-  // turned up in this public repository. Both forms now ask every account the
-  // same rule, and every password they set is temporary.
-  test('both password forms ask the one rule, for a temporary password, demo account or not', () => {
-    expect(admin).toMatch(/import \{ passwordProblem, passwordHint, PASSWORD_MIN_LENGTH \} from '\.\/account\/password-rules';/);
-    const reset = admin.slice(admin.indexOf('function ResetPasswordDialog('), admin.indexOf('export default function Admin('));
-    expect(reset).toContain('passwordProblem(password, user.email)');
-    expect(reset).toContain('placeholder={passwordHint()}');
-    expect(reset).toContain('required minLength={PASSWORD_MIN_LENGTH} autoFocus');
-    expect(reset).toContain('>Temporary password</label>');
-
-    expect(admin).toContain('const passProblem = passwordProblem(pass, email);');
-    const create = admin.slice(admin.indexOf('{/* Create form */}'), admin.indexOf('Create account'));
-    expect(create).toContain('placeholder={passwordHint()}');
-    expect(create).toMatch(/required minLength=\{PASSWORD_MIN_LENGTH\} autoComplete="new-password"\s+style=/);
-    expect(create).toContain('>Temporary password</label>');
-    expect(create).toContain('The password you set is temporary.');
-
+  // turned up in this public repository. Then every password an admin set was
+  // temporary. Now an admin sets none: an account is invited, and a reset is
+  // a link, so the person chooses their own (invite-ui.test.js).
+  test('an admin sets no password, demo account or not: no password field, no temporary-password dialog', () => {
+    expect(admin).not.toMatch(/from '\.\/account\/password-rules'/);
+    expect(admin).not.toMatch(/passwordProblem|passwordHint|PASSWORD_MIN_LENGTH/);
+    expect(admin).not.toContain('function ResetPasswordDialog(');
+    expect(admin).not.toContain('id="admin-password"');
+    expect(admin).not.toContain('Temporary password</label>');
     expect(admin).not.toMatch(/demoRule|shortPasswordAllowed|DEMO_PASSWORD_MIN_LENGTH/);
-    expect(admin).toMatch(/toast\.success\(`Temporary password for \$\{resetting\.email\} set\./);
   });
 
   // A demo account may still have the short password from before; made an

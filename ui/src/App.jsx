@@ -18,6 +18,8 @@ import { SET_PASSWORD_PATH } from './api/client';
 import Login from './pages/Login';
 
 const Capture       = lazy(() => import('./pages/Capture'));
+const SetPassword    = lazy(() => import('./pages/SetPassword'));
+const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const Setup         = lazy(() => import('./pages/Setup'));
 const Invoices      = lazy(() => import('./pages/Invoices'));
 const InvoiceReview = lazy(() => import('./pages/InvoiceReview'));
@@ -99,6 +101,12 @@ function AppRoutes() {
           {/* Outside the auth guard on purpose: the pairing token in the URL is the
               phone's only credential, and it grants upload and nothing else. */}
           <Route path="/capture/:token" element={<Capture />} />
+          {/* Outside the auth guard too, and open signed in or not: an invite
+              or reset link (/set-password#t=…) is for someone with no
+              password to sign in with, and the token in it sets that one
+              account's password once. Forgot password asks for a link. */}
+          <Route path="/set-password" element={<SetPassword />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route
             path="/"
             element={

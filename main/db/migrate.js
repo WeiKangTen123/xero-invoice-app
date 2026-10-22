@@ -167,7 +167,9 @@ function run() {
   // password was set was never kept, and a guess would read as a fact.
   _ensureColumn('users', 'password_changed_at', 'password_changed_at TEXT');
   // The sessions table itself is schema.sql's CREATE TABLE IF NOT EXISTS,
-  // which an existing database gets on its next boot like a new one.
+  // which an existing database gets on its next boot like a new one. So is
+  // auth_tokens (invite and reset links): a new table with nothing to fill
+  // in from older rows needs no numbered step below.
   for (const [col, ddl] of [
     ['receipt_file', 'receipt_file TEXT'], ['receipt_mime', 'receipt_mime TEXT'], ['receipt_box', 'receipt_box TEXT'],
     ['receipt_page', 'receipt_page INTEGER'], ['receipt_group', 'receipt_group TEXT'], ['received_at', 'received_at TEXT'],

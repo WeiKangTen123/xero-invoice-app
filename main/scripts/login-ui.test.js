@@ -161,15 +161,20 @@ describe('Admin › Users: the lock badge (lockBadge) and the notes beside it', 
 describe('the sign-in page is wired to them', () => {
   const page = read('pages/Login.jsx');
 
-  test('after first run there is no Register tab; accounts and resets come from an administrator', () => {
+  // A forgotten password: reset by email where the server can send it
+  // (forgot-password-ui.test.js), otherwise a reset link from an administrator.
+  test('after first run there is no Register tab; accounts come from an administrator, and a reset link from them without email', () => {
     expect(page).not.toMatch(/\['login', 'register'\]/);
     expect(page).not.toMatch(/switchMode|'Register'/);
     expect(page).toMatch(/const mode = firstRun \? 'register' : 'login';/);
     expect(page).toMatch(/\{!firstRun && \(/);
     expect(page).toContain('Need an account? Ask your administrator.');
     expect(page).toContain('Forgot your password?');
-    expect(page).toContain('Ask your administrator to reset it from Users. You&apos;ll get a temporary password to sign in with, then set your own.');
+    expect(login.ASK_ADMIN_TEXT).toBe('Ask your administrator for a reset link.');
+    expect(page).toMatch(/\{!mail && forgot && \([\s\S]*?\{ASK_ADMIN_TEXT\}/);
     expect(page).toMatch(/onClick=\{\(\) => setForgot\(v => !v\)\}/);
+    // The temporary password an administrator once set is not offered any more.
+    expect(page).not.toMatch(/temporary password to sign in with|reset it from Users/);
   });
 
   test('first run still sets up the admin account, at twelve characters', () => {
@@ -262,17 +267,18 @@ describe('Admin › Users is wired to them', () => {
     expect(admin).toMatch(/await fetchUsers\(\);\s+return true;/);
   });
 
-  test('the reset and create forms set a temporary password of twelve characters, and say what it is', () => {
-    // "Works once" was never true: it works until it is replaced, for a day.
-    expect((admin.match(/They sign in with it within 24 hours, then must choose their own\./g) || []).length).toBe(2);
-    expect(admin).not.toMatch(/once, within 24 hours/);
-    expect(admin).toMatch(/import \{ passwordProblem, passwordHint, PASSWORD_MIN_LENGTH \} from '\.\/account\/password-rules';/);
-    // Twelve for every account, demo accounts' included (their own describe below).
-    expect(admin).toMatch(/required minLength=\{PASSWORD_MIN_LENGTH\} autoFocus autoComplete="new-password"/);
-    expect(admin).toMatch(/required minLength=\{PASSWORD_MIN_LENGTH\} autoComplete="new-password"\s+style=/);
-    expect(admin).toMatch(/disabled=\{saving \|\| !!problem\}/);
-    // Create is also held while a demo account's mailbox copy has no sender (demo-ui.test.js).
-    expect(admin).toMatch(/disabled=\{!!passProblem \|\| !!createProblem\}/);
+  // The temporary passwords an administrator set are gone from this page: an
+  // account is invited, and a reset is a link, so the person chooses their
+  // own password and nobody else ever knows it (invite-ui.test.js).
+  test('no form here sets a password: the invite and the reset are links', () => {
+    expect(admin).not.toMatch(/They sign in with it within 24 hours/);
+    expect(admin).not.toMatch(/from '\.\/account\/password-rules'/);
+    expect(admin).not.toMatch(/autoComplete="new-password"/);
+    expect(admin).not.toMatch(/api\.patch\(`\/admin\/users\/\$\{[^}]+\}\/password`/);
+    expect(admin).toMatch(/api\.post\(`\/admin\/users\/\$\{u\.id\}\/reset-link`, \{\}\)/);
+    // Invite is held while one is on its way, and while a demo account's
+    // mailbox copy has no sender (demo-ui.test.js).
+    expect(admin).toMatch(/disabled=\{inviting \|\| !!createProblem\}/);
   });
 });
 
@@ -295,10 +301,11 @@ describe('the password rules for a demo account', () => {
     expect(rules.passwordHint()).toBe('Min. 12 characters');
   });
 
-  test('the Users page asks every account the same rules, and never calls a password permanent', () => {
+  test('the Users page sets no password for any account, and never calls one permanent', () => {
     const admin = read('pages/Admin.jsx');
-    expect(admin).toMatch(/passwordProblem\(password, user\.email\)/);
-    expect(admin).toMatch(/passwordProblem\(pass, email\)/);
+    expect(admin).not.toMatch(/passwordProblem\(/);
     expect(admin).not.toMatch(/demoRule|DEMO_PASSWORD_MIN_LENGTH|shortPasswordAllowed|permanent/);
+    // The person sets theirs on the set-password page, by the same rules.
+    expect(read('pages/SetPassword.jsx')).toMatch(/const problem\s+= passwordProblem\(password, email\);/);
   });
 });

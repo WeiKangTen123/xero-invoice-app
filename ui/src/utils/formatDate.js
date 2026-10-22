@@ -51,6 +51,39 @@ export function formatTime(iso, timezone = DEFAULT_TIMEZONE) {
   return _fmt(iso, timezone, { hour: '2-digit', minute: '2-digit', hour12: false }, d => d.toLocaleTimeString());
 }
 
+// "29 Oct" and "29 Oct, 14:05", the year only when it is not this one: for
+// a moment close by, such as when an invite or reset link runs out. The month
+// is named here rather than by Intl, which says "Sept" or "Sep" depending on
+// the browser. `now` is for tests. '' for no time at all.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function _parts(ms, timezone) {
+  // h23 rather than hour12: false, which some engines turn into "24:05".
+  try {
+    const out = {};
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: timezone, day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    });
+    for (const p of fmt.formatToParts(new Date(ms))) out[p.type] = p.value;
+    return { day: String(Number(out.day)), month: MONTHS[Number(out.month) - 1], year: out.year, time: `${out.hour}:${out.minute}` };
+  } catch {
+    const d = new Date(ms);
+    return {
+      day: String(d.getDate()), month: MONTHS[d.getMonth()], year: String(d.getFullYear()),
+      time: `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
+    };
+  }
+}
+export function formatShortDate(iso, timezone = DEFAULT_TIMEZONE, now = Date.now()) {
+  const ms = iso ? new Date(iso).getTime() : NaN;
+  if (!Number.isFinite(ms)) return '';
+  const p = _parts(ms, timezone);
+  return p.year === _parts(now, timezone).year ? `${p.day} ${p.month}` : `${p.day} ${p.month} ${p.year}`;
+}
+export function formatShortDateTime(iso, timezone = DEFAULT_TIMEZONE, now = Date.now()) {
+  const day = formatShortDate(iso, timezone, now);
+  return day ? `${day}, ${_parts(new Date(iso).getTime(), timezone).time}` : '';
+}
+
 export function formatRelative(iso) {
   if (!iso) return '—';
   const ms = Date.now() - new Date(iso).getTime();

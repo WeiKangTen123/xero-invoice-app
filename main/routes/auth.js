@@ -4,7 +4,7 @@ const rateLimit = require('express-rate-limit');
 const {
   hasUsers, findById, findByEmail, normalizeEmail, emailProblem, createUser, validatePassword, verifyDummy,
   verifiedPasswordHash, passwordProblem, setPassword, invalidateSessions,
-  requirePasswordChange,
+  requirePasswordChange, hashPassword, setPasswordHash, unlockAccount, isInvited,
   lockStatus, recordFailedLogin, recordSuccessfulLogin, temporaryPasswordExpired, LOCK_AFTER_FAILURES,
   getUserConfig, DEFAULT_TIMEZONE,
 } = require('../utils/users');
@@ -17,6 +17,9 @@ const logger   = require('../utils/logger');
 const auditLog = require('../utils/audit-log');
 const sessions = require('../utils/sessions');
 const notify   = require('../utils/notify');
+const authTokens = require('../utils/auth-tokens');
+const mailer     = require('../utils/mailer');
+const mailTemplates = require('../utils/mail-templates');
 
 // What a locked account is told, whatever the password. The body carries
 // when the lock ends and the whole minutes left, for the form to say so.
@@ -222,9 +225,40 @@ const changePasswordLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Check if any users have been created yet (frontend uses this to show Register vs Login)
+// Asking for a reset link (POST /forgot-password): five a quarter hour from
+// one address, counted whatever the outcome, since every answer is the same
+// success. It stops one address mailing reset links to a list of others;
+// the limit per account (resetAllowed below) stops many addresses mailing one
+// person.
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyGenerator: req => req.ip,
+  message: { error: 'Too many requests from this address. Please try again in 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Opening and using an invite or reset link (POST /link-info, /set-password):
+// twenty failures a quarter hour per address — a link not found, used or run
+// out, or a password the rules refuse. A token is 256 random bits, so this is
+// not what keeps one from being guessed; it keeps anyone from trying.
+const linkLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  skipSuccessfulRequests: true,
+  keyGenerator: req => req.ip,
+  message: { error: 'Too many attempts from this address. Please try again in 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// GET /api/auth/status — whether any account exists (the sign-in page shows
+// first-run registration when none does), and whether the server can send
+// email with links in it (`mail`), which is when the page offers "Forgot your
+// password?".
 router.get('/status', (_req, res) => {
-  res.json({ hasUsers: hasUsers() });
+  res.json({ hasUsers: hasUsers(), mail: mailer.isConfigured() && !!mailer.appBaseUrl() });
 });
 
 // Self-registration creates the FIRST account, which becomes admin. After
@@ -533,6 +567,178 @@ router.post('/change-password', requireAuth, changePasswordLimiter, asyncHandler
     res.json({ success: true, token });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+}));
+
+// ── Invite and reset links ───────────────────────────────────────────────────
+// A person chooses a password through a single-use link (utils/auth-tokens.js)
+// sent by email (utils/mailer.js): an admin's invite to a new account, or a
+// reset asked for here or sent by an admin. The link opens the set-password
+// page with the token in its fragment, which the page posts to link-info (to
+// say whose link it is) and set-password (to use it).
+
+// Work done after the answer has gone (sending mail, telling Slack), so the
+// answer does not wait on a mail server, and for forgot-password so it takes
+// the same time whether there is an account or not. Never rejects; a failure
+// is logged. `settled` lets the tests wait for it.
+const _afterResponse = new Set();
+function afterResponse(what, work) {
+  const job = new Promise(resolve => setImmediate(resolve))
+    .then(work)
+    .catch(err => logger.error(`${what} failed`, { error: err && err.message }))
+    .finally(() => _afterResponse.delete(job));
+  _afterResponse.add(job);
+  return job;
+}
+router.settled = () => Promise.all([..._afterResponse]);
+
+// Reset links asked for one address: at most three an hour, whoever asks.
+// Past that a request is quietly ignored (the answer is the same success), so
+// nobody can fill a person's inbox with them. Kept in memory, like the rate
+// limits: a restart starts the count again.
+const RESET_REQUESTS_PER_HOUR = 3;
+const HOUR_MS = 60 * 60 * 1000;
+const _resetRequests = new Map(); // address -> ms of each recent request
+
+function resetAllowed(address, now = Date.now()) {
+  const recent = (_resetRequests.get(address) || []).filter(at => now - at < HOUR_MS);
+  const allowed = recent.length < RESET_REQUESTS_PER_HOUR;
+  if (allowed) recent.push(now);
+  _resetRequests.set(address, recent);
+  // Swept as it grows, so addresses asked for once do not stay for the life
+  // of the process.
+  if (_resetRequests.size > 1000) {
+    for (const [key, times] of _resetRequests) if (!times.some(at => now - at < HOUR_MS)) _resetRequests.delete(key);
+  }
+  return allowed;
+}
+
+// What a link that cannot be used is told (410), by why: the page shows it
+// as it is. An invite that has run out needs an admin; a reset, a new
+// request from the sign-in page.
+const LINK_MESSAGES = {
+  expiredInvite: 'This invite has expired. Ask your administrator to send a new one.',
+  expiredReset:  'This link has expired. Request a new one.',
+  used:          'This link has already been used. If you set your password, sign in.',
+  invalid:       "This link isn't valid any more. Ask your administrator for a new one.",
+};
+function linkRefusal(link) {
+  if (link.reason === 'expired') {
+    return { error: link.purpose === 'invite' ? LINK_MESSAGES.expiredInvite : LINK_MESSAGES.expiredReset, reason: 'expired' };
+  }
+  if (link.reason === 'used') return { error: LINK_MESSAGES.used, reason: 'used' };
+  return { error: LINK_MESSAGES.invalid, reason: 'invalid' };
+}
+
+// Sends a reset link to `email` if it should go: the account exists, is not
+// disabled, has a password to reset (an invite not yet accepted has none:
+// its invite link is the way in), and the server can send mail with links in
+// it. The request is in the trail whenever the account exists, with where it
+// came from and whether a link went; the account itself is never changed or
+// locked by it. Its current password keeps working until a new one is set.
+async function sendResetLink(email, client) {
+  const address = normalizeEmail(email);
+  if (!address || emailProblem(address)) return;
+  if (!resetAllowed(address)) {
+    logger.info('Reset request ignored: three already in the last hour for this address', { email: address.slice(0, 200), ip: client.ip });
+    return;
+  }
+  const row = findByEmail(address);
+  if (!row) {
+    logger.info('Reset requested for an address with no account', { email: address.slice(0, 200), ip: client.ip });
+    return;
+  }
+  let reason = null;
+  if (row.disabled_at) reason = 'disabled';
+  else if (isInvited(row)) reason = 'invited';
+  else if (!mailer.isConfigured() || !mailer.appBaseUrl()) reason = 'mail_off';
+
+  let emailed = false;
+  if (!reason) {
+    const now = Date.now();
+    const raw = authTokens.issue(row.id, 'reset', { ttlMs: authTokens.RESET_TTL_MS, now });
+    const expiresAt = new Date(now + authTokens.RESET_TTL_MS).toISOString();
+    const sent = await mailer.send({ to: row.email, ...mailTemplates.reset({ to: row.email, link: mailer.linkFor(raw), expiresAt, now }) });
+    emailed = sent.sent;
+    // A link nobody received is no use to anyone; it goes.
+    if (!emailed) { reason = 'send_failed'; authTokens.revoke(row.id, 'reset'); }
+  }
+  auditLog.recordAdminEvent({
+    actor: null, target: row, action: 'password.reset_requested', details: { ...client, emailed, ...(reason ? { reason } : {}) },
+  });
+  logger.info('Password reset requested', { email: row.email, ip: client.ip, emailed, reason });
+}
+
+// POST /api/auth/forgot-password { email } — always { success: true }, at
+// once, whether or not the address has an account (OWASP: the answer must
+// not say which addresses exist, by its words or by its speed). The work is
+// done after the answer has gone (sendResetLink).
+router.post('/forgot-password', forgotPasswordLimiter, (req, res) => {
+  const email  = req.body ? req.body.email : undefined;
+  const client = clientOf(req);
+  res.json({ success: true });
+  afterResponse('Password reset request', () => sendResetLink(email, client));
+});
+
+// POST /api/auth/link-info { token } — whose link this is, before the page
+// asks for a password: { purpose: 'invite' | 'reset', email, invitedBy (the
+// admin who made it, or null), expiresAt }. A link that cannot be used is a
+// 410 with why (linkRefusal). Uses nothing up.
+router.post('/link-info', linkLimiter, (req, res) => {
+  const link = authTokens.peek(req.body ? req.body.token : undefined);
+  if (!link.ok) return res.status(410).json(linkRefusal(link));
+  const maker = link.createdBy ? findById(link.createdBy) : null;
+  res.json({ purpose: link.purpose, email: link.email, invitedBy: maker ? maker.email : null, expiresAt: link.expiresAt });
+});
+
+// POST /api/auth/set-password { token, password } — sets the password the
+// link was for, and uses the link up. The password meets the same rules as
+// everywhere (passwordProblem, with the account's address); it is hashed
+// first, since that is slow, and then the link is used up and the password
+// written in one transaction (auth-tokens.js#consume), so two tabs with the
+// same link cannot both get through. With it: the temporary marks come off,
+// the account is unlocked (the person resetting is often the one locked out),
+// and every session is signed out, the cutoff moved and the rows ended as
+// password_reset or invite_accepted.
+//
+// Does not sign the person in: they sign in with the new password, which
+// proves it was typed as meant, and the sign-in is recorded like any other.
+// Answers { success: true, email } for the sign-in form to fill in. Then an
+// accepted invite is told to the admins on Slack, and a reset is confirmed to
+// the person by email, as OWASP asks: if they did not do it, they know.
+router.post('/set-password', linkLimiter, asyncHandler(async (req, res) => {
+  const { token, password } = req.body || {};
+  if (typeof token !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ error: 'A link and a new password are required' });
+  }
+  const link = authTokens.peek(token);
+  if (!link.ok) return res.status(410).json(linkRefusal(link));
+  const problem = passwordProblem(password, link.email);
+  if (problem) return res.status(400).json({ error: problem });
+
+  const hash   = await hashPassword(password);
+  const reason = link.purpose === 'invite' ? 'invite_accepted' : 'password_reset';
+  const done = authTokens.consume(token, row => {
+    setPasswordHash(row.user_id, hash);
+    unlockAccount(row.user_id);
+    invalidateSessions(row.user_id);
+    return sessions.endAllSessions(row.user_id, reason);
+  });
+  if (!done.ok) return res.status(410).json(linkRefusal(done));
+
+  const client = clientOf(req);
+  const self   = { id: done.userId, email: done.email };
+  auditLog.recordAdminEvent({ actor: self, target: self, action: 'password.set_via_link', details: { purpose: done.purpose, ...client } });
+  logger.info('Password set from a link', { email: done.email, purpose: done.purpose, sessionsEnded: done.result, ip: client.ip });
+  res.json({ success: true, email: done.email });
+
+  if (done.purpose === 'invite') {
+    afterResponse('Invite accepted notice', () => notify.notifyNotice(`✅ ${done.email} accepted their invite`));
+  } else if (mailer.isConfigured()) {
+    const base = mailer.appBaseUrl();
+    afterResponse('Password changed email', () => mailer.send({
+      to: done.email, ...mailTemplates.passwordChanged({ to: done.email, at: new Date(), signInUrl: base ? `${base}/login` : null }),
+    }));
   }
 }));
 

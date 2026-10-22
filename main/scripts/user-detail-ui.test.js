@@ -147,7 +147,7 @@ describe('the head of the panel (statusLine)', () => {
     expect(line({ mustChangePassword: true, tempPasswordExpiresAt: '2026-10-21T01:12:00.000Z' }).notes)
       .toContainEqual({ text: 'Temporary password, expires 21 Oct 09:12', tone: 'yellow' });
     expect(line({ mustChangePassword: true, tempPasswordExpiresAt: '2026-10-19T01:12:00.000Z' }).notes)
-      .toContainEqual({ text: 'Temporary password expired 19 Oct 09:12: reset it to let them in', tone: 'red' });
+      .toContainEqual({ text: 'Temporary password expired 19 Oct 09:12: send a reset link to let them in', tone: 'red' });
     // No expiry: their own password, which the rules now refuse (users.js
     // requirePasswordChange). It still signs in, to the change-password screen.
     expect(line({ mustChangePassword: true }).notes)
@@ -372,7 +372,7 @@ describe('the controls the panel offers (panelActions)', () => {
     expect(keys(groups)).toEqual([['account', ['role', 'reset']], ['danger', ['disabled', 'delete']]]);
     expect(groups.map(g => g.label)).toEqual(['Account', 'Danger']);
     expect(find(groups, 'role').label).toBe('★ Make admin');
-    expect(find(groups, 'reset').label).toBe('🔑 Reset password');
+    expect(find(groups, 'reset').label).toBe('🔑 Send reset link');
     expect(find(groups, 'disabled').label).toBe('⏸ Disable');
     expect(find(groups, 'delete')).toMatchObject({ label: '✕ Delete', danger: true, blocked: null });
   });
@@ -385,14 +385,17 @@ describe('the controls the panel offers (panelActions)', () => {
     expect(find(d.panelActions({ user: { ...jane, disabledAt: '2026-10-18T04:00:00.000Z' }, now: NOW }), 'disabled').label).toBe('✓ Enable');
   });
 
-  // Every account's reset is temporary, a demo account's included: the
-  // short permanent demo password went (password-rules.js).
-  test('Reset password says which kind of password it sets', () => {
+  // A reset is a link for the person to choose their own password, for
+  // every account, a demo account's included: an admin no longer sets a
+  // temporary one (invite-ui.test.js has the invited account's controls).
+  test('Send reset link says it is a link, emailed or to copy, never a password the admin sets', () => {
     const title = user => find(d.panelActions({ user: { ...jane, ...user }, now: NOW }), 'reset').title;
-    expect(title({ demo: true })).toBe('Set a temporary password for this account');
-    expect(title({ demo: true, role: 'admin' })).toBe('Set a temporary password for this account');
-    expect(title({ demo: false })).toBe('Set a temporary password for this account');
-    expect(title({ role: 'admin' })).toBe('Set a temporary password for this account');
+    const said = 'A link to choose a new password: emailed to them, or for you to copy and send';
+    expect(title({ demo: true })).toBe(said);
+    expect(title({ demo: true, role: 'admin' })).toBe(said);
+    expect(title({ demo: false })).toBe(said);
+    expect(title({ role: 'admin' })).toBe(said);
+    expect(said).not.toMatch(/temporary/i);
   });
 
   test('the last admin cannot be demoted, disabled or deleted, and each button says so', () => {
@@ -450,11 +453,17 @@ describe('Admin › Users opens the panel and shares its handlers with it', () =
     expect(admin).toMatch(/import UserDetailPanel from '\.\/admin\/UserDetailPanel';/);
     expect(admin).toMatch(/role="button"\s+tabIndex=\{0\}\s+aria-haspopup="dialog"\s+onClick=\{\(\) => openDetail\(u\.id\)\}/);
     expect(admin).toMatch(/if \(e\.key !== 'Enter' && e\.key !== ' '\) return;\s+\/\/[^\n]*\n\s+e\.preventDefault\(\);\s+openDetail\(u\.id\);/);
-    // The row no longer keeps its own row closed, nor an inline strip of controls.
+    // The row no longer keeps its own row closed, nor an inline strip of
+    // controls: the only ones on a row are an invited account's New link
+    // and Revoke (invite-ui.test.js), which keep their clicks and keys from
+    // the row.
     expect(admin).not.toMatch(/role=\{isMe \? undefined : 'button'\}/);
     expect(admin).not.toMatch(/if \(!isMe\) setSelectedId/);
     expect(admin).not.toContain('selectedId');
-    expect(admin).not.toMatch(/onClick=\{\(\) => handle\w+\(u\)\}/);
+    const onRow = [...admin.matchAll(/onClick=\{\(\) => (handle\w+)\(u\)\}/g)].map(m => m[1]).sort();
+    expect(onRow).toEqual(['handleNewInvite', 'handleRevokeInvite']);
+    expect(admin).toMatch(/<RowButton onClick=\{\(\) => handleNewInvite\(u\)\}/);
+    expect(admin).toMatch(/<RowButton onClick=\{\(\) => handleRevokeInvite\(u\)\}/);
   });
 
   test('the panel is given the account, whether it is you, the last-admin rule, and the page\'s handlers', () => {
@@ -465,9 +474,10 @@ describe('Admin › Users opens the panel and shares its handlers with it', () =
     expect(admin).toContain("const isLastAdmin = u => u.role === 'admin' && !u.disabledAt && admins.length <= 1;");
     expect(admin).toMatch(/busy=\{busy\}\s+error=\{actionError\}\s+refreshKey=\{detailRefresh\}\s+actions=\{userActions\}\s+onClose=\{closeDetail\}/);
     const actions = admin.slice(admin.indexOf('const userActions = {'), admin.indexOf('};', admin.indexOf('const userActions = {')));
-    for (const pair of ['unlock: handleUnlock', 'role: handleRole', 'reset: setResetting', 'signOut: handleSignOut',
+    for (const pair of ['unlock: handleUnlock', 'role: handleRole', 'reset: handleResetLink', 'signOut: handleSignOut',
       'disabled: handleDisabled', 'remove: handleDelete', 'stopWatcher: handleStopWatcher',
-      'autoSubmitOff: handleAutoSubmitOff', 'revokeSession: handleRevokeSession']) {
+      'autoSubmitOff: handleAutoSubmitOff', 'revokeSession: handleRevokeSession',
+      'invite: handleNewInvite', 'revokeInvite: handleRevokeInvite']) {
       expect(actions).toContain(pair);
     }
   });
@@ -477,8 +487,13 @@ describe('Admin › Users opens the panel and shares its handlers with it', () =
     // `done` is the toast, or a function making it from the server's answer.
     expect(control).toMatch(/const answer = await send\(\);\s+if \(done\) toast\.success\(typeof done === 'function' \? done\(answer \|\| \{\}\) : done\);\s+setDetailRefresh\(n => n \+ 1\);\s+await fetchUsers\(\);\s+return true;/);
     expect(control).toMatch(/setActionError\(err\.message\);/);
-    // The reset password dialog, opened from the panel, refreshes it too.
-    expect(admin).toMatch(/setResetting\(null\);\s+setDetailRefresh\(n => n \+ 1\);\s+fetchUsers\(\);/);
+    // Send reset link and New link go through control() too, so they refresh
+    // the panel; what came back opens in a dialog over it.
+    expect(fn('handleResetLink')).toMatch(/const sent = await control\('reset', u, async \(\) => \{/);
+    expect(fn('handleResetLink')).toMatch(/if \(sent\) setShownLink\(\{ kind: 'reset', email: u\.email, answer: answer\?\.reset \|\| \{\} \}\);/);
+    expect(fn('handleNewInvite')).toMatch(/const sent = await control\('invite', u, async \(\) => \{/);
+    // A control used from a row has no panel to say an error in: a toast does.
+    expect(control).toMatch(/if \(detailId !== u\.id\) toast\.error\(err\.message\);/);
     // A deleted account's panel closes.
     expect(fn('handleDelete')).toMatch(/setDetailId\(id => \(id === u\.id \? null : id\)\);/);
   });
@@ -594,7 +609,8 @@ describe('the panel', () => {
 
   test('every control is the page\'s handler, held while another runs or when the server would refuse it', () => {
     for (const [key, call] of [['unlock', 'unlock'], ['role', 'role'], ['reset', 'reset'], ['stopWatcher', 'stopWatcher'],
-      ['autoSubmitOff', 'autoSubmitOff'], ['disabled', 'disabled'], ['delete', 'remove']]) {
+      ['autoSubmitOff', 'autoSubmitOff'], ['disabled', 'disabled'], ['delete', 'remove'],
+      ['invite', 'invite'], ['revokeInvite', 'revokeInvite']]) {
       expect(panel).toMatch(new RegExp(`${key}:\\s+\\(\\) => actions\\.${call}\\(user\\),`));
     }
     expect(panel).toMatch(/disabled=\{!!busy \|\| !!a\.blocked\}\s+title=\{a\.blocked \|\| a\.title\}\s+onClick=\{run\[a\.key\]\}/);

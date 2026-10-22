@@ -106,8 +106,10 @@ export function statusLine(user, now = Date.now(), opts = {}) {
   const o = { timeZone: opts.timeZone, now };
   const locked = isLocked(u, now);
 
+  const invited = u.invited === true;
   const state = u.disabledAt ? { label: 'Disabled', tone: 'red' }
     : locked                 ? { label: 'Locked',   tone: 'red' }
+    : invited                ? { label: 'Invited',  tone: 'yellow' }
     : u.online               ? { label: 'Online',   tone: 'green' }
     :                          { label: 'Active',   tone: 'gray' };
 
@@ -131,6 +133,15 @@ export function statusLine(user, now = Date.now(), opts = {}) {
 
   const notes = [];
   if (u.disabledAt && shortDate(u.disabledAt, o)) notes.push({ text: `Disabled since ${shortDate(u.disabledAt, o)}`, tone: 'red' });
+  // Invited and no password yet (the list's invited, inviteExpiresAt,
+  // inviteExpired): when the link runs out, or that it has.
+  if (invited) {
+    const until = toMs(u.inviteExpiresAt);
+    const gone  = u.inviteExpired === true || (Number.isFinite(until) && until <= toMs(now));
+    const at    = Number.isFinite(until) ? shortDateTime(until, o) : '';
+    if (gone) notes.push({ text: at ? `Invite expired ${at}: send a new link to let them in` : 'Invite expired: send a new link to let them in', tone: 'red' });
+    else notes.push({ text: at ? `Invite link expires ${at}` : 'Invite sent, no password set yet', tone: 'yellow' });
+  }
   if (u.passwordChangedAt && shortDate(u.passwordChangedAt, o)) {
     notes.push({ text: `Password changed ${shortDate(u.passwordChangedAt, o)}`, tone: null });
   }
@@ -140,7 +151,7 @@ export function statusLine(user, now = Date.now(), opts = {}) {
     // rules now refuse (or a demo account made an admin); it still signs in.
     if (!Number.isFinite(expires)) notes.push({ text: 'Must choose a new password: theirs no longer meets the rules', tone: 'yellow' });
     else if (expires > toMs(now)) notes.push({ text: `Temporary password, expires ${shortDateTime(expires, o)}`, tone: 'yellow' });
-    else notes.push({ text: `Temporary password expired ${shortDateTime(expires, o)}: reset it to let them in`, tone: 'red' });
+    else notes.push({ text: `Temporary password expired ${shortDateTime(expires, o)}: send a reset link to let them in`, tone: 'red' });
   }
   const failed = Number(u.failedLogins) || 0;
   if (locked) {
@@ -395,7 +406,9 @@ export function activityRow(item) {
 // says on hover, and why it is held (the server refuses these too; the
 // button says why first). Your own account offers only what the server
 // allows on yourself: Unlock and the automation switches. `busyKey` is the
-// key the page's control() marks the request in flight with.
+// key the page's control() marks the request in flight with. An account
+// still on its invite has no password to reset: it is offered a new invite
+// link, or the invite revoked, as its row in the list is.
 export function panelActions({ user, isMe = false, lastAdmin = false, now = Date.now(), work = null } = {}) {
   const u = user || {};
   const groups = [];
@@ -411,10 +424,15 @@ export function panelActions({ user, isMe = false, lastAdmin = false, now = Date
       title: u.role === 'admin' ? 'Back to an ordinary user' : 'Give them this page',
       blocked: lastAdmin ? 'Cannot demote the last admin' : null,
     });
-    account.push({
-      key: 'reset', busyKey: 'reset', label: '🔑 Reset password',
-      title: 'Set a temporary password for this account',
-    });
+    if (u.invited === true) {
+      account.push({ key: 'invite', busyKey: 'invite', label: '✉ New invite link', title: 'Make a new invite link, emailed or to copy' });
+      account.push({ key: 'revokeInvite', busyKey: 'revokeInvite', label: '⊘ Revoke invite', title: 'Stop the link they were sent from working' });
+    } else {
+      account.push({
+        key: 'reset', busyKey: 'reset', label: '🔑 Send reset link',
+        title: 'A link to choose a new password: emailed to them, or for you to copy and send',
+      });
+    }
   }
   if (account.length) groups.push({ key: 'account', label: 'Account', actions: account });
 

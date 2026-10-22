@@ -6,13 +6,13 @@ import RetryAlert from '../components/RetryAlert';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useToast } from '../context/ToastContext';
-import { formatDateTime, formatRelative } from '../utils/formatDate';
+import { formatDateTime, formatRelative, formatShortDate } from '../utils/formatDate';
 import { fmtMoney } from '../utils/format';
 import { staggerIn } from '../utils/stagger';
 import ActivityPanel from './admin/ActivityPanel';
 import UserDetailPanel from './admin/UserDetailPanel';
-import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, createdMessage } from './admin/users';
-import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
+import LinkResult from './admin/LinkResult';
+import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, copiedNote, inviteNote, revokeInviteAsk } from './admin/users';
 
 const ADMIN_TABS = [
   { key: 'users',      label: '👥 Users' },
@@ -34,11 +34,6 @@ function Avatar({ email }) {
     </div>
   );
 }
-
-const EYE_BUTTON = {
-  position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)',
-  background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 13,
-};
 
 // A click focuses a focusable row too, and a ring there is only noise; the ring
 // is for someone moving through the list with the keyboard. A browser too old
@@ -62,65 +57,20 @@ function autoSubmitOffSend(u) {
   return api.patch(`/admin/users/${u.id}/auto-process`, { autoProcess: false });
 }
 
-// An admin cannot see a password (it is a bcrypt hash), only set a temporary
-// one and pass it on. It works for 24 hours, until the account chooses its
-// own. The server signs out every session that account has open.
-function ResetPasswordDialog({ user, onClose, onDone }) {
-  const [password, setPassword] = useState('');
-  const [show,     setShow]     = useState(false);
-  const [error,    setError]    = useState('');
-  const [saving,   setSaving]   = useState(false);
-  // The server's rules (pages/account/password-rules.js), said as typed: the
-  // same for every account, demo accounts' included.
-  const problem  = passwordProblem(password, user.email);
-
-  async function submit(e) {
-    e.preventDefault();
-    setSaving(true); setError('');
-    try {
-      await api.patch(`/admin/users/${user.id}/password`, { password });
-      onDone();
-    } catch (err) {
-      setError(err.message);
-      setSaving(false);
-    }
-  }
-
+// A button on a user's row. The row itself opens the account's panel, by
+// click and by Enter or Space, so the button keeps both to itself.
+function RowButton({ onClick, children, ...rest }) {
   return (
-    <Modal onClose={onClose} busy={saving} label={`Reset password for ${user.email}`}>
-      <div className="card-title">Reset password</div>
-      <div className="card-subtitle">
-        Set a temporary password for <strong>{user.email}</strong> and pass it on to them.
-        They sign in with it within 24 hours, then must choose their own.
-        The current one cannot be shown. Every session they have open is signed out.
-      </div>
-      <form onSubmit={submit}>
-        <div className="form-group">
-          <label htmlFor="reset-password" className="form-label">Temporary password</label>
-          <div style={{ position: 'relative' }}>
-            <input id="reset-password"
-              type={show ? 'text' : 'password'}
-              className="form-input"
-              placeholder={passwordHint()}
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              required minLength={PASSWORD_MIN_LENGTH} autoFocus autoComplete="new-password"
-              style={{ paddingRight: 38 }}
-            />
-            <button type="button" onClick={() => setShow(v => !v)} style={EYE_BUTTON}
-              aria-label={show ? 'Hide password' : 'Show password'}>{show ? '🙈' : '👁'}</button>
-          </div>
-          {password && problem && <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }}>{problem}</div>}
-        </div>
-        {error && <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
-          <button type="button" className="btn btn-outline" onClick={onClose} disabled={saving}>Cancel</button>
-          <button type="submit" className="btn btn-primary" disabled={saving || !!problem}>
-            {saving ? 'Saving…' : 'Set password'}
-          </button>
-        </div>
-      </form>
-    </Modal>
+    <button
+      type="button"
+      className="btn btn-outline btn-sm"
+      onClick={e => { e.stopPropagation(); onClick(); }}
+      onKeyDown={e => e.stopPropagation()}
+      style={{ padding: '2px 9px', fontSize: 11.5 }}
+      {...rest}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -156,8 +106,6 @@ export default function Admin() {
   // A failed load said "No users found", which an admin could take literally.
   const [usersErr, setUsersErr] = useState('');
   const [email,   setEmail]   = useState('');
-  const [pass,    setPass]    = useState('');
-  const [showPass, setShowPass] = useState(false);
   const [role,    setRole]    = useState('user');
   // A demo account (pages/admin/users.js): sample data in place of a Xero
   // connection, with this admin's settings copied over so it works at once.
@@ -166,31 +114,22 @@ export default function Admin() {
   const [copyFrom,   setCopyFrom]   = useState(() => copyDefaults());
   const [filterFrom, setFilterFrom] = useState('');
   const [error,   setError]   = useState('');
-  const [success, setSuccess] = useState('');
+  // An invite on its way, and then what came of it: shown in the card in
+  // place of the form until Done, as its link (when email is not set up) is
+  // shown nowhere else and never again.
+  const [inviting, setInviting] = useState(false);
+  const [invited,  setInvited]  = useState(null);
   // Which account's detail panel is open, which control is in flight
-  // (`key:id`), and the account the Reset password dialog is for. A control
-  // is used from the panel, which covers the page, so its error is said in
-  // the panel (actionError) and its success in a toast; the panel asks the
-  // server again whenever detailRefresh moves.
+  // (`key:id`), and the link a New link or Send reset link came back with
+  // ({ kind, email, answer }), shown in a dialog. A control is used from the
+  // panel, which covers the page, so its error is said in the panel
+  // (actionError) and its success in a toast; the panel asks the server
+  // again whenever detailRefresh moves.
   const [detailId,      setDetailId]      = useState(null);
   const [detailRefresh, setDetailRefresh] = useState(0);
   const [actionError,   setActionError]   = useState('');
   const [busy,       setBusy]       = useState(null);
-  const [resetting,  setResetting]  = useState(null);
-  // One timer for the success banner. Each message used to start its own and
-  // none was ever cancelled, so the timer of an earlier message cleared a newer
-  // one after a second or two.
-  const successTimer = useRef(null);
-  useEffect(() => () => clearTimeout(successTimer.current), []);
-
-  // A success also clears any error still showing from an earlier attempt, so
-  // the page never says both at once.
-  function showSuccess(message, ms = 4000) {
-    clearTimeout(successTimer.current);
-    setError('');
-    setSuccess(message);
-    successTimer.current = setTimeout(() => setSuccess(''), ms);
-  }
+  const [shownLink,  setShownLink]  = useState(null);
 
   async function fetchUsers() {
     try { const d = await api.get('/admin/users'); setUsers(d.users || []); setUsersErr(''); }
@@ -201,27 +140,30 @@ export default function Admin() {
     fetchUsers().finally(() => setLoading(false));
   }, []);
 
-  // The Add User form as a whole, for the helpers that say what it sends and
-  // why it cannot be sent yet (the mailbox copy needs a sender address).
-  const form = { email, password: pass, role, demo, copyFrom, mailboxFilterFrom: filterFrom };
+  // The Invite a user form as a whole, for the helpers that say what it sends
+  // and why it cannot be sent yet (the mailbox copy needs a sender address).
+  // No password: the person sets their own from the link.
+  const form = { email, role, demo, copyFrom, mailboxFilterFrom: filterFrom };
   const createProblem = addUserProblem(form);
-  const passProblem = passwordProblem(pass, email);
 
   async function handleCreate(e) {
     e.preventDefault();
-    setError(''); setSuccess('');
+    setError('');
     if (createProblem) { setError(createProblem); return; }
+    setInviting(true);
     try {
-      // The banner says what was copied, from the server's answer: a group
+      // The result says what was copied, from the server's answer: a group
       // with nothing to copy is not copied, whatever its box said.
       const payload = addUserPayload(form);
       const created = await api.post('/admin/users', payload);
-      setEmail(''); setPass(''); setRole('user');
+      setEmail(''); setRole('user');
       setDemo(false); setCopyFrom(copyDefaults()); setFilterFrom('');
-      showSuccess(createdMessage(payload, created), 7000);
+      setInvited({ email: created.user?.email || payload.email, invite: created.invite || {}, copied: copiedNote(payload, created) });
       await fetchUsers();
     } catch (err) {
       setError(err.message);
+    } finally {
+      setInviting(false);
     }
   }
 
@@ -239,6 +181,9 @@ export default function Admin() {
       return true;
     } catch (err) {
       setActionError(err.message);
+      // From a row (New link, Revoke), with no panel open on the account to
+      // say it in.
+      if (detailId !== u.id) toast.error(err.message);
       return false;
     } finally {
       setBusy(null);
@@ -316,11 +261,40 @@ export default function Admin() {
     await control(`revoke:${s.sid}`, u, () => api.post(`/admin/users/${u.id}/sessions/${encodeURIComponent(s.sid)}/revoke`, {}), 'Session revoked.');
   }
 
+  // A reset link for the account: emailed to them when this server can send
+  // email, otherwise shown here once to pass on. An administrator never sets
+  // or sees anyone's password. The answer is the dialog's to show.
+  async function handleResetLink(u) {
+    let answer = null;
+    const sent = await control('reset', u, async () => {
+      answer = await api.post(`/admin/users/${u.id}/reset-link`, {});
+      return answer;
+    });
+    if (sent) setShownLink({ kind: 'reset', email: u.email, answer: answer?.reset || {} });
+  }
+
+  // Another invite link for an account that has not set its password yet,
+  // shown as the first was: emailed, or to copy.
+  async function handleNewInvite(u) {
+    let answer = null;
+    const sent = await control('invite', u, async () => {
+      answer = await api.post(`/admin/users/${u.id}/invite`, {});
+      return answer;
+    });
+    if (sent) setShownLink({ kind: 'invite', email: u.email, answer: answer?.invite || {} });
+  }
+
+  async function handleRevokeInvite(u) {
+    if (!(await confirm(revokeInviteAsk(u)))) return;
+    await control('revokeInvite', u, () => api.delete(`/admin/users/${u.id}/invite`), `The invite for ${u.email} was revoked.`);
+  }
+
   // Every control the detail panel offers is one of the handlers above.
   const userActions = {
-    unlock: handleUnlock, role: handleRole, reset: setResetting, signOut: handleSignOut,
+    unlock: handleUnlock, role: handleRole, reset: handleResetLink, signOut: handleSignOut,
     disabled: handleDisabled, remove: handleDelete, stopWatcher: handleStopWatcher,
     autoSubmitOff: handleAutoSubmitOff, revokeSession: handleRevokeSession,
+    invite: handleNewInvite, revokeInvite: handleRevokeInvite,
   };
 
   // A disabled admin cannot sign in, so they do not count as the last one.
@@ -358,7 +332,6 @@ export default function Admin() {
       </div>
 
       {error   && <div className="alert alert-error"><span className="alert-icon">✕</span>{error}</div>}
-      {success && <div className="alert alert-success"><span className="alert-icon">✓</span>{success}</div>}
 
       {tab === 'reports'    && <ReportsPanel navigate={navigate} timezone={me?.timezone} />}
       {tab === 'monitoring' && <MonitoringPanel timezone={me?.timezone} onViewLogs={viewUserLogs} />}
@@ -410,6 +383,9 @@ export default function Admin() {
                 const failed  = failedNote(u, now);
                 const mustSet = mustSetNote(u);
                 const isDemo  = demoBadge(u);
+                // Invited and no password yet: the invite in place of the
+                // sign-in details, which it has none of (users.js inviteNote).
+                const invite  = inviteNote(u, { now, day: formatShortDate(u.inviteExpiresAt, me?.timezone) });
                 return (
                   <div key={u.id} style={{ animation: staggerIn(i, 40, '0.25s') }}>
                     {/* Clicking a row opens the account's detail panel
@@ -467,27 +443,41 @@ export default function Admin() {
                           {u.disabledAt && (
                             <span className="badge badge-red" title={`Disabled ${formatDateTime(u.disabledAt, me?.timezone)}`}>⏸ Disabled</span>
                           )}
-                          {u.createdAt && (
-                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                              Joined {formatDateTime(u.createdAt, me?.timezone)}
-                            </span>
-                          )}
-                          <span className={`badge ${u.online ? 'badge-green' : 'badge-gray'}`} title={u.lastSeenAt ? `Last seen ${formatDateTime(u.lastSeenAt, me?.timezone)}` : 'Never signed in'}>
-                            {u.online ? '● Online' : formatRelative(u.lastSeenAt) === '—' ? 'Never online' : `Offline · ${formatRelative(u.lastSeenAt)}`}
-                          </span>
-                          {lock && (
-                            <span className="badge badge-red" title={lock.title}>{lock.text}</span>
-                          )}
-                          {failed && (
-                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="Wrong passwords since the last sign-in">{failed}</span>
-                          )}
-                          {mustSet && (
-                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="On a temporary password from an administrator">{mustSet}</span>
-                          )}
-                          {u.lastLoginAt && (
-                            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                              Last sign-in {formatDateTime(u.lastLoginAt, me?.timezone)}
-                            </span>
+                          {invite ? (
+                            <>
+                              <span className={`badge ${invite.expired ? 'badge-red' : 'badge-yellow'}`} title={invite.title}>{invite.text}</span>
+                              <RowButton onClick={() => handleNewInvite(u)} disabled={!!busy} title="Make a new invite link, emailed or to copy">
+                                {busy === `invite:${u.id}` ? '…' : 'New link'}
+                              </RowButton>
+                              <RowButton onClick={() => handleRevokeInvite(u)} disabled={!!busy} title="Stop the link they were sent from working">
+                                {busy === `revokeInvite:${u.id}` ? '…' : 'Revoke'}
+                              </RowButton>
+                            </>
+                          ) : (
+                            <>
+                              {u.createdAt && (
+                                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                                  Joined {formatDateTime(u.createdAt, me?.timezone)}
+                                </span>
+                              )}
+                              <span className={`badge ${u.online ? 'badge-green' : 'badge-gray'}`} title={u.lastSeenAt ? `Last seen ${formatDateTime(u.lastSeenAt, me?.timezone)}` : 'Never signed in'}>
+                                {u.online ? '● Online' : formatRelative(u.lastSeenAt) === '—' ? 'Never online' : `Offline · ${formatRelative(u.lastSeenAt)}`}
+                              </span>
+                              {lock && (
+                                <span className="badge badge-red" title={lock.title}>{lock.text}</span>
+                              )}
+                              {failed && (
+                                <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="Wrong passwords since the last sign-in">{failed}</span>
+                              )}
+                              {mustSet && (
+                                <span style={{ fontSize: 11, color: 'var(--text-muted)' }} title="On a temporary password from an administrator">{mustSet}</span>
+                              )}
+                              {u.lastLoginAt && (
+                                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                                  Last sign-in {formatDateTime(u.lastLoginAt, me?.timezone)}
+                                </span>
+                              )}
+                            </>
                           )}
                         </div>
                       </div>
@@ -501,146 +491,137 @@ export default function Admin() {
           )}
         </div>
 
-        {/* Create form */}
+        {/* Invite form. No password: the person is sent a link to set their
+            own (emailed when Setup › Email sending is set up, otherwise
+            shown here to pass on), and the result takes the form's place
+            until Done. */}
         <div className="card" style={{ position: 'sticky', top: 80 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
             <div style={{ width: 34, height: 34, borderRadius: 9, background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 17 }}>
               ＋
             </div>
             <div>
-              <div className="card-title">Add User</div>
+              <div className="card-title">Invite a user</div>
             </div>
           </div>
-          <div className="card-subtitle">
-            The password you set is temporary. They sign in with it within 24 hours, then must choose their own.
-          </div>
 
-          <form onSubmit={handleCreate}>
-            <div className="form-group">
-              <label htmlFor="admin-email" className="form-label">Email address</label>
-              <input id="admin-email"
-                type="email"
-                className="form-input"
-                placeholder="user@company.com"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                required autoComplete="off" spellCheck={false} autoCapitalize="none"
-              />
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="admin-password" className="form-label">Temporary password</label>
-              <div style={{ position: 'relative' }}>
-                <input id="admin-password"
-                  type={showPass ? 'text' : 'password'}
-                  className="form-input"
-                  placeholder={passwordHint()}
-                  value={pass}
-                  onChange={e => setPass(e.target.value)}
-                  required minLength={PASSWORD_MIN_LENGTH} autoComplete="new-password"
-                  style={{ paddingRight: 38 }}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPass(v => !v)}
-                  style={EYE_BUTTON}
-                  aria-label={showPass ? 'Hide password' : 'Show password'}
-                >
-                  {showPass ? '🙈' : '👁'}
-                </button>
+          {invited ? (
+            <LinkResult
+              kind="invite"
+              answer={invited.invite}
+              email={invited.email}
+              timeZone={me?.timezone}
+              extra={invited.copied}
+              onDone={() => setInvited(null)}
+            />
+          ) : (
+            <>
+              <div className="card-subtitle">
+                They get a link to set their own password. You never see it.
               </div>
-              {pass && passProblem && (
-                <div style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 4 }}>{passProblem}</div>
-              )}
-            </div>
 
-            <div className="form-group" style={{ marginBottom: 22 }}>
-              <label className="form-label">Role</label>
-              <div style={{ display: 'flex', gap: 8 }}>
-                {['user', 'admin'].map(r => (
-                  <button
-                    key={r}
-                    type="button"
-                    onClick={() => setRole(r)}
-                    style={{
-                      flex: 1, padding: '9px 0',
-                      borderRadius: 8, border: 'none', cursor: 'pointer',
-                      fontSize: 13, fontWeight: 600,
-                      background: role === r ? 'var(--accent-gradient)' : 'var(--bg-secondary)',
-                      color: role === r ? '#fff' : 'var(--text-muted)',
-                      boxShadow: role === r ? '0 2px 8px rgba(99,102,241,0.3)' : 'none',
-                      transition: 'all 0.18s ease',
-                    }}
-                  >
-                    {r === 'admin' ? '★ Admin' : '◦ User'}
-                  </button>
-                ))}
-              </div>
-            </div>
+              <form onSubmit={handleCreate}>
+                <div className="form-group">
+                  <label htmlFor="admin-email" className="form-label">Email address</label>
+                  <input id="admin-email"
+                    type="email"
+                    className="form-input"
+                    placeholder="user@company.com"
+                    value={email}
+                    onChange={e => setEmail(e.target.value)}
+                    required autoComplete="off" spellCheck={false} autoCapitalize="none"
+                  />
+                </div>
 
-            {/* A demo account shows sample data this app generates, and makes
-                no Xero connection. Ticking it offers this admin's own keys,
-                defaults and mailbox for the account (pages/admin/users.js),
-                all ticked to start. The mailbox copy needs a sender: two
-                accounts watching one mailbox must watch different senders,
-                and the server refuses the copy without one. */}
-            <div className="form-group" style={{ marginBottom: 22 }}>
-              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
-                <input
-                  type="checkbox" checked={demo} style={{ marginTop: 3 }}
-                  onChange={e => { setDemo(e.target.checked); setCopyFrom(copyDefaults()); setFilterFrom(''); }}
-                />
-                <span><strong>Demo account</strong> — sample data, no Xero connection</span>
-              </label>
-              {demo && (
-                <div style={{ marginTop: 10, paddingLeft: 22 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
-                    Copy my settings to this account:
-                  </div>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', fontSize: 13 }}>
-                    {copyBoxes().map(({ key, label }) => (
-                      <label key={key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                        <input
-                          type="checkbox" checked={!!copyFrom[key]}
-                          onChange={e => setCopyFrom(prev => ({ ...prev, [key]: e.target.checked }))}
-                        />
-                        {label}
-                      </label>
+                <div className="form-group" style={{ marginBottom: 22 }}>
+                  <label className="form-label">Role</label>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {['user', 'admin'].map(r => (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => setRole(r)}
+                        style={{
+                          flex: 1, padding: '9px 0',
+                          borderRadius: 8, border: 'none', cursor: 'pointer',
+                          fontSize: 13, fontWeight: 600,
+                          background: role === r ? 'var(--accent-gradient)' : 'var(--bg-secondary)',
+                          color: role === r ? '#fff' : 'var(--text-muted)',
+                          boxShadow: role === r ? '0 2px 8px rgba(99,102,241,0.3)' : 'none',
+                          transition: 'all 0.18s ease',
+                        }}
+                      >
+                        {r === 'admin' ? '★ Admin' : '◦ User'}
+                      </button>
                     ))}
                   </div>
-                  {copyFrom.mailbox && (
-                    <div style={{ marginTop: 10 }}>
-                      <label htmlFor="admin-filter-from" className="form-label">
-                        Only process emails from
-                        <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }}>(needed with Mailbox)</span>
-                      </label>
-                      <input id="admin-filter-from"
-                        type="email"
-                        className="form-input"
-                        placeholder="sender address"
-                        value={filterFrom}
-                        onChange={e => setFilterFrom(e.target.value)}
-                        required
-                      />
-                      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
-                        Two accounts watching one mailbox must watch different senders: the demo account only processes emails from this address.
+                </div>
+
+                {/* A demo account shows sample data this app generates, and makes
+                    no Xero connection. Ticking it offers this admin's own keys,
+                    defaults and mailbox for the account (pages/admin/users.js),
+                    all ticked to start. The mailbox copy needs a sender: two
+                    accounts watching one mailbox must watch different senders,
+                    and the server refuses the copy without one. */}
+                <div className="form-group" style={{ marginBottom: 22 }}>
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox" checked={demo} style={{ marginTop: 3 }}
+                      onChange={e => { setDemo(e.target.checked); setCopyFrom(copyDefaults()); setFilterFrom(''); }}
+                    />
+                    <span><strong>Demo account</strong> — sample data, no Xero connection</span>
+                  </label>
+                  {demo && (
+                    <div style={{ marginTop: 10, paddingLeft: 22 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                        Copy my settings to this account:
                       </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', fontSize: 13 }}>
+                        {copyBoxes().map(({ key, label }) => (
+                          <label key={key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                            <input
+                              type="checkbox" checked={!!copyFrom[key]}
+                              onChange={e => setCopyFrom(prev => ({ ...prev, [key]: e.target.checked }))}
+                            />
+                            {label}
+                          </label>
+                        ))}
+                      </div>
+                      {copyFrom.mailbox && (
+                        <div style={{ marginTop: 10 }}>
+                          <label htmlFor="admin-filter-from" className="form-label">
+                            Only process emails from
+                            <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: 6 }}>(needed with Mailbox)</span>
+                          </label>
+                          <input id="admin-filter-from"
+                            type="email"
+                            className="form-input"
+                            placeholder="sender address"
+                            value={filterFrom}
+                            onChange={e => setFilterFrom(e.target.value)}
+                            required
+                          />
+                          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
+                            Two accounts watching one mailbox must watch different senders: the demo account only processes emails from this address.
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-              )}
-            </div>
 
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={!!passProblem || !!createProblem}
-              title={createProblem || undefined}
-              style={{ width: '100%', justifyContent: 'center', padding: '11px 0', fontSize: 14 }}
-            >
-              Create account
-            </button>
-          </form>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={inviting || !!createProblem}
+                  title={createProblem || undefined}
+                  style={{ width: '100%', justifyContent: 'center', padding: '11px 0', fontSize: 14 }}
+                >
+                  {inviting ? <><span className="btn-spinner" /> Inviting…</> : 'Invite user'}
+                </button>
+              </form>
+            </>
+          )}
         </div>
       </div>}
 
@@ -660,18 +641,22 @@ export default function Admin() {
         />
       )}
 
-      {/* Opened from the panel, and drawn over it (Modal sits above it). */}
-      {resetting && (
-        <ResetPasswordDialog
-          user={resetting}
-          onClose={() => setResetting(null)}
-          onDone={() => {
-            toast.success(`Temporary password for ${resetting.email} set. It works for 24 hours, until they choose their own; their other sessions were signed out.`);
-            setResetting(null);
-            setDetailRefresh(n => n + 1);
-            fetchUsers();
-          }}
-        />
+      {/* What New link or Send reset link came to, drawn over the panel
+          (Modal sits above it). Closing it is Done: the link is not kept. */}
+      {shownLink && (
+        <Modal onClose={() => setShownLink(null)} maxWidth={480}
+               label={shownLink.kind === 'reset' ? `Reset link for ${shownLink.email}` : `Invite for ${shownLink.email}`}>
+          <div className="card-title" style={{ marginBottom: 12 }}>
+            {shownLink.kind === 'reset' ? 'Reset link' : 'New invite link'}
+          </div>
+          <LinkResult
+            kind={shownLink.kind}
+            answer={shownLink.answer}
+            email={shownLink.email}
+            timeZone={me?.timezone}
+            onDone={() => setShownLink(null)}
+          />
+        </Modal>
       )}
     </div>
   );

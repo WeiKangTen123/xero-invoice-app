@@ -40,8 +40,10 @@ const USER_AGENT_MAX = 300;
 const TOUCH_THROTTLE_MS = 60 * 1000;
 
 // Why a session ended, as stored in ended_reason. 'expired' is never written:
-// listSessions reports it for a session that simply ran out.
-const END_REASONS = ['logout', 'revoked', 'signed_out_everywhere', 'password_changed', 'disabled', 'expired'];
+// listSessions reports it for a session that simply ran out. 'password_reset'
+// and 'invite_accepted' are a password set through a link (routes/auth.js
+// set-password), which signs the account out everywhere.
+const END_REASONS = ['logout', 'revoked', 'signed_out_everywhere', 'password_changed', 'password_reset', 'invite_accepted', 'disabled', 'expired'];
 
 // Statements are prepared on first use rather than at load, as in
 // audit-log.js: in tests the database is created after this module is

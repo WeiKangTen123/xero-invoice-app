@@ -80,4 +80,18 @@ function notifySecurity(text, { windowMs = THROTTLE_WINDOW_MS, now = Date.now() 
   }
 }
 
-module.exports = { notifyInvoiceCreated, notifyError, notifyErrorThrottled, notifySecurity, THROTTLE_WINDOW_MS };
+// A notice for the admins, posted as written and not throttled: something a
+// person did that an admin will want to know, not a warning (routes/auth.js:
+// an invite accepted). Never throws and never rejects, like notifySecurity.
+// Resolves false when empty, true otherwise.
+function notifyNotice(text) {
+  try {
+    const message = String(text ?? '');
+    if (!message) return Promise.resolve(false);
+    return notifySlack(message).then(() => true, () => false);
+  } catch (_) {
+    return Promise.resolve(false);
+  }
+}
+
+module.exports = { notifyInvoiceCreated, notifyError, notifyErrorThrottled, notifySecurity, notifyNotice, THROTTLE_WINDOW_MS };

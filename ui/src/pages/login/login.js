@@ -1,10 +1,12 @@
 // The sign-in screen's decisions that need no React: which form it shows,
-// what it says when a first-run registration is refused, what the alert says
+// whether a forgotten password can be reset by email, the address passed in
+// the query, what it says when a first-run registration is refused, what the alert says
 // when the server answers 423 (the account is locked after too many wrong
 // passwords), and the countdown on the button while the lock lasts. The page
 // cannot be rendered on every machine this is worked on, so they live here,
-// import nothing, and main/scripts/login-ui.test.js and
-// main/scripts/login-flow-ui.test.js run them as they are.
+// import nothing, and main/scripts/login-ui.test.js,
+// main/scripts/login-flow-ui.test.js, main/scripts/set-password-ui.test.js
+// and main/scripts/forgot-password-ui.test.js run them as they are.
 
 // ── Which form ───────────────────────────────────────────────────────────────
 // The page asks GET /auth/status before it shows a form. Until the answer it
@@ -26,6 +28,36 @@ export function formFromStatus(body) {
 }
 
 export const STATUS_FAILED_MESSAGE = 'Could not reach the server to load the sign-in form. Check your connection and try again.';
+
+// Whether "Forgot your password?" can lead to a reset by email: the same
+// answer says so (`mail`, true once this server can send email). Without
+// it, the person asks an administrator for a reset link.
+export function resetByEmail(body) {
+  return !!body && body.mail === true;
+}
+
+export const ASK_ADMIN_TEXT = 'Ask your administrator for a reset link.';
+
+// The address passed along in the query (?email=), to start a form with: the
+// sign-in page's from a password just set, the forgot-password page's from
+// the sign-in form. Only something that looks like one address, never a long
+// one; '' for anything else.
+export function emailFromSearch(search) {
+  try {
+    const value = new URLSearchParams(String(search || '')).get('email');
+    const e = typeof value === 'string' ? value.trim() : '';
+    return e && e.length <= 254 && /^[^\s@,;<>]+@[^\s@,;<>]+$/.test(e) ? e : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+// Where "Forgot your password?" leads when reset by email is on: with the
+// address typed so far, when it is one, so it is not typed twice.
+export function forgotPath(email) {
+  const e = emailFromSearch(`?email=${encodeURIComponent(String(email || '').trim())}`);
+  return e ? `/forgot-password?email=${encodeURIComponent(e)}` : '/forgot-password';
+}
 
 // A first-run registration the server turned away because an account exists
 // after all: 403, someone else set this site up first (in another tab, or

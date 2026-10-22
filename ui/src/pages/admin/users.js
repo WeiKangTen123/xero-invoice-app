@@ -1,8 +1,11 @@
 // Admin › Users: what a row says about an account's sign-in state, from the
 // fields GET /api/admin/users sends (failedLogins, lockedUntil,
-// mustChangePassword). The page cannot be rendered on every machine this is
-// worked on, so the wording lives here, imports nothing, and
-// main/scripts/login-ui.test.js runs it as it is.
+// mustChangePassword, invited, inviteExpiresAt, inviteExpired), and what the
+// page says once an invite or a reset link is made. The page cannot be
+// rendered on every machine this is worked on, so the wording lives here,
+// imports nothing, and main/scripts/login-ui.test.js,
+// main/scripts/demo-ui.test.js and main/scripts/invite-ui.test.js run it as
+// it is.
 
 function toMs(value) {
   if (value instanceof Date) return value.getTime();
@@ -62,7 +65,7 @@ export function mustSetNote(row) {
 
 // ── Demo accounts ────────────────────────────────────────────────────────────
 // A demo account (GET /api/admin/users rows carry `demo`) shows sample data
-// this app generates in place of a Xero connection. The Add User form offers
+// this app generates in place of a Xero connection. The Invite a user form offers
 // to copy this admin's keys, defaults and mailbox to it, so it works at once;
 // main/scripts/demo-ui.test.js runs what is below.
 
@@ -99,17 +102,18 @@ export function copyDefaults() {
   return out;
 }
 
-// What the form sends, from its fields: { email, password, role, demo,
-// copyFrom: { llm, defaults, mailbox }, mailboxFilterFrom }. The copy boxes
-// are only shown for a demo account, so their ticks only travel with one;
-// the sender address only travels with the mailbox, trimmed.
+// What the form sends, from its fields: { email, role, demo, copyFrom: { llm,
+// defaults, mailbox }, mailboxFilterFrom }. No password: the person sets
+// their own from the invite link, and an administrator never knows it. The
+// copy boxes are only shown for a demo account, so their ticks only travel
+// with one; the sender address only travels with the mailbox, trimmed.
 export function addUserPayload(form) {
   const f = form || {};
   const demo = f.demo === true;
   const ticks = (demo && f.copyFrom) || {};
   const copyFrom = {};
   for (const b of COPY_BOXES) copyFrom[b.key] = ticks[b.key] === true;
-  const payload = { email: f.email, password: f.password, role: f.role, demo, copyFrom };
+  const payload = { email: f.email, role: f.role, demo, copyFrom };
   if (copyFrom.mailbox) payload.mailboxFilterFrom = String(f.mailboxFilterFrom || '').trim();
   return payload;
 }
@@ -137,26 +141,93 @@ export function addUserProblem(form) {
   return null;
 }
 
-// The copy groups as the banner names them, in the order the boxes show.
+// The copy groups as the result names them, in the order the boxes show.
 const COPY_NAMES = { llm: 'LLM keys', defaults: 'invoice defaults', mailbox: 'mailbox' };
 
-// What the banner says once an account is made, from what was sent
-// (addUserPayload) and what the server answered (POST /api/admin/users:
-// { user, copied }): "Demo account x created. Copied: LLM keys, invoice
-// defaults, mailbox." A group that was ticked but had nothing to copy (no
-// keys, no defaults, no mailbox password) is named too, so the admin is not
-// left thinking it went across.
-export function createdMessage(payload, answer) {
+// What was copied to a new demo account, said under the invite's result,
+// from what was sent (addUserPayload) and what the server answered (POST
+// /api/admin/users: { user, copied }): "Demo account: copied LLM keys,
+// invoice defaults, mailbox." A group that was ticked but had nothing to copy
+// (no keys, no defaults, no mailbox password) is named too, so the admin is
+// not left thinking it went across. '' for an ordinary account.
+export function copiedNote(payload, answer) {
   const user   = (answer && answer.user) || null;
   const demo   = user ? user.demo === true : !!(payload && payload.demo === true);
-  const email  = (user && user.email) || (payload && payload.email) || '';
+  if (!demo) return '';
   const sent   = (answer && Array.isArray(answer.copied)) ? answer.copied : [];
   const keys   = COPY_BOXES.map(b => b.key);
   const copied = keys.filter(k => sent.includes(k));
   const missed = keys.filter(k => payload && payload.copyFrom && payload.copyFrom[k] === true && !sent.includes(k));
   const names  = list => list.map(k => COPY_NAMES[k]).join(', ');
-  let text = `${demo ? 'Demo account' : 'User'} ${email} created.`;
-  if (copied.length) text += ` Copied: ${names(copied)}.`;
+  let text = 'Demo account';
+  text += copied.length ? `: copied ${names(copied)}.` : '.';
   if (missed.length) text += ` Not copied, as you have none set up: ${names(missed)}.`;
   return text;
+}
+
+// ── Invites and reset links ──────────────────────────────────────────────────
+// An account is made without a password: the person is sent a link to set
+// their own (/set-password#t=…), and so is anyone an administrator sends a
+// reset link. The server emails it when it can (Setup › Email sending);
+// otherwise it hands the link back, once, for the admin to pass on.
+
+// What the result says for the server's answer, { emailed, link, expiresAt,
+// emailError? } (POST /api/admin/users → invite, POST …/invite → invite,
+// POST …/reset-link → reset). `kind` is 'invite' or 'reset'; `when` is the
+// expiry as the page formats it ("29 Oct, 14:05", utils/formatDate.js
+// formatShortDateTime), '' when there is none. `link` is set only when the
+// admin has to send it themselves; `note` goes under it. `ok` is false only
+// when nothing reached anyone.
+export function linkResult(kind, answer, email, when) {
+  const a     = answer || {};
+  const what  = kind === 'reset' ? 'Reset link' : 'Invite';
+  const who   = typeof email === 'string' && email.trim() ? email.trim() : 'them';
+  const until = typeof when === 'string' && when ? when : '';
+  if (a.emailed === true) {
+    return { ok: true, emailed: true, link: null, text: `${what} sent to ${who}.${until ? ` It expires on ${until}.` : ''}`, note: '' };
+  }
+  const link = typeof a.link === 'string' && a.link.trim() ? a.link.trim() : null;
+  const err  = typeof a.emailError === 'string' && a.emailError.trim() ? a.emailError.trim() : '';
+  const why  = err ? `The email couldn't be sent (${err})` : 'Email isn\'t set up on this server';
+  if (!link) {
+    // Neither emailed nor handed back: nothing reached anyone. Said plainly,
+    // with the way to try again.
+    return {
+      ok: false, emailed: false, link: null,
+      text: `${what} created, but it was not emailed${err ? ` (${err})` : ''} and no link came back. ${kind === 'reset' ? 'Send reset link' : 'New link'} makes another.`,
+      note: '',
+    };
+  }
+  return {
+    ok: true, emailed: false, link,
+    text: `${what} created. ${why}, so send this link to ${who} yourself. Treat it like a password.`,
+    note: `Shown once. Single use${until ? `, expires ${until}` : ''}.`,
+  };
+}
+
+// The note on a row that has been invited and has not set a password yet,
+// in place of its sign-in details: "Invited · expires 29 Oct", or "Invite
+// expired 20 Oct" once it has run out (the server says so, `inviteExpired`;
+// its expiry against `now` says the same for a list loaded a while ago).
+// `day` is the expiry as the page formats it ("29 Oct"). null for any other
+// row.
+export function inviteNote(row, { now = Date.now(), day = '' } = {}) {
+  if (row?.invited !== true) return null;
+  const at      = toMs(row.inviteExpiresAt);
+  const expired = row.inviteExpired === true || (Number.isFinite(at) && at <= toMs(now));
+  if (expired) {
+    return { expired, text: day ? `Invite expired ${day}` : 'Invite expired', title: 'The invite link ran out before they used it. New link makes another.' };
+  }
+  return { expired, text: day ? `Invited · expires ${day}` : 'Invited', title: 'Has not set a password yet. New link makes another; Revoke stops the one sent.' };
+}
+
+// Revoke, asked first: the link sent stops working.
+export function revokeInviteAsk(row) {
+  const email = (row && row.email) || 'this account';
+  return {
+    title:        `Revoke the invite for ${email}?`,
+    message:      'The link they were sent stops working at once.',
+    confirmLabel: 'Revoke',
+    danger:       true,
+  };
 }

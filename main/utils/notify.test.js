@@ -81,3 +81,30 @@ describe('notifySecurity', () => {
     await expect(notify.notifySecurity(undefined)).resolves.toBe(false);
   });
 });
+
+describe('notifyNotice', () => {
+  let axios, notify;
+  beforeEach(() => {
+    jest.resetModules();
+    axios  = require('axios');
+    notify = require('./notify');
+    process.env.SLACK_WEBHOOK_URL = 'http://slack.test/hook';
+  });
+  afterEach(() => { delete process.env.SLACK_WEBHOOK_URL; });
+
+  test('posts the text as it is, every time: a notice is not a repeating alert', async () => {
+    await expect(notify.notifyNotice('✅ ana@co.test accepted their invite')).resolves.toBe(true);
+    await expect(notify.notifyNotice('✅ ana@co.test accepted their invite')).resolves.toBe(true);
+    expect(axios.post.mock.calls).toEqual([
+      ['http://slack.test/hook', { text: '✅ ana@co.test accepted their invite' }],
+      ['http://slack.test/hook', { text: '✅ ana@co.test accepted their invite' }],
+    ]);
+  });
+
+  test('never throws or rejects: Slack failing, or nothing to say', async () => {
+    axios.post.mockRejectedValueOnce(new Error('ECONNRESET'));
+    await expect(notify.notifyNotice('x')).resolves.toBe(true);   // notifySlack logs and swallows it
+    await expect(notify.notifyNotice('')).resolves.toBe(false);
+    await expect(notify.notifyNotice(undefined)).resolves.toBe(false);
+  });
+});

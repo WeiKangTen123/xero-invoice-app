@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS users (
   -- Also unique however cased (idx_users_email_nocase, the end of this file).
   email        TEXT NOT NULL UNIQUE,
   -- An Argon2id hash, or a bcrypt one ($2a$/$2b$) from before, replaced at
-  -- its owner's next sign-in (users.js, Password hashes).
+  -- its owner's next sign-in (users.js, Password hashes). '!' for an account
+  -- made by invite that has not chosen one yet: no password matches it.
   password     TEXT NOT NULL,
   -- 'admin' or 'user'; so is is_demo 0 or 1 (users_role_insert/_update).
   role         TEXT NOT NULL DEFAULT 'user',
@@ -67,7 +68,8 @@ CREATE TABLE IF NOT EXISTS users (
 -- an admin can see where an account is signed in. last_seen_at and last_ip
 -- are written at most once a minute per session (sessions.js#touchSession).
 -- ended_reason: logout | revoked | signed_out_everywhere | password_changed |
--- disabled | expired; ended_by the admin's id when an admin ended it. Rows
+-- password_reset | invite_accepted | disabled | expired; ended_by the
+-- admin's id when an admin ended it. Rows
 -- go 30 days after their last use (sessions.js#pruneSessions): they hold IP
 -- addresses. No foreign key, so a write here can never fail on one; the rows
 -- go with the account in users.js#deleteUser.
@@ -84,6 +86,28 @@ CREATE TABLE IF NOT EXISTS sessions (
   ended_by     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, last_seen_at);
+
+-- Single-use links that let a person choose a password (utils/auth-tokens.js):
+-- an admin's invite to a new account, and a password reset, asked for on the
+-- sign-in page or sent by an admin. The link carries a random token; only its
+-- SHA-256 is kept here, so a copy of the database (a backup, a read of this
+-- table) holds no link that works. email is the address the link was sent
+-- for: once the account's address changes the link is dead. created_by is the
+-- admin who made it, NULL for one a person asked for themselves. used_at is
+-- set when the link is used; an earlier link superseded by a newer one is
+-- deleted. Used and expired rows go 30 days on (auth-tokens.js#prune).
+CREATE TABLE IF NOT EXISTS auth_tokens (
+  id         INTEGER PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  purpose    TEXT NOT NULL CHECK (purpose IN ('invite', 'reset')),
+  token_hash TEXT NOT NULL UNIQUE,
+  email      TEXT NOT NULL,
+  created_by TEXT,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id, purpose);
 
 -- 1:1 with users — Xero/IMAP/LLM credentials (was data/users/<id>/config.json)
 CREATE TABLE IF NOT EXISTS user_credentials (

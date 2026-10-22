@@ -21,6 +21,9 @@ const watcherRegistry  = require('../email/watcher-registry');
 const tokenCache       = require('../utils/token-cache');
 const sessions         = require('../utils/sessions');
 const db               = require('../db');
+const authTokens       = require('../utils/auth-tokens');
+const mailer           = require('../utils/mailer');
+const mailTemplates    = require('../utils/mail-templates');
 const logger       = require('../utils/logger');
 const auditLog     = require('../utils/audit-log');
 
@@ -47,7 +50,8 @@ const LOG_FILES = { combined: 'combined.log', error: 'error.log' };
 // GET /api/admin/users — every account, with its lockout and temporary-
 // password state (users.js#sanitize: failedLogins, lockedUntil, lockCount,
 // lastLockedAt, mustChangePassword, tempPasswordExpiresAt, lastLoginAt,
-// passwordChangedAt).
+// passwordChangedAt) and, for an account still waiting on its invite,
+// invited, inviteExpiresAt and inviteExpired.
 router.get('/users', requireAdmin, (_req, res) => {
   res.json({ users: getAllUsers() });
 });
@@ -162,30 +166,84 @@ function _copySettings(fromId, toId, groups, mailboxFilterFrom) {
   return copied;
 }
 
-// POST /api/admin/users — create new user. The password an admin types is
+// ── Invite and reset links ───────────────────────────────────────────────────
+// An admin no longer has to know anyone's password: a new account is invited
+// by a single-use link, and a forgotten password replaced through one
+// (utils/auth-tokens.js; the person uses it at /set-password, routes/auth.js).
+// The link is emailed when the server can send mail (utils/mailer.js). When
+// it cannot, or the mail fails, the answer carries the link instead, once,
+// for the admin to hand over: it is never stored (only its hash is) and
+// cannot be shown again; another is a new link, which kills this one.
+
+// A link starts with this app's public address, never the request's Host
+// header (mailer.js), so without one there is no link to make.
+const NO_APP_URL = {
+  error: "Links can't be made yet: set this app's web address (APP_BASE_URL) in Setup → Email first.",
+  code:  'NO_APP_URL',
+};
+
+// A new link of this kind for the account, made by this admin: its raw token
+// and when it stops working. Every earlier unused link of the kind dies.
+function _issueLink(target, purpose, ttlMs, admin) {
+  const now = Date.now();
+  const raw = authTokens.issue(target.id, purpose, { ttlMs, createdBy: admin.id, now });
+  return { raw, expiresAt: new Date(now + ttlMs).toISOString(), now };
+}
+
+// Emails the link when the server can. Answers what the admin is told:
+// { emailed, link, expiresAt }, `link` only when it was not emailed, and
+// `emailError` when a send was tried and failed (what the mail server said,
+// never the password).
+async function _deliverLink(target, purpose, issued, admin) {
+  const link = mailer.linkFor(issued.raw);
+  const { expiresAt, now } = issued;
+  if (!mailer.isConfigured()) return { emailed: false, link, expiresAt };
+  const mail = purpose === 'invite'
+    ? mailTemplates.invite({ to: target.email, link, expiresAt, invitedBy: admin.email, now })
+    : mailTemplates.reset({ to: target.email, link, expiresAt, requestedBy: admin.email, now });
+  const sent = await mailer.send({ to: target.email, ...mail });
+  return sent.sent ? { emailed: true, link: null, expiresAt } : { emailed: false, link, expiresAt, emailError: sent.error };
+}
+
+// POST /api/admin/users — create new user.
+//
+// Without `password`, the account is invited: it is made with no password
+// (users.js INVITED_PASSWORD), cannot sign in, and a link to choose one is
+// made, good for 7 days, and emailed when the server can send mail. Answers
+// 201 { success, user, copied, invite: { emailed, link, expiresAt } }, with
+// `link` only when it was not emailed (and `emailError` when the mail
+// failed). A 409 NO_APP_URL when there is no public address to start a link
+// with, before anything is made.
+//
+// With `password` (kept for older clients), the password an admin types is
 // temporary: it must be replaced at the first sign-in and dies after a day,
 // so the admin never ends up knowing a password someone is actually using.
+// Answers { success, user, copied }.
 //
-// Body: { email, password, role, demo, copyFrom: { llm, defaults, mailbox },
+// Body: { email, password?, role, demo, copyFrom: { llm, defaults, mailbox },
 // mailboxFilterFrom }. `demo` makes a demo account, which runs against the
 // generated Demo Company instead of Xero (users.js isDemoUser). `copyFrom`
 // names which groups of the creating admin's own settings to copy onto the
 // new account (see _copySettings): the LLM keys, the posting defaults, the
 // mailbox — which needs `mailboxFilterFrom`, the one sender address the new
-// account watches for (see _mailboxClash). Answers { success, user, copied },
-// `copied` being the groups that had something to copy. The audit event
-// records `demo`, `copied` and that the password is temporary with when it
-// expires, never a value.
+// account watches for (see _mailboxClash). `copied` is the groups that had
+// something to copy. The audit event records `demo`, `copied`, and either
+// that the account was invited (whether by email, and when the link expires)
+// or that the password is temporary with when it expires, never a value.
 //
 // All or nothing: the account is made first (createUser commits it), so when
-// the copy then fails the account is deleted again and the answer is a 500.
-// Left in place, it was an account with half its settings, and trying again
-// said "already exists".
+// the copy or the invite link then fails the account is deleted again and
+// the answer is a 500. Left in place, it was an account with half its
+// settings, and trying again said "already exists". A mail that fails is not
+// a failure: the link is handed back instead.
 router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
   const { email, password, role, demo, copyFrom, mailboxFilterFrom } = req.body || {};
+  const invite = password === undefined || password === null;
   // Strings, or nothing goes further: a number or an object for the email
   // reached createUser and came back as "email.toLowerCase is not a function".
-  if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
+  if (invite) {
+    if (typeof email !== 'string' || !email.trim()) return res.status(400).json({ error: 'Email is required' });
+  } else if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
     return res.status(400).json({ error: 'Email and password are required' });
   }
   if (typeof users.emailProblem === 'function') {
@@ -204,8 +262,10 @@ router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
   // were once allowed went (users.js passwordProblem).
   const isDemo  = demo === true;
   const newRole = role === 'admin' ? 'admin' : 'user';
-  const problem = passwordProblem(password, email);
-  if (problem) return res.status(400).json({ error: problem });
+  if (!invite) {
+    const problem = passwordProblem(password, email);
+    if (problem) return res.status(400).json({ error: problem });
+  }
   const groups = _copyGroups(copyFrom);
   const filter = String(mailboxFilterFrom ?? '').trim();
   if (groups.mailbox) {
@@ -214,10 +274,13 @@ router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
     const clash = _mailboxClash(req.user.id, filter);
     if (clash) return res.status(400).json({ error: clash });
   }
+  if (invite && !mailer.appBaseUrl()) return res.status(409).json(NO_APP_URL);
 
   let user;
   try {
-    user = await users.createUser(email, password, newRole, { temporary: true, demo: isDemo });
+    user = invite
+      ? await users.createUser(email, null, newRole, { invited: true, demo: isDemo })
+      : await users.createUser(email, password, newRole, { temporary: true, demo: isDemo });
   } catch (err) {
     const refused = _createRefusal(err);
     if (refused) return res.status(refused.status).json(refused.body);
@@ -232,17 +295,41 @@ router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
     logger.error('Could not copy settings onto a new account; the account was removed again', {
       email: user.email, error: err.message, by: req.user.email,
     });
-    try { users.deleteUser(user.id); } catch (undoErr) {
-      logger.error('Could not remove a half-made account', { id: user.id, email: user.email, error: undoErr.message });
-    }
+    _undoCreate(user);
     return res.status(500).json({ error: 'Could not copy your settings to the new account, so it was not created. Try again.' });
   }
 
-  const expiresAt = user.tempPasswordExpiresAt || null;
-  recordAdmin(req, user, 'user.create', { role: user.role, demo: user.demo, copied, temporary: true, expiresAt });
-  logger.info('Admin created user', { email: user.email, role: user.role, demo: user.demo, copied, by: req.user.email });
-  res.status(201).json({ success: true, user, copied });
+  if (!invite) {
+    const expiresAt = user.tempPasswordExpiresAt || null;
+    recordAdmin(req, user, 'user.create', { role: user.role, demo: user.demo, copied, temporary: true, expiresAt });
+    logger.info('Admin created user', { email: user.email, role: user.role, demo: user.demo, copied, by: req.user.email });
+    return res.status(201).json({ success: true, user, copied });
+  }
+
+  let issued;
+  try {
+    issued = _issueLink(user, 'invite', authTokens.INVITE_TTL_MS, req.user);
+  } catch (err) {
+    logger.error('Could not make the invite link for a new account; the account was removed again', {
+      email: user.email, error: err.message, by: req.user.email,
+    });
+    _undoCreate(user);
+    return res.status(500).json({ error: 'Could not make the invite link, so the account was not created. Try again.' });
+  }
+  const sent = await _deliverLink(user, 'invite', issued, req.user);
+  recordAdmin(req, user, 'user.create', {
+    role: user.role, demo: user.demo, copied, invited: true, emailed: sent.emailed, expiresAt: sent.expiresAt,
+  });
+  logger.info('Admin invited a new user', { email: user.email, role: user.role, demo: user.demo, copied, emailed: sent.emailed, by: req.user.email });
+  res.status(201).json({ success: true, user: users.getUser(user.id) || user, copied, invite: sent });
 }));
+
+// Removes an account made moments ago whose setting up then failed.
+function _undoCreate(user) {
+  try { users.deleteUser(user.id); } catch (undoErr) {
+    logger.error('Could not remove a half-made account', { id: user.id, email: user.email, error: undoErr.message });
+  }
+}
 
 // What createUser's refusals answer (users.js): a malformed address is the
 // admin's to fix (400), one already taken is a conflict (409). Anything else
@@ -504,6 +591,75 @@ router.patch('/users/:id/password', requireAdmin, asyncHandler(async (req, res) 
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+}));
+
+// What the link routes below refuse, and why. An account that has chosen its
+// password has no invite to send or revoke; one still waiting on its invite
+// has no password to reset. A disabled account's link would not work
+// (auth-tokens.js#peek), so none is made until it is enabled.
+const NOT_INVITED = {
+  error: 'This account has already set its password, so there is no invite. Send a password reset link instead.',
+  code:  'NOT_INVITED',
+};
+const STILL_INVITED = {
+  error: "This account hasn't accepted its invite yet, so it has no password to reset. Send a new invite instead.",
+  code:  'INVITED',
+};
+const disabledRefusal = what => ({ error: `This account is disabled. Enable it first, then send ${what}.`, code: 'DISABLED' });
+
+// POST /api/admin/users/:id/invite — a new invite for an account that has
+// not accepted its last one (run out, lost, or revoked): good for 7 days,
+// emailed when the server can send mail, and the old link stops working.
+// Answers { invite: { emailed, link, expiresAt } }, `link` only when it was
+// not emailed (and `emailError` when the mail failed). 409 for an account
+// that has already chosen its password (NOT_INVITED) or is disabled, or when
+// there is no public address for the link (NO_APP_URL).
+router.post('/users/:id/invite', requireAdmin, asyncHandler(async (req, res) => {
+  const target = findById(req.params.id);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (!users.isInvited(target)) return res.status(409).json(NOT_INVITED);
+  if (target.disabled_at) return res.status(409).json(disabledRefusal('the invite'));
+  if (!mailer.appBaseUrl()) return res.status(409).json(NO_APP_URL);
+  const invite = await _deliverLink(target, 'invite', _issueLink(target, 'invite', authTokens.INVITE_TTL_MS, req.user), req.user);
+  recordAdmin(req, target, 'user.invite', { emailed: invite.emailed, expiresAt: invite.expiresAt });
+  logger.info('Admin sent a new invite', { email: target.email, emailed: invite.emailed, by: req.user.email });
+  res.json({ invite });
+}));
+
+// DELETE /api/admin/users/:id/invite — the account's invite link stops
+// working, for one sent to the wrong person or no longer wanted. The account
+// stays, still invited, with no way in until a new invite is sent (or it is
+// deleted). Answers { success: true }; 409 for an account with a password.
+router.delete('/users/:id/invite', requireAdmin, (req, res) => {
+  const target = findById(req.params.id);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  if (!users.isInvited(target)) return res.status(409).json(NOT_INVITED);
+  const revoked = authTokens.revoke(target.id, 'invite');
+  recordAdmin(req, target, 'user.invite_revoke', { revoked });
+  logger.info('Admin revoked an invite', { email: target.email, revoked, by: req.user.email });
+  res.json({ success: true });
+});
+
+// POST /api/admin/users/:id/reset-link — a link for the person to choose a
+// new password themselves, good for 24 hours, emailed when the server can
+// send mail: the way to help someone locked out without the admin ever
+// knowing their password (PATCH /users/:id/password, a temporary password,
+// stays for when there is no other way). Nothing changes until the link is
+// used: the current password keeps working, and using it signs the account
+// out everywhere and unlocks it (routes/auth.js set-password). Answers
+// { reset: { emailed, link, expiresAt } } as the invite does. Not for your
+// own account (400), one still waiting on its invite (409 INVITED), or a
+// disabled one (409).
+router.post('/users/:id/reset-link', requireAdmin, asyncHandler(async (req, res) => {
+  const target = findTarget(req, res, 'Change your own password from the Account page');
+  if (!target) return;
+  if (users.isInvited(target)) return res.status(409).json(STILL_INVITED);
+  if (target.disabled_at) return res.status(409).json(disabledRefusal('a reset link'));
+  if (!mailer.appBaseUrl()) return res.status(409).json(NO_APP_URL);
+  const reset = await _deliverLink(target, 'reset', _issueLink(target, 'reset', authTokens.ADMIN_RESET_TTL_MS, req.user), req.user);
+  recordAdmin(req, target, 'user.reset_link', { emailed: reset.emailed, expiresAt: reset.expiresAt });
+  logger.info('Admin sent a password reset link', { email: target.email, emailed: reset.emailed, by: req.user.email });
+  res.json({ reset });
 }));
 
 // POST /api/admin/users/:id/unlock — ends a sign-in lockout early and clears

@@ -100,7 +100,7 @@ export default function UserDetailPanel({ user, isMe = false, lastAdmin = false,
   }, []);
 
   // Escape closes the panel, unless a dialog opened from it (a confirm, the
-  // reset password form) is on top: Escape is that dialog's. Listened for in
+  // reset or invite link) is on top: Escape is that dialog's. Listened for in
   // the capture phase, so this runs before the dialog's own listener closes
   // it and the check below still sees it. onClose is read from a ref so the
   // listener is added once.
@@ -167,6 +167,8 @@ export default function UserDetailPanel({ user, isMe = false, lastAdmin = false,
     unlock:        () => actions.unlock(user),
     role:          () => actions.role(user),
     reset:         () => actions.reset(user),
+    invite:        () => actions.invite(user),
+    revokeInvite:  () => actions.revokeInvite(user),
     stopWatcher:   () => actions.stopWatcher(user),
     autoSubmitOff: () => actions.autoSubmitOff(user),
     disabled:      () => actions.disabled(user),

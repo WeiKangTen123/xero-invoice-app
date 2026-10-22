@@ -69,10 +69,22 @@ const SECTION_META = {
     desc: 'Set once for the whole server — every user registers this same value on their own Xero Web app',
     testKey: null,
   },
+  // For the whole server: what invites and password-reset links are emailed
+  // with. Left empty, the admin is shown each link to send themselves.
+  email: {
+    label: 'Email sending (admin)', icon: '📨',
+    desc: 'Sends invites and password-reset links. Not set up: you copy links and send them yourself.',
+    testKey: 'email', testLabel: 'Send test email',
+    helpUrl: 'https://myaccount.google.com/apppasswords', helpLabel: 'Gmail App Password ↗',
+  },
 };
 
+// A key that reads like a secret but is not one: this site's own address,
+// which every link it emails shows anyway.
+const PLAIN_KEYS = new Set(['APP_BASE_URL']);
+
 function isSecretKey(key) {
-  return /pass|secret|key|url/i.test(key);
+  return /pass|secret|key|url/i.test(key) && !PLAIN_KEYS.has(key);
 }
 
 function HelpLink({ url, label }) {
@@ -130,6 +142,7 @@ function Field({ name, meta, value, onChange }) {
           )}
         </div>
         {note && <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>{note}</div>}
+        {meta.hint && <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>{meta.hint}</div>}
       </div>
     );
   }
@@ -263,6 +276,9 @@ function Field({ name, meta, value, onChange }) {
           </button>
         </div>
       )}
+      {/* A line of help the server sends with a field (the email sending
+          settings), under it rather than behind a tooltip. */}
+      {meta.hint && <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>{meta.hint}</div>}
     </div>
   );
 }
@@ -279,6 +295,9 @@ function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, tes
   // place at the front when there is nothing to offer for it — an app password
   // always, and the server name for a provider we do not know.
   const hasAutomatic = entries.some(([, m]) => m.auto);
+  // A server-wide section is read-only to anyone but an admin, and so is its
+  // Test button: the server refuses it (Send test email is admin-only).
+  const readOnly = entries.length > 0 && entries.every(([, m]) => m.readOnly);
   const needed   = hasAutomatic ? entries.filter(([k, m]) => !m.auto && !OPTIONAL_KEYS.has(k)) : entries;
   const decided  = hasAutomatic ? entries.filter(([k, m]) => m.auto || OPTIONAL_KEYS.has(k)) : [];
 
@@ -299,7 +318,7 @@ function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, tes
           </div>
         </div>
 
-        {meta.testKey && (
+        {meta.testKey && !readOnly && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
             <TestResult msg={msgs[meta.testKey]} />
             <button
@@ -1192,7 +1211,10 @@ export default function Setup() {
 
         <LlmKeysCard idx={2} testing={testing} msgs={msgs} onTest={runTest} />
 
-        {['defaults', 'allowances', 'preferences', 'optional', 'xeroOAuth'].map((key, i) => {
+        {/* The server's own settings (admin) come last: Slack, the OAuth
+            redirect and email sending. Anyone but an admin sees them
+            read-only, with no Test button. */}
+        {['defaults', 'allowances', 'preferences', 'optional', 'xeroOAuth', 'email'].map((key, i) => {
           const sectionData = config[key];
           if (!sectionData) return null;
           return (

@@ -75,6 +75,29 @@ export function passwordProblem(password, email) {
   return null;
 }
 
+// The rules one at a time, for the checklist under a new-password field
+// (pages/SetPassword.jsx): each in plain words, and whether the password
+// meets it yet. The two after the length are only judged once the length is
+// right: a short password fails on length whatever else it is, and the list
+// above is too short to call a short password uncommon. Built on
+// passwordProblem, so the list and the message never disagree.
+export function passwordChecklist(password, email) {
+  const pw     = typeof password === 'string' ? password.normalize('NFC') : '';
+  const length = [...pw].length;
+  const long   = length > PASSWORD_MAX_LENGTH;
+  const sized  = length >= PASSWORD_MIN_LENGTH && !long;
+  return [
+    {
+      key: 'length',
+      label: long ? `At most ${PASSWORD_MAX_LENGTH} characters` : `At least ${PASSWORD_MIN_LENGTH} characters`,
+      ok: sized,
+    },
+    { key: 'email',  label: 'Not your email address',       ok: sized && passwordProblem(password, email) !== 'Password must not be your email address' },
+    // Without the address, the one rule left after the length is this one.
+    { key: 'common', label: 'Not a commonly used password', ok: sized && passwordProblem(password, '') === null },
+  ];
+}
+
 // The placeholder under a new-password field.
 export function passwordHint() {
   return `Min. ${PASSWORD_MIN_LENGTH} characters`;

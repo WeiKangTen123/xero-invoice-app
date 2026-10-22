@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import { api, SET_PASSWORD_PATH } from '../api/client';
 import { returnPathFrom } from '../utils/returnTo';
 import {
-  lockMessage, lockCountdown, formFromStatus, registerRefusal,
-  FORM_CHECKING, FORM_FIRST_RUN, FORM_UNREACHABLE, STATUS_FAILED_MESSAGE,
+  lockMessage, lockCountdown, formFromStatus, registerRefusal, resetByEmail, emailFromSearch, forgotPath,
+  FORM_CHECKING, FORM_FIRST_RUN, FORM_UNREACHABLE, STATUS_FAILED_MESSAGE, ASK_ADMIN_TEXT,
 } from './login/login';
 import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
 
@@ -26,7 +26,10 @@ export default function Login() {
   // Said when a first-run registration found an account already there and
   // the form became a sign-in form.
   const [notice, setNotice]   = useState('');
-  const [email, setEmail]     = useState('');
+  // An address passed along (?email=), from a password just set by an invite
+  // or reset link: filled in, so only the new password is typed.
+  const [prefilled]           = useState(() => emailFromSearch(location.search));
+  const [email, setEmail]     = useState(prefilled);
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [error, setError]     = useState('');
@@ -38,13 +41,17 @@ export default function Login() {
   const [lock, setLock]       = useState(null);
   const [now, setNow]         = useState(() => Date.now());
   const [forgot, setForgot]   = useState(false);
+  // Whether this server can email a reset link (GET /auth/status → mail).
+  const [mail, setMail]       = useState(false);
 
   const shakeTimer = useRef(null);
   const firstRun = form === FORM_FIRST_RUN;
   const mode = firstRun ? 'register' : 'login';
 
-  // Resolves once the form is known, or known to be unreachable.
+  // Resolves once the form is known, or known to be unreachable. The same
+  // answer says whether a forgotten password can be reset by email.
   const loadForm = useCallback(() => api.get('/auth/status')
+    .then(d => { setMail(resetByEmail(d)); return d; })
     .then(d => setForm(formFromStatus(d)))
     .catch(() => setForm(FORM_UNREACHABLE)), []);
 
@@ -317,7 +324,7 @@ export default function Login() {
                         value={email}
                         onChange={e => setEmail(e.target.value)}
                         required
-                        autoFocus
+                        autoFocus={!prefilled}
                         // Lets a password manager fill this in, and offer to save
                         // the pair when an account is created: "username" is the
                         // value they pair with a password, an email address or not.
@@ -343,6 +350,8 @@ export default function Login() {
                         value={password}
                         onChange={e => setPassword(e.target.value)}
                         required
+                        // With the address filled in, the password is what is left to type.
+                        autoFocus={!!prefilled}
                         minLength={mode === 'register' ? PASSWORD_MIN_LENGTH : 1}
                         autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
                         style={{ paddingRight: 42 }}
@@ -398,22 +407,34 @@ export default function Login() {
                   </div>
                 </form>
 
-                {/* After first run there is nowhere to register: accounts and
-                    password resets both come from an administrator, and the form
-                    says so rather than leaving someone to look for a button. */}
+                {/* After first run there is nowhere to register: accounts come
+                    from an administrator's invite, and the form says so rather
+                    than leaving someone to look for a button. A forgotten
+                    password is reset by email where this server can send it
+                    (the address typed so far goes along); elsewhere an
+                    administrator sends a reset link. */}
                 {!firstRun && (
                   <div style={{ marginTop: 18, textAlign: 'center', fontSize: 12.5, lineHeight: 1.55 }}>
-                    <button
-                      type="button"
-                      onClick={() => setForgot(v => !v)}
-                      aria-expanded={forgot}
-                      style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, color: 'var(--accent)' }}
-                    >
-                      Forgot your password?
-                    </button>
-                    {forgot && (
+                    {mail ? (
+                      <Link
+                        to={forgotPath(email)}
+                        style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--accent)' }}
+                      >
+                        Forgot your password?
+                      </Link>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setForgot(v => !v)}
+                        aria-expanded={forgot}
+                        style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, color: 'var(--accent)' }}
+                      >
+                        Forgot your password?
+                      </button>
+                    )}
+                    {!mail && forgot && (
                       <p style={{ marginTop: 6, color: isDark ? 'rgba(255,255,255,0.6)' : '#4b5068', animation: 'fadeIn 0.2s ease' }}>
-                        Ask your administrator to reset it from Users. You&apos;ll get a temporary password to sign in with, then set your own.
+                        {ASK_ADMIN_TEXT}
                       </p>
                     )}
                     <p style={{ marginTop: 8, color: muted }}>Need an account? Ask your administrator.</p>
