@@ -112,4 +112,23 @@ describe('GET /api/invoices/:id/pdf — who may read it', () => {
     const res = await withBearer(token).expect(403);
     expect(res.body.code).toBe('password_change_required');
   });
+
+  // And the 2-step gate: an admin who has not turned 2-step sign-in on gets
+  // nothing else either (auth-middleware.js accessGate).
+  test('an admin who must set up 2-step sign-in first is refused, with the code that opens the set-up', async () => {
+    const before = process.env.MFA_REQUIRED_FOR_ADMINS;
+    process.env.MFA_REQUIRED_FOR_ADMINS = 'true';
+    try {
+      const admin = await users.createUser(`pdfadmin${Date.now()}@test.com`, 'password123', 'admin');
+      require('../utils/pdf-store').forUser(admin.id).save('inv1', PDF);
+      const res = await withBearer(sessionToken(admin)).expect(403);
+      expect(res.body.code).toBe('mfa_setup_required');
+      // The same admin with the gate off gets the PDF, so it was the gate.
+      process.env.MFA_REQUIRED_FOR_ADMINS = 'false';
+      await withBearer(sessionToken(admin)).expect(200);
+    } finally {
+      if (before === undefined) delete process.env.MFA_REQUIRED_FOR_ADMINS;
+      else process.env.MFA_REQUIRED_FOR_ADMINS = before;
+    }
+  });
 });

@@ -225,7 +225,8 @@ describe('docked beside the page on a wide window', () => {
   });
 
   test('Layout keeps that width free right of the page and the banner, not the header', () => {
-    expect(lay).toMatch(/import \{ Suspense, useState \} from 'react';/);
+    // useEffect is the privacy notice's (Layout asks the server whether to show it).
+    expect(lay).toMatch(/import \{ Suspense, useState, useEffect \} from 'react';/);
     expect(lay).toContain('const [chatDock, setChatDock] = useState(0);');
     expect(lay).toContain("style={{ '--chat-dock-width': `${chatDock}px` }}");
     expect(lay).toMatch(/const DOCK_ROOM = \{\s*marginRight: 'var\(--chat-dock-width\)',/);

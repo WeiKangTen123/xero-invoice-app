@@ -6,10 +6,11 @@ import { ViewModeProvider } from './context/ViewModeContext';
 import { PipelineProvider } from './context/PipelineContext';
 import { ConfirmProvider } from './context/ConfirmContext';
 import { ToastProvider } from './context/ToastContext';
+import { ReauthProvider } from './context/ReauthContext';
 import Layout from './components/layout/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 import { returnPathFrom } from './utils/returnTo';
-import { SET_PASSWORD_PATH } from './api/client';
+import { SET_PASSWORD_PATH, MFA_SETUP_PATH, requiredPath } from './api/client';
 // Login stays eager: it is the first paint for anyone signed out, and making it
 // wait on a chunk to render a single form trades a real delay for no saving.
 // Every other page is loaded on demand — the financial dashboard alone pulls in
@@ -72,6 +73,9 @@ function PrivateRoute({ children, adminOnly }) {
   // (403 password_change_required), so every other page leads to the form.
   // The sidebar still renders around it; its links come back here.
   if (user.mustChangePassword && !location.pathname.startsWith('/account')) return <Navigate to={SET_PASSWORD_PATH} replace />;
+  // Then an admin without 2-step sign-in sets it up, the same way: the server
+  // answers 403 mfa_setup_required to the rest until it is on.
+  if (user.mfaSetupRequired && !location.pathname.startsWith('/account')) return <Navigate to={MFA_SETUP_PATH} replace />;
   if (adminOnly && user.role !== 'admin') return <Navigate to="/dashboard" replace />;
   return children;
 }
@@ -96,8 +100,9 @@ function AppRoutes() {
           {/* Signing in sets `user`, which re-renders this before Login's own
               navigate runs — so both send to the same place: the page that
               sent the user here, else the dashboard — unless a password must
-              be set first, which comes before any page. */}
-          <Route path="/login" element={user ? <Navigate to={user.mustChangePassword ? SET_PASSWORD_PATH : returnPathFrom(location)} replace /> : <Login />} />
+              be set, or 2-step sign-in set up, first, which come before any
+              page (api/client.js requiredPath). */}
+          <Route path="/login" element={user ? <Navigate to={requiredPath(user) || returnPathFrom(location)} replace /> : <Login />} />
           {/* Outside the auth guard on purpose: the pairing token in the URL is the
               phone's only credential, and it grants upload and nothing else. */}
           <Route path="/capture/:token" element={<Capture />} />
@@ -158,7 +163,11 @@ export default function App() {
           <PipelineProvider>
             <ToastProvider>
               <ConfirmProvider>
-                <RouterProvider router={router} />
+                {/* Answers a 403 reauth_required from any request with
+                    "Confirm it's you", then sends it again (api/client.js). */}
+                <ReauthProvider>
+                  <RouterProvider router={router} />
+                </ReauthProvider>
               </ConfirmProvider>
             </ToastProvider>
           </PipelineProvider>

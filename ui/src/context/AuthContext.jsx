@@ -58,8 +58,25 @@ export function AuthProvider({ children }) {
     try { setUser((await api.get('/auth/me')).user); } catch { /* ignore */ }
   }
 
+  // The user, signed in. Or, for an account with 2-step sign-in on, the
+  // server's { mfaRequired: true, mfaToken, methods }: the password was right
+  // but there is no session yet, so nothing is stored; the sign-in page asks
+  // for the code and verifyMfa finishes it.
   async function login(email, password) {
     const data = await api.post('/auth/login', { email, password });
+    if (data && data.mfaRequired === true) return data;
+    localStorage.setItem('token', data.token);
+    setUser(data.user);
+    setAuthError('');
+    return data.user;
+  }
+
+  // The second step: `proof` is { code } from the authenticator app or
+  // { recoveryCode }, sent with the mfaToken the first step handed back. Its
+  // answer is a sign-in's, stored the same way; the user may carry
+  // recoveryCodesLeft after a recovery code.
+  async function verifyMfa(mfaToken, proof) {
+    const data = await api.post('/auth/mfa/verify', { mfaToken, ...proof });
     localStorage.setItem('token', data.token);
     setUser(data.user);
     setAuthError('');
@@ -104,7 +121,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, authError, checking, retrySession: checkSession, login, logout, register, refreshUser, changePassword, signOutEverywhere }}>
+    <AuthContext.Provider value={{ user, loading, authError, checking, retrySession: checkSession, login, verifyMfa, logout, register, refreshUser, changePassword, signOutEverywhere }}>
       {children}
     </AuthContext.Provider>
   );

@@ -2,7 +2,7 @@ const express      = require('express');
 const router       = express.Router();
 const { decodeBase64 } = require('../utils/base64');
 const jwt          = require('jsonwebtoken');
-const { requireAuth, sessionUser, jwtSecret, PASSWORD_CHANGE_REQUIRED } = require('../middleware/auth-middleware');
+const { requireAuth, sessionUser, jwtSecret, accessGate } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
 const { isActive, getSetupStatus } = require('../utils/users');
 const invoiceStore = require('../utils/invoice-store');
@@ -351,10 +351,12 @@ router.get('/:id/pdf', (req, res, next) => {
     const bearerToken = (req.headers.authorization || '').replace('Bearer ', '').trim();
     const session = sessionUser(bearerToken);
     if (session.error) return res.status(401).json({ error: session.error });
-    // And requireAuth's other check: an account that must choose a new
-    // password first (a temporary one from an admin) gets nothing else, PDFs
-    // included. This route skipped it, so a reset password opened every PDF.
-    if (session.user.must_change_password) return res.status(403).json(PASSWORD_CHANGE_REQUIRED);
+    // And requireAuth's other checks (accessGate): an account that must choose
+    // a new password first, or an admin who must turn on 2-step sign-in
+    // first, gets nothing else, PDFs included. This route skipped them, so a
+    // reset password opened every PDF.
+    const gate = accessGate(session.user, req.method, req.originalUrl || req.url);
+    if (gate) return res.status(403).json(gate);
     userId = session.user.id;
   }
 

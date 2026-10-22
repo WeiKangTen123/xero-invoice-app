@@ -910,7 +910,8 @@ describe('the tab and its parts are wired to the helpers and the server', () => 
 describe('what the tab needs from the API client and the check panel', () => {
   test('the API client offers PUT, which the overrides and bank options are saved with', () => {
     const client = read('api/client.js');
-    expect(client).toMatch(/\bput:\s*\(path, body\)\s*=>\s*request\(path, \{ method: 'PUT'/);
+    // send() is request() with "Confirm it's you" answered (mfa-ui.test.js).
+    expect(client).toMatch(/\bput:\s*\(path, body\)\s*=>\s*send\(path, \{ method: 'PUT'/);
   });
 
   test('the check panel asks the cash manager\'s own check route', () => {

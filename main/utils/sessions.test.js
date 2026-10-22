@@ -22,7 +22,7 @@ describe('utils/sessions', () => {
 
   test('the table and the index the lists read by exist', () => {
     const cols = db.prepare('PRAGMA table_info(sessions)').all().map(c => c.name);
-    expect(cols).toEqual(['id', 'user_id', 'created_at', 'last_seen_at', 'first_ip', 'last_ip', 'user_agent', 'ended_at', 'ended_reason', 'ended_by']);
+    expect(cols).toEqual(['id', 'user_id', 'created_at', 'last_seen_at', 'first_ip', 'last_ip', 'user_agent', 'ended_at', 'ended_reason', 'ended_by', 'reauth_at']);
     expect(db.prepare('PRAGMA index_info(idx_sessions_user)').all().map(c => c.name)).toEqual(['user_id', 'last_seen_at']);
     expect(sessions.SESSION_LIFETIME_MS).toBe(require('../middleware/auth-middleware').SESSION_TTL_SECONDS * 1000);
     expect(sessions.SESSION_LIFETIME_MS).toBe(2 * HOUR);
@@ -36,7 +36,7 @@ describe('utils/sessions', () => {
     expect(row(sid)).toEqual({
       id: sid, user_id: jane.id, created_at: expect.any(String), last_seen_at: expect.any(String),
       first_ip: '203.0.113.5', last_ip: '203.0.113.5', user_agent: 'Mozilla/5.0 (Windows)',
-      ended_at: null, ended_reason: null, ended_by: null,
+      ended_at: null, ended_reason: null, ended_by: null, reauth_at: null,
     });
     expect(row(sid).last_seen_at).toBe(row(sid).created_at);
     // A browser's description is kept to 300 characters.
@@ -112,13 +112,30 @@ describe('utils/sessions', () => {
     expect(sessions.isSessionLive(undefined)).toBe(false);
   });
 
+  // "Confirm it's you" (routes/auth.js reauth) marks one live session, and
+  // liveSession says when; an ended session cannot be marked.
+  test('markReauthenticated: stamps this session only, and never an ended one', () => {
+    const sid = sessions.startSession(jane.id);
+    const other = sessions.startSession(jane.id);
+    const at = Date.now() - 60 * 1000;
+    expect(sessions.markReauthenticated(sid, at)).toBe(true);
+    expect(sessions.liveSession(sid).reauthAt).toBe(at);
+    expect(row(sid).reauth_at).toBe(new Date(at).toISOString());
+    expect(sessions.liveSession(other).reauthAt).toBeNull();
+    sessions.endSession(other, 'logout');
+    expect(sessions.markReauthenticated(other)).toBe(false);
+    expect(row(other).reauth_at).toBeNull();
+    expect(sessions.markReauthenticated(null)).toBe(false);
+    expect(sessions.END_REASONS).toEqual(expect.arrayContaining(['mfa_enabled', 'mfa_recovery_codes', 'mfa_disabled', 'mfa_reset']));
+  });
+
   // What sessionUser reads on every request: whose the session is and when it
   // began, which the twelve hours are counted from.
   test('liveSession: the account and the start of a session not ended; null otherwise', () => {
     const sid = sessions.startSession(jane.id);
     const began = Date.now() - 3 * HOUR;
     db.prepare('UPDATE sessions SET created_at = ? WHERE id = ?').run(new Date(began).toISOString(), sid);
-    expect(sessions.liveSession(sid)).toEqual({ userId: jane.id, startedAt: began });
+    expect(sessions.liveSession(sid)).toEqual({ userId: jane.id, startedAt: began, reauthAt: null });
     sessions.endSession(sid, 'logout');
     expect(sessions.liveSession(sid)).toBeNull();
     for (const v of ['0'.repeat(32), null, undefined, '']) expect(sessions.liveSession(v)).toBeNull();

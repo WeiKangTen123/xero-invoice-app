@@ -42,8 +42,14 @@ const TOUCH_THROTTLE_MS = 60 * 1000;
 // Why a session ended, as stored in ended_reason. 'expired' is never written:
 // listSessions reports it for a session that simply ran out. 'password_reset'
 // and 'invite_accepted' are a password set through a link (routes/auth.js
-// set-password), which signs the account out everywhere.
-const END_REASONS = ['logout', 'revoked', 'signed_out_everywhere', 'password_changed', 'password_reset', 'invite_accepted', 'disabled', 'expired'];
+// set-password), which signs the account out everywhere. The mfa_* reasons are
+// 2-step sign-in changing (utils/mfa.js): turned on, new recovery codes, or
+// turned off by the person, which end the account's other sessions; and an
+// admin's reset of it, which ends them all.
+const END_REASONS = [
+  'logout', 'revoked', 'signed_out_everywhere', 'password_changed', 'password_reset', 'invite_accepted', 'disabled', 'expired',
+  'mfa_enabled', 'mfa_recovery_codes', 'mfa_disabled', 'mfa_reset',
+];
 
 // Statements are prepared on first use rather than at load, as in
 // audit-log.js: in tests the database is created after this module is
@@ -138,15 +144,33 @@ function isSessionLive(sid) {
 }
 
 // The session a token names, while it has not been ended: whose it is
-// (userId) and when it began (startedAt, ms), which is what the twelve-hour
-// limit counts from. null for one ended, pruned or never made. Read on every
-// authenticated request: one primary-key lookup.
+// (userId), when it began (startedAt, ms), which is what the twelve-hour
+// limit counts from, and when it last confirmed it was its owner (reauthAt,
+// ms, or null: markReauthenticated). null for one ended, pruned or never
+// made. Read on every authenticated request: one primary-key lookup.
 function liveSession(sid) {
   if (!sid) return null;
-  const r = _stmt('SELECT user_id, created_at FROM sessions WHERE id = ? AND ended_at IS NULL').get(String(sid));
+  const r = _stmt('SELECT user_id, created_at, reauth_at FROM sessions WHERE id = ? AND ended_at IS NULL').get(String(sid));
   if (!r) return null;
   const startedAt = Date.parse(r.created_at);
-  return { userId: r.user_id, startedAt: Number.isFinite(startedAt) ? startedAt : 0 };
+  const reauthAt  = r.reauth_at ? Date.parse(r.reauth_at) : NaN;
+  return {
+    userId: r.user_id, startedAt: Number.isFinite(startedAt) ? startedAt : 0,
+    reauthAt: Number.isFinite(reauthAt) ? reauthAt : null,
+  };
+}
+
+// The person at this session has just shown it is them again — their
+// password, or a 2-step code (POST /api/auth/reauth) — so for the next ten
+// minutes it may take the most sensitive admin actions
+// (auth-middleware.js#recentlyConfirmed). Only this session: a confirmation
+// on the laptop says nothing about the phone. Returns whether a live session
+// was marked.
+function markReauthenticated(sid, now = Date.now()) {
+  if (!sid) return false;
+  const { changes } = _stmt('UPDATE sessions SET reauth_at = ? WHERE id = ? AND ended_at IS NULL')
+    .run(new Date(now).toISOString(), String(sid));
+  return changes > 0;
 }
 
 // When a session nobody ended stops working, in ms: two hours after it was
@@ -203,6 +227,6 @@ function pruneSessions(now = Date.now()) {
 }
 
 module.exports = {
-  startSession, touchSession, endSession, endAllSessions, isSessionLive, liveSession, getSession, listSessions, pruneSessions,
+  startSession, touchSession, endSession, endAllSessions, isSessionLive, liveSession, markReauthenticated, getSession, listSessions, pruneSessions,
   userAgentOf, SESSION_LIFETIME_MS, SESSION_MAX_AGE_MS, SESSION_RETENTION_DAYS, USER_AGENT_MAX, TOUCH_THROTTLE_MS, END_REASONS,
 };

@@ -140,6 +140,11 @@ function sessionUser(token) {
     if (err instanceof jwt.TokenExpiredError) return { error: expiredMessage(token) };
     return { error: 'Invalid or expired token' };
   }
+  // A session token has no audience. One that names one is some other kind
+  // of token signed with the same secret — the half-made sign-in between the
+  // password and the 2-step code (utils/mfa.js, audience 'mfa') — and is no
+  // session, whatever account it names.
+  if (claims.aud !== undefined) return { error: 'Invalid or expired token' };
   // The token says who; the database says whether they still exist and what
   // they may do. Role and existence used to be read from the token alone, so a
   // deleted or demoted user kept their access until it ran out, which was up to
@@ -247,11 +252,51 @@ const PASSWORD_CHANGE_ALLOWED = new Set([
 ]);
 const PASSWORD_CHANGE_REQUIRED = { error: 'Set a new password to continue.', code: 'password_change_required' };
 
-// Whether this request may run while the account's password is temporary.
-// The query string and a trailing slash are not part of the route.
-function allowedBeforePasswordChange(method, url) {
+// Method and path as the allowlists name a route. The query string and a
+// trailing slash are not part of the route.
+function _routeKey(method, url) {
   const path = String(url || '').split('?')[0].replace(/\/+$/, '') || '/';
-  return PASSWORD_CHANGE_ALLOWED.has(`${String(method || '').toUpperCase()} ${path}`);
+  return `${String(method || '').toUpperCase()} ${path}`;
+}
+
+// Whether this request may run while the account's password is temporary.
+function allowedBeforePasswordChange(method, url) {
+  return PASSWORD_CHANGE_ALLOWED.has(_routeKey(method, url));
+}
+
+// ── An admin must turn on 2-step sign-in first ──────────────────────────────
+// An admin can read every account, make admins and reset passwords, so an
+// admin's account must have 2-step sign-in on (utils/mfa.js#requiredFor; the
+// switch is MFA_REQUIRED_FOR_ADMINS, on for every server). An admin without
+// it still signs in with the password, and then, as with a temporary
+// password, may do only what setting it up takes: see where they stand, set
+// it up, and the four the password gate allows (who am I, sign out, their
+// own sign-ins, change password). Everything else is a 403 with a code the
+// client turns into the set-up screen. The password gate comes first: an
+// admin with a temporary password chooses a new one, then sets up 2-step.
+const MFA_SETUP_ALLOWED = new Set([
+  'GET /api/auth/me',
+  'POST /api/auth/logout',
+  'GET /api/auth/sign-ins',
+  'POST /api/auth/change-password',
+  'GET /api/auth/mfa',
+  'POST /api/auth/mfa/setup',
+  'POST /api/auth/mfa/enable',
+]);
+const MFA_SETUP_REQUIRED = { error: 'Set up 2-step sign-in to continue.', code: 'mfa_setup_required' };
+
+function allowedBeforeMfaSetup(method, url) {
+  return MFA_SETUP_ALLOWED.has(_routeKey(method, url));
+}
+
+// The 403 this account gets for this request before anything else, or null:
+// a temporary password to replace, then 2-step sign-in to set up. `live` is
+// the account's row (sessionUser). requireAuth applies it; so must any route
+// that reads a session token itself (the invoice PDF route).
+function accessGate(live, method, url) {
+  if (live.must_change_password && !allowedBeforePasswordChange(method, url)) return PASSWORD_CHANGE_REQUIRED;
+  if (require('../utils/mfa').setupRequired(live) && !allowedBeforeMfaSetup(method, url)) return MFA_SETUP_REQUIRED;
+  return null;
 }
 
 function requireAuth(req, res, next) {
@@ -262,17 +307,22 @@ function requireAuth(req, res, next) {
   // the password. A 403 rather than a 401 because the client treats every 401
   // as a session that has ended and goes back to the login page, which is
   // exactly where this must not send someone who has just signed in.
-  if (live.must_change_password && !allowedBeforePasswordChange(req.method, req.originalUrl || req.url)) {
-    return res.status(403).json(PASSWORD_CHANGE_REQUIRED);
-  }
+  const gate = accessGate(live, req.method, req.originalUrl || req.url);
+  if (gate) return res.status(403).json(gate);
   // `demo` rides along for GET /api/auth/me: the client hides the Xero
   // connection behind it (users.js isDemoUser). `sid` is the session this
   // request belongs to (null only for the test suite's tokens, above), for
   // Sign out and for the routes that keep this session while ending others.
+  // mfaEnabled and mfaSetupRequired are for the client too: whether 2-step
+  // sign-in is on, and whether this account must turn it on before anything
+  // else (the gate above).
+  const mfa = require('../utils/mfa');
+  const mfaEnabled = mfa.isEnabled(live);
   req.user = {
     ...claims, id: live.id, email: live.email, role: live.role, mustChangePassword: !!live.must_change_password,
     passwordChangeReason: require('../utils/users').passwordChangeReason(live),
     demo: !!live.is_demo, sid: claims.sid || null,
+    mfaEnabled, mfaSetupRequired: mfa.requiredFor(live) && !mfaEnabled,
   };
   renewSession(res, live, claims, session);
   // Throttled to at most one DB write per user per minute — see
@@ -298,9 +348,45 @@ function requireAdmin(req, res, next) {
   });
 }
 
+// ── Confirm it's you ─────────────────────────────────────────────────────────
+// The actions that would hand someone the keys — making an admin, resetting
+// an admin's password, deleting an admin, turning off someone's 2-step
+// sign-in — want the person at the keyboard to have shown it is them within
+// the last ten minutes, not just to hold a session: a laptop left unlocked, or
+// a token copied off it, is a session without its owner. They show it with
+// POST /api/auth/reauth (their password, or a 2-step code), which marks this
+// session (sessions.js#markReauthenticated); anything older answers 403 with
+// a code the client turns into the "Confirm it's you" prompt, after which it
+// sends the request again.
+const REAUTH_WINDOW_SECONDS = 10 * 60;
+const REAUTH_REQUIRED = { code: 'reauth_required', error: "Confirm it's you to continue." };
+
+// Whether this request's session confirmed it was its owner within the last
+// ten minutes. A token with no session is the test suite's (accepted only
+// under NODE_ENV=test, acceptsTokensWithoutSession above) and has nothing to
+// have confirmed: it passes there, as it passes every other session check,
+// and is refused everywhere else long before this.
+function recentlyConfirmed(req, now = Date.now()) {
+  if (!req.user) return false;
+  if (!req.user.sid) return acceptsTokensWithoutSession();
+  const session = require('../utils/sessions').liveSession(req.user.sid);
+  if (!session || session.reauthAt === null) return false;
+  return now - session.reauthAt <= REAUTH_WINDOW_SECONDS * 1000;
+}
+
+// The middleware form, after requireAuth or requireAdmin. A route that needs
+// it only sometimes (an admin target, an admin role) asks recentlyConfirmed
+// itself and answers REAUTH_REQUIRED.
+function requireRecentAuth(req, res, next) {
+  if (!recentlyConfirmed(req)) return res.status(403).json(REAUTH_REQUIRED);
+  next();
+}
+
 module.exports = {
   requireAuth, requireAdmin, sessionUser, signSession, jwtSecret, jwtSecretProblem, MIN_JWT_SECRET_LENGTH,
   SESSION_TTL_SECONDS, SESSION_MAX_AGE_SECONDS, SESSION_RENEW_AFTER_SECONDS, SESSION_TOKEN_HEADER,
   SESSION_EXPIRED_MESSAGE, SESSION_MAX_AGE_MESSAGE, SIGNED_OUT_MESSAGE, SESSION_ENDED_MESSAGE,
   allowedBeforePasswordChange, PASSWORD_CHANGE_ALLOWED, PASSWORD_CHANGE_REQUIRED,
+  accessGate, allowedBeforeMfaSetup, MFA_SETUP_ALLOWED, MFA_SETUP_REQUIRED,
+  requireRecentAuth, recentlyConfirmed, REAUTH_REQUIRED, REAUTH_WINDOW_SECONDS,
 };

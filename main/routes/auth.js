@@ -6,12 +6,13 @@ const {
   verifiedPasswordHash, passwordProblem, setPassword, invalidateSessions,
   requirePasswordChange, hashPassword, setPasswordHash, unlockAccount, isInvited,
   lockStatus, recordFailedLogin, recordSuccessfulLogin, temporaryPasswordExpired, LOCK_AFTER_FAILURES,
-  getUserConfig, DEFAULT_TIMEZONE,
+  getUserConfig, getUser, DEFAULT_TIMEZONE,
 } = require('../utils/users');
 // Session tokens are signed in one place, auth-middleware.js#signSession,
 // which sets how long they last (two hours, renewed while in use, and never
 // past twelve hours from the sign-in).
-const { requireAuth, signSession, SESSION_TOKEN_HEADER } = require('../middleware/auth-middleware');
+const { requireAuth, signSession, SESSION_TOKEN_HEADER, REAUTH_WINDOW_SECONDS } = require('../middleware/auth-middleware');
+const mfa      = require('../utils/mfa');
 const asyncHandler = require('../middleware/async-handler');
 const logger   = require('../utils/logger');
 const auditLog = require('../utils/audit-log');
@@ -196,11 +197,38 @@ function keepOnlyThisSession(req, reason) {
   return sid;
 }
 
+// The account as a sign-in hands it to the client, with where it stands on
+// 2-step sign-in: mfaEnabled (users.js#sanitize has it too) and
+// mfaSetupRequired, as GET /me has them (auth-middleware.js), so the client
+// can go straight to set-up. `row` is the account's raw row.
+function withMfaState(user, row) {
+  const enabled = mfa.isEnabled(row);
+  return { ...user, mfaEnabled: enabled, mfaSetupRequired: mfa.requiredFor(row) && !enabled };
+}
+
+// Ends every other session of the account, keeping this one, when its 2-step
+// sign-in changes: a session signed in before 2-step went on, or holding the
+// recovery codes just replaced, was let in on less than it takes now. Only
+// the session rows are ended (sessions.js), which is enough to refuse their
+// tokens; the account's cutoff is left where it is, unlike a password change,
+// so this session's token stays good and no new one has to be handed back. A
+// token with no session is the test suite's, and ends them all. Never fails
+// the request.
+function endOtherSessions(req, reason) {
+  try {
+    return sessions.endAllSessions(req.user.id, reason, { except: req.user.sid || null });
+  } catch (err) {
+    logger.warn('Could not end the other sessions', { userId: req.user.id, reason, error: err.message });
+    return 0;
+  }
+}
+
 // Strict rate limiter for authentication endpoints: at most 10 failed
 // attempts per 15 minutes per IP. Only failures count (any answer of 400 or
 // more: a wrong password, a lock, a refused registration). Every attempt used
 // to, and an office behind one address was shut out after its tenth sign-in
-// of the morning.
+// of the morning. The 2-step code (POST /mfa/verify) shares it: a wrong code
+// and a wrong password come out of the same ten.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: process.env.NODE_ENV === 'test' ? 1000 : 10,
@@ -221,6 +249,22 @@ const changePasswordLimiter = rateLimit({
   max: 5,
   keyGenerator: req => `change-password:${req.user.id}`,
   message: { error: 'Too many password change attempts. Please try again in 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Showing the password or a code again from a signed-in session: "Confirm it's
+// you" (POST /reauth), new recovery codes and turning 2-step off. Five wrong a
+// quarter hour per account, as for a password change, and for the same
+// reason: whoever this stops already holds a session and is guessing to take
+// the account further. Only wrong answers count, so an admin confirming
+// several times in a busy afternoon is never stopped.
+const confirmLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  skipSuccessfulRequests: true,
+  keyGenerator: req => `confirm:${req.user.id}`,
+  message: { error: 'Too many wrong attempts. Please try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -301,7 +345,9 @@ router.post('/register', authLimiter, asyncHandler(async (req, res) => {
     auditLog.recordAdminEvent({ actor: user, target: user, action: 'user.register', details: { role: user.role, ...client } });
     const token = signSession(user, { sid: startSessionFor(user, req) });
     logger.info('User registered', { email: user.email, role: user.role, ip: client.ip });
-    res.status(201).json({ success: true, user, token });
+    // The first account is an admin, so on a server it is sent to set up
+    // 2-step sign-in before anything else (mfaSetupRequired).
+    res.status(201).json({ success: true, user: withMfaState(user, findById(user.id)), token });
   } catch (err) {
     logger.error('Registration failed', { error: err.message });
     res.status(500).json({ error: 'Could not create the account' });
@@ -391,6 +437,42 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
       return res.status(401).json({ error: 'This temporary password has expired. Ask your administrator for a new one.' });
     }
 
+    // ── 2-step sign-in ──
+    // With 2-step on (utils/mfa.js), the right password is half a sign-in and
+    // nothing a sign-in does is done yet: no session, no clearing of the
+    // lockout record (recordSuccessfulLogin: cleared here, the failed count
+    // would start again at every right password, and someone holding it could
+    // guess codes for ever), and no demand for a new password. Each of those
+    // waits for the code (POST /mfa/verify), which the answer's mfaToken is
+    // for: five minutes, one use. What this step learnt that the second needs
+    // rides in it: that the password is one the rules now refuse, and that
+    // this is the owner of a locked account at an address they have used. A
+    // lock that landed during the slow check is read here, as
+    // recordSuccessfulLogin would have found it below, and nothing is cleared.
+    //
+    // Recorded as login.password_ok, not login.success. It is in the person's
+    // own sign-in list (GET /sign-ins), so a password someone else holds shows
+    // up there even when the code stops them; and it is not a sign-in, so it
+    // never makes an address "known" (signedInFromBefore) or counts in the
+    // new-country alert, which read login.success alone.
+    if (mfa.isEnabled(row)) {
+      if (!viaKnownAddress) {
+        const landed = lockStatus(findById(user.id));
+        if (landed) {
+          if (!signedInFromBefore(user.id, ip)) return refuseLocked(res, row, client, landed);
+          viaKnownAddress = true;
+        }
+      }
+      const passwordChange = !user.mustChangePassword && !!passwordProblem(password, user.email);
+      const mfaToken = mfa.issueChallenge(user.id, { passwordChange, viaKnownAddress });
+      auditLog.recordAdminEvent({
+        actor: null, target: row, action: 'login.password_ok', details: viaKnownAddress ? { ...client, viaKnownAddress: true } : { ...client },
+      });
+      logger.info('Password accepted; 2-step code asked for', { email: user.email, ip });
+      res.set('Cache-Control', 'no-store');
+      return res.json({ mfaRequired: true, mfaToken, methods: ['totp', 'recovery'] });
+    }
+
     const earlier = earlierSignInAddresses(user.id);
     // Clears the lockout record, unless a lock is in force: the lock read
     // above was taken before the slow check, and a wrong guess sent alongside
@@ -422,14 +504,164 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
     const token = signSession(signedIn, { sid: startSessionFor(signedIn, req) });
     logger.info('User logged in', { email: user.email, role: user.role, ip });
     // `user` is sanitized (users.js), so it carries mustChangePassword: the
-    // client goes straight to the change-password screen when it is set.
-    res.json({ token, user: signedIn });
+    // client goes straight to the change-password screen when it is set, and
+    // (an admin without 2-step) to its set-up when mfaSetupRequired is.
+    res.json({ token, user: withMfaState(signedIn, row) });
     alertNewCountry(user, ip, earlier).catch(() => {});
   } catch (err) {
     logger.error('Login error', { error: err.message });
     res.status(500).json({ error: 'Login failed' });
   }
 }));
+
+// ── The second step: the code ────────────────────────────────────────────────
+// What the second step says when its mfaToken cannot be used, by why
+// (mfa.readChallenge). Each answer carries `restart: true`: the client goes
+// back to the password.
+const CHALLENGE_REFUSALS = {
+  expired:  'Your sign-in timed out. Sign in again.',
+  invalid:  'Your sign-in timed out. Sign in again.',
+  used:     'This sign-in has already been used. Sign in again.',
+  too_many: 'Too many wrong codes. Sign in again.',
+  ended:    'Sign in again.',
+};
+const WRONG_CODE = 'That code is not right. Try again.';
+
+// Whether the account was signed out everywhere (a password change or reset,
+// "sign out everywhere") after this mfaToken was issued: the half-made
+// sign-in goes with the sessions, as sessionUser would refuse a token that
+// old. Compared at whole seconds, as there.
+function signedOutSince(row, claims) {
+  if (!row.sessions_valid_from || claims.iat === undefined) return false;
+  return claims.iat < Math.floor(Date.parse(row.sessions_valid_from) / 1000);
+}
+
+// POST /api/auth/mfa/verify { mfaToken, code } or { mfaToken, recoveryCode }
+// — the second step. A right code finishes the sign-in exactly as /login
+// does without 2-step: the lockout record cleared, a new password demanded if
+// the one typed no longer meets the rules, a session started, login.success
+// recorded (details.mfa: 'totp' | 'recovery') and { token, user } answered. A
+// recovery code is used up, recorded (mfa.recovery_used), told to Slack (the
+// phone may be lost, or someone has the codes), and the answer's user says
+// how many are left (recoveryCodesLeft). A recovery code typed into `code` is
+// taken as one.
+//
+// A wrong code is a 401 and counts as a wrong password does
+// (recordFailedLogin), so the account lockout still applies, except while a
+// lock stands for the owner at a known address. The fifth wrong code on one
+// mfaToken kills it: 401 with `restart: true`, and the password must be
+// typed again; if that code also locked the account, the answer says until
+// when. A wrong code that locks the account sooner is the 423 a locked
+// sign-in gets, with `restart: true`. The same per-IP limit as /login.
+router.post('/mfa/verify', authLimiter, (req, res) => {
+  try {
+    const { mfaToken, code, recoveryCode } = req.body || {};
+    const challenge = mfa.readChallenge(mfaToken);
+    if (challenge.error) {
+      return res.status(401).json({ error: CHALLENGE_REFUSALS[challenge.error] || CHALLENGE_REFUSALS.expired, restart: true });
+    }
+    const { claims, jti } = challenge;
+    const client = clientOf(req);
+    const { ip } = client;
+
+    // The account as it is now. Deleted, disabled, its 2-step turned off by an
+    // admin, its temporary password run out, or signed out everywhere since
+    // the password step: the half-made sign-in ends, and the password step
+    // says why, if anything is to be said.
+    const row = findById(claims.id);
+    if (!row || row.disabled_at || !mfa.isEnabled(row) || temporaryPasswordExpired(row) || signedOutSince(row, claims)) {
+      mfa.endChallenge(jti);
+      return res.status(401).json({ error: CHALLENGE_REFUSALS.ended, restart: true });
+    }
+
+    const useRecovery = recoveryCode !== undefined && recoveryCode !== null;
+    const given = useRecovery ? recoveryCode : code;
+    if ((typeof given !== 'string' && typeof given !== 'number') || !String(given).trim()) {
+      return res.status(400).json({ error: 'Enter the 6-digit code from your authenticator app, or a recovery code.' });
+    }
+    const method = useRecovery || mfa.looksLikeRecoveryCode(String(given)) ? 'recovery' : 'totp';
+
+    // A lock is honoured as at the password step: nothing gets through it but
+    // the owner at an address the account has signed in from before.
+    let viaKnownAddress = !!claims.kna;
+    const lock = lockStatus(row);
+    if (lock && !viaKnownAddress) {
+      if (!signedInFromBefore(row.id, ip)) {
+        mfa.endChallenge(jti);
+        return refuseLocked(res, row, client, { ...lock, restart: true });
+      }
+      viaKnownAddress = true;
+    }
+
+    let codesLeft = null;
+    let right;
+    if (method === 'recovery') {
+      codesLeft = mfa.useRecoveryCode(row.id, String(given));
+      right = codesLeft !== null;
+    } else {
+      right = mfa.verifyCode(row.id, given);
+    }
+
+    if (!right) {
+      const { dead } = mfa.countWrongCode(jti);
+      // Counted against the account like a wrong password; nothing counts
+      // while a lock stands (the owner at a known address got this far).
+      const next = lock ? null : recordFailedLogin(row.id);
+      auditLog.recordAdminEvent({ actor: null, target: row, action: 'login.failed', details: { reason: 'wrong_code', method, ...client } });
+      logger.info('Sign-in failed: wrong 2-step code', { email: row.email, ip, method, failedLogins: next ? next.failed_logins : null });
+      const locked = next && next.locked ? { lockedUntil: next.locked_until, lockMinutes: next.lockMinutes } : null;
+      if (locked) {
+        mfa.endChallenge(jti);
+        auditLog.recordAdminEvent({
+          actor: null, target: row, action: 'login.locked', details: { ...client, ...locked, failures: LOCK_AFTER_FAILURES },
+        });
+        logger.warn('Account locked after failed sign-ins', { email: row.email, ip, ...locked, lastWas: 'wrong 2-step code' });
+        securityAlert(`🔒 ${row.email} locked for ${next.lockMinutes} min after ${LOCK_AFTER_FAILURES} failed sign-ins, the last a wrong 2-step code (IP ${ip || 'unknown'})`);
+      }
+      if (dead) return res.status(401).json({ error: CHALLENGE_REFUSALS.too_many, restart: true, ...(locked || {}) });
+      if (locked) return res.status(423).json({ error: LOCKED_MESSAGE, ...locked, restart: true });
+      return res.status(401).json({ error: WRONG_CODE });
+    }
+
+    // Spent before anything else, so it cannot finish a second sign-in.
+    if (!mfa.spendChallenge(jti)) return res.status(401).json({ error: CHALLENGE_REFUSALS.used, restart: true });
+
+    // From here exactly what /login does once the password is right.
+    const earlier = earlierSignInAddresses(row.id);
+    if (!recordSuccessfulLogin(row.id) && !viaKnownAddress) {
+      if (!signedInFromBefore(row.id, ip)) return refuseLocked(res, row, client, { ...(lockStatus(findById(row.id)) || {}), restart: true });
+      viaKnownAddress = true;
+    }
+    if (viaKnownAddress) {
+      logger.info('Signed in to a locked account from an address it has signed in from before', { email: row.email, ip });
+    }
+    if (claims.pwc) {
+      requirePasswordChange(row.id);
+      logger.info('Password no longer meets the rules: a new one is required', { email: row.email });
+    }
+
+    const self = { id: row.id, email: row.email };
+    if (method === 'recovery') {
+      auditLog.recordAdminEvent({ actor: self, target: self, action: 'mfa.recovery_used', details: { codesLeft, ...client } });
+      logger.warn('Signed in with a recovery code', { email: row.email, ip, codesLeft });
+      securityAlert(`🔑 ${row.email} signed in with a 2-step recovery code; ${codesLeft} left (IP ${ip || 'unknown'})`);
+    }
+    auditLog.recordAdminEvent({
+      actor: self, target: self, action: 'login.success',
+      details: { ...client, mfa: method, ...(viaKnownAddress ? { viaKnownAddress: true } : {}) },
+    });
+    const live = findById(row.id);
+    const user = withMfaState(getUser(row.id), live);
+    if (method === 'recovery') user.recoveryCodesLeft = codesLeft;
+    const token = signSession(user, { sid: startSessionFor(user, req) });
+    logger.info('User logged in', { email: user.email, role: user.role, ip, mfa: method });
+    res.json({ token, user });
+    alertNewCountry(user, ip, earlier).catch(() => {});
+  } catch (err) {
+    logger.error('2-step sign-in error', { error: err.message });
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
 
 // POST /api/auth/logout — ends this session, stops this user's mailbox
 // watcher and revokes their phone-capture links.
@@ -568,6 +800,136 @@ router.post('/change-password', requireAuth, changePasswordLimiter, asyncHandler
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+}));
+
+// ── 2-step sign-in: turning it on, and looking after it ─────────────────────
+// The signed-in person's own (utils/mfa.js). An admin must have it on
+// (auth-middleware.js sends one without it to set it up, and these three are
+// what that takes: GET /mfa, POST /mfa/setup, POST /mfa/enable); anyone else
+// may. What it needs never leaves the server again once shown: the secret
+// only during set-up, the recovery codes once when made. Those answers are
+// not to be kept by a browser or a proxy (Cache-Control: no-store).
+const MFA_ALREADY_ON = '2-step sign-in is already on.';
+const MFA_NOT_ON     = "2-step sign-in isn't on for this account.";
+
+function _self(req) {
+  return { id: req.user.id, email: req.user.email };
+}
+
+// GET /api/auth/mfa — { enabled, enabledAt, required, recoveryCodesLeft }:
+// whether it is on and since when, whether this account must have it, and
+// how many unused recovery codes it has (0 when off).
+router.get('/mfa', requireAuth, (req, res) => {
+  res.json(mfa.status(req.user.id));
+});
+
+// POST /api/auth/mfa/setup — a new secret for the authenticator app: { secret
+// (base32, for typing in), otpauthUrl, qrSvg (the QR code as a
+// data:image/svg+xml;base64 URL) }. Kept as pending until POST /mfa/enable
+// shows a code from it; asked again, it is replaced. 409 when 2-step is
+// already on: a new secret then would be a way round it.
+router.post('/mfa/setup', requireAuth, asyncHandler(async (req, res) => {
+  const started = mfa.beginSetup(req.user.id);
+  if (!started) return res.status(409).json({ error: MFA_ALREADY_ON });
+  const qrSvg = await mfa.qrSvgDataUrl(started.otpauthUrl);
+  res.set('Cache-Control', 'no-store');
+  res.json({ secret: started.secret, otpauthUrl: started.otpauthUrl, qrSvg });
+}));
+
+// POST /api/auth/mfa/enable { code } — a code from the pending secret turns
+// 2-step on: { enabled: true, recoveryCodes } with ten new recovery codes,
+// shown this once and never again (only their hashes are kept). A wrong code
+// is a 400 that points at the usual cause, a phone's clock; no set-up under
+// way is a 400, already on a 409. Every other session of the account ends
+// (endOtherSessions); this one goes on. An admin turning it on is told to
+// Slack: on a first sign-in it is whoever holds the password who chooses the
+// phone, so an admin who did not do this should hear of it.
+router.post('/mfa/enable', requireAuth, (req, res) => {
+  const result = mfa.enable(req.user.id, req.body ? req.body.code : undefined);
+  if (!result.ok) {
+    if (result.reason === 'already')  return res.status(409).json({ error: MFA_ALREADY_ON });
+    if (result.reason === 'no_setup') return res.status(400).json({ error: 'Start setting up 2-step sign-in first.' });
+    return res.status(400).json({ error: 'That code is not right. Check the time on your phone and try again.' });
+  }
+  const ended = endOtherSessions(req, 'mfa_enabled');
+  auditLog.recordAdminEvent({ actor: _self(req), target: _self(req), action: 'mfa.enable' });
+  logger.info('2-step sign-in turned on', { email: req.user.email, otherSessionsEnded: ended });
+  if (req.user.role === 'admin') {
+    securityAlert(`🔐 ${req.user.email} (admin) turned on 2-step sign-in (IP ${req.ip || 'unknown'})`);
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json({ enabled: true, recoveryCodes: result.recoveryCodes });
+});
+
+// POST /api/auth/mfa/recovery-codes { password } — ten new recovery codes in
+// place of the old, which stop working: { recoveryCodes }, shown once. The
+// current password is asked for first (400 when wrong), so a browser left
+// signed in cannot be used to take a fresh set. Every other session ends.
+router.post('/mfa/recovery-codes', requireAuth, confirmLimiter, asyncHandler(async (req, res) => {
+  if (!mfa.status(req.user.id).enabled) return res.status(409).json({ error: MFA_NOT_ON });
+  const { password } = req.body || {};
+  if (typeof password !== 'string' || !password) return res.status(400).json({ error: 'Your current password is required' });
+  if (!(await verifiedPasswordHash(req.user.id, password))) return res.status(400).json({ error: 'Current password is incorrect' });
+  const recoveryCodes = mfa.regenerateRecoveryCodes(req.user.id);
+  if (!recoveryCodes) return res.status(409).json({ error: MFA_NOT_ON });
+  const ended = endOtherSessions(req, 'mfa_recovery_codes');
+  auditLog.recordAdminEvent({ actor: _self(req), target: _self(req), action: 'mfa.recovery_codes' });
+  logger.info('New 2-step recovery codes made', { email: req.user.email, otherSessionsEnded: ended });
+  res.set('Cache-Control', 'no-store');
+  res.json({ recoveryCodes });
+}));
+
+// POST /api/auth/mfa/disable { password, code } — turns 2-step off, for an
+// account that may be without it: an admin may not (403). Both the current
+// password and a code (from the app, or a recovery code) are asked for, so
+// neither a browser left signed in nor a phone left on a desk is enough. Every
+// other session ends.
+router.post('/mfa/disable', requireAuth, confirmLimiter, asyncHandler(async (req, res) => {
+  if (req.user.role === 'admin') return res.status(403).json({ error: 'Admins must keep 2-step sign-in on.' });
+  if (!mfa.status(req.user.id).enabled) return res.status(409).json({ error: MFA_NOT_ON });
+  const { password, code } = req.body || {};
+  if (typeof password !== 'string' || !password || (typeof code !== 'string' && typeof code !== 'number') || !String(code).trim()) {
+    return res.status(400).json({ error: 'Your current password and a code are required' });
+  }
+  if (!(await verifiedPasswordHash(req.user.id, password))) return res.status(400).json({ error: 'Current password is incorrect' });
+  const right = mfa.looksLikeRecoveryCode(String(code))
+    ? mfa.useRecoveryCode(req.user.id, String(code)) !== null
+    : mfa.verifyCode(req.user.id, code);
+  if (!right) return res.status(400).json({ error: WRONG_CODE });
+  mfa.turnOff(req.user.id);
+  const ended = endOtherSessions(req, 'mfa_disabled');
+  auditLog.recordAdminEvent({ actor: _self(req), target: _self(req), action: 'mfa.disable' });
+  logger.info('2-step sign-in turned off', { email: req.user.email, otherSessionsEnded: ended });
+  res.json({ success: true, enabled: false });
+}));
+
+// POST /api/auth/reauth { password } or { code } — "Confirm it's you": the
+// person at this session shows it is them again, with their password or, when
+// 2-step is on, a code from the app. For ten minutes this session may then
+// take the actions that want it (auth-middleware.js#requireRecentAuth): only
+// this session, marked on its row (sessions.reauth_at). Answers { success:
+// true, until }; a wrong password or code is a 400 (not a 401, which the
+// client would read as signed out). Recorded as session.reauth, with where it
+// came from.
+router.post('/reauth', requireAuth, confirmLimiter, asyncHandler(async (req, res) => {
+  const { password, code } = req.body || {};
+  const hasCode = (typeof code === 'string' || typeof code === 'number') && String(code).trim() !== '';
+  let method;
+  if (hasCode) {
+    if (!req.user.mfaEnabled) return res.status(400).json({ error: `${MFA_NOT_ON} Use your password.` });
+    if (!mfa.verifyCode(req.user.id, code)) return res.status(400).json({ error: WRONG_CODE });
+    method = 'totp';
+  } else if (typeof password === 'string' && password) {
+    if (!(await verifiedPasswordHash(req.user.id, password))) return res.status(400).json({ error: 'Current password is incorrect' });
+    method = 'password';
+  } else {
+    return res.status(400).json({ error: 'Enter your password, or a code from your authenticator app.' });
+  }
+  const now = Date.now();
+  if (req.user.sid) sessions.markReauthenticated(req.user.sid, now);
+  auditLog.recordAdminEvent({ actor: _self(req), target: _self(req), action: 'session.reauth', details: { method, ...clientOf(req) } });
+  logger.info("Confirmed it's them", { email: req.user.email, method });
+  res.json({ success: true, until: new Date(now + REAUTH_WINDOW_SECONDS * 1000).toISOString() });
 }));
 
 // ── Invite and reset links ───────────────────────────────────────────────────

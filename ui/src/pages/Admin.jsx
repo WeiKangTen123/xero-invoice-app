@@ -12,7 +12,7 @@ import { staggerIn } from '../utils/stagger';
 import ActivityPanel from './admin/ActivityPanel';
 import UserDetailPanel from './admin/UserDetailPanel';
 import LinkResult from './admin/LinkResult';
-import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, copiedNote, inviteNote, revokeInviteAsk } from './admin/users';
+import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, copiedNote, inviteNote, revokeInviteAsk, mfaBadge, mfaResetAsk, mfaResetDone } from './admin/users';
 
 const ADMIN_TABS = [
   { key: 'users',      label: '👥 Users' },
@@ -289,12 +289,22 @@ export default function Admin() {
     await control('revokeInvite', u, () => api.delete(`/admin/users/${u.id}/invite`), `The invite for ${u.email} was revoked.`);
   }
 
+  // 2-step sign-in turned off for someone who lost their phone; they set it
+  // up again at their next sign-in. Like inviting or promoting an admin, the
+  // server may first ask "Confirm it's you" (403 reauth_required), which the
+  // API client answers itself (context/ReauthContext.jsx) for every handler
+  // here.
+  async function handleMfaReset(u) {
+    if (!(await confirm(mfaResetAsk(u)))) return;
+    await control('mfaReset', u, () => api.post(`/admin/users/${u.id}/mfa-reset`, {}), mfaResetDone(u));
+  }
+
   // Every control the detail panel offers is one of the handlers above.
   const userActions = {
     unlock: handleUnlock, role: handleRole, reset: handleResetLink, signOut: handleSignOut,
     disabled: handleDisabled, remove: handleDelete, stopWatcher: handleStopWatcher,
     autoSubmitOff: handleAutoSubmitOff, revokeSession: handleRevokeSession,
-    invite: handleNewInvite, revokeInvite: handleRevokeInvite,
+    invite: handleNewInvite, revokeInvite: handleRevokeInvite, mfaReset: handleMfaReset,
   };
 
   // A disabled admin cannot sign in, so they do not count as the last one.
@@ -383,6 +393,7 @@ export default function Admin() {
                 const failed  = failedNote(u, now);
                 const mustSet = mustSetNote(u);
                 const isDemo  = demoBadge(u);
+                const twoStep = mfaBadge(u);
                 // Invited and no password yet: the invite in place of the
                 // sign-in details, which it has none of (users.js inviteNote).
                 const invite  = inviteNote(u, { now, day: formatShortDate(u.inviteExpiresAt, me?.timezone) });
@@ -439,6 +450,9 @@ export default function Admin() {
                           </span>
                           {isDemo && (
                             <span className="badge badge-gray" title={isDemo.title}>{isDemo.text}</span>
+                          )}
+                          {twoStep && (
+                            <span className="badge badge-green" title={twoStep.title}>{twoStep.text}</span>
                           )}
                           {u.disabledAt && (
                             <span className="badge badge-red" title={`Disabled ${formatDateTime(u.disabledAt, me?.timezone)}`}>⏸ Disabled</span>

@@ -142,7 +142,10 @@ describe('the Account page is wired to them', () => {
     expect(page).toMatch(/onPasswordSet=\{settingPassword \? onPasswordSet : undefined\}/);
     expect(page).toMatch(/await refreshUser\(\);\s+navigate\('\/dashboard', \{ replace: true \}\);/);
     // The one control the server would refuse meanwhile is left out.
-    expect(page).toMatch(/\{!settingPassword && <SessionsCard idx=\{1\} \/>\}/);
+    // So does 2-step sign-in's card, and in set-up-2-step mode all but that
+    // card (mfa-ui.test.js).
+    expect(page).toMatch(/\{!settingPassword && !settingUp2Step && <SessionsCard idx=\{2\} \/>\}/);
+    expect(page).toMatch(/\{!settingPassword && <TwoStepCard /);
   });
 
   test('Sessions: the sentence, a confirm first, the route, the token kept, the note', () => {

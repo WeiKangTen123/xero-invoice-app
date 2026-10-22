@@ -9,6 +9,7 @@ const {
   getGeminiKeys, addGeminiKey, removeGeminiKey, checkAllowanceSettings, defaultsFrom, timezoneProblem, emailProblem,
 } = require('../utils/users');
 const logger  = require('../utils/logger');
+const onboarding = require('../utils/onboarding');
 const { automaticImapValues, resolveImapSettings } = require('../email/imap-settings');
 
 // ── Field definitions ─────────────────────────────────────────────────────────
@@ -49,6 +50,7 @@ const FIELD_LABELS = {
   SMTP_PASS:             'Password',
   SMTP_FROM_NAME:        'Sender name',
   APP_BASE_URL:          'App web address',
+  PRIVACY_CONTACT_EMAIL: 'Privacy contact email',
 };
 
 // A line of help under a server-wide field, for the ones whose value is not
@@ -60,6 +62,7 @@ const FIELD_HINTS = {
   SMTP_PASS:      'For Gmail: an App Password (myaccount.google.com/apppasswords) for the address above.',
   SMTP_FROM_NAME: 'The name emails come from. Blank uses "Financial Automation".',
   APP_BASE_URL:   "This app's public address, such as https://app.example.com. Every link in an email starts with it.",
+  PRIVACY_CONTACT_EMAIL: 'Who people write to about their data; the privacy notice every account reads names this address. Blank uses the admin who signed in most recently.',
 };
 
 // What a blank account box codes the claim to, said beside the box: the claim
@@ -95,6 +98,10 @@ const GLOBAL_SECTIONS = {
   // (utils/mailer.js), and the public address the links start with. Read
   // from process.env on every send, so a save here takes effect at once.
   email:     ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM_NAME', 'APP_BASE_URL'],
+  // Who to ask about one's data, as the privacy notice names them
+  // (utils/onboarding.js privacyContact, which falls back to an admin's
+  // address while this is blank).
+  privacy:   ['PRIVACY_CONTACT_EMAIL'],
 };
 
 // ENV_FILE lets the tests point at a throwaway file instead of the real
@@ -256,6 +263,9 @@ function checkGlobalSettings(patch) {
   if (!blank('SMTP_USER') && emailProblem(values.SMTP_USER)) {
     errors.push({ field: 'SMTP_USER', error: 'Send from must be the email address the app signs in as' });
   }
+  if (!blank('PRIVACY_CONTACT_EMAIL') && emailProblem(values.PRIVACY_CONTACT_EMAIL)) {
+    errors.push({ field: 'PRIVACY_CONTACT_EMAIL', error: 'Privacy contact must be an email address, such as privacy@example.com' });
+  }
   if (!blank('SMTP_FROM_NAME') && values.SMTP_FROM_NAME.length > 100) {
     errors.push({ field: 'SMTP_FROM_NAME', error: 'Sender name must be at most 100 characters' });
   }
@@ -269,6 +279,22 @@ function checkGlobalSettings(patch) {
     }
   }
   return { values, errors };
+}
+
+// The settings each kept Test result is about (utils/onboarding.js, for the
+// "Get set up" checklist): the mailbox's server, port, address and password,
+// and the Custom Connection's credentials. A save that changes one of them
+// leaves the last result about settings that are no longer there, so the
+// step goes back to "not tested yet" until Test is pressed again. An OAuth
+// connection needs nothing of this: the checklist reads it from the
+// connection itself.
+const TESTED_KEYS = {
+  imap: ['IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASS'],
+  xero: ['XERO_CLIENT_ID', 'XERO_CLIENT_SECRET'],
+};
+function testsOutdatedBy(config, patch) {
+  const changed = key => patch[key] !== undefined && String(patch[key] ?? '').trim() !== String(config[key] ?? '').trim();
+  return Object.keys(TESTED_KEYS).filter(kind => TESTED_KEYS[kind].some(changed));
 }
 
 // ── POST /api/setup — save updated values ─────────────────────────────────────
@@ -309,8 +335,10 @@ router.post('/', requireAuth, (req, res) => {
       logger.info('Mailbox server or address changed: saved mailbox password removed', { by: req.user.email });
     }
 
+    const untested = testsOutdatedBy(getUserConfig(req.user.id), userPatch);
     if (Object.keys(userPatch).length)   saveUserConfig(req.user.id, userPatch);
     if (Object.keys(globalPatch).length) writeEnvFile(globalPatch);
+    for (const kind of untested) onboarding.clearTest(req.user.id, kind);
 
     logger.info('Setup config saved', {
       userKeys:   Object.keys(userPatch),
@@ -380,6 +408,19 @@ router.delete('/llm-keys/:id', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
+// The outcome of Test LLM, Test IMAP or Test Xero, kept for the "Get set up"
+// checklist (utils/onboarding.js), where a step is done once its Test has
+// passed. Kept before the answer is sent, so a checklist that reads it as the
+// answer arrives sees it. Whatever becomes of the record, the person gets the
+// test's answer: recordTest does not throw, and is guarded here as well.
+function rememberTest(req, kind, ok, message) {
+  try {
+    onboarding.recordTest(req.user.id, kind, { ok, message });
+  } catch (err) {
+    logger.warn('Setup test result not recorded', { kind, error: err.message });
+  }
+}
+
 // ── POST /api/setup/test/xero — test this user's Xero connection ──────────────
 // Tests whichever method is active (OAuth or Custom Connection) and leaves it
 // active. It used to test Custom Connection only and switch the account to it
@@ -396,9 +437,13 @@ router.post('/test/xero', requireAuth, asyncHandler(async (req, res) => {
   try {
     const { method } = await testConnection(req.user.id);
     const via = method === 'oauth' ? 'via Xero login (OAuth)' : 'via Custom Connection';
-    res.json({ success: true, message: `Xero connected successfully ${via}` });
+    const message = `Xero connected successfully ${via}`;
+    rememberTest(req, 'xero', true, message);
+    res.json({ success: true, message });
   } catch (err) {
-    res.status(400).json({ success: false, message: xeroErrMsg(err) });
+    const message = xeroErrMsg(err);
+    rememberTest(req, 'xero', false, message);
+    res.status(400).json({ success: false, message });
   }
 }));
 
@@ -497,7 +542,9 @@ router.post('/test/imap', requireAuth, asyncHandler(async (req, res) => {
       const missing = !settings.password ? 'an app password'
                     : !settings.host     ? 'the mailbox server (we do not know it for this email provider)'
                     : 'a mailbox address';
-      return res.status(400).json({ success: false, message: `Mailbox not configured — go to Setup and add ${missing}.` });
+      const message = `Mailbox not configured — go to Setup and add ${missing}.`;
+      rememberTest(req, 'imap', false, message);
+      return res.status(400).json({ success: false, message });
     }
 
     const Imap = require('imap');
@@ -518,8 +565,10 @@ router.post('/test/imap', requireAuth, asyncHandler(async (req, res) => {
       imap.once('error', reject);
       imap.connect();
     });
+    rememberTest(req, 'imap', true, 'IMAP connected successfully');
     res.json({ success: true, message: 'IMAP connected successfully' });
   } catch (err) {
+    rememberTest(req, 'imap', false, err.message);
     res.status(400).json({ success: false, message: err.message });
   }
 }));
@@ -529,8 +578,10 @@ router.post('/test/llm', requireAuth, asyncHandler(async (req, res) => {
   try {
     const { extractWithRetry } = require('../email/llm-parser');
     await extractWithRetry('Invoice #TEST-001\nVendor: Test Co\nTotal: $1.00', 'test.pdf', req.user.id);
+    rememberTest(req, 'llm', true, 'LLM API connected successfully');
     res.json({ success: true, message: 'LLM API connected successfully' });
   } catch (err) {
+    rememberTest(req, 'llm', false, err.message);
     res.status(400).json({ success: false, message: err.message });
   }
 }));

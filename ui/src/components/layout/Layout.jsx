@@ -1,10 +1,14 @@
-import { Suspense, useState } from 'react';
+import { Suspense, useState, useEffect } from 'react';
 import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import Header from './Header';
 import BottomNav from './BottomNav';
 import ChatAssistant from '../ChatAssistant';
 import XeroConnectionBanner from './XeroConnectionBanner';
+import PrivacyNotice from '../PrivacyNotice';
+import { canAskForNotice, shouldShowNotice } from '../privacy-notice';
+import { api } from '../../api/client';
+import { useAuth } from '../../context/AuthContext';
 import { useViewMode } from '../../context/ViewModeContext';
 
 // Room kept free on the right of everything under the header for the chat
@@ -21,6 +25,25 @@ export default function Layout() {
   // The width of the chat while it is docked beside the page (a wide window,
   // chat open), else 0. ChatAssistant reports it; nothing else sets it.
   const [chatDock, setChatDock] = useState(0);
+
+  // The privacy notice (components/privacy-notice.js), over whichever page
+  // comes first after signing in, until the account has read this version.
+  // Asked once per account, and again when what comes before it is done:
+  // nothing is asked while a password must be set or 2-step sign-in set up,
+  // since those screens come first and the server refuses everything else.
+  // A failed ask shows nothing; the next sign-in or reload asks again.
+  const { user } = useAuth();
+  const [notice, setNotice] = useState(null);
+  const askable = canAskForNotice(user);
+  useEffect(() => {
+    setNotice(null);
+    if (!askable) return;
+    let live = true;
+    api.get('/onboarding')
+      .then(d => { if (live) setNotice(d.notice || null); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [user?.id, askable]);
 
   return (
     <div className={`app-layout ${isMobile ? 'mobile-mode' : ''}`} style={{ '--chat-dock-width': `${chatDock}px` }}>
@@ -63,6 +86,9 @@ export default function Layout() {
 
       {isMobile && <BottomNav />}
       <ChatAssistant onDockChange={setChatDock} />
+      {shouldShowNotice(user, notice) && (
+        <PrivacyNotice contact={notice.contact} onDone={() => setNotice(n => ({ ...n, required: false }))} />
+      )}
     </div>
   );
 }

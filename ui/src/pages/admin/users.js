@@ -1,11 +1,11 @@
 // Admin › Users: what a row says about an account's sign-in state, from the
 // fields GET /api/admin/users sends (failedLogins, lockedUntil,
-// mustChangePassword, invited, inviteExpiresAt, inviteExpired), and what the
-// page says once an invite or a reset link is made. The page cannot be
-// rendered on every machine this is worked on, so the wording lives here,
-// imports nothing, and main/scripts/login-ui.test.js,
-// main/scripts/demo-ui.test.js and main/scripts/invite-ui.test.js run it as
-// it is.
+// mustChangePassword, invited, inviteExpiresAt, inviteExpired, mfaEnabled),
+// and what the page says once an invite or a reset link is made. The page
+// cannot be rendered on every machine this is worked on, so the wording lives
+// here, imports nothing, and main/scripts/login-ui.test.js,
+// main/scripts/demo-ui.test.js, main/scripts/invite-ui.test.js and
+// main/scripts/mfa-ui.test.js run it as it is.
 
 function toMs(value) {
   if (value instanceof Date) return value.getTime();
@@ -219,6 +219,31 @@ export function inviteNote(row, { now = Date.now(), day = '' } = {}) {
     return { expired, text: day ? `Invite expired ${day}` : 'Invite expired', title: 'The invite link ran out before they used it. New link makes another.' };
   }
   return { expired, text: day ? `Invited · expires ${day}` : 'Invited', title: 'Has not set a password yet. New link makes another; Revoke stops the one sent.' };
+}
+
+// ── 2-step sign-in ───────────────────────────────────────────────────────────
+// Rows carry `mfaEnabled`. The small badge on a row with it on, or null.
+export function mfaBadge(row) {
+  if (row?.mfaEnabled !== true) return null;
+  return { text: '2-step', title: '2-step sign-in is on: a code from an authenticator app after the password' };
+}
+
+// Reset 2-step, asked first (POST /api/admin/users/:id/mfa-reset): for
+// someone who has lost their phone and their recovery codes.
+export function mfaResetAsk(row) {
+  const email = (row && row.email) || 'this account';
+  return {
+    title:        `Reset 2-step sign-in for ${email}?`,
+    message:      'They will have to set it up again at their next sign-in. Use this when they have lost their phone.',
+    confirmLabel: 'Reset 2-step',
+    danger:       true,
+  };
+}
+
+// The toast once it is done.
+export function mfaResetDone(row) {
+  const email = (row && row.email) || 'The account';
+  return `2-step sign-in for ${email} is reset. They set it up again at their next sign-in.`;
 }
 
 // Revoke, asked first: the link sent stops working.

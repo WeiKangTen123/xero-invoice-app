@@ -56,7 +56,9 @@ describe('the sign-in page is wired to them', () => {
     expect(page).toMatch(/const \[form, setForm\]\s+= useState\(FORM_CHECKING\);/);
     expect(page).toMatch(/const firstRun = form === FORM_FIRST_RUN;/);
     expect(page).toMatch(/\.then\(d => setForm\(formFromStatus\(d\)\)\)\s+\.catch\(\(\) => setForm\(FORM_UNREACHABLE\)\)/);
-    expect(page).toMatch(/\{form === FORM_CHECKING \? \(\s+<p role="status"/);
+    // After the second step's branch (mfa-ui.test.js), which only shows once
+    // a password was right.
+    expect(page).toMatch(/\{challenge \? \(\s+<MfaStep[\s\S]*?\/>\s+\) : form === FORM_CHECKING \? \(\s+<p role="status"/);
     // The old start: sign-in first, switched to first run if the answer said so.
     expect(page).not.toMatch(/setFirstRun|useState\(false\);\s*\n\s*const \[email/);
   });

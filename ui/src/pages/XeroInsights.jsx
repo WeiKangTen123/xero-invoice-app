@@ -21,6 +21,7 @@ import CashManagerTab from './xero-insights/CashManagerTab';
 import BudgetTab from './xero-insights/BudgetTab';
 import VarianceTab from './xero-insights/VarianceTab';
 import AgeingSection from './xero-insights/AgeingSection';
+import SetupChecklist from '../components/SetupChecklist';
 import { canChooseDataSource, currentSource } from './setup/data-source';
 import { useDataSource } from './setup/useDataSource';
 
@@ -892,6 +893,9 @@ function XeroInsights() {
           <h1>Dashboard</h1>
           <p>Live financial data pulled read-only from your connected Xero organisation.</p>
         </div>
+        {/* What is left to set up, Xero among it, in the setup guide's
+            order (components/SetupChecklist.jsx); gone once all of it works. */}
+        <SetupChecklist />
         {/* An admin can also show the sample data instead. The page reloads
             itself once the switch lands (see XeroInsightsPage above). */}
         {chooser ? (

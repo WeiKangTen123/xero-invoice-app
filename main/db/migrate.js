@@ -170,6 +170,15 @@ function run() {
   // which an existing database gets on its next boot like a new one. So is
   // auth_tokens (invite and reset links): a new table with nothing to fill
   // in from older rows needs no numbered step below.
+  //
+  // 2-step sign-in (utils/mfa.js) and when a session last confirmed it was its
+  // owner. NULL on every existing row: 2-step off, and no session confirmed,
+  // which is the truth for both.
+  for (const col of ['mfa_secret', 'mfa_pending_secret', 'mfa_enabled_at', 'mfa_recovery']) {
+    _ensureColumn('users', col, `${col} TEXT`);
+  }
+  _ensureColumn('users', 'mfa_last_step', 'mfa_last_step INTEGER');
+  _ensureColumn('sessions', 'reauth_at', 'reauth_at TEXT');
   for (const [col, ddl] of [
     ['receipt_file', 'receipt_file TEXT'], ['receipt_mime', 'receipt_mime TEXT'], ['receipt_box', 'receipt_box TEXT'],
     ['receipt_page', 'receipt_page INTEGER'], ['receipt_group', 'receipt_group TEXT'], ['received_at', 'received_at TEXT'],

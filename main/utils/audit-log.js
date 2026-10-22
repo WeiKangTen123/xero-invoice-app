@@ -27,10 +27,12 @@ const RETENTION_DAYS = 730;
 const SIGN_IN_RETENTION_DAYS = 90;
 // A first-run registration (user.register) holds the same address and
 // browser, so it goes with them, and so do a reset asked for on the sign-in
-// page and a password set through a link (password.reset_requested,
-// password.set_via_link).
+// page, a password set through a link and a sign-in with a recovery code
+// (password.reset_requested, password.set_via_link, mfa.recovery_used). The
+// 2-step sign-in steps are login.* (login.password_ok) and a confirmation is
+// session.* (session.reauth), so they are in already.
 const SIGN_IN_ACTION_SQL = "(action LIKE 'login.%' OR action = 'logout' OR action LIKE 'session.%' OR action = 'user.register'"
-  + " OR action IN ('password.reset_requested', 'password.set_via_link'))";
+  + " OR action IN ('password.reset_requested', 'password.set_via_link', 'mfa.recovery_used'))";
 
 // One page of history. The review page shows a record's whole life in one
 // page nearly always; the cap is what keeps a pathological record (an import
@@ -202,6 +204,9 @@ const ADMIN_ACTIONS = {
   // An admin moving their own account between Xero and sample data
   // (routes/setup.js data-source); details { from, to }: 'xero' | 'demo'.
   'account.data_source':   'Switched data source',
+  // The person's own, on the privacy notice shown once at first sign-in
+  // (utils/onboarding.js); details { version }: which wording they read.
+  'notice.acknowledged':   'Read the privacy notice',
   // Sign-ins (routes/auth.js). The first three have no admin behind them:
   // success is the person's own, a failure and a lock are nobody's. They are
   // here, and not only in the log, so an admin can see a guesser at work
@@ -218,6 +223,23 @@ const ADMIN_ACTIONS = {
   // Sign out, the person's own; ending one session is an admin's (details.sid).
   'logout':                'Signed out',
   'session.revoke':        'Ended a session',
+  // 2-step sign-in (utils/mfa.js, routes/auth.js). The password was right and
+  // a code was asked for: not a sign-in yet, but in the person's own list, so
+  // a password someone else holds shows up even when the code stops them
+  // (details { ip, ua }). A sign-in that then goes through is login.success
+  // with details.mfa 'totp' or 'recovery'; a wrong code is login.failed with
+  // details.reason 'wrong_code' and details.method.
+  'login.password_ok':     'Password accepted, 2-step code asked for',
+  'mfa.enable':            'Turned on 2-step sign-in',
+  'mfa.disable':           'Turned off 2-step sign-in',
+  'mfa.recovery_codes':    'Made new recovery codes',
+  // A sign-in with a recovery code (details { codesLeft, ip, ua }), and an
+  // admin turning off someone else's 2-step sign-in for a lost phone.
+  'mfa.recovery_used':     'Signed in with a recovery code',
+  'mfa.reset':             'Reset 2-step sign-in',
+  // "Confirm it's you" before a sensitive admin action (details { method:
+  // 'password' | 'totp', ip, ua }).
+  'session.reauth':        "Confirmed it's them",
 };
 
 // What a refused sign-in's reason is called in its sentence.
@@ -252,12 +274,23 @@ function describeAdminEvent(action, details, targetEmail) {
   const d = details || {};
   const who = targetEmail || 'an account';
   switch (action) {
-    case 'login.success':         return 'Signed in';
+    case 'login.success':         return d.mfa === 'recovery' ? 'Signed in with a recovery code'
+      : d.mfa ? 'Signed in with a 2-step code' : 'Signed in';
     // A failure names the address typed: for a known account that is the
     // account's; for an unknown one it is what someone was trying.
-    case 'login.failed':          return targetEmail
-      ? `Wrong password for ${targetEmail}`
-      : `Sign-in failed for ${d.email || 'an unknown address'}: no such account`;
+    case 'login.failed':
+      if (d.reason === 'wrong_code') return `Wrong ${d.method === 'recovery' ? 'recovery code' : '2-step code'} for ${who}`;
+      return targetEmail
+        ? `Wrong password for ${targetEmail}`
+        : `Sign-in failed for ${d.email || 'an unknown address'}: no such account`;
+    case 'login.password_ok':     return 'Password accepted; a 2-step code was asked for';
+    case 'mfa.enable':            return 'Turned on 2-step sign-in';
+    case 'mfa.disable':           return 'Turned off 2-step sign-in';
+    case 'mfa.recovery_codes':    return 'Made new recovery codes; the old ones stopped working';
+    case 'mfa.recovery_used':     return Number.isFinite(Number(d.codesLeft)) && d.codesLeft !== null
+      ? `Signed in with a recovery code (${d.codesLeft} left)` : 'Signed in with a recovery code';
+    case 'mfa.reset':             return `Turned off 2-step sign-in for ${who}`;
+    case 'session.reauth':        return `Confirmed it's them with ${d.method === 'totp' ? 'a 2-step code' : 'their password'}`;
     case 'login.locked':          return `Locked for ${_lockLength(d.lockMinutes)} after ${d.failures || 5} failed attempts`;
     case 'login.unlocked':        return `Unlocked ${who}`;
     case 'login.refused':         return REFUSED_REASONS[d.reason] ? `Sign-in refused: ${REFUSED_REASONS[d.reason]}` : 'Sign-in refused';
@@ -288,7 +321,8 @@ function describeAdminEvent(action, details, targetEmail) {
     }
     case 'password.change':       return 'Changed their own password';
     case 'account.data_source':   return d.to === 'demo' ? 'Switched to sample data (Demo Company)' : 'Switched to Xero';
-    default:                      return ADMIN_ACTIONS[action] || action;
+    case 'notice.acknowledged':   return d.version ? `Read the privacy notice (version ${d.version})` : 'Read the privacy notice';
+    default:                     return ADMIN_ACTIONS[action] || action;
   }
 }
 
@@ -319,9 +353,11 @@ function listAdminEvents({ targetUserId = null, action = null, from = null, to =
 // One person's own sign-in history (GET /api/auth/sign-ins): the newest
 // `limit` login.* events on their account, each as when, which, from where
 // and in which browser (ua: the User-Agent, null for events from before it
-// was kept), for a lock how long it was for, and for a refusal why. Nothing
-// else: the address typed on a failure is theirs anyway, and the page that
-// shows the list writes its own words for each kind.
+// was kept), for a lock how long it was for, and for a refusal why. Since
+// 2-step sign-in: `mfa` on a sign-in that used it ('totp' | 'recovery'), and
+// `reason: 'wrong_code'` on a failure that was a wrong code rather than a
+// wrong password. Nothing else: the address typed on a failure is theirs
+// anyway, and the page that shows the list writes its own words for each kind.
 function listSignInEvents(userId, { limit = 20 } = {}) {
   const n = Math.min(Math.max(Number(limit) || 20, 1), PAGE_MAX);
   return db.prepare("SELECT at, action, details FROM admin_events WHERE target_user_id = ? AND action LIKE 'login.%' ORDER BY id DESC LIMIT ?")
@@ -331,6 +367,8 @@ function listSignInEvents(userId, { limit = 20 } = {}) {
       const event = { at: r.at, action: r.action, ip: d.ip ? String(d.ip) : null, ua: d.ua ? String(d.ua) : null };
       if (r.action === 'login.locked' && Number.isFinite(Number(d.lockMinutes))) event.lockMinutes = Number(d.lockMinutes);
       if (r.action === 'login.refused' && d.reason) event.reason = String(d.reason);
+      if (r.action === 'login.failed' && d.reason) event.reason = String(d.reason);
+      if (r.action === 'login.success' && d.mfa) event.mfa = String(d.mfa);
       return event;
     });
 }

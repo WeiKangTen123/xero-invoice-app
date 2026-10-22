@@ -253,7 +253,8 @@ describe('Admin › Users is wired to them', () => {
   const admin = read('pages/Admin.jsx');
 
   test('the form sends demo, copyFrom and mailboxFilterFrom through the helper, and is held while it has a problem', () => {
-    expect(admin).toMatch(/import \{ lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, copiedNote, inviteNote, revokeInviteAsk \} from '\.\/admin\/users';/);
+    // The 2-step helpers (mfa-ui.test.js) share the import.
+    expect(admin).toMatch(/import \{ lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, copiedNote, inviteNote, revokeInviteAsk\b[^}]*\} from '\.\/admin\/users';/);
     expect(admin).toContain('const form = { email, role, demo, copyFrom, mailboxFilterFrom: filterFrom };');
     expect(admin).toContain('const createProblem = addUserProblem(form);');
     expect(admin).toContain('if (createProblem) { setError(createProblem); return; }');

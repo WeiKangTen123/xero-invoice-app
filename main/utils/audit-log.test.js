@@ -334,6 +334,36 @@ describe('audit trail (store, context, retention)', () => {
       expect(describeAdminEvent('account.data_source', { from: 'demo', to: 'xero' }, 'jane@test.com')).toBe('Switched to Xero');
     });
 
+    test('2-step sign-in has labels and sentences, and its steps in the sign-in list say which', () => {
+      const { ADMIN_ACTIONS, describeAdminEvent: say } = auditLog;
+      for (const a of ['login.password_ok', 'mfa.enable', 'mfa.disable', 'mfa.recovery_codes', 'mfa.recovery_used', 'mfa.reset', 'session.reauth']) {
+        expect(ADMIN_ACTIONS[a]).toEqual(expect.any(String));
+      }
+      expect(say('login.success', { mfa: 'totp' })).toBe('Signed in with a 2-step code');
+      expect(say('login.success', { mfa: 'recovery' })).toBe('Signed in with a recovery code');
+      expect(say('login.success', {})).toBe('Signed in');
+      expect(say('login.failed', { reason: 'wrong_code', method: 'totp' }, 'jane@test.com')).toBe('Wrong 2-step code for jane@test.com');
+      expect(say('login.failed', { reason: 'wrong_code', method: 'recovery' }, 'jane@test.com')).toBe('Wrong recovery code for jane@test.com');
+      expect(say('login.failed', {}, 'jane@test.com')).toBe('Wrong password for jane@test.com');
+      expect(say('login.password_ok', {})).toBe('Password accepted; a 2-step code was asked for');
+      expect(say('mfa.recovery_used', { codesLeft: 0 })).toBe('Signed in with a recovery code (0 left)');
+      expect(say('mfa.recovery_used', {})).toBe('Signed in with a recovery code');
+      expect(say('mfa.reset', {}, 'jane@test.com')).toBe('Turned off 2-step sign-in for jane@test.com');
+      expect(say('session.reauth', { method: 'totp' })).toBe("Confirmed it's them with a 2-step code");
+      expect(say('session.reauth', { method: 'password' })).toBe("Confirmed it's them with their password");
+
+      const rec = (action, details) => auditLog.recordAdminEvent({ actor: null, target: owner, action, details });
+      rec('login.password_ok', { ip: '10.0.0.1', ua: 'Firefox' });
+      rec('login.failed', { reason: 'wrong_code', method: 'totp', ip: '10.0.0.1', ua: 'Firefox' });
+      rec('login.success', { mfa: 'totp', ip: '10.0.0.1', ua: 'Firefox' });
+      rec('session.reauth', { method: 'password', ip: '10.0.0.1' });   // not a sign-in
+      expect(auditLog.listSignInEvents(owner.id)).toEqual([
+        { at: expect.any(String), action: 'login.success',     ip: '10.0.0.1', ua: 'Firefox', mfa: 'totp' },
+        { at: expect.any(String), action: 'login.failed',      ip: '10.0.0.1', ua: 'Firefox', reason: 'wrong_code' },
+        { at: expect.any(String), action: 'login.password_ok', ip: '10.0.0.1', ua: 'Firefox' },
+      ]);
+    });
+
     test('listSignInEvents gives the browser, and why a sign-in was refused', () => {
       auditLog.recordAdminEvent({ actor: null, target: owner, action: 'login.refused', details: { reason: 'disabled', ip: '10.0.0.1', ua: 'Firefox' } });
       auditLog.recordAdminEvent({ actor: owner, target: owner, action: 'logout', details: { ip: '10.0.0.1', ua: 'Firefox' } });   // not a sign-in
@@ -425,6 +455,19 @@ describe('audit trail (store, context, retention)', () => {
       for (const action of ['password.reset_requested', 'password.set_via_link', 'user.invite', 'user.reset_link']) ins.run(ago(91), action);
       expect(auditLog.pruneOldEvents()).toEqual({ invoices: 0, admin: 2, sessions: 0 });
       expect(db.prepare('SELECT action FROM admin_events ORDER BY id').all().map(r => r.action)).toEqual(['user.invite', 'user.reset_link']);
+    });
+
+    // 2-step sign-in: the steps that hold where a sign-in came from go with the
+    // sign-ins; turning it on, off, reset or new codes are account changes and
+    // stay two years.
+    test('the 2-step sign-in steps holding an address go after 90 days; the account changes stay', () => {
+      const ago = days => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      const ins = db.prepare('INSERT INTO admin_events (at, action) VALUES (?, ?)');
+      const go   = ['login.password_ok', 'mfa.recovery_used', 'session.reauth'];
+      const stay = ['mfa.enable', 'mfa.disable', 'mfa.reset', 'mfa.recovery_codes'];
+      for (const action of [...go, ...stay]) ins.run(ago(91), action);
+      expect(auditLog.pruneOldEvents()).toEqual({ invoices: 0, admin: go.length, sessions: 0 });
+      expect(db.prepare('SELECT action FROM admin_events ORDER BY id').all().map(r => r.action)).toEqual(stay);
     });
 
     test('the sessions are pruned with the events, 30 days after they were last used', () => {

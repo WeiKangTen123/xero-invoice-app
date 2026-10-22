@@ -58,7 +58,20 @@ CREATE TABLE IF NOT EXISTS users (
   -- for it). Set at creation (routes/admin.js); an admin may switch their own
   -- account either way (PUT /api/setup/data-source), and its Xero credentials
   -- are left untouched meanwhile, so switching back needs no reconnect.
-  is_demo INTEGER NOT NULL DEFAULT 0
+  is_demo INTEGER NOT NULL DEFAULT 0,
+  -- 2-step sign-in (utils/mfa.js): a code from an authenticator app after the
+  -- password. mfa_secret is the app's shared secret, encrypted like every
+  -- other secret (utils/crypto.js); mfa_pending_secret the one shown during
+  -- set-up, until a code from it turns 2-step on. mfa_enabled_at says when it
+  -- was turned on (NULL = off). mfa_last_step is the 30-second step of the
+  -- last code accepted, so no code works twice. mfa_recovery is a JSON array
+  -- of the SHA-256 of each unused recovery code; the codes themselves are
+  -- shown once and never kept.
+  mfa_secret         TEXT,
+  mfa_pending_secret TEXT,
+  mfa_enabled_at     TEXT,
+  mfa_last_step      INTEGER,
+  mfa_recovery       TEXT
 );
 
 -- One row per sign-in (utils/sessions.js). Session tokens are still stateless
@@ -72,7 +85,12 @@ CREATE TABLE IF NOT EXISTS users (
 -- admin's id when an admin ended it. Rows
 -- go 30 days after their last use (sessions.js#pruneSessions): they hold IP
 -- addresses. No foreign key, so a write here can never fail on one; the rows
--- go with the account in users.js#deleteUser.
+-- go with the account in users.js#deleteUser. ended_reason may also be
+-- mfa_enabled | mfa_recovery_codes | mfa_disabled | mfa_reset (2-step
+-- sign-in changed: every other session of the account ends). reauth_at is
+-- when this session last confirmed it was its owner (password or 2-step code,
+-- POST /api/auth/reauth); the most sensitive admin actions want that within
+-- the last ten minutes (auth-middleware.js#recentlyConfirmed).
 CREATE TABLE IF NOT EXISTS sessions (
   id           TEXT PRIMARY KEY,
   user_id      TEXT NOT NULL,
@@ -83,7 +101,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_agent   TEXT,
   ended_at     TEXT,
   ended_reason TEXT,
-  ended_by     TEXT
+  ended_by     TEXT,
+  reauth_at    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, last_seen_at);
 
@@ -506,6 +525,25 @@ CREATE TABLE IF NOT EXISTS admin_events (
 );
 CREATE INDEX IF NOT EXISTS idx_admin_events_at     ON admin_events(at);
 CREATE INDEX IF NOT EXISTS idx_admin_events_target ON admin_events(target_user_id, at);
+
+-- First-run state per account (utils/onboarding.js, which also creates it at
+-- load with this same definition, its TABLE_SQL): which version of the privacy
+-- notice the account has seen and when, and the last Test LLM / Test IMAP /
+-- Test Xero outcome, for the Get set up checklist.
+CREATE TABLE IF NOT EXISTS user_onboarding (
+  user_id          TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  notice_version   INTEGER,
+  notice_seen_at   TEXT,
+  llm_ok           INTEGER,
+  llm_message      TEXT,
+  llm_checked_at   TEXT,
+  imap_ok          INTEGER,
+  imap_message     TEXT,
+  imap_checked_at  TEXT,
+  xero_ok          INTEGER,
+  xero_message     TEXT,
+  xero_checked_at  TEXT
+);
 
 -- ── Guards on users ─────────────────────────────────────────────────────────
 -- Applied by migrate.js after its steps, not with the rest of this file: on a

@@ -446,3 +446,25 @@ as above and restart. A value whose key is missing fails with a message
 naming that key (`encrypted with key "2026-10", which is not in
 ENCRYPTION_KEYS`, or `enc:v1, written under ENCRYPTION_KEY, which is not
 set`). To bring the restored data onto the current key, run steps 4–9 again.
+
+## Sign-in
+
+- **2-step sign-in is required for admins.** An admin without it is sent to
+  Account › 2-step sign-in at their next sign-in and can do nothing else
+  until it is on. `MFA_REQUIRED_FOR_ADMINS=false` in `main/.env` (then
+  `pm2 restart`) turns the requirement off in an emergency; accounts that
+  have it on keep using it.
+- **An admin lost their phone.** Another admin: Admin › the account › Reset
+  2-step. They set it up again at their next sign-in.
+- **The only admin lost both phone and recovery codes.** On the server, from
+  the app's folder:
+  `sudo -u weika -H node main/scripts/mfa-reset.js you@example.com`.
+  It turns 2-step off for that account, signs it out everywhere, records it in
+  the admin trail and tells Slack. They set it up again at the next sign-in.
+- **Locked out after wrong passwords.** The lock ends on its own (15 minutes,
+  doubling within a day up to 24 hours). Another admin can Unlock it, or send
+  a reset link (a completed reset also clears the lock). The right password
+  from an address the account has signed in from before still gets through.
+- **Invite and reset emails.** Setup › Email sending (admin). Without it, the
+  Admin page shows each link once to copy and send by hand, and the sign-in
+  page offers no "Forgot your password?".

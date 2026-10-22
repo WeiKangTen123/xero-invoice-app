@@ -2,7 +2,8 @@ const express      = require('express');
 const router       = express.Router();
 const fs           = require('fs');
 const path         = require('path');
-const { requireAdmin } = require('../middleware/auth-middleware');
+const { requireAdmin, requireRecentAuth, recentlyConfirmed, REAUTH_REQUIRED } = require('../middleware/auth-middleware');
+const mfa              = require('../utils/mfa');
 const asyncHandler     = require('../middleware/async-handler');
 const users            = require('../utils/users');
 const {
@@ -38,6 +39,31 @@ function recordAdmin(req, target, action, details = null) {
   });
 }
 
+// ── Confirm it's you ─────────────────────────────────────────────────────────
+// What would hand someone an admin's keys wants the admin at the keyboard to
+// have shown it is them within ten minutes (auth-middleware.js
+// #recentlyConfirmed, POST /api/auth/reauth), not just to hold a session:
+// making an admin (Add user as admin, or a role change to admin), and
+// resetting, sending a reset link to, or deleting an account that is an
+// admin, and turning off anyone's 2-step sign-in. Asked after the request is
+// checked and its account found, so a 400 or 404 is said as it is, and
+// before anything changes. True when it has answered 403 reauth_required.
+function refusedUnconfirmed(req, res) {
+  if (recentlyConfirmed(req)) return false;
+  res.status(403).json(REAUTH_REQUIRED);
+  return true;
+}
+
+// Posts a security alert to Slack, and never lets it reach the request that
+// raised it.
+function securityAlert(text) {
+  try {
+    return Promise.resolve(require('../utils/notify').notifySecurity(text)).catch(() => false);
+  } catch (_) {
+    return Promise.resolve(false);
+  }
+}
+
 // LOGS_DIR override lets tests point at a throwaway directory instead of the
 // real logs/ folder a dev server may be actively writing to (see db/index.js
 // for the same DB_PATH pattern).
@@ -50,8 +76,9 @@ const LOG_FILES = { combined: 'combined.log', error: 'error.log' };
 // GET /api/admin/users — every account, with its lockout and temporary-
 // password state (users.js#sanitize: failedLogins, lockedUntil, lockCount,
 // lastLockedAt, mustChangePassword, tempPasswordExpiresAt, lastLoginAt,
-// passwordChangedAt) and, for an account still waiting on its invite,
-// invited, inviteExpiresAt and inviteExpired.
+// passwordChangedAt), whether 2-step sign-in is on (mfaEnabled) and, for an
+// account still waiting on its invite, invited, inviteExpiresAt and
+// inviteExpired.
 router.get('/users', requireAdmin, (_req, res) => {
   res.json({ users: getAllUsers() });
 });
@@ -274,6 +301,8 @@ router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
     const clash = _mailboxClash(req.user.id, filter);
     if (clash) return res.status(400).json({ error: clash });
   }
+  // A new admin is a new set of keys to every account.
+  if (newRole === 'admin' && refusedUnconfirmed(req, res)) return;
   if (invite && !mailer.appBaseUrl()) return res.status(409).json(NO_APP_URL);
 
   let user;
@@ -388,6 +417,7 @@ router.delete('/users/:id', requireAdmin, asyncHandler(async (req, res) => {
     }
     const target = findById(id);
     if (!target) return res.status(404).json({ error: 'User not found' });
+    if (target.role === 'admin' && refusedUnconfirmed(req, res)) return;
     if (lastActiveAdmin(target)) {
       return res.status(400).json({ error: 'Cannot delete the last admin account' });
     }
@@ -537,6 +567,7 @@ router.patch('/users/:id/role', requireAdmin, (req, res) => {
   }
   const target = findTarget(req, res, 'You cannot change your own role');
   if (!target) return;
+  if (role === 'admin' && refusedUnconfirmed(req, res)) return;
   if (role === 'user' && lastActiveAdmin(target)) {
     return res.status(400).json({ error: 'Cannot demote the last admin account' });
   }
@@ -582,6 +613,7 @@ router.patch('/users/:id/password', requireAdmin, asyncHandler(async (req, res) 
   try {
     const target = findTarget(req, res, 'Change your own password from the Account page');
     if (!target) return;
+    if (target.role === 'admin' && refusedUnconfirmed(req, res)) return;
     await setPassword(target.id, req.body.password, { temporary: true });
     endSessionsOf(req, target, 'password_changed');
     // That it was reset, and by whom. Never the password.
@@ -653,6 +685,7 @@ router.delete('/users/:id/invite', requireAdmin, (req, res) => {
 router.post('/users/:id/reset-link', requireAdmin, asyncHandler(async (req, res) => {
   const target = findTarget(req, res, 'Change your own password from the Account page');
   if (!target) return;
+  if (target.role === 'admin' && refusedUnconfirmed(req, res)) return;
   if (users.isInvited(target)) return res.status(409).json(STILL_INVITED);
   if (target.disabled_at) return res.status(409).json(disabledRefusal('a reset link'));
   if (!mailer.appBaseUrl()) return res.status(409).json(NO_APP_URL);
@@ -661,6 +694,31 @@ router.post('/users/:id/reset-link', requireAdmin, asyncHandler(async (req, res)
   logger.info('Admin sent a password reset link', { email: target.email, emailed: reset.emailed, by: req.user.email });
   res.json({ reset });
 }));
+
+// POST /api/admin/users/:id/mfa-reset — turns off an account's 2-step sign-in
+// (utils/mfa.js#turnOff: the secret, any set-up under way, the recovery
+// codes), for a person whose phone is lost along with their recovery codes.
+// They sign in with the password alone next time, and an admin is sent
+// straight back to set it up again. Every session of the account is signed
+// out (the cutoff moved and the rows ended as mfa_reset), since any of them
+// may be the one that took the phone. Wants a recent "Confirm it's you"
+// (requireRecentAuth); not for your own account (400), and a 409 for one with
+// 2-step off. Told to Slack: taking a second factor off an account is how an
+// account is taken over, if it is not who it says. Answers { success: true }.
+router.post('/users/:id/mfa-reset', requireAdmin, requireRecentAuth, (req, res) => {
+  const target = findTarget(req, res, "You can't reset your own 2-step sign-in");
+  if (!target) return;
+  if (!mfa.isEnabled(target)) {
+    return res.status(409).json({ error: "This account doesn't have 2-step sign-in on.", code: 'MFA_NOT_ENABLED' });
+  }
+  mfa.turnOff(target.id);
+  invalidateSessions(target.id);
+  const ended = endSessionsOf(req, target, 'mfa_reset');
+  recordAdmin(req, target, 'mfa.reset', { role: target.role });
+  logger.warn('Admin reset 2-step sign-in', { email: target.email, sessionsEnded: ended, by: req.user.email });
+  securityAlert(`🔐 ${req.user.email} turned off 2-step sign-in for ${target.email}${target.role === 'admin' ? ' (an admin)' : ''}`);
+  res.json({ success: true });
+});
 
 // POST /api/admin/users/:id/unlock — ends a sign-in lockout early and clears
 // the failed count behind it (users.js#unlockAccount). Allowed on your own

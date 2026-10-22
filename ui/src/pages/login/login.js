@@ -1,12 +1,14 @@
 // The sign-in screen's decisions that need no React: which form it shows,
 // whether a forgotten password can be reset by email, the address passed in
-// the query, what it says when a first-run registration is refused, what the alert says
+// the query, what it says when a first-run registration is refused, the
+// second step for an account with 2-step sign-in on, what the alert says
 // when the server answers 423 (the account is locked after too many wrong
 // passwords), and the countdown on the button while the lock lasts. The page
 // cannot be rendered on every machine this is worked on, so they live here,
 // import nothing, and main/scripts/login-ui.test.js,
-// main/scripts/login-flow-ui.test.js, main/scripts/set-password-ui.test.js
-// and main/scripts/forgot-password-ui.test.js run them as they are.
+// main/scripts/login-flow-ui.test.js, main/scripts/set-password-ui.test.js,
+// main/scripts/forgot-password-ui.test.js and main/scripts/mfa-ui.test.js run
+// them as they are.
 
 // ── Which form ───────────────────────────────────────────────────────────────
 // The page asks GET /auth/status before it shows a form. Until the answer it
@@ -68,6 +70,52 @@ export function registerRefusal(err) {
   if (err?.status === 403) return 'This site already has an administrator, so the form now signs in. Need an account? Ask your administrator.';
   if (err?.status === 409) return 'An account with this email already exists. Sign in with its password.';
   return null;
+}
+
+// ── The second step: 2-step sign-in ──────────────────────────────────────────
+// A right password for an account with 2-step sign-in on is not a session
+// yet: POST /auth/login answers { mfaRequired: true, mfaToken, methods }, and
+// the same card asks for the code from the authenticator app (or a recovery
+// code), sent with the mfaToken to POST /auth/mfa/verify, whose answer is the
+// usual { token, user }.
+
+export const MFA_CODE_PROMPT     = 'Enter the 6-digit code from your authenticator app';
+export const MFA_RECOVERY_PROMPT = 'Enter one of your recovery codes';
+export const MFA_RECOVERY_HINT   = 'Each recovery code works once.';
+
+// The second step a sign-in answer asks for, { mfaToken, methods }, or null
+// for an answer that signed in (or anything else). The ways default to both
+// when the server lists none.
+export function mfaChallenge(answer) {
+  if (!answer || answer.mfaRequired !== true) return null;
+  if (typeof answer.mfaToken !== 'string' || !answer.mfaToken) return null;
+  const listed = Array.isArray(answer.methods) ? answer.methods.filter(m => typeof m === 'string') : [];
+  return { mfaToken: answer.mfaToken, methods: listed.length ? listed : ['totp', 'recovery'] };
+}
+
+// Whether "Use a recovery code instead" is offered.
+export function canUseRecovery(challenge) {
+  return !!challenge && Array.isArray(challenge.methods) && challenge.methods.includes('recovery');
+}
+
+// A code the server turned down. `restart`: the step is over and the form
+// goes back to the email and password, with the message: the server said so
+// (`restart: true`: it took too long, or too many wrong codes), or the account
+// is now locked (423). Otherwise another code may be tried.
+export function verifyFailure(err) {
+  const restart = !!err && ((err.body && err.body.restart === true) || err.status === 423);
+  const said    = err && typeof err.message === 'string' && err.message ? err.message : '';
+  return { restart, message: said || (restart ? 'Sign in again.' : 'That code did not work. Try again.') };
+}
+
+// The toast after signing in with a recovery code: how many are left (the
+// user carries recoveryCodesLeft), and where to make more once few are.
+export function recoveryLeftToast(left) {
+  const n = left === null || left === undefined || left === '' ? NaN : Number(left);
+  if (!Number.isFinite(n) || n < 0) return { kind: 'info', text: 'Signed in with a recovery code. It cannot be used again.' };
+  if (n === 0) return { kind: 'error', text: 'No recovery codes left. Make new ones on the Account page.' };
+  const text = `${n} recovery code${n === 1 ? '' : 's'} left.`;
+  return n <= 2 ? { kind: 'error', text: `${text} Make new ones on the Account page.` } : { kind: 'info', text };
 }
 
 // A time in ms from whatever the caller holds: a Date, a number, an ISO

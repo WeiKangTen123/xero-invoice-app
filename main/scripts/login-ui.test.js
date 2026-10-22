@@ -196,9 +196,11 @@ describe('the sign-in page is wired to them', () => {
     expect(page).toMatch(/triggerError\(err\.message\);/);
   });
 
+  // requiredPath (api/client.js): the set-password form first, then 2-step
+  // set-up for an admin without it (mfa-ui.test.js runs it).
   test('a sign-in that must change its password goes to the form; the rest go back where they came from', () => {
-    expect(page).toMatch(/import \{ api, SET_PASSWORD_PATH \} from '\.\.\/api\/client';/);
-    expect(page).toMatch(/navigate\(user\?\.mustChangePassword \? SET_PASSWORD_PATH : returnPathFrom\(location\), \{ replace: true \}\)/);
+    expect(page).toMatch(/import \{ api, requiredPath \} from '\.\.\/api\/client';/);
+    expect(page).toMatch(/navigate\(requiredPath\(user\) \|\| returnPathFrom\(location\), \{ replace: true \}\)/);
   });
 });
 
@@ -216,9 +218,9 @@ describe('the must-change gate', () => {
 
   test('the route guard sends every page but Account to the form; the login route too; /account exists', () => {
     const app = read('App.jsx');
-    expect(app).toMatch(/import \{ SET_PASSWORD_PATH \} from '\.\/api\/client';/);
+    expect(app).toMatch(/import \{ SET_PASSWORD_PATH\b[^}]*\} from '\.\/api\/client';/);
     expect(app).toMatch(/if \(user\.mustChangePassword && !location\.pathname\.startsWith\('\/account'\)\) return <Navigate to=\{SET_PASSWORD_PATH\} replace \/>;/);
-    expect(app).toMatch(/user\.mustChangePassword \? SET_PASSWORD_PATH : returnPathFrom\(location\)/);
+    expect(app).toMatch(/<Navigate to=\{requiredPath\(user\) \|\| returnPathFrom\(location\)\} replace \/>/);
     expect(app).toMatch(/const Account\s+= lazy\(\(\) => import\('\.\/pages\/Account'\)\);/);
     expect(app).toMatch(/<Route path="account"\s+element=\{page\(<Account \/>\)\} \/>/);
   });

@@ -2,12 +2,13 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
-import { api, SET_PASSWORD_PATH } from '../api/client';
+import { api, requiredPath } from '../api/client';
 import { returnPathFrom } from '../utils/returnTo';
 import {
-  lockMessage, lockCountdown, formFromStatus, registerRefusal, resetByEmail, emailFromSearch, forgotPath,
+  lockMessage, lockCountdown, formFromStatus, registerRefusal, resetByEmail, emailFromSearch, forgotPath, mfaChallenge,
   FORM_CHECKING, FORM_FIRST_RUN, FORM_UNREACHABLE, STATUS_FAILED_MESSAGE, ASK_ADMIN_TEXT,
 } from './login/login';
+import MfaStep from './login/MfaStep';
 import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
 
 // Two modes. On first run the form creates the admin account (the server's
@@ -43,6 +44,10 @@ export default function Login() {
   const [forgot, setForgot]   = useState(false);
   // Whether this server can email a reset link (GET /auth/status → mail).
   const [mail, setMail]       = useState(false);
+  // The second step (login/MfaStep.jsx), once the password was right for an
+  // account with 2-step sign-in on: the server's { mfaToken, methods }, and
+  // no session until the code is checked.
+  const [challenge, setChallenge] = useState(null);
 
   const shakeTimer = useRef(null);
   const firstRun = form === FORM_FIRST_RUN;
@@ -102,11 +107,11 @@ export default function Login() {
     setLoading(true);
     try {
       const user = mode === 'login' ? await login(email, password) : await register(email, password);
-      // A temporary password from an administrator must be replaced before
-      // anything else; otherwise back to the page that sent you here, if it
-      // was one of ours. Replaced rather than pushed, so Back from there does
-      // not return to this form.
-      navigate(user?.mustChangePassword ? SET_PASSWORD_PATH : returnPathFrom(location), { replace: true });
+      // Right password, 2-step sign-in on: the code is asked for next, in
+      // this card. The password is not kept for it.
+      const step = mode === 'login' ? mfaChallenge(user) : null;
+      if (step) { setPassword(''); setChallenge(step); return; }
+      signedIn(user);
     } catch (err) {
       // 423: too many wrong passwords, and the server says until when. The
       // button is off until then; a right password is refused just the same
@@ -134,6 +139,28 @@ export default function Login() {
     } finally {
       setLoading(false);
     }
+  }
+
+  // A temporary password from an administrator must be replaced before
+  // anything else, then an admin without 2-step sign-in sets it up
+  // (api/client.js requiredPath); otherwise back to the page that sent you
+  // here, if it was one of ours. Replaced rather than pushed, so Back from
+  // there does not return to this form.
+  function signedIn(user) {
+    navigate(requiredPath(user) || returnPathFrom(location), { replace: true });
+  }
+
+  // The second step is over without signing in: Back, or the server said to
+  // start again (it took too long, or too many wrong codes). When the account
+  // is now locked (a 423, or a restart that carries lockedUntil) the form
+  // counts it down as after wrong passwords.
+  function restartSignIn(err, message) {
+    setChallenge(null);
+    setPassword('');
+    setError('');
+    const l = err?.body ? lockMessage(err.body, Date.now()) : null;
+    if (l) { setLock(l); setNow(Date.now()); shake(); return; }
+    if (message) triggerError(message);
   }
 
   const isDark = theme === 'dark';
@@ -265,13 +292,24 @@ export default function Login() {
           }}>
 
             <div style={{ fontSize: 15, fontWeight: 700, color: isDark ? '#eeeef5' : '#0d0e14', marginBottom: 18 }}>
-              {firstRun ? 'Set up your admin account' : 'Sign in'}
+              {challenge ? '2-step sign-in' : firstRun ? 'Set up your admin account' : 'Sign in'}
             </div>
 
-            {/* No form until the server has said which: a first run that
-                flashed the sign-in form, or a failed check that left it there
-                on a site with no account yet, both misled. */}
-            {form === FORM_CHECKING ? (
+            {/* The second step takes the card's place once the password was
+                right and the account has 2-step sign-in on. Otherwise no form
+                until the server has said which: a first run that flashed the
+                sign-in form, or a failed check that left it there on a site
+                with no account yet, both misled. */}
+            {challenge ? (
+              <MfaStep
+                challenge={challenge}
+                onVerified={signedIn}
+                onRestart={restartSignIn}
+                onBack={() => restartSignIn(null, '')}
+                onError={shake}
+                muted={muted}
+              />
+            ) : form === FORM_CHECKING ? (
               <p role="status" style={{ fontSize: 13.5, color: muted, textAlign: 'center', padding: '18px 0' }}>
                 Loading…
               </p>

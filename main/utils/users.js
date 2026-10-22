@@ -910,6 +910,10 @@ function readUsers() {
 // never re-sent) and inviteExpired whether no link of it works any more, so
 // the Users list can offer to send a new one. One indexed read per invited
 // account, none for the rest.
+//
+// `mfaEnabled` is whether 2-step sign-in is on (utils/mfa.js#isEnabled: an
+// enabled date and a secret), for the Users list and the account itself.
+// Never the secret or the recovery codes, which no reader is shown again.
 function _inviteState(u) {
   const invited = u.password !== undefined ? u.password === INVITED_PASSWORD : !!u.invited;
   if (!invited) return { invited: false, inviteExpiresAt: null, inviteExpired: false };
@@ -939,6 +943,7 @@ function sanitize(u) {
     lastLockedAt:          u.last_locked_at ?? u.lastLockedAt ?? null,
     passwordChangedAt:     u.password_changed_at ?? u.passwordChangedAt ?? null,
     tempPasswordExpiresAt: u.temp_password_expires_at ?? u.tempPasswordExpiresAt ?? null,
+    mfaEnabled: u.mfa_enabled_at !== undefined ? !!(u.mfa_enabled_at && u.mfa_secret) : !!u.mfaEnabled,
     ..._inviteState(u),
   };
 }

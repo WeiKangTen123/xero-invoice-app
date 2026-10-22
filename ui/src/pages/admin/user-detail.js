@@ -99,7 +99,7 @@ function isLocked(user, now) {
 // Three lines under the email:
 //   ● Active · user · joined 3 Sep 2026                  [demo] [★ admin]
 //   Last sign-in 20 Oct 09:12 · active 2 min ago
-//   Password changed 16 Oct · 🔒 Locked until 10:45 (5 failed)
+//   Password changed 16 Oct · 2-step on · 🔒 Locked until 10:45 (5 failed)
 // `state.tone` colours the dot; each note carries its own tone (null is muted).
 export function statusLine(user, now = Date.now(), opts = {}) {
   const u = user || {};
@@ -144,6 +144,14 @@ export function statusLine(user, now = Date.now(), opts = {}) {
   }
   if (u.passwordChangedAt && shortDate(u.passwordChangedAt, o)) {
     notes.push({ text: `Password changed ${shortDate(u.passwordChangedAt, o)}`, tone: null });
+  }
+  // 2-step sign-in (the list's mfaEnabled), when the server says either way.
+  // An admin without it sets it up at their next sign-in, so theirs is a
+  // warning. Nothing for an invite, which has no sign-in yet.
+  if (typeof u.mfaEnabled === 'boolean' && !invited) {
+    if (u.mfaEnabled) notes.push({ text: '2-step on', tone: 'green' });
+    else if (u.role === 'admin') notes.push({ text: '2-step off: they set it up at their next sign-in', tone: 'yellow' });
+    else notes.push({ text: '2-step off', tone: null });
   }
   if (u.mustChangePassword === true) {
     const expires = toMs(u.tempPasswordExpiresAt);
@@ -433,6 +441,14 @@ export function panelActions({ user, isMe = false, lastAdmin = false, now = Date
         title: 'A link to choose a new password: emailed to them, or for you to copy and send',
       });
     }
+    // Only with it on: there is nothing to reset otherwise. Never on
+    // yourself (the Account page turns your own off).
+    if (u.mfaEnabled === true) {
+      account.push({
+        key: 'mfaReset', busyKey: 'mfaReset', label: '⟲ Reset 2-step',
+        title: 'For a lost phone: their 2-step sign-in is turned off, and they set it up again at their next sign-in',
+      });
+    }
   }
   if (account.length) groups.push({ key: 'account', label: 'Account', actions: account });
 
@@ -468,7 +484,7 @@ export function panelActions({ user, isMe = false, lastAdmin = false, now = Date
 }
 
 // Said on your own account in place of the controls the server refuses there.
-export const SELF_NOTE = 'This is your account: change your password, or sign out everywhere, from the Account page. '
+export const SELF_NOTE = 'This is your account: change your password or 2-step sign-in, or sign out everywhere, from the Account page. '
   + 'Another admin changes its role, disables or deletes it.';
 
 // ── Attribution ──────────────────────────────────────────────────────────────

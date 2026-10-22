@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { useLocation } from 'react-router-dom';
 import { api } from '../api/client';
 import { useViewMode } from '../context/ViewModeContext';
 import ChartOfAccounts from '../components/ChartOfAccounts';
@@ -7,6 +8,8 @@ import HelpTooltip from '../components/HelpTooltip';
 import AccountCodeSelect from '../components/AccountCodeSelect';
 import RetryAlert from '../components/RetryAlert';
 import TestResult from '../components/ResultNote';
+import SetupChecklist from '../components/SetupChecklist';
+import { setupAnchor } from '../components/setup-checklist';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { TIMEZONE_OPTIONS, DEFAULT_TIMEZONE } from '../utils/formatDate';
@@ -76,6 +79,13 @@ const SECTION_META = {
     desc: 'Sends invites and password-reset links. Not set up: you copy links and send them yourself.',
     testKey: 'email', testLabel: 'Send test email',
     helpUrl: 'https://myaccount.google.com/apppasswords', helpLabel: 'Gmail App Password ↗',
+  },
+  // For the whole server: who the privacy notice every account reads names
+  // as the person to ask about their data.
+  privacy: {
+    label: 'Privacy contact (admin)', icon: '🛡',
+    desc: 'Named in the privacy notice as who to ask about personal data. Blank: the admin who signed in most recently.',
+    testKey: null,
   },
 };
 
@@ -302,7 +312,7 @@ function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, tes
   const decided  = hasAutomatic ? entries.filter(([k, m]) => m.auto || OPTIONAL_KEYS.has(k)) : [];
 
   return (
-    <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
+    <div id={`setup-${sectionKey}`} className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <div style={{
@@ -661,7 +671,7 @@ function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing,
   if (connectionView(connection, user) === 'demo') {
     const card = demoCard(connection);
     return (
-      <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
+      <div id="setup-xero" className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 8 }}>
           <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>
             🔗
@@ -688,7 +698,7 @@ function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing,
   }
 
   return (
-    <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
+    <div id="setup-xero" className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>
@@ -860,7 +870,7 @@ function XeroConnectionCard({ idx, user, values, onChange, sectionData, testing,
 // log, and reproduced in headless Chrome with this app's React). Its button
 // is a plain button and Enter is caught on the inputs, which also keeps Enter
 // from submitting the settings form around it.
-function LlmKeysCard({ idx, testing, msgs, onTest }) {
+function LlmKeysCard({ idx, testing, msgs, onTest, onKeysChange }) {
   const [keys,    setKeys]    = useState(null);
   const [serverKey, setServerKey] = useState(false);
   const [newKey,  setNewKey]  = useState('');
@@ -887,6 +897,7 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
       await api.post('/setup/llm-keys', { apiKey: newKey.trim(), label: newLabel.trim() || undefined });
       setNewKey(''); setNewLabel(''); setShowNew(false);
       await fetchKeys();
+      onKeysChange?.();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -906,13 +917,13 @@ function LlmKeysCard({ idx, testing, msgs, onTest }) {
 
   async function handleRemove(id) {
     setRemoving(id);
-    try { await api.delete(`/setup/llm-keys/${id}`); await fetchKeys(); }
+    try { await api.delete(`/setup/llm-keys/${id}`); await fetchKeys(); onKeysChange?.(); }
     catch (err) { setError(err.message); }
     finally { setRemoving(null); }
   }
 
   return (
-    <div className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
+    <div id="setup-llm" className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16 }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>
@@ -1036,6 +1047,11 @@ export default function Setup() {
   // Bumped whenever the Xero connection changes, so anything below reading Xero
   // data refetches instead of showing a disconnected organisation's figures.
   const [xeroVersion, setXeroVersion] = useState(0);
+  // Bumped after anything that can tick a step of the "Get set up" checklist
+  // at the top (a save, a Test, a key added or removed, a Xero change), so it
+  // reads the server's verdict again (components/SetupChecklist.jsx).
+  const [checklistVersion, setChecklistVersion] = useState(0);
+  const refreshChecklist = useCallback(() => setChecklistVersion(v => v + 1), []);
   const [saved,   setSaved]   = useState(false);
   const savedTimer = useRef(null);
   useEffect(() => () => clearTimeout(savedTimer.current), []);
@@ -1068,6 +1084,17 @@ export default function Setup() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // The checklist's links point at a card here (/setup#setup-llm and the
+  // like). The cards are drawn only once the settings have loaded, after the
+  // browser looked for the anchor, and a link followed from this page itself
+  // changes only the hash, so the card is brought into view here.
+  const { hash } = useLocation();
+  const loaded = !!config;
+  useEffect(() => {
+    const id = setupAnchor(hash);
+    if (loaded && id) document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [hash, loaded]);
 
   const dirty = !!config && Object.keys({ ...values, ...savedValues })
     .some(k => (values[k] ?? '') !== (savedValues[k] ?? ''));
@@ -1109,6 +1136,8 @@ export default function Setup() {
     setSaved(true);
     clearTimeout(savedTimer.current);
     savedTimer.current = setTimeout(() => setSaved(false), 3500);
+    // A changed mailbox or Custom Connection undoes its last Test.
+    refreshChecklist();
     // Picks up a changed TIMEZONE (or any other /auth/me-visible field) so every
     // already-mounted component reading it (Admin.jsx's timestamps, etc.)
     // reflects the change immediately instead of needing a full reload.
@@ -1145,6 +1174,8 @@ export default function Setup() {
       setMsgs(prev => ({ ...prev, [type]: { ok: false, text: err.message } }));
     } finally {
       setTesting(prev => ({ ...prev, [type]: false }));
+      // The server kept this Test's outcome for the checklist.
+      refreshChecklist();
     }
   }
 
@@ -1173,6 +1204,10 @@ export default function Setup() {
         <p>Configure API credentials. Secrets are stored in <code style={{ fontSize: 12, background: 'var(--bg-secondary)', padding: '1px 6px', borderRadius: 4 }}>.env</code> and never exposed after saving.</p>
       </div>
 
+      {/* What is left to set up, in the setup guide's order; gone once all
+          four steps work. */}
+      <SetupChecklist refreshKey={checklistVersion} />
+
       {saved && (
         <div className="alert alert-success">
           <span className="alert-icon">✓</span>
@@ -1194,7 +1229,7 @@ export default function Setup() {
           <XeroConnectionCard
             idx={0} user={user} sectionData={config.xero}
             values={values} onChange={handleChange} testing={testing} msgs={msgs} onTest={runTest}
-            onConnectionChange={() => setXeroVersion(v => v + 1)}
+            onConnectionChange={() => { setXeroVersion(v => v + 1); refreshChecklist(); }}
           />
         )}
 
@@ -1209,11 +1244,11 @@ export default function Setup() {
           );
         })}
 
-        <LlmKeysCard idx={2} testing={testing} msgs={msgs} onTest={runTest} />
+        <LlmKeysCard idx={2} testing={testing} msgs={msgs} onTest={runTest} onKeysChange={refreshChecklist} />
 
         {/* The server's own settings (admin) come last: Slack, the OAuth
-            redirect and email sending. Anyone but an admin sees them
-            read-only, with no Test button. */}
+            redirect, email sending and the privacy contact. Anyone but an
+            admin sees them read-only, with no Test button. */}
         {['defaults', 'allowances', 'preferences', 'optional', 'xeroOAuth', 'email'].map((key, i) => {
           const sectionData = config[key];
           if (!sectionData) return null;
@@ -1224,6 +1259,12 @@ export default function Setup() {
             />
           );
         })}
+        {config.privacy && (
+          <SectionCard
+            sectionKey="privacy" meta={SECTION_META.privacy} sectionData={config.privacy}
+            values={values} onChange={handleChange} idx={9} testing={testing} msgs={msgs} onTest={runTest}
+          />
+        )}
 
       </form>
 

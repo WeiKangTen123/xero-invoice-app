@@ -28,12 +28,32 @@ describe('db/migrate', () => {
     run();
     const cols = table => db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
     expect(cols('users')).toContain('password_changed_at');
-    expect(cols('sessions')).toEqual(['id', 'user_id', 'created_at', 'last_seen_at', 'first_ip', 'last_ip', 'user_agent', 'ended_at', 'ended_reason', 'ended_by']);
+    expect(cols('sessions')).toEqual(['id', 'user_id', 'created_at', 'last_seen_at', 'first_ip', 'last_ip', 'user_agent', 'ended_at', 'ended_reason', 'ended_by', 'reauth_at']);
     expect(db.prepare('PRAGMA index_info(idx_sessions_user)').all().map(c => c.name)).toEqual(['user_id', 'last_seen_at']);
     // Unknown for an account that existed before, not a guess.
     expect(db.prepare("SELECT password_changed_at FROM users WHERE id = 'u1'").get().password_changed_at).toBeNull();
     run();
-    expect(cols('sessions')).toHaveLength(10);
+    expect(cols('sessions')).toHaveLength(11);
+  });
+
+  // 2-step sign-in (utils/mfa.js) and "Confirm it's you" reach a database
+  // deployed before them: every existing account with 2-step off and every
+  // existing session unconfirmed, which is the truth for both.
+  test('a deployed database gains the 2-step sign-in columns and sessions.reauth_at, all empty', () => {
+    run();
+    for (const col of ['mfa_secret', 'mfa_pending_secret', 'mfa_enabled_at', 'mfa_last_step', 'mfa_recovery']) {
+      db.exec(`ALTER TABLE users DROP COLUMN ${col}`);
+    }
+    db.exec('ALTER TABLE sessions DROP COLUMN reauth_at');
+    db.prepare("INSERT INTO users (id, email, password, created_at) VALUES ('u1', 'old@test.com', 'x', '2026-01-01T00:00:00.000Z')").run();
+    db.prepare("INSERT INTO sessions (id, user_id, created_at, last_seen_at) VALUES ('s1', 'u1', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')").run();
+    run();
+    expect(db.prepare("SELECT mfa_secret, mfa_pending_secret, mfa_enabled_at, mfa_last_step, mfa_recovery FROM users WHERE id = 'u1'").get())
+      .toEqual({ mfa_secret: null, mfa_pending_secret: null, mfa_enabled_at: null, mfa_last_step: null, mfa_recovery: null });
+    expect(db.prepare("SELECT reauth_at FROM sessions WHERE id = 's1'").get()).toEqual({ reauth_at: null });
+    const types = Object.fromEntries(db.prepare('PRAGMA table_info(users)').all().map(c => [c.name, c.type]));
+    expect(types.mfa_last_step).toBe('INTEGER');
+    run();
   });
 
   test('invoices.xero_tenant_id and user_settings.default_tenant_id exist after a run', () => {

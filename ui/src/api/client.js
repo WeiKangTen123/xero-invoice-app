@@ -14,6 +14,20 @@ const SESSION_TOKEN_HEADER = 'X-Session-Token';
 // client for a request the server refused for it (below).
 export const SET_PASSWORD_PATH = '/account?set-password=1';
 
+// Where an admin without 2-step sign-in is sent: the Account page, in its
+// set-up-2-step mode. Sent there the same three ways as above; the server
+// answers 403 { code: 'mfa_setup_required' } until it is on.
+export const MFA_SETUP_PATH = '/account?setup-2-step=1';
+
+// The page an account must go to before any other, or '' when there is none.
+// A password to set comes first, as on the server, which answers
+// password_change_required ahead of mfa_setup_required.
+export function requiredPath(user) {
+  if (user && user.mustChangePassword) return SET_PASSWORD_PATH;
+  if (user && user.mfaSetupRequired) return MFA_SETUP_PATH;
+  return '';
+}
+
 function getToken() {
   return localStorage.getItem('token');
 }
@@ -95,6 +109,15 @@ function requirePasswordChange() {
   window.location.href = SET_PASSWORD_PATH;
 }
 
+// The same for 403 { code: 'mfa_setup_required' }: an admin who has not set
+// up 2-step sign-in is taken to the Account page to do it, token kept, and
+// the Account page is left alone for the same reason.
+function requireMfaSetup() {
+  const path = window.location.pathname;
+  if (path.startsWith('/account') || isPublicPath(path)) return;
+  window.location.href = MFA_SETUP_PATH;
+}
+
 // Sign-in, registration, sign-out and the rest of the session's own routes
 // (main/routes/auth.js), the query string aside.
 export function isAuthPath(path) {
@@ -133,6 +156,8 @@ async function request(path, options = {}, retried = false) {
       }
     } else if (res.status === 403 && data.code === 'password_change_required') {
       requirePasswordChange();
+    } else if (res.status === 403 && data.code === 'mfa_setup_required') {
+      requireMfaSetup();
     }
     // A 401 throws too. On most pages the navigation above wins the race and
     // the caller never runs; on /login (no navigation) a wrong password used to
@@ -155,12 +180,63 @@ async function request(path, options = {}, retried = false) {
   return data;
 }
 
+// ── Confirm it's you ─────────────────────────────────────────────────────────
+// The sensitive admin actions (inviting or promoting an admin; a reset link,
+// password reset or deletion of an admin; resetting someone's 2-step
+// sign-in) answer 403 { code: 'reauth_required' } when this session has not
+// proved lately who is at the keyboard. Every call gets the same answer to
+// it, so no page handles it: a provider (context/ReauthContext.jsx) registers
+// what asks, which resolves true once POST /auth/reauth has gone through and
+// false when the person cancels. The request is then sent once more; on a
+// cancel the caller gets the original error. Without a provider the error
+// goes to the caller as it came.
+const REAUTH_PATH = '/auth/reauth';
+let reauthHandler = null;
+let reauthAsking  = null;
+
+// Registers the asker; returns what unregisters it (an effect's cleanup).
+export function setReauthHandler(fn) {
+  reauthHandler = typeof fn === 'function' ? fn : null;
+  return () => { if (reauthHandler === fn) reauthHandler = null; };
+}
+
+// A refusal the asker answers. Never the reauth request itself: a wrong
+// password there is the dialog's to say.
+export function needsReauth(err, path) {
+  return !!err && err.status === 403 && err.code === 'reauth_required'
+    && !String(path || '').startsWith(REAUTH_PATH);
+}
+
+// One question at a time: requests refused together wait on the same one,
+// and each is sent again once it is answered. A handler that throws counts
+// as a cancel.
+function confirmIdentity(err) {
+  if (!reauthAsking) {
+    reauthAsking = Promise.resolve()
+      .then(() => reauthHandler(err))
+      .then(ok => ok === true, () => false)
+      .finally(() => { reauthAsking = null; });
+  }
+  return reauthAsking;
+}
+
+async function send(path, options) {
+  try {
+    return await request(path, options);
+  } catch (err) {
+    if (!reauthHandler || !needsReauth(err, path)) throw err;
+    if (!(await confirmIdentity(err))) throw err;
+    // Once: a second refusal goes to the caller.
+    return request(path, options);
+  }
+}
+
 export const api = {
-  get:    (path)       => request(path),
-  post:   (path, body) => request(path, { method: 'POST',   body: JSON.stringify(body) }),
-  patch:  (path, body) => request(path, { method: 'PATCH',  body: JSON.stringify(body) }),
+  get:    (path)       => send(path),
+  post:   (path, body) => send(path, { method: 'POST',   body: JSON.stringify(body) }),
+  patch:  (path, body) => send(path, { method: 'PATCH',  body: JSON.stringify(body) }),
   // A whole record replaced: the Cash Flow Manager's bank options and the
   // change made to one forecast item.
-  put:    (path, body) => request(path, { method: 'PUT',    body: JSON.stringify(body) }),
-  delete: (path)       => request(path, { method: 'DELETE' }),
+  put:    (path, body) => send(path, { method: 'PUT',    body: JSON.stringify(body) }),
+  delete: (path)       => send(path, { method: 'DELETE' }),
 };
