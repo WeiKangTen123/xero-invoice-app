@@ -1,10 +1,11 @@
 const BASE = '/api';
 
 // Where the server hands back a fresh session token, once the one a request
-// carried is an hour old (main/middleware/auth-middleware.js#renewSession).
-// Tokens last 24 hours, so storing these is what keeps someone who is using
-// the app signed in. The API is on this page's own origin, so the header is
-// readable here without any CORS exposure.
+// carried is a quarter of an hour old (main/middleware/auth-middleware.js
+// #renewSession). Tokens last two hours, so storing these is what keeps
+// someone who is using the app signed in, up to twelve hours from signing in.
+// The API is on this page's own origin, so the header is readable here
+// without any CORS exposure.
 const SESSION_TOKEN_HEADER = 'X-Session-Token';
 
 // Where someone who must set a new password is sent: the Account page, in
@@ -82,6 +83,12 @@ function requirePasswordChange() {
   window.location.href = SET_PASSWORD_PATH;
 }
 
+// Sign-in, registration, sign-out and the rest of the session's own routes
+// (main/routes/auth.js), the query string aside.
+export function isAuthPath(path) {
+  return /^\/auth(\/|$|\?)/.test(String(path || ''));
+}
+
 async function request(path, options = {}, retried = false) {
   const token   = getToken();
   const headers = { 'Content-Type': 'application/json', ...options.headers };
@@ -102,9 +109,13 @@ async function request(path, options = {}, retried = false) {
       // the first time. Only a rejection of the token still stored ends the
       // session; if it moved yet again during the retry, the newer one is left
       // for its own requests to judge.
+      //
+      // Never for /auth/*: there a 401 is the answer, not the token's fault.
+      // A wrong password sent while another tab stored a token was sent
+      // again, and counted twice towards the lock.
       const current = getToken();
       if (current && current !== token) {
-        if (!retried) return request(path, options, true);
+        if (!retried && !isAuthPath(path)) return request(path, options, true);
       } else {
         clearSession();
       }

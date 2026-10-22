@@ -444,9 +444,9 @@ describe('admin account controls', () => {
     test('sets a new password and signs out the sessions that existed before', async () => {
       const stale = tokenFor(target, 5);
       await me(stale).expect(200);
-      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'newpassword1' }).expect(200);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'Reset-pass-2026-q' }).expect(200);
       await login('user@test.com', 'password123').expect(401);
-      const fresh = await login('user@test.com', 'newpassword1').expect(200);
+      const fresh = await login('user@test.com', 'Reset-pass-2026-q').expect(200);
       await me(stale).expect(401);
       await me(fresh.body.token).expect(200);
     });
@@ -457,8 +457,8 @@ describe('admin account controls', () => {
       expect(res.body.error).toMatch(/12 characters/);
       expect((await reset('qwerty123456').expect(400)).body.error).toBe('That password is too common; choose another');
       expect((await reset('User@Test.com').expect(400)).body.error).toBe('Password must not be your email address');
-      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${admin.id}/password`)).send({ password: 'newpassword1' }).expect(400);
-      await asAdmin(request(serverFor(app)).patch('/api/admin/users/nope/password')).send({ password: 'newpassword1' }).expect(404);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${admin.id}/password`)).send({ password: 'Reset-pass-2026-q' }).expect(400);
+      await asAdmin(request(serverFor(app)).patch('/api/admin/users/nope/password')).send({ password: 'Reset-pass-2026-q' }).expect(404);
       // Nothing temporary was set. (Read before signing in: this fixture's own
       // password is under twelve characters, so the sign-in asks for a new one,
       // with no expiry, as for any password the rules now refuse.)
@@ -469,11 +469,11 @@ describe('admin account controls', () => {
 
     test('the password set is temporary: the account signs in with mustChangePassword and is held to the change', async () => {
       const before = Date.now();
-      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'newpassword1' }).expect(200);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'Reset-pass-2026-q' }).expect(200);
       const row = users.findById(target.id);
       expect(row.must_change_password).toBe(1);
       expect(Date.parse(row.temp_password_expires_at) - before).toBeGreaterThanOrEqual(24 * 60 * 60 * 1000);
-      const fresh = await login('user@test.com', 'newpassword1').expect(200);
+      const fresh = await login('user@test.com', 'Reset-pass-2026-q').expect(200);
       expect(fresh.body.user.mustChangePassword).toBe(true);
       const gated = await request(serverFor(app)).get('/api/admin/users').set('Authorization', `Bearer ${fresh.body.token}`).expect(403);
       expect(gated.body.code).toBe('password_change_required');
@@ -483,9 +483,9 @@ describe('admin account controls', () => {
     test('a reset unlocks a locked-out account', async () => {
       for (let i = 0; i < 5; i++) await login('user@test.com', 'wrong');
       await login('user@test.com', 'password123').expect(423);
-      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'newpassword1' }).expect(200);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'Reset-pass-2026-q' }).expect(200);
       expect(users.findById(target.id)).toMatchObject({ failed_logins: 0, lock_count: 0, locked_until: null, last_locked_at: null });
-      await login('user@test.com', 'newpassword1').expect(200);
+      await login('user@test.com', 'Reset-pass-2026-q').expect(200);
     });
   });
 
@@ -524,7 +524,7 @@ describe('admin account controls', () => {
       expect(mine(await list())).toMatchObject({ failedLogins: 0, lastLoginAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
       for (let i = 0; i < 5; i++) await login('user@test.com', 'wrong');
       expect(mine(await list())).toMatchObject({ failedLogins: 0, lockedUntil: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) });
-      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'newpassword1' }).expect(200);
+      await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${target.id}/password`)).send({ password: 'Reset-pass-2026-q' }).expect(200);
       expect(mine(await list())).toMatchObject({ lockedUntil: null, mustChangePassword: true });
     });
   });
@@ -717,5 +717,193 @@ describe("admin: disabling or deleting stops the account's automation", () => {
     jest.advanceTimersByTime(PAST_ANY_BACKOFF);
     expect(Imap.mock.calls.length).toBe(connections);
     expect(registry.isRunning(target.id)).toBe(false);
+  });
+});
+
+// Deleting the rows forgot the account's Xero refresh token here and left the
+// grant alive at Xero; the token is now revoked there first, best effort, and
+// what the process held for the account in memory goes with it.
+describe("admin: deleting an account lets go of its Xero connection", () => {
+  let app, users, jwtSecret, admin, target, axios, tokenCache, auditLog;
+
+  const XERO = {
+    XERO_CONNECTION_TYPE: 'oauth', XERO_OAUTH_CLIENT_ID: 'oauth-id', XERO_OAUTH_CLIENT_SECRET: 'oauth-secret',
+    XERO_OAUTH_REFRESH_TOKEN: 'rt-live',
+  };
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users      = require('../utils/users');
+    axios      = require('axios');
+    tokenCache = require('../utils/token-cache');
+    auditLog   = require('../utils/audit-log');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    app = express();
+    app.use(express.json());
+    app.use('/api/admin', require('./admin'));
+    admin  = await users.createUser('admin@test.com', 'password123', 'auto');
+    target = await users.createUser('user@test.com',  'password123', 'user');
+    users.saveUserConfig(target.id, XERO);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const del = id => request(serverFor(app)).delete(`/api/admin/users/${id}`)
+    .set('Authorization', `Bearer ${jwt.sign({ id: admin.id, email: admin.email, role: admin.role }, jwtSecret())}`);
+  const deleteEvent = () => auditLog.listAdminEvents({ action: 'user.delete', limit: 1 }).events[0];
+
+  test("the refresh token is revoked at Xero before the account's row goes, as Disconnect does", async () => {
+    let rowThere = null;
+    const post = jest.spyOn(axios, 'post').mockImplementation(async (url, body) => {
+      rowThere = !!users.findById(target.id);
+      return { status: 200, data: {}, url, body };
+    });
+    await del(target.id).expect(200);
+    expect(post).toHaveBeenCalledTimes(1);
+    const [url, body, options] = post.mock.calls[0];
+    expect(url).toBe('https://identity.xero.com/connect/revocation');
+    expect(String(body)).toBe('token=rt-live');
+    expect(options.headers.Authorization).toBe(`Basic ${Buffer.from('oauth-id:oauth-secret').toString('base64')}`);
+    expect(rowThere).toBe(true);
+    expect(users.findById(target.id)).toBeNull();
+    expect(deleteEvent().details).toMatchObject({ role: 'user', xeroRevoked: true });
+  });
+
+  test('Xero refusing or unreachable does not stop the delete, and is logged', async () => {
+    const logger = require('../utils/logger');
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    jest.spyOn(axios, 'post').mockRejectedValue(Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' }));
+    await del(target.id).expect(200);
+    expect(users.findById(target.id)).toBeNull();
+    expect(deleteEvent().details).toMatchObject({ xeroRevoked: false });
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/revocation failed/), expect.objectContaining({ userId: target.id }));
+  });
+
+  test('a revoke that throws outright does not stop it either', async () => {
+    const logger = require('../utils/logger');
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    jest.spyOn(require('../xero/oauth'), 'revokeRefreshToken').mockRejectedValue(new Error('oauth module broke'));
+    await del(target.id).expect(200);
+    expect(users.findById(target.id)).toBeNull();
+    expect(warn).toHaveBeenCalledWith("Could not revoke a deleted account's Xero connection; deleting it anyway",
+      { userId: target.id, error: 'oauth module broke' });
+  });
+
+  test('an account with no Xero connection is deleted without asking Xero anything', async () => {
+    const other = await users.createUser('plain@test.com', 'password123', 'user');
+    const post = jest.spyOn(axios, 'post');
+    await del(other.id).expect(200);
+    expect(post).not.toHaveBeenCalled();
+    expect(deleteEvent().details).toMatchObject({ xeroRevoked: false });
+  });
+
+  test('the access tokens, organisations and connection health held in memory go too', async () => {
+    jest.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} });
+    const cache = tokenCache.forUser(target.id);
+    cache.cacheToken('tenant-1', 'Target Org', 'access-token', Date.now() + 30 * 60 * 1000, 'oauth');
+    tokenCache.markNeedsReconnect(target.id, { method: 'oauth', reason: 'refused' });
+    expect(cache.getAllTenants()).toHaveLength(1);
+    expect(tokenCache.getHealth(target.id).needsReconnect).toBe(true);
+
+    await del(target.id).expect(200);
+
+    expect(tokenCache.forUser(target.id).getAllTenants()).toEqual([]);
+    expect(tokenCache.getHealth(target.id)).toMatchObject({ method: null, needsReconnect: false, reason: null, lastRefreshedAt: null });
+    expect(tokenCache.getPersistedTenants(target.id)).toEqual([]);
+  });
+
+  test('a delete that fails is a 500 that is logged, without its own message', async () => {
+    const logger = require('../utils/logger');
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    jest.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} });
+    const db = require('../db');
+    db.exec(`CREATE TRIGGER refuse_delete BEFORE DELETE ON users WHEN OLD.id = '${target.id}' BEGIN SELECT RAISE(ABORT, 'database is locked'); END`);
+    const res = await del(target.id).expect(500);
+    expect(res.body).toEqual({ error: 'Could not delete the account' });
+    expect(error).toHaveBeenCalledWith('Admin could not delete a user', expect.objectContaining({ error: 'database is locked' }));
+    expect(users.findById(target.id)).not.toBeNull();
+  });
+});
+
+// An admin on sample data (PUT /api/setup/data-source) keeps their own Xero
+// underneath. Made a user, they could not switch back to it, so the demote
+// switches them back — when there is something to go back to — and refuses
+// while anything could be posted across the switch.
+describe('admin: removing admin from someone on sample data', () => {
+  let app, users, jwtSecret, admin, other, auditLog, settings, emailQueue;
+
+  beforeEach(async () => {
+    jest.resetModules();
+    require('../db/migrate').run();
+    users      = require('../utils/users');
+    auditLog   = require('../utils/audit-log');
+    settings   = require('../utils/settings-store');
+    emailQueue = require('../queue/email-queue');
+    ({ jwtSecret } = require('../middleware/auth-middleware'));
+    app = express();
+    app.use(express.json());
+    app.use('/api/admin', require('./admin'));
+    admin = await users.createUser('admin@test.com', 'password123', 'auto');
+    other = await users.createUser('boss@test.com', 'password123', 'admin');
+    users.setDemo(other.id, true);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const demote = () => request(serverFor(app)).patch(`/api/admin/users/${other.id}/role`)
+    .set('Authorization', `Bearer ${jwt.sign({ id: admin.id, email: admin.email, role: admin.role }, jwtSecret())}`)
+    .send({ role: 'user' });
+  const roleEvent = () => auditLog.listAdminEvents({ action: 'user.role', limit: 1 }).events[0];
+
+  test('with their own Xero on file, they are switched back to it, and the answer and the event say so', async () => {
+    users.saveUserConfig(other.id, { XERO_CONNECTION_TYPE: 'oauth', XERO_OAUTH_REFRESH_TOKEN: 'rt-live' });
+    const clear = jest.spyOn(require('../xero/reports'), 'clearCache');
+    const res = await demote().expect(200);
+    expect(res.body).toMatchObject({ success: true, switchedToXero: true, user: { role: 'user', demo: false } });
+    expect(users.findById(other.id)).toMatchObject({ role: 'user', is_demo: 0 });
+    expect(roleEvent().details).toEqual({ from: 'admin', to: 'user', switchedToXero: true });
+    expect(clear).toHaveBeenCalledWith(other.id);
+    // Only the flag moved: the connection is as it was.
+    expect(users.getUserConfig(other.id)).toMatchObject({ XERO_CONNECTION_TYPE: 'oauth', XERO_OAUTH_REFRESH_TOKEN: 'rt-live' });
+  });
+
+  test('a Custom Connection counts as their own Xero too', async () => {
+    users.saveUserConfig(other.id, { XERO_CLIENT_ID: 'cc-id', XERO_CLIENT_SECRET: 'cc-secret' });
+    expect((await demote().expect(200)).body.switchedToXero).toBe(true);
+    expect(users.isDemoUser(other.id)).toBe(false);
+  });
+
+  test('with no Xero of their own there is nothing to go back to: they stay on sample data, like any demo account', async () => {
+    const res = await demote().expect(200);
+    expect(res.body).toMatchObject({ switchedToXero: false, user: { role: 'user', demo: true } });
+    expect(users.findById(other.id)).toMatchObject({ role: 'user', is_demo: 1 });
+    expect(roleEvent().details).toEqual({ from: 'admin', to: 'user' });
+  });
+
+  test('refused while their mailbox watcher is on: sample-data mail would post into the real books', async () => {
+    users.saveUserConfig(other.id, { XERO_CONNECTION_TYPE: 'oauth', XERO_OAUTH_REFRESH_TOKEN: 'rt-live' });
+    settings.forUser(other.id).setWatcherEnabled(true);
+    const res = await demote().expect(409);
+    expect(res.body.code).toBe('BUSY');
+    expect(res.body.error).toMatch(/^boss@test\.com is on sample data, and removing admin switches them back to their own Xero\. Stop their mailbox watcher first/);
+    expect(users.findById(other.id)).toMatchObject({ role: 'admin', is_demo: 1 });
+    expect(roleEvent()).toBeUndefined();
+  });
+
+  test('refused while documents are still queued, saying how many', async () => {
+    users.saveUserConfig(other.id, { XERO_CONNECTION_TYPE: 'oauth', XERO_OAUTH_REFRESH_TOKEN: 'rt-live' });
+    jest.spyOn(emailQueue, 'getPending').mockReturnValue([{ id: 'a' }, { id: 'b' }]);
+    const res = await demote().expect(409);
+    expect(res.body.error).toMatch(/2 documents are still being processed; try again once they finish\.$/);
+    expect(users.findById(other.id)).toMatchObject({ role: 'admin', is_demo: 1 });
+  });
+
+  test('an admin on Xero, or a promotion, is untouched by any of this', async () => {
+    users.setDemo(other.id, false);
+    settings.forUser(other.id).setWatcherEnabled(true);
+    expect((await demote().expect(200)).body).toMatchObject({ switchedToXero: false, user: { role: 'user', demo: false } });
+    const promote = await request(serverFor(app)).patch(`/api/admin/users/${other.id}/role`)
+      .set('Authorization', `Bearer ${jwt.sign({ id: admin.id, email: admin.email, role: admin.role }, jwtSecret())}`)
+      .send({ role: 'admin' }).expect(200);
+    expect(promote.body.switchedToXero).toBe(false);
   });
 });

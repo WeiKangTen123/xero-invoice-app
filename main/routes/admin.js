@@ -4,15 +4,17 @@ const fs           = require('fs');
 const path         = require('path');
 const { requireAdmin } = require('../middleware/auth-middleware');
 const asyncHandler     = require('../middleware/async-handler');
+const users            = require('../utils/users');
 const {
-  getAllUsers, createUser, updateUserRole, deleteUser, readUsers, findById, getSetupStatus, isOnline,
+  getAllUsers, updateUserRole, deleteUser, readUsers, findById, getSetupStatus, isOnline,
   passwordProblem, requirePasswordChange, setPassword, invalidateSessions, setDisabled, unlockAccount, getUserDefaults, isKnownTimezone,
-  getUserConfig, saveUserConfig, getImapSettings, getGeminiKeys, addGeminiKey,
-} = require('../utils/users');
+  getUserConfig, saveUserConfig, getImapSettings, getGeminiKeys, addGeminiKey, setDemo,
+} = users;
 const invoiceStore     = require('../utils/invoice-store');
 const settingsStore    = require('../utils/settings-store');
 const processState     = require('../utils/process-state');
 const emailQueue       = require('../queue/email-queue');
+const claimQueue       = require('../claims/claim-queue');
 const emailWorker      = require('../queue/email-worker');
 const claimWorker      = require('../claims/claim-worker');
 const watcherRegistry  = require('../email/watcher-registry');
@@ -61,6 +63,16 @@ const DEFAULT_KEYS = [
 const MAILBOX_FILTER_REQUIRED = 'A sender filter is required when the mailbox is copied: two accounts watching one '
   + 'mailbox must watch different senders, because the watcher marks an email it has processed as read, '
   + 'so whichever account reads a message first takes it from the other.';
+// The watcher asks the mail server for messages FROM the filter, and the
+// server matches it anywhere in the sender: 'gmail.com' would take (and mark
+// read) nearly everything in the mailbox. So the filter is one whole address.
+const MAILBOX_FILTER_ADDRESS = 'The sender filter must be one whole email address, such as bills@vendor.com: the mailbox '
+  + 'search matches any sender that contains it, so a domain or part of an address would take almost every email.';
+const OWN_FILTER_BLANK = 'Your own mailbox watcher has no sender filter, so it takes every email in the mailbox and would '
+  + 'race the new account for the same mail. Set your own sender filter in Setup first, then copy the mailbox.';
+// One address and nothing else: no spaces, no list, no display name, and a
+// domain with a dot in it. Kept the same as ui/src/pages/admin/users.js.
+const FULL_ADDRESS = /^[^\s@,;<>()"]+@[^\s@,;<>()".]+(?:\.[^\s@,;<>()".]+)+$/;
 
 // The groups asked for, as { llm, defaults, mailbox } of booleans. Anything
 // that is not an object, or a key that is not a group, asks for nothing.
@@ -69,13 +81,47 @@ function _copyGroups(copyFrom) {
   return Object.fromEntries(COPY_GROUPS.map(g => [g, asked[g] === true]));
 }
 
+// Why the new account cannot watch the admin's mailbox for `filter`, or
+// null. Every account already watching that mailbox (the same server and
+// login, with a password to sign in with) must watch a different sender, the
+// admin included: one with no filter takes every email, and since the
+// server matches a filter anywhere in the sender, two filters where one
+// contains the other (or the same one twice) take each other's mail. Nothing
+// to say when the admin has no mailbox password, as nothing is copied then
+// (_copySettings).
+function _mailboxClash(fromId, filter) {
+  const mailbox = getImapSettings(fromId);
+  if (!mailbox.password) return null;
+  const which  = s => `${String(s.host || '').toLowerCase()}|${String(s.user || '').toLowerCase()}`;
+  const wanted = filter.toLowerCase();
+  for (const row of readUsers()) {
+    const own = String(row.id) === String(fromId);
+    const s   = own ? mailbox : getImapSettings(row.id);
+    if (!s.password || which(s) !== which(mailbox)) continue;
+    const theirs = String(s.filterFrom || '').trim().toLowerCase();
+    if (!theirs) {
+      if (own) return OWN_FILTER_BLANK;
+      return `${row.email} already watches this mailbox with no sender filter, so it takes every email in it and `
+        + 'would race the new account for the same mail. Give that account a sender filter first.';
+    }
+    if (theirs.includes(wanted) || wanted.includes(theirs)) {
+      return `${own ? 'Your own watcher' : row.email} already watches this mailbox for ${s.filterFrom}. The new account `
+        + 'needs a sender of its own, one that neither contains nor is part of that one, or the two would race for the same mail.';
+    }
+  }
+  return null;
+}
+
 // Copies the chosen groups of `fromId`'s settings onto `toId`, and returns
 // the groups that had something to copy. The mailbox goes over as the
 // settings the watcher resolves for the source account (users.getImapSettings)
 // rather than as typed: a box the admin left blank is filled from the
 // admin's own sign-in address, and copied blank it would be filled from the
 // new account's, which is a different mailbox. The sender filter is the new
-// account's own, never the source's (see MAILBOX_FILTER_REQUIRED).
+// account's own, never the source's (see MAILBOX_FILTER_REQUIRED). A mailbox
+// with no password is not a mailbox to copy: the rest of it pinned the new
+// account to the admin's address with no way to sign in, and was reported
+// as copied.
 function _copySettings(fromId, toId, groups, mailboxFilterFrom) {
   const source = getUserConfig(fromId);
   const patch  = {};
@@ -97,8 +143,8 @@ function _copySettings(fromId, toId, groups, mailboxFilterFrom) {
     }
     if (any) copied.push('defaults');
   }
-  if (groups.mailbox) {
-    const resolved = getImapSettings(fromId, source);
+  const resolved = groups.mailbox ? getImapSettings(fromId, source) : null;
+  if (resolved && resolved.password) {
     const values = {
       IMAP_HOST: resolved.host, IMAP_PORT: resolved.port, IMAP_USER: resolved.user, IMAP_PASS: resolved.password,
       IMAP_POLL_INTERVAL_MS: source.IMAP_POLL_INTERVAL_MS, IMAP_LOOKBACK_DAYS: source.IMAP_LOOKBACK_DAYS,
@@ -125,42 +171,129 @@ function _copySettings(fromId, toId, groups, mailboxFilterFrom) {
 // generated Demo Company instead of Xero (users.js isDemoUser). `copyFrom`
 // names which groups of the creating admin's own settings to copy onto the
 // new account (see _copySettings): the LLM keys, the posting defaults, the
-// mailbox — which needs `mailboxFilterFrom`, the sender the new account
-// watches for. Answers { success, user, copied }, `copied` being the groups
-// that had something to copy. The audit event records `demo` and `copied`,
-// never a value.
+// mailbox — which needs `mailboxFilterFrom`, the one sender address the new
+// account watches for (see _mailboxClash). Answers { success, user, copied },
+// `copied` being the groups that had something to copy. The audit event
+// records `demo`, `copied` and that the password is temporary with when it
+// expires, never a value.
+//
+// All or nothing: the account is made first (createUser commits it), so when
+// the copy then fails the account is deleted again and the answer is a 500.
+// Left in place, it was an account with half its settings, and trying again
+// said "already exists".
 router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
-  try {
-    const { email, password, role, demo, copyFrom, mailboxFilterFrom } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
-    if (demo !== undefined && typeof demo !== 'boolean') {
-      return res.status(400).json({ error: 'demo must be true or false' });
-    }
-    // Every account's first password is temporary, replaced at the first
-    // sign-in, a demo account's too: the short permanent one demo accounts
-    // were once allowed went (users.js passwordProblem).
-    const isDemo  = demo === true;
-    const newRole = role === 'admin' ? 'admin' : 'user';
-    const problem = passwordProblem(password, email);
-    if (problem) return res.status(400).json({ error: problem });
-    const groups = _copyGroups(copyFrom);
-    if (groups.mailbox && !String(mailboxFilterFrom ?? '').trim()) {
-      return res.status(400).json({ error: MAILBOX_FILTER_REQUIRED });
-    }
-    const user   = await createUser(email, password, newRole, { temporary: true, demo: isDemo });
-    const copied = _copySettings(req.user.id, user.id, groups, mailboxFilterFrom);
-    recordAdmin(req, user, 'user.create', { role: user.role, demo: user.demo, copied });
-    logger.info('Admin created user', { email, role: user.role, demo: user.demo, copied, by: req.user.email });
-    res.status(201).json({ success: true, user, copied });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
+  const { email, password, role, demo, copyFrom, mailboxFilterFrom } = req.body || {};
+  // Strings, or nothing goes further: a number or an object for the email
+  // reached createUser and came back as "email.toLowerCase is not a function".
+  if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
   }
+  if (typeof users.emailProblem === 'function') {
+    const problem = users.emailProblem(email);
+    if (problem) return res.status(400).json({ error: problem });
+  }
+  if (demo !== undefined && typeof demo !== 'boolean') {
+    return res.status(400).json({ error: 'demo must be true or false' });
+  }
+  // As the role change below: an unknown role was quietly made a user.
+  if (role !== undefined && role !== 'admin' && role !== 'user') {
+    return res.status(400).json({ error: "Role must be 'admin' or 'user'" });
+  }
+  // Every account's first password is temporary, replaced at the first
+  // sign-in, a demo account's too: the short permanent one demo accounts
+  // were once allowed went (users.js passwordProblem).
+  const isDemo  = demo === true;
+  const newRole = role === 'admin' ? 'admin' : 'user';
+  const problem = passwordProblem(password, email);
+  if (problem) return res.status(400).json({ error: problem });
+  const groups = _copyGroups(copyFrom);
+  const filter = String(mailboxFilterFrom ?? '').trim();
+  if (groups.mailbox) {
+    if (!filter) return res.status(400).json({ error: MAILBOX_FILTER_REQUIRED });
+    if (!FULL_ADDRESS.test(filter)) return res.status(400).json({ error: MAILBOX_FILTER_ADDRESS });
+    const clash = _mailboxClash(req.user.id, filter);
+    if (clash) return res.status(400).json({ error: clash });
+  }
+
+  let user;
+  try {
+    user = await users.createUser(email, password, newRole, { temporary: true, demo: isDemo });
+  } catch (err) {
+    const refused = _createRefusal(err);
+    if (refused) return res.status(refused.status).json(refused.body);
+    logger.error('Admin could not create a user', { email, error: err.message, by: req.user.email });
+    return res.status(500).json({ error: 'Could not create the account' });
+  }
+
+  let copied;
+  try {
+    copied = _copySettings(req.user.id, user.id, groups, filter);
+  } catch (err) {
+    logger.error('Could not copy settings onto a new account; the account was removed again', {
+      email: user.email, error: err.message, by: req.user.email,
+    });
+    try { users.deleteUser(user.id); } catch (undoErr) {
+      logger.error('Could not remove a half-made account', { id: user.id, email: user.email, error: undoErr.message });
+    }
+    return res.status(500).json({ error: 'Could not copy your settings to the new account, so it was not created. Try again.' });
+  }
+
+  const expiresAt = user.tempPasswordExpiresAt || null;
+  recordAdmin(req, user, 'user.create', { role: user.role, demo: user.demo, copied, temporary: true, expiresAt });
+  logger.info('Admin created user', { email: user.email, role: user.role, demo: user.demo, copied, by: req.user.email });
+  res.status(201).json({ success: true, user, copied });
 }));
 
+// What createUser's refusals answer (users.js): a malformed address is the
+// admin's to fix (400), one already taken is a conflict (409). Anything else
+// is ours, logged, and answered without its message. 'Email already exists'
+// is how createUser said it before it carried a code.
+function _createRefusal(err) {
+  const code = err && err.code;
+  if (code === 'EMAIL_INVALID') return { status: 400, body: { error: err.message, code } };
+  if (code === 'EMAIL_EXISTS' || (err && err.message === 'Email already exists')) {
+    return { status: 409, body: { error: 'An account with this email already exists', code: 'EMAIL_EXISTS' } };
+  }
+  if (code === 'REGISTRATION_CLOSED') return { status: 403, body: { error: err.message, code } };
+  return null;
+}
+
+// ── An account's Xero connection, when the account goes ─────────────────────
+// Deleting the rows forgot the refresh token here, but Xero still held the
+// grant: the app stayed listed under that organisation's connected apps, with
+// access to its books, until the token lapsed by itself. So it is revoked at
+// Xero first, as Disconnect does (routes/xero-oauth.js), while the row it is
+// read from still exists. Best effort: an unreachable Xero must not keep an
+// admin from deleting an account, so a failure is a warning and the delete
+// goes ahead. Answers whether Xero confirmed the revocation.
+async function revokeXero(userId) {
+  try {
+    return await require('../xero/oauth').revokeRefreshToken(userId);
+  } catch (err) {
+    logger.warn("Could not revoke a deleted account's Xero connection; deleting it anyway", { userId, error: err.message });
+    return false;
+  }
+}
+
+// And what this process still holds for it once the rows are gone: access
+// tokens and the organisation list in memory, the connection health (its row
+// went with the account; the memory copy did not), and reports read from its
+// organisations. Each part on its own: one failing does not keep the others.
+function forgetXero(userId) {
+  const parts = [
+    ['token cache',       () => tokenCache.forUser(userId).clear()],
+    ['connection health', () => tokenCache.clearHealth(userId)],
+    ['report cache',      () => require('../xero/reports').clearCache(userId)],
+  ];
+  for (const [part, clear] of parts) {
+    try { clear(); } catch (err) {
+      logger.warn(`Could not clear a deleted account's Xero ${part}`, { userId, error: err.message });
+    }
+  }
+}
+
 // DELETE /api/admin/users/:id
-router.delete('/users/:id', requireAdmin, (req, res) => {
+router.delete('/users/:id', requireAdmin, asyncHandler(async (req, res) => {
   try {
     const { id } = req.params;
     if (id === req.user.id) {
@@ -175,22 +308,29 @@ router.delete('/users/:id', requireAdmin, (req, res) => {
     // polling for the deleted account, its next mail recreated the folder just
     // removed, and the workers carried on with the account's queued jobs.
     const watcherStopped = stopAutomation(id);
+    const xeroRevoked    = await revokeXero(id);
+    // Another admin's delete may have finished while Xero was asked.
+    if (!findById(id)) return res.status(404).json({ error: 'User not found' });
     deleteUser(id);
     // The rows cascade in the database; the files (receipts, PDFs, queues)
-    // do not. users.js had said this route removed them — it never did.
+    // do not. users.js had said this route removed them — it never did. A
+    // job finishing a moment later can still write the folder back; the
+    // daily sweep removes it then (utils/account-cleanup.js).
     try {
       fs.rmSync(require('../utils/paths').userDir(id), { recursive: true, force: true });
     } catch (err) {
       logger.warn("Could not remove the deleted user's files", { id, error: err.message });
     }
+    forgetXero(id);
     // The email is copied into the event: the account it names is gone.
-    recordAdmin(req, target, 'user.delete', { role: target.role, watcherStopped });
-    logger.info('Admin deleted user', { id, watcherStopped, by: req.user.email });
+    recordAdmin(req, target, 'user.delete', { role: target.role, watcherStopped, xeroRevoked });
+    logger.info('Admin deleted user', { id, watcherStopped, xeroRevoked, by: req.user.email });
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    logger.error('Admin could not delete a user', { id: req.params.id, error: err.message, by: req.user.email });
+    res.status(500).json({ error: 'Could not delete the account' });
   }
-});
+}));
 
 // ── Account controls ─────────────────────────────────────────────────────────
 // Ends every session of an account an admin has just signed out, reset or
@@ -260,9 +400,49 @@ function stopAutomation(userId) {
   return wasRunning;
 }
 
+// ── Demoting an admin who is on sample data ─────────────────────────────────
+// An admin may switch their own account to sample data and back
+// (PUT /api/setup/data-source); only an admin may. Their own Xero connection
+// waits underneath, unused, and the keep-alive (jobs/xero-keepalive.js) keeps
+// it from lapsing only for an admin. Demoted as they were, they would be a
+// demo user with no way back to it, and the connection would die unused
+// after 60 days.
+//
+// So the demote switches them back to their own Xero, in the same request,
+// and says so (switchedToXero in the answer and the audit event), rather
+// than refusing: a refusal would leave the admin unable to remove admin from
+// someone who cannot or will not sign in to switch first. Only when they have
+// a Xero connection of their own on file (users.getSetupStatus's rule, less
+// the demo account's stand-in). Without one there is nothing to go back to,
+// and they stay on sample data like any demo account: a demo account made an
+// admin for a while and then made a user again stays the demo account it
+// was made as.
+//
+// The switch is refused while anything could be posted across it, as the
+// data-source switch itself is (routes/setup.js): a watcher still on, or
+// documents still queued, would post sample-data mail into the real books.
+function _ownXeroOnFile(userId) {
+  const config = getUserConfig(userId) || {};
+  return !!(config.XERO_CLIENT_ID && config.XERO_CLIENT_SECRET) || config.XERO_CONNECTION_TYPE === 'oauth';
+}
+
+function _switchBusy(target) {
+  const watching = watcherRegistry.isRunning(target.id) || settingsStore.forUser(target.id).watcherEnabled();
+  if (watching) {
+    return `${target.email} is on sample data, and removing admin switches them back to their own Xero. `
+      + 'Stop their mailbox watcher first, so nothing is posted across the switch.';
+  }
+  const n = emailQueue.getPending(target.id).length + claimQueue.getPending(target.id).length;
+  if (n > 0) {
+    return `${target.email} is on sample data, and removing admin switches them back to their own Xero. `
+      + `${n} ${n === 1 ? 'document is' : 'documents are'} still being processed; try again once they finish.`;
+  }
+  return null;
+}
+
 // PATCH /api/admin/users/:id/role — promote or demote. updateUserRole existed in
 // users.js from the start and nothing called it, so making a second admin took
-// a SQL statement on the server.
+// a SQL statement on the server. Answers { success, user, switchedToXero }.
 router.patch('/users/:id/role', requireAdmin, (req, res) => {
   const { role } = req.body;
   if (role !== 'admin' && role !== 'user') {
@@ -273,6 +453,12 @@ router.patch('/users/:id/role', requireAdmin, (req, res) => {
   if (role === 'user' && lastActiveAdmin(target)) {
     return res.status(400).json({ error: 'Cannot demote the last admin account' });
   }
+  // See "Demoting an admin who is on sample data" above.
+  const switchedToXero = role === 'user' && target.role === 'admin' && !!target.is_demo && _ownXeroOnFile(target.id);
+  if (switchedToXero) {
+    const busy = _switchBusy(target);
+    if (busy) return res.status(409).json({ error: busy, code: 'BUSY' });
+  }
   // A demo account made an admin may still have the short password demo
   // accounts were once allowed, and as an admin it can switch to real Xero
   // and manage every account. It must choose a full one first: at once, since
@@ -280,10 +466,22 @@ router.patch('/users/:id/role', requireAdmin, (req, res) => {
   // the demo account gets nothing until it has.
   const newPassword = role === 'admin' && target.role !== 'admin' && !!target.is_demo;
   if (newPassword) requirePasswordChange(target.id);
+  if (switchedToXero) {
+    setDemo(target.id, false);
+    // Reports cached for the account came from the Demo Company, as on the
+    // switch itself; a failure is a warning, the switch has happened.
+    try { require('../xero/reports').clearCache(target.id); } catch (err) {
+      logger.warn('Could not clear cached reports after switching a demoted admin to Xero', { email: target.email, error: err.message });
+    }
+  }
   const user = updateUserRole(target.id, role);
-  recordAdmin(req, target, 'user.role', { from: target.role, to: role, ...(newPassword ? { passwordChangeRequired: true } : {}) });
-  logger.info('Admin changed user role', { email: target.email, role, by: req.user.email });
-  res.json({ success: true, user });
+  recordAdmin(req, target, 'user.role', {
+    from: target.role, to: role,
+    ...(newPassword ? { passwordChangeRequired: true } : {}),
+    ...(switchedToXero ? { switchedToXero: true } : {}),
+  });
+  logger.info('Admin changed user role', { email: target.email, role, switchedToXero, by: req.user.email });
+  res.json({ success: true, user, switchedToXero });
 });
 
 // PATCH /api/admin/users/:id/password — set a new password for an account.

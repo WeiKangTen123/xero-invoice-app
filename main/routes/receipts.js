@@ -78,7 +78,7 @@ function pollImageToken(userId, invoiceId, now = Date.now()) {
 }
 
 function verifyImageToken(token, invoiceId) {
-  const payload = jwt.verify(token, jwtSecret());
+  const payload = jwt.verify(token, jwtSecret(), { algorithms: ['HS256'] });
   // A PDF token must not open a receipt, and a token for one receipt must not
   // open another. Both are checked, not just expiry.
   if (payload.purpose !== 'receipt' || payload.invoiceId !== invoiceId) {

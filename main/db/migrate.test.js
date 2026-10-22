@@ -143,7 +143,7 @@ describe('db/migrate', () => {
 
     // Next boot, with the cause gone: the step and everything after it run.
     run();
-    expect(db.pragma('user_version', { simple: true })).toBe(4);
+    expect(db.pragma('user_version', { simple: true })).toBe(5);
     expect(plain()).toMatch(/^enc:v1:/);
   });
 

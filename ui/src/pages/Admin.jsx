@@ -11,7 +11,7 @@ import { fmtMoney } from '../utils/format';
 import { staggerIn } from '../utils/stagger';
 import ActivityPanel from './admin/ActivityPanel';
 import UserDetailPanel from './admin/UserDetailPanel';
-import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem } from './admin/users';
+import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, createdMessage } from './admin/users';
 import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
 
 const ADMIN_TABS = [
@@ -212,10 +212,13 @@ export default function Admin() {
     setError(''); setSuccess('');
     if (createProblem) { setError(createProblem); return; }
     try {
-      await api.post('/admin/users', addUserPayload(form));
+      // The banner says what was copied, from the server's answer: a group
+      // with nothing to copy is not copied, whatever its box said.
+      const payload = addUserPayload(form);
+      const created = await api.post('/admin/users', payload);
       setEmail(''); setPass(''); setRole('user');
       setDemo(false); setCopyFrom(copyDefaults()); setFilterFrom('');
-      showSuccess(`${demo ? 'Demo account' : 'User'} ${email} created.`);
+      showSuccess(createdMessage(payload, created), 7000);
       await fetchUsers();
     } catch (err) {
       setError(err.message);
@@ -225,11 +228,12 @@ export default function Admin() {
   // One request per control, then the list and the open panel are refetched
   // so both show the server's view rather than an optimistic guess. True when
   // the request went through, for a caller with something to say after it.
+  // `done` is the toast, or a function making it from the server's answer.
   async function control(key, u, send, done) {
     setBusy(`${key}:${u.id}`); setActionError('');
     try {
-      await send();
-      if (done) toast.success(done);
+      const answer = await send();
+      if (done) toast.success(typeof done === 'function' ? done(answer || {}) : done);
       setDetailRefresh(n => n + 1);
       await fetchUsers();
       return true;
@@ -266,12 +270,16 @@ export default function Admin() {
     // A demo account may still have the short password demo accounts were
     // once allowed, so the server makes it choose a new one first.
     const newPassword = role === 'admin' && u.demo === true;
+    // An admin on sample data who has their own Xero goes back to it when
+    // made a user, as a user cannot switch (routes/admin.js); the server
+    // says whether that happened (switchedToXero).
+    const onSample = role === 'user' && u.demo === true;
     const ok = await confirm(role === 'admin'
       ? { title: `Make ${u.email} an admin?`, message: `They will see every account, every flagged invoice and the server logs, and can do everything on this page.${newPassword ? ' As a demo account, it must choose a new password before anything else.' : ''}`, confirmLabel: 'Make admin' }
-      : { title: `Remove admin from ${u.email}?`, message: 'They keep their account and data, and lose access to this page.', confirmLabel: 'Make user' });
+      : { title: `Remove admin from ${u.email}?`, message: `They keep their account and data, and lose access to this page.${onSample ? ' They are on sample data: if they have their own Xero connection, they are switched back to it, as a user cannot switch.' : ''}`, confirmLabel: 'Make user' });
     if (!ok) return;
     await control('role', u, () => api.patch(`/admin/users/${u.id}/role`, { role }),
-      `${u.email} is now ${role === 'admin' ? 'an admin' : 'a user'}.${newPassword ? ' They must choose a new password before anything else.' : ''}`);
+      answer => `${u.email} is now ${role === 'admin' ? 'an admin' : 'a user'}.${newPassword ? ' They must choose a new password before anything else.' : ''}${answer.switchedToXero ? ' They are back on their own Xero.' : ''}`);
   }
 
   async function handleSignOut(u) {

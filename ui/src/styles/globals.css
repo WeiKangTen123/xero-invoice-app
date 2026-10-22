@@ -119,6 +119,16 @@ body {
   to   { opacity: 1; transform: translateX(0); }
 }
 
+/* The sign-in page's drifting background and the card's shake on a wrong
+   password, stilled for anyone whose system asks for less motion. Both are
+   set inline (pages/Login.jsx), which only !important outranks. */
+@media (prefers-reduced-motion: reduce) {
+  .login-orb,
+  .login-card {
+    animation: none !important;
+  }
+}
+
 /* ── Layout ──────────────────────────────────────── */
 .app-layout {
   display: flex;

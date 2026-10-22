@@ -114,13 +114,49 @@ export function addUserPayload(form) {
   return payload;
 }
 
+// One whole address and nothing else, as the server asks of the sender
+// (routes/admin.js FULL_ADDRESS, kept the same): the mail server matches the
+// sender filter anywhere in a sender, so 'gmail.com' would match almost
+// every email in the mailbox.
+const FULL_ADDRESS = /^[^\s@,;<>()"]+@[^\s@,;<>()".]+(?:\.[^\s@,;<>()".]+)+$/;
+
 // Why the form cannot be sent yet, or null. Two accounts watching one mailbox
 // must watch different senders, so the mailbox copy needs the address the
-// demo account processes emails from; the server refuses it without one.
+// demo account processes emails from; the server refuses it without one, or
+// with anything but one whole address. (Whether it clashes with a sender
+// another account already watches for, the admin's own included, only the
+// server knows; it says so in its answer.)
 export function addUserProblem(form) {
   const p = addUserPayload(form);
   if (p.copyFrom.mailbox && !p.mailboxFilterFrom) {
     return 'Mailbox needs a sender address: the demo account only processes emails from that sender';
   }
+  if (p.copyFrom.mailbox && !FULL_ADDRESS.test(p.mailboxFilterFrom)) {
+    return 'Mailbox needs one whole sender address, such as bills@vendor.com: a domain or part of an address would match almost every email';
+  }
   return null;
+}
+
+// The copy groups as the banner names them, in the order the boxes show.
+const COPY_NAMES = { llm: 'LLM keys', defaults: 'invoice defaults', mailbox: 'mailbox' };
+
+// What the banner says once an account is made, from what was sent
+// (addUserPayload) and what the server answered (POST /api/admin/users:
+// { user, copied }): "Demo account x created. Copied: LLM keys, invoice
+// defaults, mailbox." A group that was ticked but had nothing to copy (no
+// keys, no defaults, no mailbox password) is named too, so the admin is not
+// left thinking it went across.
+export function createdMessage(payload, answer) {
+  const user   = (answer && answer.user) || null;
+  const demo   = user ? user.demo === true : !!(payload && payload.demo === true);
+  const email  = (user && user.email) || (payload && payload.email) || '';
+  const sent   = (answer && Array.isArray(answer.copied)) ? answer.copied : [];
+  const keys   = COPY_BOXES.map(b => b.key);
+  const copied = keys.filter(k => sent.includes(k));
+  const missed = keys.filter(k => payload && payload.copyFrom && payload.copyFrom[k] === true && !sent.includes(k));
+  const names  = list => list.map(k => COPY_NAMES[k]).join(', ');
+  let text = `${demo ? 'Demo account' : 'User'} ${email} created.`;
+  if (copied.length) text += ` Copied: ${names(copied)}.`;
+  if (missed.length) text += ` Not copied, as you have none set up: ${names(missed)}.`;
+  return text;
 }

@@ -25,7 +25,7 @@ function _imageBucket(req, invoiceId) {
   if (typeof token !== 'string' || !token) return null;
   try {
     // The same scope routes/receipts.js checks: a receipt token, for THIS receipt.
-    const p = jwt.verify(token, jwtSecret());
+    const p = jwt.verify(token, jwtSecret(), { algorithms: ['HS256'] });
     return p.purpose === 'receipt' && p.invoiceId === invoiceId && p.userId ? `image:${p.userId}` : null;
   } catch { return null; }
 }
@@ -42,7 +42,7 @@ function rateLimitKey(req) {
 
   const auth = (req.headers && req.headers.authorization) || '';
   if (auth.startsWith('Bearer ')) {
-    try { return `user:${jwt.verify(auth.slice(7), jwtSecret()).id}`; } catch { /* not ours; use the IP */ }
+    try { return `user:${jwt.verify(auth.slice(7), jwtSecret(), { algorithms: ['HS256'] }).id}`; } catch { /* not ours; use the IP */ }
   }
   return `ip:${req.ip}`;
 }

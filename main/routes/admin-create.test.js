@@ -38,6 +38,7 @@ describe('POST /api/admin/users — demo accounts and copied settings', () => {
     users.addGeminiKey(admin.id, 'gemini-key-one', 'first');
     users.addGeminiKey(admin.id, 'gemini-key-two', null);
   });
+  afterEach(() => jest.restoreAllMocks());
 
   const auth = () => `Bearer ${jwt.sign({ id: admin.id, email: admin.email, role: admin.role }, jwtSecret())}`;
   const create = body => request(serverFor(app)).post('/api/admin/users').set('Authorization', auth())
@@ -178,7 +179,13 @@ describe('POST /api/admin/users — demo accounts and copied settings', () => {
     expect(users.getSetupStatus(res.body.user.id)).toMatchObject({ ready: true, missingConfig: [] });
 
     const event = lastEvent();
-    expect(event.details).toEqual({ role: 'user', demo: true, copied: ['llm', 'defaults', 'mailbox'] });
+    // That the password is temporary, and when it stops working: the account
+    // is made with one an admin knows.
+    expect(event.details).toEqual({
+      role: 'user', demo: true, copied: ['llm', 'defaults', 'mailbox'],
+      temporary: true, expiresAt: res.body.user.tempPasswordExpiresAt,
+    });
+    expect(Date.parse(event.details.expiresAt)).toBeGreaterThan(Date.now());
     expect(event.summary).toBe('Created new@outlook.com as a demo account with the llm, defaults, mailbox settings copied');
     for (const secret of ['app-pass', 'legacy-gemini-key', 'gemini-key-one', 'cc-secret', 'oauth-secret', 'rt-live']) {
       expect(JSON.stringify(event)).not.toContain(secret);
@@ -201,5 +208,131 @@ describe('POST /api/admin/users — demo accounts and copied settings', () => {
       expect(configOf(res.body.user.id)).toEqual({});
       users.deleteUser(res.body.user.id);
     }
+  });
+
+  // ── The mailbox copy ───────────────────────────────────────────────────────
+  // The watcher asks the mail server for messages FROM the filter, and the
+  // server matches it anywhere in the sender.
+
+  test('a mailbox with no password is not copied, nor reported as copied', async () => {
+    users.saveUserConfig(admin.id, { IMAP_PASS: '' });
+    const res = await create({ copyFrom: { mailbox: true, defaults: true }, mailboxFilterFrom: 'receipts@vendor.test' }).expect(201);
+    expect(res.body.copied).toEqual(['defaults']);
+    // Nothing of the mailbox: it used to pin the new account to ada@gmail.com
+    // with no password to sign in with.
+    expect(Object.keys(configOf(res.body.user.id)).filter(k => k.startsWith('IMAP'))).toEqual([]);
+  });
+
+  test('the sender filter must be one whole address, not a domain or part of one', async () => {
+    for (const filter of ['gmail.com', 'vendor', '@vendor.test', 'receipts@', 'receipts@vendor', 'a@b.test, c@d.test',
+      'Bills <bills2@vendor.test>', 'receipts @vendor.test', 'receipts@vendor..test']) {
+      const res = await create({ copyFrom: { mailbox: true }, mailboxFilterFrom: filter }).expect(400);
+      expect(res.body.error).toMatch(/one whole email address/);
+    }
+    expect(users.findByEmail('new@outlook.com')).toBeNull();
+  });
+
+  test("refused while the admin's own watcher has no sender filter: it takes every email, so the two would race", async () => {
+    users.saveUserConfig(admin.id, { IMAP_FILTER_FROM: '' });
+    const res = await create({ copyFrom: { mailbox: true }, mailboxFilterFrom: 'receipts@vendor.test' }).expect(400);
+    expect(res.body.error).toMatch(/Your own mailbox watcher has no sender filter/);
+    expect(res.body.error).toMatch(/Set your own sender filter in Setup first/);
+    expect(users.findByEmail('new@outlook.com')).toBeNull();
+  });
+
+  test("refused when the filter is the admin's own, or contains or is part of it", async () => {
+    for (const filter of ['bills@vendor.test', 'BILLS@Vendor.Test', 'ills@vendor.test']) {
+      const res = await create({ copyFrom: { mailbox: true }, mailboxFilterFrom: filter }).expect(400);
+      expect(res.body.error).toMatch(/^Your own watcher already watches this mailbox for bills@vendor\.test/);
+    }
+    users.saveUserConfig(admin.id, { IMAP_FILTER_FROM: 'bills@vendor.te' });
+    expect((await create({ copyFrom: { mailbox: true }, mailboxFilterFrom: 'bills@vendor.test' }).expect(400)).body.error)
+      .toMatch(/neither contains nor is part of/);
+    expect(users.findByEmail('new@outlook.com')).toBeNull();
+  });
+
+  test('refused when another account already watches the mailbox for that sender', async () => {
+    await create({ demo: true, copyFrom: { mailbox: true }, mailboxFilterFrom: 'receipts@vendor.test' }).expect(201);
+    const res = await create({ email: 'second@outlook.com', demo: true, copyFrom: { mailbox: true }, mailboxFilterFrom: 'receipts@vendor.test' }).expect(400);
+    expect(res.body.error).toMatch(/^new@outlook\.com already watches this mailbox for receipts@vendor\.test/);
+    expect(users.findByEmail('second@outlook.com')).toBeNull();
+    // A sender of its own is fine, and so is another mailbox altogether.
+    await create({ email: 'second@outlook.com', demo: true, copyFrom: { mailbox: true }, mailboxFilterFrom: 'statements@bank.test' }).expect(201);
+  });
+
+  // ── Input hygiene and refusals ─────────────────────────────────────────────
+
+  test('email and password must be strings', async () => {
+    for (const body of [{ email: 42 }, { email: { $ne: '' } }, { email: ['a@b.test'] }, { email: '   ' },
+      { password: 123456789012345 }, { password: ['Temp-pass-2026-x'] }, { password: '' }]) {
+      const res = await create(body).expect(400);
+      expect(res.body.error).toBe('Email and password are required');
+    }
+    expect(users.getAllUsers()).toHaveLength(1);
+  });
+
+  test("an unknown role is refused, as the role change refuses it, rather than made a user", async () => {
+    for (const role of ['superuser', 'Admin', '', 1]) {
+      expect((await create({ role }).expect(400)).body.error).toBe("Role must be 'admin' or 'user'");
+    }
+    expect(users.findByEmail('new@outlook.com')).toBeNull();
+    // Leaving it out is still a user.
+    const res = await create({ role: undefined }).expect(201);
+    expect(res.body.user.role).toBe('user');
+  });
+
+  test('the address is checked by users.emailProblem when there is one', async () => {
+    const had = users.emailProblem;
+    users.emailProblem = jest.fn(raw => (raw === 'not-an-address' ? 'Enter a whole email address' : null));
+    try {
+      expect((await create({ email: 'not-an-address' }).expect(400)).body.error).toBe('Enter a whole email address');
+      expect(users.emailProblem).toHaveBeenCalledWith('not-an-address');
+      await create({}).expect(201);
+    } finally {
+      users.emailProblem = had;
+    }
+  });
+
+  test('an address already taken is a 409, in either of the ways createUser says it', async () => {
+    await create({}).expect(201);
+    const res = await create({ email: 'NEW@outlook.com' }).expect(409);
+    expect(res.body).toEqual({ error: 'An account with this email already exists', code: 'EMAIL_EXISTS' });
+    jest.spyOn(users, 'createUser').mockRejectedValueOnce(Object.assign(new Error('An account with this email already exists'), { code: 'EMAIL_EXISTS' }));
+    expect((await create({ email: 'other@outlook.com' }).expect(409)).body.error).toBe('An account with this email already exists');
+  });
+
+  test("createUser's other refusals: a malformed address is a 400 with its message", async () => {
+    jest.spyOn(users, 'createUser').mockRejectedValueOnce(Object.assign(new Error('That is not an email address'), { code: 'EMAIL_INVALID' }));
+    expect((await create({}).expect(400)).body).toEqual({ error: 'That is not an email address', code: 'EMAIL_INVALID' });
+  });
+
+  test('any other failure is logged and answered as a 500, never with its own message', async () => {
+    const logger = require('../utils/logger');
+    const error  = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    jest.spyOn(users, 'createUser').mockRejectedValueOnce(new TypeError('email.toLowerCase is not a function'));
+    const res = await create({}).expect(500);
+    expect(res.body).toEqual({ error: 'Could not create the account' });
+    expect(error).toHaveBeenCalledWith('Admin could not create a user', expect.objectContaining({ error: 'email.toLowerCase is not a function' }));
+  });
+
+  // ── All or nothing ─────────────────────────────────────────────────────────
+
+  test('a copy that fails takes the new account with it, so trying again works', async () => {
+    const db = require('../db');
+    // The database refuses the new account's first LLM key, part-way through the copy.
+    db.exec(`CREATE TRIGGER refuse_copy BEFORE INSERT ON user_gemini_keys WHEN NEW.user_id <> '${admin.id}'
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END`);
+    const logger = require('../utils/logger');
+    const error  = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    const res = await create({ demo: true, copyFrom: { llm: true, defaults: true } }).expect(500);
+    expect(res.body.error).toBe('Could not copy your settings to the new account, so it was not created. Try again.');
+    expect(users.findByEmail('new@outlook.com')).toBeNull();
+    expect(lastEvent()).toBeUndefined();
+    expect(error).toHaveBeenCalledWith('Could not copy settings onto a new account; the account was removed again', expect.objectContaining({ error: 'disk full' }));
+
+    db.exec('DROP TRIGGER refuse_copy');
+    const again = await create({ demo: true, copyFrom: { llm: true, defaults: true } }).expect(201);
+    expect(again.body.copied).toEqual(['llm', 'defaults']);
+    expect(lastEvent()).toMatchObject({ targetEmail: 'new@outlook.com', details: { copied: ['llm', 'defaults'], temporary: true } });
   });
 });

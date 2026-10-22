@@ -15,25 +15,34 @@ export function AuthProvider({ children }) {
   // out, so a 502 during a deploy or a moment without wifi threw away a valid
   // session and sent them to the login form. Now anything else keeps the token
   // and the app offers to try again (see SessionRetry in App.jsx).
+  //
+  // Only the token a check sent is condemned by its 401. One stored since, by
+  // a sign-in in another tab, is checked in its turn: the API client does not
+  // ask /auth/* twice itself (api/client.js), so it is asked here, once.
   const checkSession = useCallback(async () => {
-    const token = localStorage.getItem('token');
-    if (!token) { setUser(null); setAuthError(''); setLoading(false); return; }
-    setChecking(true);
     try {
-      const d = await api.get('/auth/me');
-      setUser(d.user);
-      setAuthError('');
-    } catch (err) {
-      if (err.status === 401) {
-        // Only the token this check sent is condemned. One stored since, by a
-        // sign-in in another tab, is left for its own requests to judge.
-        if (localStorage.getItem('token') === token) localStorage.removeItem('token');
-        setUser(null);
-        setAuthError('');
-      } else {
-        setAuthError(err.message || 'Could not reach the server');
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const token = localStorage.getItem('token');
+        if (!token) { setUser(null); setAuthError(''); return; }
+        setChecking(true);
+        try {
+          const d = await api.get('/auth/me');
+          setUser(d.user);
+          setAuthError('');
+          return;
+        } catch (err) {
+          if (err.status !== 401) { setAuthError(err.message || 'Could not reach the server'); return; }
+          const replaced = localStorage.getItem('token') !== token;
+          if (replaced && attempt === 0) continue;
+          if (!replaced) localStorage.removeItem('token');
+          setUser(null);
+          setAuthError('');
+          return;
+        }
       }
     } finally {
+      // Once, after the last answer: the app waits on `loading` before it
+      // decides between the sign-in page and the one asked for.
       setChecking(false);
       setLoading(false);
     }
@@ -81,10 +90,13 @@ export function AuthProvider({ children }) {
     if (data.token) localStorage.setItem('token', data.token);
   }
 
+  // The account is made and signed in by the one request: its answer carries
+  // the token and the user, as a sign-in's does. A second request to
+  // /auth/login used to follow it, which spent one of the address's sign-in
+  // attempts, left the session the registration started unused, and, if it
+  // failed, left the form offering to create an account that already existed.
   async function register(email, password) {
-    await api.post('/auth/register', { email, password });
-    // Register doesn't return a token — immediately log in
-    const data = await api.post('/auth/login', { email, password });
+    const data = await api.post('/auth/register', { email, password });
     localStorage.setItem('token', data.token);
     setUser(data.user);
     setAuthError('');

@@ -151,10 +151,10 @@ describe('routes/auth password and account state', () => {
       const t = tokenFor(u);
       // A wrong current password is a 400, not a 401: a 401 would bounce the
       // browser to the login page.
-      const wrong = await change(t, { currentPassword: 'wrong', newPassword: 'newpassword1' }).expect(400);
+      const wrong = await change(t, { currentPassword: 'wrong', newPassword: 'new-password-2026' }).expect(400);
       expect(wrong.body.error).toMatch(/current password/i);
       await change(t, { currentPassword: 'password123', newPassword: 'short' }).expect(400);
-      await change(t, { newPassword: 'newpassword1' }).expect(400);
+      await change(t, { newPassword: 'new-password-2026' }).expect(400);
       await change(t, { currentPassword: 'password123' }).expect(400);
       await login('cp@test.com', 'password123').expect(200);
     });
@@ -166,22 +166,23 @@ describe('routes/auth password and account state', () => {
       const other = await users.createUser('bystander@test.com', 'password123', 'user');
       const t = tokenFor(u);
       for (let i = 0; i < 5; i++) {
-        await change(t, { currentPassword: `guess-${i}`, newPassword: 'newpassword1' }).expect(400);
+        await change(t, { currentPassword: `guess-${i}`, newPassword: 'new-password-2026' }).expect(400);
       }
-      const limited = await change(t, { currentPassword: 'password123', newPassword: 'newpassword1' }).expect(429);
+      const limited = await change(t, { currentPassword: 'password123', newPassword: 'new-password-2026' }).expect(429);
       expect(limited.body.error).toMatch(/too many/i);
       await login('guess@test.com', 'password123').expect(200);   // the right answer, sixth, changed nothing
-      await change(tokenFor(other), { currentPassword: 'password123', newPassword: 'newpassword1' }).expect(200);
+      await change(tokenFor(other), { currentPassword: 'password123', newPassword: 'new-password-2026' }).expect(200);
     });
 
     test("an admin's reset that lands mid-change wins: 409, and the admin's password stands", async () => {
       const u = await users.createUser('race@test.com', 'password123', 'user');
       // The reset is made to land in the window this route has: after the
       // current password has been checked, before the new one is written.
-      const bcrypt = require('bcryptjs');
-      const realCompare = bcrypt.compare;
-      jest.spyOn(bcrypt, 'compare').mockImplementationOnce(async (pw, hash) => {
-        const ok = await realCompare(pw, hash);
+      // Hashes are Argon2id (users.js), so the check is argon2.verify.
+      const argon2 = require('argon2');
+      const realVerify = argon2.verify;
+      jest.spyOn(argon2, 'verify').mockImplementationOnce(async (hash, pw) => {
+        const ok = await realVerify(hash, pw);
         await users.setPassword(u.id, 'admin-set-pass-01');   // what PATCH /api/admin/users/:id/password calls
         return ok;
       });
@@ -200,12 +201,12 @@ describe('routes/auth password and account state', () => {
     test('changes the password, keeps this session via the returned token and signs out the others', async () => {
       const u = await users.createUser('cp@test.com', 'password123', 'user');
       const stale = tokenFor(u, 5);
-      const res = await change(stale, { currentPassword: 'password123', newPassword: 'newpassword1' }).expect(200);
+      const res = await change(stale, { currentPassword: 'password123', newPassword: 'new-password-2026' }).expect(200);
       expect(res.body.token).toBeTruthy();
       await me(stale).expect(401);
       await me(res.body.token).expect(200);
       await login('cp@test.com', 'password123').expect(401);
-      await login('cp@test.com', 'newpassword1').expect(200);
+      await login('cp@test.com', 'new-password-2026').expect(200);
     });
   });
 

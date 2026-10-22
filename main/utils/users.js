@@ -222,6 +222,38 @@ function getAllowanceSettings(userId) {
   return allowanceSettingsFrom(userId ? getUserConfig(userId) : {});
 }
 
+// ── Email addresses ──────────────────────────────────────────────────────────
+// An address is stored, and looked up, in one form: trimmed, Unicode NFC and
+// lower case. The lookup used to be lower(email) = lower(?), which no index
+// serves and which SQLite's lower() applies to A-Z only, so "ÉLODIE@x.com"
+// and "élodie@x.com" could be two accounts. Stored normalised (older rows by
+// migrate.js step 5), a sign-in is one `email = ?` on the column's own index,
+// and the unique index on email COLLATE NOCASE (schema.sql) refuses a second
+// account for an address that differs only in case. Null for anything that
+// is not a string.
+function normalizeEmail(raw) {
+  if (typeof raw !== 'string') return null;
+  return raw.trim().normalize('NFC').toLowerCase();
+}
+
+// What is wrong with an address typed for a new account, in words for the
+// form, or null. Deliberately loose — something@something.something with no
+// spaces, at most 254 characters, the longest address mail can carry. Whether
+// the mailbox exists is for mail to find out, not a pattern.
+const EMAIL_MAX_LENGTH = 254;
+function emailProblem(raw) {
+  const address = normalizeEmail(raw);
+  if (!address) return 'Enter an email address';
+  if (address.length > EMAIL_MAX_LENGTH) return 'That email address is too long';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) return 'Enter a valid email address';
+  return null;
+}
+
+// An Error a route can tell apart by its code, carrying the words to show.
+function _refusal(message, code) {
+  return Object.assign(new Error(message), { code });
+}
+
 // ── User CRUD ─────────────────────────────────────────────────────────────────
 
 function hasUsers() {
@@ -232,8 +264,12 @@ function findById(id) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(id) || null;
 }
 
-function findByEmail(email) {
-  return db.prepare('SELECT * FROM users WHERE lower(email) = lower(?)').get(email) || null;
+// By address, however it was cased or spaced (normalizeEmail). Null when
+// there is no such account, and for anything that is not an address.
+function findByEmail(raw) {
+  const address = normalizeEmail(raw);
+  if (!address) return null;
+  return db.prepare('SELECT * FROM users WHERE email = ?').get(address) || null;
 }
 
 // In-memory throttle so a chatty client (the dashboard's pipeline-status poll can
@@ -253,17 +289,30 @@ function touchLastSeen(userId) {
 
 // The password is hashed as given: the rule on what a password may be
 // (passwordProblem) is applied by every route before it gets here, so the
-// tests can make accounts with short fixture passwords without a bcrypt-cost
-// password each. `temporary` marks the password as one an admin chose, to be
-// replaced at the first sign-in and dead after a day (schema.sql). `demo`
-// makes a demo account: one that never connects to Xero and runs against the
-// generated Demo Company instead (users.is_demo; see isDemoUser). An admin
-// may later switch their own account either way (setDemo).
-async function createUser(email, password, role = 'user', { temporary = false, demo = false } = {}) {
-  const hash = await bcrypt.hash(password, 10);
+// tests can make accounts with short fixture passwords. The address is
+// checked here, though (emailProblem), and stored normalised: a refusal
+// throws an Error whose `code` says which — EMAIL_INVALID, EMAIL_EXISTS, or
+// REGISTRATION_CLOSED — and whose message is the words to show.
+//
+// `firstOnly` is self-registration, which may only make the first account:
+// asked inside the transaction that inserts, so of several registrations at
+// once exactly one gets in. The route used to ask hasUsers() before the slow
+// hash and three at once all got through. `temporary` marks the password as
+// one an admin chose, to be replaced at the first sign-in and dead after a
+// day (schema.sql). `demo` makes a demo account: one that never connects to
+// Xero and runs against the generated Demo Company instead (users.is_demo;
+// see isDemoUser). An admin may later switch their own account either way
+// (setDemo).
+const REGISTRATION_CLOSED_MESSAGE = 'Public registration is disabled. Contact your administrator.';
+async function createUser(email, password, role = 'user', { temporary = false, demo = false, firstOnly = false } = {}) {
+  const problem = emailProblem(email);
+  if (problem) throw _refusal(problem, 'EMAIL_INVALID');
+  const address = normalizeEmail(email);
+  const hash    = await hashPassword(password);
 
   const create = db.transaction(() => {
-    if (findByEmail(email)) throw new Error('Email already exists');
+    if (firstOnly && hasUsers()) throw _refusal(REGISTRATION_CLOSED_MESSAGE, 'REGISTRATION_CLOSED');
+    if (findByEmail(address)) throw _refusal('An account with this email already exists', 'EMAIL_EXISTS');
 
     // 'auto' = first user becomes admin, all subsequent users become 'user'.
     // Resolved inside the transaction so two simultaneous first registrations
@@ -276,7 +325,7 @@ async function createUser(email, password, role = 'user', { temporary = false, d
       // Keeping the timestamp prefix preserves creation order; the suffix makes
       // a collision effectively impossible.
       id:        `${now}${require('crypto').randomBytes(4).toString('hex')}`,
-      email:     email.toLowerCase().trim(),
+      email:     address,
       password:  hash,
       role:      actualRole,
       createdAt: new Date(now).toISOString(),
@@ -287,10 +336,20 @@ async function createUser(email, password, role = 'user', { temporary = false, d
       passwordChangedAt: new Date(now).toISOString(),
     };
 
-    db.prepare(`
-      INSERT INTO users (id, email, password, role, created_at, must_change_password, temp_password_expires_at, is_demo, password_changed_at)
-      VALUES (@id, @email, @password, @role, @createdAt, @mustChangePassword, @tempPasswordExpiresAt, @isDemo, @passwordChangedAt)
-    `).run(user);
+    try {
+      db.prepare(`
+        INSERT INTO users (id, email, password, role, created_at, must_change_password, temp_password_expires_at, is_demo, password_changed_at)
+        VALUES (@id, @email, @password, @role, @createdAt, @mustChangePassword, @tempPasswordExpiresAt, @isDemo, @passwordChangedAt)
+      `).run(user);
+    } catch (err) {
+      // The unique indexes on email have the last word: an older row the
+      // lookup above missed (one left as it was typed, migrate.js) still
+      // refuses a second account for its address.
+      if (err.code === 'SQLITE_CONSTRAINT_UNIQUE' && /email/.test(err.message)) {
+        throw _refusal('An account with this email already exists', 'EMAIL_EXISTS');
+      }
+      throw err;
+    }
 
     // Pre-create the user's credentials row so every account has one from day one
     // (mirrors the old behaviour of always creating config.json on user creation).
@@ -303,14 +362,32 @@ async function createUser(email, password, role = 'user', { temporary = false, d
     return sanitize(user);
   });
 
-  return create();
+  // IMMEDIATE: the write lock is taken before the first read, so the "any
+  // users yet?" and "this address yet?" answers hold until the insert.
+  return create.immediate();
 }
 
+// The account for this address and password, or null. A hash due for
+// replacing (needsRehash, or one that matched only as typed, not in NFC) is
+// replaced here, the one moment the password is in hand: written only if the
+// stored hash is still the one just checked, so a password changed meanwhile
+// is never undone, and never at the cost of the sign-in.
 async function validatePassword(email, password) {
   const user = findByEmail(email);
   if (!user) return null;
-  const ok = await bcrypt.compare(password, user.password);
-  return ok ? sanitize(user) : null;
+  const { ok, asTyped } = await _check(user.password, password);
+  if (!ok) return null;
+  if (asTyped || needsRehash(user.password)) await _rehash(user, password);
+  return sanitize(user);
+}
+
+async function _rehash(user, password) {
+  try {
+    const hash = await hashPassword(password);
+    db.prepare('UPDATE users SET password = ? WHERE id = ? AND password = ?').run(hash, user.id, user.password);
+  } catch (err) {
+    require('./logger').warn('Could not replace an old password hash', { userId: user.id, error: err.message });
+  }
 }
 
 // Every place that accepts a password checks this — register, the admin's Add
@@ -318,13 +395,22 @@ async function validatePassword(email, password) {
 // while the server refused under eight.
 //
 // Three rules and no more: at least twelve characters, not the account's own
-// email address (with or without the domain, in any case), and not on the
-// list of passwords everyone tries first (common-passwords.js). Length is
-// what makes a password hard to guess; rules about digits and symbols only
-// decide which short password is chosen. Nothing expires: a password that
-// was good stays good, so existing accounts are not asked to change. `email`
-// is the account's, for the second rule; without it that rule is skipped.
+// email address (with or without the domain, in any case), and not one of the
+// passwords everyone tries first (common-passwords.js: a published list, one
+// character over and over, a straight run of digits, or only the words of
+// this app). Length is what makes a password hard to guess; rules about
+// digits and symbols only decide which short password is chosen. Nothing
+// expires: a password that was good stays good, so existing accounts are not
+// asked to change. `email` is the account's, for the second rule; without it
+// that rule is skipped.
+//
+// Characters are counted as a person counts them: in Unicode NFC (the form the
+// hash is made from, hashPassword) and by code point, so an emoji is one
+// character, not the two UTF-16 units JavaScript's length counts. The ceiling
+// of 128 is not about strength: it keeps a megabyte "password" from costing a
+// hash, and no passphrase anyone types comes near it.
 const PASSWORD_MIN_LENGTH = 12;
+const PASSWORD_MAX_LENGTH = 128;
 
 // Every account, demo or not, admin or not. Demo accounts used to be allowed a
 // six-character permanent password for typing in front of people; the one
@@ -334,16 +420,144 @@ const PASSWORD_MIN_LENGTH = 12;
 // new one at its next sign-in (routes/auth.js, requirePasswordChange).
 function passwordProblem(password, email = null) {
   const min = PASSWORD_MIN_LENGTH;
-  if (typeof password !== 'string' || password.length < min) {
-    return `Password must be at least ${min} characters`;
-  }
+  if (typeof password !== 'string') return `Password must be at least ${min} characters`;
+  const pw     = password.normalize('NFC');
+  const length = [...pw].length;
+  if (length < min) return `Password must be at least ${min} characters`;
+  if (length > PASSWORD_MAX_LENGTH) return `Password must be at most ${PASSWORD_MAX_LENGTH} characters`;
   if (typeof email === 'string' && email.trim()) {
-    const pw   = password.toLowerCase();
-    const addr = email.toLowerCase().trim();
-    if (pw === addr || pw === addr.split('@')[0]) return 'Password must not be your email address';
+    const lower = pw.toLowerCase();
+    const addr  = normalizeEmail(email);
+    if (lower === addr || lower === addr.split('@')[0]) return 'Password must not be your email address';
   }
-  if (require('./common-passwords').isCommonPassword(password)) return 'That password is too common; choose another';
+  if (require('./common-passwords').isCommonPassword(pw)) return 'That password is too common; choose another';
   return null;
+}
+
+// ── Password hashes ──────────────────────────────────────────────────────────
+// Argon2id at OWASP's recommended minimum (Password Storage Cheat Sheet): 19
+// MiB of memory, two passes, one lane. Every hash used to be bcrypt, which
+// reads only the first 72 bytes of a password — two long passphrases that
+// agree that far were one password to it — and whose cost is time alone,
+// which a graphics card spends cheaply. Argon2 makes each guess cost memory
+// as well.
+//
+// The hash is of the password in Unicode NFC, so "é" typed as one character
+// or as "e" and an accent is the same password, as it is to the rules
+// (passwordProblem). The bcrypt hashes were of the password exactly as typed,
+// so a check that fails in NFC is tried once more as typed.
+//
+// Nobody is asked to do anything: verifyPassword reads both kinds by their
+// prefix, and a bcrypt hash (or a weaker Argon2 one) is replaced the next time
+// its owner signs in, when the password is in hand (validatePassword).
+//
+// `argon2` is a native module. If it ever fails to load — a missing prebuilt
+// binary, a build for another platform — signing in must still work: new
+// hashes are bcrypt at cost 12 until it loads, said once in the log, and an
+// Argon2id hash already stored is checked with Node's own crypto.argon2 where
+// this Node has it (24.7 and later).
+const ARGON2_OPTIONS       = { memoryCost: 19456, timeCost: 2, parallelism: 1 };
+const BCRYPT_FALLBACK_COST = 12;
+
+let _argon2; // the module; false once it has failed to load
+function _argon2Module() {
+  if (_argon2 === undefined) {
+    try {
+      _argon2 = require('argon2');
+    } catch (err) {
+      _argon2 = false;
+      require('./logger').warn(`argon2 could not be loaded; new password hashes use bcrypt (cost ${BCRYPT_FALLBACK_COST}) until it can`, { error: err.message });
+    }
+  }
+  return _argon2;
+}
+
+const _isBcrypt = hash => /^\$2[aby]\$\d\d\$/.test(hash);
+
+// An Argon2 hash in its parts, or null for anything else.
+function _argon2Parts(hash) {
+  const m = /^\$(argon2(?:id|i|d))\$v=(\d+)\$([^$]+)\$([^$]+)\$([^$]+)$/.exec(hash);
+  if (!m) return null;
+  const params = Object.fromEntries(m[3].split(',').map(kv => kv.split('=')));
+  return { type: m[1], version: Number(m[2]), m: Number(params.m), t: Number(params.t), p: Number(params.p), salt: m[4], hash: m[5] };
+}
+
+async function hashPassword(password) {
+  if (typeof password !== 'string') throw new TypeError('A password must be a string');
+  const pw     = password.normalize('NFC');
+  const argon2 = _argon2Module();
+  return argon2
+    ? argon2.hash(pw, { type: argon2.argon2id, ...ARGON2_OPTIONS })
+    : bcrypt.hash(pw, BCRYPT_FALLBACK_COST);
+}
+
+// Node's own Argon2, for an Argon2 hash while the module will not load.
+function _nodeArgon2Verify(parts, password) {
+  const { argon2, timingSafeEqual } = require('crypto');
+  if (typeof argon2 !== 'function' || parts.version !== 19) {
+    require('./logger').error('An Argon2 password hash cannot be checked: the argon2 module did not load and this Node has no crypto.argon2');
+    return Promise.resolve(false);
+  }
+  const expected = Buffer.from(parts.hash, 'base64');
+  return new Promise(resolve => argon2(parts.type, {
+    message: password, nonce: Buffer.from(parts.salt, 'base64'),
+    parallelism: parts.p, tagLength: expected.length, memory: parts.m, passes: parts.t,
+  }, (err, tag) => resolve(!err && tag.length === expected.length && timingSafeEqual(tag, expected))));
+}
+
+async function _checkOne(hash, password) {
+  try {
+    if (_isBcrypt(hash)) return await bcrypt.compare(password, hash);
+    const parts = _argon2Parts(hash);
+    if (!parts) return false;
+    const argon2 = _argon2Module();
+    return argon2 ? await argon2.verify(hash, password) : await _nodeArgon2Verify(parts, password);
+  } catch {
+    return false; // a hash that cannot be read matches nothing
+  }
+}
+
+// Whether `password` is the one `hash` was made from — in NFC, or failing
+// that as typed (`asTyped`: an old bcrypt hash of a password not in NFC,
+// worth a new hash). Never throws.
+async function _check(hash, password) {
+  if (typeof hash !== 'string' || typeof password !== 'string') return { ok: false, asTyped: false };
+  const nfc = password.normalize('NFC');
+  if (await _checkOne(hash, nfc)) return { ok: true, asTyped: false };
+  if (nfc !== password && await _checkOne(hash, password)) return { ok: true, asTyped: true };
+  return { ok: false, asTyped: false };
+}
+
+async function verifyPassword(hash, password) {
+  return (await _check(hash, password)).ok;
+}
+
+// Whether a stored hash should be replaced at its owner's next sign-in: every
+// bcrypt hash, and an Argon2 one that is not Argon2id or is cheaper than
+// ARGON2_OPTIONS. While argon2 will not load nothing better than bcrypt at
+// cost 12 can be made, so then only a cheaper bcrypt hash is due, and an
+// Argon2 one is kept.
+function needsRehash(hash) {
+  if (typeof hash !== 'string') return false;
+  if (_isBcrypt(hash)) return _argon2Module() ? true : Number(hash.slice(4, 6)) < BCRYPT_FALLBACK_COST;
+  const parts = _argon2Parts(hash);
+  if (!parts || !_argon2Module()) return false;
+  return parts.type !== 'argon2id' || parts.version !== 19
+    || !(parts.m >= ARGON2_OPTIONS.memoryCost) || !(parts.t >= ARGON2_OPTIONS.timeCost);
+}
+
+// A sign-in to an address with no account runs this in place of the check, so
+// it takes as long as one with an account and the time taken does not say
+// which addresses exist. Always false: each hash is of 32 random bytes nobody
+// kept, with the parameters of a real one (bcrypt's while argon2 will not
+// load, as every new hash is bcrypt then).
+const DUMMY_HASHES = {
+  argon2: '$argon2id$v=19$m=19456,p=1,t=2$Xr7ZhVbQ6pj0IAFYIzlZwQ$QYkxcDTuyr5SlTjOBbuczidbimw0kb6Yf6Tc/Y0x4vk',
+  bcrypt: '$2a$12$BI28PWY3GPPlZrhiFukr0ebCNio/7HvHpioTVE4YWNdbODSvtMPjO',
+};
+async function verifyDummy(password) {
+  await _check(_argon2Module() ? DUMMY_HASHES.argon2 : DUMMY_HASHES.bcrypt, typeof password === 'string' ? password : '');
+  return false;
 }
 
 // ── Sign-in lockout ──────────────────────────────────────────────────────────
@@ -402,23 +616,44 @@ function lockAfterFailure(row, now = Date.now()) {
 }
 
 // A wrong password for this account: applies lockAfterFailure to the row and
-// writes the result. Read and written in one transaction, so two wrong
-// passwords landing together each count. Returns what lockAfterFailure did,
-// or null for an account that no longer exists.
-const recordFailedLogin = db.transaction((id, now = Date.now()) => {
+// writes the result. Returns what lockAfterFailure did, or null for an
+// account that no longer exists.
+//
+// Read and written in one IMMEDIATE transaction — the write lock is held from
+// before the read — so wrong passwords landing together each count, even from
+// another connection to the database; and a failure short of a lock adds one
+// in SQL rather than writing back the count it read.
+const _recordFailedLogin = db.transaction((id, now) => {
   const row = findById(id);
   if (!row) return null;
   const next = lockAfterFailure(row, now);
-  db.prepare('UPDATE users SET failed_logins = ?, locked_until = ?, lock_count = ?, last_locked_at = ? WHERE id = ?')
-    .run(next.failed_logins, next.locked_until, next.lock_count, next.last_locked_at, id);
+  if (next.locked) {
+    db.prepare('UPDATE users SET failed_logins = 0, locked_until = ?, lock_count = ?, last_locked_at = ? WHERE id = ?')
+      .run(next.locked_until, next.lock_count, next.last_locked_at, id);
+  } else {
+    db.prepare('UPDATE users SET failed_logins = failed_logins + 1 WHERE id = ?').run(id);
+  }
   return next;
 });
+function recordFailedLogin(id, now = Date.now()) {
+  return _recordFailedLogin.immediate(id, now);
+}
 
 // A sign-in that went through: the lockout record is cleared whole, and the
-// time of the sign-in kept.
+// time of the sign-in kept — unless a lock is in force at `now`. The lock is
+// checked before the slow password check, so guesses sent together all pass
+// it; one of them may lock the account while another, right, is still being
+// checked. Written unconditionally, that right one wiped the lock. So the
+// clearing is conditional, in the same statement: true when the account was
+// clear (or its lock had ended) and now is, false when a lock stands and
+// nothing was written — the sign-in must then be refused as locked (423).
 function recordSuccessfulLogin(id, now = Date.now()) {
-  db.prepare('UPDATE users SET failed_logins = 0, locked_until = NULL, lock_count = 0, last_locked_at = NULL, last_login_at = ? WHERE id = ?')
-    .run(new Date(now).toISOString(), id);
+  const at = new Date(now).toISOString();
+  const { changes } = db.prepare(`
+    UPDATE users SET failed_logins = 0, locked_until = NULL, lock_count = 0, last_locked_at = NULL, last_login_at = ?
+    WHERE id = ? AND (locked_until IS NULL OR locked_until <= ?)
+  `).run(at, id, at);
+  return changes > 0;
 }
 
 // An admin's unlock: the same clean slate a successful sign-in leaves, without
@@ -444,12 +679,13 @@ function temporaryPasswordExpired(row, now = Date.now()) {
 async function verifiedPasswordHash(id, password) {
   const user = findById(id);
   if (!user || typeof password !== 'string') return null;
-  return (await bcrypt.compare(password, user.password)) ? user.password : null;
+  return (await verifyPassword(user.password, password)) ? user.password : null;
 }
 
 // Sets a new password and signs the user out everywhere. Tokens are stateless,
-// live 24 hours and renew while in use (auth-middleware.js), so without the
-// cutoff a reset would leave an active old session valid indefinitely — the
+// live 2 hours and renew while in use, up to 12 hours from the sign-in
+// (auth-middleware.js), so without the cutoff a reset would leave an active
+// old session valid for the rest of that time — the
 // opposite of what a reset is for. (The session rows are ended by the routes,
 // which know which session to keep and who did it: utils/sessions.js.) When
 // it happened is kept in password_changed_at, for the Admin page.
@@ -471,7 +707,7 @@ async function setPassword(id, newPassword, { ifCurrentHash = null, temporary = 
   if (!user) throw new Error('User not found');
   const problem = passwordProblem(newPassword, user.email);
   if (problem) throw new Error(problem);
-  const hash = await bcrypt.hash(newPassword, 10);
+  const hash = await hashPassword(newPassword);
   const now  = Date.now();
   const at   = new Date(now).toISOString();
   const marks = temporary
@@ -698,9 +934,11 @@ function ensureUserDirectories() {
 
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
+  normalizeEmail, emailProblem, EMAIL_MAX_LENGTH,
   passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, isDemoUser, setDemo,
   requirePasswordChange, passwordChangeReason,
-  PASSWORD_MIN_LENGTH,
+  hashPassword, verifyPassword, needsRehash, verifyDummy, ARGON2_OPTIONS,
+  PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH,
   lockStatus, lockAfterFailure, recordFailedLogin, recordSuccessfulLogin, unlockAccount, temporaryPasswordExpired,
   LOCK_AFTER_FAILURES, LOCK_BASE_MS, LOCK_MAX_MS, TEMP_PASSWORD_TTL_MS,
   getAllUsers, updateUserRole, deleteUser, readUsers,

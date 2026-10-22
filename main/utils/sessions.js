@@ -5,7 +5,8 @@
 // Tokens are still stateless JWTs (middleware/auth-middleware.js). What
 // changes is that a token minted at a sign-in names its session in a `sid`
 // claim, a renewal keeps it, and sessionUser refuses a token whose session has
-// been ended. Before this, the only way to end a session was to end all of
+// been ended or began more than twelve hours ago (the row's created_at is the
+// sign-in). Before this, the only way to end a session was to end all of
 // them (users.sessions_valid_from), and Sign out ended nothing at all: the
 // browser forgot its token, and a copy of it stayed good for the rest of the
 // day.
@@ -16,12 +17,14 @@
 // and deleted 30 days after it was last used.
 const crypto = require('crypto');
 const db     = require('../db');
-const { SESSION_TTL_SECONDS } = require('../middleware/auth-middleware');
+const { SESSION_TTL_SECONDS, SESSION_MAX_AGE_SECONDS } = require('../middleware/auth-middleware');
 
-// A session is in use while its token can be: a token lives 24 hours and is
-// renewed while used (auth-middleware.js), so one last seen more than 24
-// hours ago has no token left that works.
+// A session is in use while its token can be: a token lives two hours and is
+// renewed while used (auth-middleware.js), so one last seen more than two
+// hours ago has no token left that works. And none works twelve hours after
+// the sign-in, however busy the session has been.
 const SESSION_LIFETIME_MS = SESSION_TTL_SECONDS * 1000;
+const SESSION_MAX_AGE_MS  = SESSION_MAX_AGE_SECONDS * 1000;
 
 // Kept this long after the last use, then deleted (pruneSessions). Long
 // enough to answer "was that me last week?"; no longer, because each row
@@ -125,11 +128,30 @@ function endAllSessions(userId, reason, { except = null, endedBy = null } = {}) 
 }
 
 // Whether a token naming this session may still be used: the session exists
-// and has not been ended. Its age is the token's own business (its exp); a
-// row pruned away is gone, and so is its session.
+// and has not been ended. Its age is checked by the caller (auth-middleware.js
+// #sessionUser, against liveSession's startedAt); a row pruned away is gone,
+// and so is its session.
 function isSessionLive(sid) {
-  if (!sid) return false;
-  return _stmt('SELECT 1 FROM sessions WHERE id = ? AND ended_at IS NULL').get(String(sid)) !== undefined;
+  return liveSession(sid) !== null;
+}
+
+// The session a token names, while it has not been ended: whose it is
+// (userId) and when it began (startedAt, ms), which is what the twelve-hour
+// limit counts from. null for one ended, pruned or never made. Read on every
+// authenticated request: one primary-key lookup.
+function liveSession(sid) {
+  if (!sid) return null;
+  const r = _stmt('SELECT user_id, created_at FROM sessions WHERE id = ? AND ended_at IS NULL').get(String(sid));
+  if (!r) return null;
+  const startedAt = Date.parse(r.created_at);
+  return { userId: r.user_id, startedAt: Number.isFinite(startedAt) ? startedAt : 0 };
+}
+
+// When a session nobody ended stops working, in ms: two hours after it was
+// last used or twelve after it began, whichever is sooner. NaN when its row
+// has no readable times.
+function _runsOutAt(r) {
+  return Math.min(Date.parse(r.last_seen_at) + SESSION_LIFETIME_MS, Date.parse(r.created_at) + SESSION_MAX_AGE_MS);
 }
 
 function _session(r, now) {
@@ -137,13 +159,13 @@ function _session(r, now) {
     sid: r.id, createdAt: r.created_at, lastSeenAt: r.last_seen_at, firstIp: r.first_ip, lastIp: r.last_ip,
     userAgent: r.user_agent, endedAt: r.ended_at, endedReason: r.ended_reason,
   };
-  // Nothing ends a session that is simply left: its last token runs out a
-  // day after it was last used. Said here rather than written, so the answer
+  // Nothing ends a session that is simply left, or reaches its twelve hours:
+  // its last token runs out. Said here rather than written, so the answer
   // does not wait on a sweep.
   if (!s.endedAt) {
-    const lastSeen = Date.parse(r.last_seen_at);
-    if (Number.isFinite(lastSeen) && lastSeen + SESSION_LIFETIME_MS <= now) {
-      s.endedAt = new Date(lastSeen + SESSION_LIFETIME_MS).toISOString();
+    const end = _runsOutAt(r);
+    if (Number.isFinite(end) && end <= now) {
+      s.endedAt = new Date(end).toISOString();
       s.endedReason = 'expired';
     }
   }
@@ -159,13 +181,13 @@ function getSession(sid, now = Date.now()) {
 }
 
 // An account's sessions, most recently used first. `active` (the default):
-// only those still in use, not ended and used within a token's lifetime.
-// `active: false`: every session kept (the last 30 days), ended ones with
-// when and why.
+// only those still in use, not ended, used within a token's lifetime and
+// begun less than twelve hours ago. `active: false`: every session kept (the
+// last 30 days), ended ones with when and why.
 function listSessions(userId, { active = true, now = Date.now() } = {}) {
   const rows = active
-    ? _stmt('SELECT * FROM sessions WHERE user_id = ? AND ended_at IS NULL AND last_seen_at > ? ORDER BY last_seen_at DESC, created_at DESC')
-      .all(String(userId), new Date(now - SESSION_LIFETIME_MS).toISOString())
+    ? _stmt('SELECT * FROM sessions WHERE user_id = ? AND ended_at IS NULL AND last_seen_at > ? AND created_at > ? ORDER BY last_seen_at DESC, created_at DESC')
+      .all(String(userId), new Date(now - SESSION_LIFETIME_MS).toISOString(), new Date(now - SESSION_MAX_AGE_MS).toISOString())
     : _stmt('SELECT * FROM sessions WHERE user_id = ? ORDER BY last_seen_at DESC, created_at DESC').all(String(userId));
   return rows.map(r => _session(r, now));
 }
@@ -179,6 +201,6 @@ function pruneSessions(now = Date.now()) {
 }
 
 module.exports = {
-  startSession, touchSession, endSession, endAllSessions, isSessionLive, getSession, listSessions, pruneSessions,
-  userAgentOf, SESSION_LIFETIME_MS, SESSION_RETENTION_DAYS, USER_AGENT_MAX, TOUCH_THROTTLE_MS, END_REASONS,
+  startSession, touchSession, endSession, endAllSessions, isSessionLive, liveSession, getSession, listSessions, pruneSessions,
+  userAgentOf, SESSION_LIFETIME_MS, SESSION_MAX_AGE_MS, SESSION_RETENTION_DAYS, USER_AGENT_MAX, TOUCH_THROTTLE_MS, END_REASONS,
 };

@@ -100,6 +100,23 @@ describe('the password rules a form mirrors (passwordProblem)', () => {
       expect(rules.passwordProblem(p, email)).toBe('That password is too common; choose another');
     }
     expect(rules.passwordProblem('correct horse battery', email)).toBeNull();
+    // Any length of straight run, and nothing but the words of this app.
+    for (const p of ['0123456789012345678901', 'Password@123', 'Xero2026!!!!', 'FinancialAutomation1', 'invoices4finance']) {
+      expect(rules.passwordProblem(p, email)).toBe('That password is too common; choose another');
+    }
+    expect(rules.passwordProblem('xero is my accountant', email)).toBeNull();
+  });
+
+  // As the server counts: in NFC, by character, so an emoji is one and e with
+  // an accent is one; and no more than 128.
+  test('counted in characters, twelve to 128', () => {
+    expect(rules.PASSWORD_MAX_LENGTH).toBe(128);
+    expect(rules.passwordProblem('😀'.repeat(6), email)).toBe('Password must be at least 12 characters');
+    expect(rules.passwordProblem('café au lai', email)).toBe('Password must be at least 12 characters');
+    expect(rules.passwordProblem('café au lait', email)).toBeNull();
+    expect(rules.passwordProblem('🐱🐶'.repeat(64), email)).toBeNull();
+    expect(rules.passwordProblem('🐱🐶'.repeat(65), email)).toBe('Password must be at most 128 characters');
+    expect(rules.passwordProblem('josé@nexsoss.com', 'JOSÉ@nexsoss.com')).toBe('Password must not be your email address');
   });
 
   test('the hint names the minimum', () => {

@@ -86,7 +86,13 @@ const notify      = require('./utils/notify');
 require('./db/migrate').run();
 // History older than two years goes at boot, before anything adds to it: a
 // ranged DELETE on the indexed time column, cheap however large the tables.
+// From then on it goes daily (jobs/account-retention.js, started below).
 require('./utils/audit-log').pruneOldEvents();
+// The data folders of deleted accounts, which a job finishing just after the
+// delete can write back (utils/account-cleanup.js): swept before the queue
+// recoveries below look through the folders, then daily with the prune.
+// Never throws.
+require('./utils/account-cleanup').sweepOrphanFolders();
 const { ensureUserDirectories, getAllUsers, isActive } = require('./utils/users');
 const emailWorker               = require('./queue/email-worker');
 const claimWorker               = require('./claims/claim-worker');
@@ -503,6 +509,8 @@ const server = app.listen(PORT, HOST, () => {
   Promise.resolve().then(() => require('./jobs/xero-change-detector').start()).catch(err => logger.warn('Xero change detector start failed', { error: err?.message || String(err) }));
   // Fetches the IP-location databases when missing or a month old, two minutes after boot and then daily (jobs/geoip-refresh.js); it never runs under the test suite, and is guarded the same way.
   Promise.resolve().then(() => require('./jobs/geoip-refresh').start()).catch(err => logger.warn('IP location refresh start failed', { error: err?.message || String(err) }));
+  // Prunes old events and sessions and sweeps deleted accounts' folders daily, as boot did above (jobs/account-retention.js); guarded the same way.
+  Promise.resolve().then(() => require('./jobs/account-retention').start()).catch(err => logger.warn('Daily retention start failed', { error: err?.message || String(err) }));
 });
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────

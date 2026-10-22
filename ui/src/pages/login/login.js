@@ -1,8 +1,42 @@
-// The sign-in screen's decisions that need no React: what the alert says when
-// the server answers 423 (the account is locked after too many wrong
+// The sign-in screen's decisions that need no React: which form it shows,
+// what it says when a first-run registration is refused, what the alert says
+// when the server answers 423 (the account is locked after too many wrong
 // passwords), and the countdown on the button while the lock lasts. The page
 // cannot be rendered on every machine this is worked on, so they live here,
-// import nothing, and main/scripts/login-ui.test.js runs them as they are.
+// import nothing, and main/scripts/login-ui.test.js and
+// main/scripts/login-flow-ui.test.js run them as they are.
+
+// ── Which form ───────────────────────────────────────────────────────────────
+// The page asks GET /auth/status before it shows a form. Until the answer it
+// is checking; then it creates the first (admin) account when there is none,
+// and signs in ever after. It used to start as a sign-in form and switch, so
+// first run flashed the wrong form; and a failed check left it signing in,
+// on a site with no account to sign in to. A check that fails now says so,
+// with a Retry.
+export const FORM_CHECKING    = 'checking';
+export const FORM_FIRST_RUN   = 'first-run';
+export const FORM_SIGN_IN     = 'sign-in';
+export const FORM_UNREACHABLE = 'unreachable';
+
+// The form for a GET /auth/status answer. Only a plain "no accounts yet" opens
+// the first-run form; anything else signs in, which is also what the server
+// holds every later visitor to.
+export function formFromStatus(body) {
+  return body && body.hasUsers === false ? FORM_FIRST_RUN : FORM_SIGN_IN;
+}
+
+export const STATUS_FAILED_MESSAGE = 'Could not reach the server to load the sign-in form. Check your connection and try again.';
+
+// A first-run registration the server turned away because an account exists
+// after all: 403, someone else set this site up first (in another tab, or
+// between this page loading and the form being sent); 409, this very address
+// has an account. Either way the form becomes a sign-in form, and this is
+// what it says. null for any other failure, which is shown as it came.
+export function registerRefusal(err) {
+  if (err?.status === 403) return 'This site already has an administrator, so the form now signs in. Need an account? Ask your administrator.';
+  if (err?.status === 409) return 'An account with this email already exists. Sign in with its password.';
+  return null;
+}
 
 // A time in ms from whatever the caller holds: a Date, a number, an ISO
 // string. NaN for anything unreadable.

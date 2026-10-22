@@ -44,12 +44,90 @@ function _step(n, name, fn) {
   }
 }
 
+// schema.sql in two: everything before its guards section, run as it is on
+// every boot, and the guards by name (the "-- guard: <name>" lines), which
+// _ensureGuards applies only once the rows already there pass them.
+function _readSchema() {
+  const parts  = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').split(/^-- guard: (\S+)[^\n]*\n/m);
+  const guards = {};
+  for (let i = 1; i < parts.length; i += 2) guards[parts[i]] = parts[i + 1];
+  return { base: parts[0], guards };
+}
+
+// Every stored address in the one form users.js#normalizeEmail gives it.
+// Accounts that would end up with the same address are left as they are —
+// which of them is the person's is not for a migration to guess — and
+// returned, as groups of ids, for the caller to report.
+function _normaliseEmails() {
+  const { normalizeEmail } = require('../utils/users');
+  const byAddress = new Map();
+  for (const row of db.prepare('SELECT id, email FROM users').all()) {
+    const address = normalizeEmail(String(row.email));
+    if (!byAddress.has(address)) byAddress.set(address, []);
+    byAddress.get(address).push(row);
+  }
+  const update = db.prepare('UPDATE users SET email = ? WHERE id = ?');
+  const collisions = [];
+  for (const [address, rows] of byAddress) {
+    if (rows.length > 1) collisions.push(rows.map(r => r.id));
+    else if (rows[0].email !== address) update.run(address, rows[0].id);
+  }
+  return collisions;
+}
+
+// What stops a guard holding for the rows already there — what is wrong and
+// the ids of the accounts in the way — or null. A guard with no check here is
+// simply created.
+function _badRoleRows() {
+  const ids = db.prepare("SELECT id FROM users WHERE role IS NULL OR role NOT IN ('admin', 'user') OR is_demo IS NULL OR is_demo NOT IN (0, 1)").all().map(r => r.id);
+  return ids.length ? { problem: "accounts whose role is not 'admin' or 'user', or whose is_demo is not 0 or 1", ids } : null;
+}
+const GUARD_CHECKS = {
+  // Normalises first, so an account left out by an earlier collision is put
+  // in the one form once the collision is gone.
+  idx_users_email_nocase: () => {
+    const ids = _normaliseEmails();
+    return ids.length ? { problem: 'two or more accounts have the same address once it is trimmed and lower-cased', ids } : null;
+  },
+  users_role_insert: _badRoleRows,
+  users_role_update: _badRoleRows,
+};
+
+// The guards on users (the end of schema.sql), each created once the rows
+// pass its check. One the rows would break is left out, with an error and a
+// Slack alert naming the accounts, and tried again on the next boot: the
+// server still starts, since the running code does not depend on a guard, and
+// the accounts are for a person to put right. A guard already there costs one
+// lookup.
+function _ensureGuards(guards) {
+  const reported = new Set();
+  for (const [name, sql] of Object.entries(guards)) {
+    if (db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(name)) continue;
+    let blocked = null;
+    try {
+      db.transaction(() => {
+        blocked = GUARD_CHECKS[name] ? GUARD_CHECKS[name]() : null;
+        if (!blocked) db.exec(sql);
+      })();
+    } catch (err) {
+      blocked = { problem: err.message, ids: [] };
+    }
+    if (!blocked || reported.has(blocked.problem)) continue;
+    reported.add(blocked.problem);
+    const msg = `users guard ${name} was not created: ${blocked.problem}; it will be tried again on the next boot`;
+    require('../utils/logger').error(msg, { ids: blocked.ids });
+    try {
+      require('../utils/notify').notifyError({ context: msg, error: `accounts: ${JSON.stringify(blocked.ids)}` }).catch(() => {});
+    } catch {}
+  }
+}
+
 // Idempotent — CREATE TABLE/INDEX IF NOT EXISTS, safe to run on every boot.
 // Columns added to an already-deployed table are ensured unconditionally
 // (cheap, and a database restored from an old backup gets them too).
 function run() {
-  const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-  db.exec(schema);
+  const { base, guards } = _readSchema();
+  db.exec(base);
 
   _ensureColumn('user_credentials', 'imap_lookback_days', 'imap_lookback_days TEXT');
   _ensureColumn('user_credentials', 'xero_connection_type',     'xero_connection_type TEXT');
@@ -141,6 +219,16 @@ function run() {
         if (cols.includes(column)) db.exec(`ALTER TABLE user_credentials DROP COLUMN ${column}`);
       }
     }],
+
+    // 5. Every stored address in the form users.js#normalizeEmail gives it
+    //    (trimmed, Unicode NFC, lower case), so a sign-in finds its account
+    //    with a plain `email = ?` on the column's index. Accounts that would
+    //    end up sharing an address keep theirs; the email guard after the
+    //    steps names them, on every boot until they are put right. The guards
+    //    themselves (one account per address in any case, the role and demo
+    //    triggers) are not a step: they wait on the rows, so they are ensured
+    //    after the steps on every boot, the way the columns are.
+    [5, 'normalise stored emails', () => { _normaliseEmails(); }],
   ];
   // In order, and no further than the first failure: the version is a high-
   // water mark, so if a later step succeeded after an earlier one failed, the
@@ -188,6 +276,10 @@ function run() {
   // The duplicate check on a new mileage or per diem claim looks up the same
   // kind on the same day (invoice-store findAllowanceDuplicate).
   db.exec('CREATE INDEX IF NOT EXISTS idx_invoices_claim_kind ON invoices(user_id, claim_kind, invoice_date)');
+
+  // Last: the triggers name users.is_demo, ensured above, and the email index
+  // wants step 5's normalised addresses.
+  _ensureGuards(guards);
 }
 
 module.exports = { run };

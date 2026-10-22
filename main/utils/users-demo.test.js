@@ -16,10 +16,16 @@ describe('users — demo accounts', () => {
   test('the migration adds users.is_demo, defaulting to 0, to an older database', () => {
     const col = () => db.prepare('PRAGMA table_info(users)').all().find(c => c.name === 'is_demo');
     expect(col()).toMatchObject({ notnull: 1, dflt_value: '0' });
+    // The guards on users name the column (schema.sql), and a column a
+    // trigger names cannot be dropped: an older database had neither.
+    const triggers = () => db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'users' ORDER BY name").all().map(r => r.name);
+    expect(triggers()).toEqual(['users_role_insert', 'users_role_update']);
+    for (const t of triggers()) db.exec(`DROP TRIGGER ${t}`);
     db.exec('ALTER TABLE users DROP COLUMN is_demo');
     expect(col()).toBeUndefined();
     require('../db/migrate').run();
     expect(col()).toMatchObject({ notnull: 1, dflt_value: '0' });
+    expect(triggers()).toEqual(['users_role_insert', 'users_role_update']);
   });
 
   test('createUser makes a real account unless asked for a demo one', async () => {

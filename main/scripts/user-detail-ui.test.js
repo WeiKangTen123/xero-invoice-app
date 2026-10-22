@@ -235,13 +235,12 @@ describe('sessions', () => {
     expect(d.sessionsHeading(undefined)).toBe('Sessions');
   });
 
-  test('an empty list from an account about in the last day says older sessions are not listed', () => {
-    const note = 'Sessions started before this update are not listed; they end within a day.';
-    expect(d.UNLISTED_SESSIONS_NOTE).toBe(note);
-    expect(d.sessionsNote([], { lastSeenAt: ago(3 * HOUR) }, NOW)).toBe(note);
-    expect(d.sessionsNote([], { online: true }, NOW)).toBe(note);
-    expect(d.sessionsNote([], { lastSeenAt: ago(2 * DAY) }, NOW)).toBe('');
-    expect(d.sessionsNote([], { lastSeenAt: null }, NOW)).toBe('');
+  // A token from before sessions were kept is now refused, so every way in is
+  // listed: an empty list is signed in nowhere, and there is nothing to add.
+  test('an empty list needs no note: every token now belongs to a listed session', () => {
+    expect(d.UNLISTED_SESSIONS_NOTE).toBe('');
+    expect(d.sessionsNote([], { lastSeenAt: ago(3 * HOUR) }, NOW)).toBe('');
+    expect(d.sessionsNote([], { online: true }, NOW)).toBe('');
     expect(d.sessionsNote([phone], { online: true }, NOW)).toBe('');
   });
 });
@@ -475,7 +474,8 @@ describe('Admin › Users opens the panel and shares its handlers with it', () =
 
   test('a control refreshes the open panel, and says how it went where the panel shows it', () => {
     const control = admin.slice(admin.indexOf('async function control(key, u, send, done) {'), admin.indexOf('function openDetail('));
-    expect(control).toMatch(/if \(done\) toast\.success\(done\);\s+setDetailRefresh\(n => n \+ 1\);\s+await fetchUsers\(\);\s+return true;/);
+    // `done` is the toast, or a function making it from the server's answer.
+    expect(control).toMatch(/const answer = await send\(\);\s+if \(done\) toast\.success\(typeof done === 'function' \? done\(answer \|\| \{\}\) : done\);\s+setDetailRefresh\(n => n \+ 1\);\s+await fetchUsers\(\);\s+return true;/);
     expect(control).toMatch(/setActionError\(err\.message\);/);
     // The reset password dialog, opened from the panel, refreshes it too.
     expect(admin).toMatch(/setResetting\(null\);\s+setDetailRefresh\(n => n \+ 1\);\s+fetchUsers\(\);/);

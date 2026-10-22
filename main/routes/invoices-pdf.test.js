@@ -54,7 +54,7 @@ describe('GET /api/invoices/:id/pdf — who may read it', () => {
 
   test('a Bearer token from before a password reset is refused', async () => {
     const stale = sessionToken(user, 5);
-    await users.setPassword(user.id, 'newpassword1');
+    await users.setPassword(user.id, 'new-password-2026');
     await withBearer(stale).expect(401);
   });
 
@@ -76,6 +76,32 @@ describe('GET /api/invoices/:id/pdf — who may read it', () => {
     await withLink(link).expect(200);
     users.setDisabled(user.id, true);
     await withLink(link).expect(401);
+  });
+
+  // The session rules reach this route too, since it asks sessionUser: a
+  // session twelve hours old is over, and a token naming no session is
+  // refused on a server.
+  test('a Bearer token whose session began more than twelve hours ago is refused; a token with no session too', async () => {
+    const sessions = require('../utils/sessions');
+    const db  = require('../db');
+    const sid = sessions.startSession(user.id);
+    const of  = s => jwt.sign({ id: user.id, email: user.email, role: user.role, sid: s }, jwtSecret(), { expiresIn: '2h' });
+    await withBearer(of(sid)).expect(200);
+    db.prepare('UPDATE sessions SET created_at = ? WHERE id = ?').run(new Date(Date.now() - 12 * 60 * 60 * 1000 - 60000).toISOString(), sid);
+    const old = await withBearer(of(sid)).expect(401);
+    expect(old.body.error).toBe('Your session ended 12 hours after you signed in. Sign in again.');
+
+    // As a server runs: production, with a secret of its own.
+    const saved = { NODE_ENV: process.env.NODE_ENV, JWT_SECRET: process.env.JWT_SECRET };
+    process.env.NODE_ENV   = 'production';
+    process.env.JWT_SECRET = 'a-real-secret-for-this-test-0123456789abcdef';
+    try {
+      const none = await withBearer(sessionToken(user)).expect(401);
+      expect(none.body.error).toBe('Your session has ended. Sign in again.');
+      await withBearer(of(sessions.startSession(user.id))).expect(200);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
   });
 
   // requireAuth's other check: an account that must choose a new password

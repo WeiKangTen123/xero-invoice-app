@@ -24,7 +24,8 @@ describe('users store (SQLite)', () => {
 
   test('createUser rejects duplicate email', async () => {
     await users.createUser('dup@test.com', 'password123', 'user');
-    await expect(users.createUser('dup@test.com', 'password123', 'user')).rejects.toThrow('Email already exists');
+    await expect(users.createUser('dup@test.com', 'password123', 'user'))
+      .rejects.toMatchObject({ code: 'EMAIL_EXISTS', message: 'An account with this email already exists' });
   });
 
   test('validatePassword', async () => {
@@ -373,7 +374,11 @@ describe('users store (SQLite)', () => {
       // As the Admin page sees it.
       expect(users.getAllUsers().find(x => x.id === u.id)).toMatchObject({ failedLogins: 0, lockedUntil: fifth.locked_until, lastLoginAt: null });
 
-      users.recordSuccessfulLogin(u.id);
+      // A right password while the lock stands clears nothing (the route
+      // answers 423); once it has ended, the slate is wiped.
+      expect(users.recordSuccessfulLogin(u.id)).toBe(false);
+      expect(users.findById(u.id)).toMatchObject({ lock_count: 1, locked_until: fifth.locked_until, last_login_at: null });
+      expect(users.recordSuccessfulLogin(u.id, Date.parse(fifth.locked_until))).toBe(true);
       expect(users.findById(u.id)).toMatchObject({ failed_logins: 0, lock_count: 0, locked_until: null, last_locked_at: null, last_login_at: expect.any(String) });
       expect(users.getAllUsers().find(x => x.id === u.id).lastLoginAt).toBe(users.findById(u.id).last_login_at);
 

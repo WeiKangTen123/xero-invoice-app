@@ -74,11 +74,60 @@ describe('Admin › Add User: why it cannot be sent yet (addUserProblem)', () =>
     expect(users.addUserProblem(form({ mailboxFilterFrom: undefined }))).toBe(problem);
   });
 
+  // The mail server matches the filter anywhere in a sender, so the server
+  // takes one whole address (routes/admin.js FULL_ADDRESS); so does the form.
+  test('the sender must be one whole address, not a domain or part of one', () => {
+    for (const filter of ['gmail.com', 'vendor', '@vendor.com', 'bills@', 'bills@vendor', 'a@b.com, c@d.com',
+      'Bills <bills@vendor.com>', 'bills @vendor.com', 'bills@vendor..com']) {
+      expect(users.addUserProblem(form({ mailboxFilterFrom: filter })))
+        .toBe('Mailbox needs one whole sender address, such as bills@vendor.com: a domain or part of an address would match almost every email');
+    }
+    for (const filter of ['bills@vendor.com', ' Bills.Payable+sg@mail.vendor.co.uk ']) {
+      expect(users.addUserProblem(form({ mailboxFilterFrom: filter }))).toBeNull();
+    }
+  });
+
+  test('the form and the server ask the same of the address', () => {
+    const pattern = src => src.match(/const FULL_ADDRESS = (\/.+\/);/)[1];
+    expect(pattern(read('pages/admin/users.js'))).toBe(pattern(fs.readFileSync(path.join(__dirname, '../routes/admin.js'), 'utf8')));
+  });
+
   test('with a sender, without the mailbox, or for an ordinary account, nothing stands in the way', () => {
     expect(users.addUserProblem(form())).toBeNull();
     expect(users.addUserProblem(form({ copyFrom: { llm: true, defaults: true, mailbox: false }, mailboxFilterFrom: '' }))).toBeNull();
     expect(users.addUserProblem(form({ demo: false, mailboxFilterFrom: '' }))).toBeNull();
     expect(users.addUserProblem(null)).toBeNull();
+  });
+});
+
+describe('Admin › Add User: what the banner says once it is made (createdMessage)', () => {
+  const sent = extra => users.addUserPayload(form(extra));
+
+  test('names what was copied, from the answer, in the order the boxes show', () => {
+    expect(users.createdMessage(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['mailbox', 'llm', 'defaults'] }))
+      .toBe('Demo account demo@nexsoss.com created. Copied: LLM keys, invoice defaults, mailbox.');
+  });
+
+  test('names a ticked group the answer did not copy: the admin had nothing in it', () => {
+    expect(users.createdMessage(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['llm', 'defaults'] }))
+      .toBe('Demo account demo@nexsoss.com created. Copied: LLM keys, invoice defaults. Not copied, as you have none set up: mailbox.');
+    expect(users.createdMessage(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: [] }))
+      .toBe('Demo account demo@nexsoss.com created. Not copied, as you have none set up: LLM keys, invoice defaults, mailbox.');
+    // Unticked is not "not copied".
+    expect(users.createdMessage(sent({ copyFrom: { llm: true, defaults: false, mailbox: false } }), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['llm'] }))
+      .toBe('Demo account demo@nexsoss.com created. Copied: LLM keys.');
+  });
+
+  test('an ordinary account says only that it was made', () => {
+    expect(users.createdMessage(sent({ demo: false }), { user: { email: 'demo@nexsoss.com', demo: false }, copied: [] }))
+      .toBe('User demo@nexsoss.com created.');
+  });
+
+  test('an answer with nothing in it falls back to what was sent', () => {
+    expect(users.createdMessage(sent(), {})).toBe('Demo account demo@nexsoss.com created. Not copied, as you have none set up: LLM keys, invoice defaults, mailbox.');
+    expect(users.createdMessage(sent({ demo: false }), undefined)).toBe('User demo@nexsoss.com created.');
+    expect(users.createdMessage(sent(), { user: { email: 'demo@nexsoss.com', demo: true }, copied: ['xero', 'llm'] }))
+      .toBe('Demo account demo@nexsoss.com created. Copied: LLM keys. Not copied, as you have none set up: invoice defaults, mailbox.');
   });
 });
 
@@ -193,11 +242,14 @@ describe('Admin › Users is wired to them', () => {
   const admin = read('pages/Admin.jsx');
 
   test('the form sends demo, copyFrom and mailboxFilterFrom through the helper, and is held while it has a problem', () => {
-    expect(admin).toMatch(/import \{ lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem \} from '\.\/admin\/users';/);
+    expect(admin).toMatch(/import \{ lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem, createdMessage \} from '\.\/admin\/users';/);
     expect(admin).toContain('const form = { email, password: pass, role, demo, copyFrom, mailboxFilterFrom: filterFrom };');
     expect(admin).toContain('const createProblem = addUserProblem(form);');
     expect(admin).toContain('if (createProblem) { setError(createProblem); return; }');
-    expect(admin).toContain("await api.post('/admin/users', addUserPayload(form));");
+    expect(admin).toContain('const payload = addUserPayload(form);');
+    expect(admin).toContain("const created = await api.post('/admin/users', payload);");
+    // The banner says what was copied, from the answer.
+    expect(admin).toContain('showSuccess(createdMessage(payload, created), 7000);');
     expect(admin).toMatch(/disabled=\{!!passProblem \|\| !!createProblem\}\s+title=\{createProblem \|\| undefined\}/);
     // The form starts over after a create, demo block included.
     expect(admin).toContain("setDemo(false); setCopyFrom(copyDefaults()); setFilterFrom('');");
@@ -247,6 +299,19 @@ describe('Admin › Users is wired to them', () => {
     expect(role).toContain("const newPassword = role === 'admin' && u.demo === true;");
     expect(role).toContain('As a demo account, it must choose a new password before anything else.');
     expect(role).toContain('They must choose a new password before anything else.');
+  });
+
+  // An admin on sample data with their own Xero is switched back to it when
+  // made a user (routes/admin.js); the page warns first and says whether it
+  // happened, from the answer.
+  test('removing admin from someone on sample data says they go back to their own Xero', () => {
+    const role = admin.slice(admin.indexOf('async function handleRole('), admin.indexOf('async function handleSignOut('));
+    expect(role).toContain("const onSample = role === 'user' && u.demo === true;");
+    expect(role).toContain('They are on sample data: if they have their own Xero connection, they are switched back to it, as a user cannot switch.');
+    expect(role).toMatch(/answer => `[^`]*\$\{answer\.switchedToXero \? ' They are back on their own Xero\.' : ''\}`/);
+    // control() hands a function its answer.
+    expect(admin).toContain('const answer = await send();');
+    expect(admin).toContain("if (done) toast.success(typeof done === 'function' ? done(answer || {}) : done);");
   });
 });
 

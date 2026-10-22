@@ -235,17 +235,13 @@ export function sessionsHeading(sessions) {
   return n > 0 ? `Sessions (${n} active)` : 'Sessions';
 }
 
-// Sessions are listed from this update on; a token issued before it is not
-// in the list but still works until it expires, within a day. Said when the
-// list is empty and the account was about in the last day, so an empty list
-// is not read as "signed in nowhere".
-export const UNLISTED_SESSIONS_NOTE = 'Sessions started before this update are not listed; they end within a day.';
+// Every token now belongs to a listed session (a token from before sessions
+// were kept is refused, auth-middleware.js), so an empty list means signed in
+// nowhere and needs no note. Kept as a function so the panel's call stands.
+export const UNLISTED_SESSIONS_NOTE = '';
 
-export function sessionsNote(sessions, user, now = Date.now()) {
-  if (Array.isArray(sessions) && sessions.length > 0) return '';
-  if (user?.online === true) return UNLISTED_SESSIONS_NOTE;
-  const seen = toMs(user?.lastSeenAt);
-  return Number.isFinite(seen) && toMs(now) - seen < 24 * 3600 * 1000 ? UNLISTED_SESSIONS_NOTE : '';
+export function sessionsNote() {
+  return '';
 }
 
 // ── Work ─────────────────────────────────────────────────────────────────────

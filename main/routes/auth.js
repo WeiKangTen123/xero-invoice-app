@@ -2,13 +2,15 @@ const express = require('express');
 const router  = express.Router();
 const rateLimit = require('express-rate-limit');
 const {
-  hasUsers, findByEmail, createUser, validatePassword, verifiedPasswordHash, passwordProblem, setPassword, invalidateSessions,
+  hasUsers, findById, findByEmail, normalizeEmail, emailProblem, createUser, validatePassword, verifyDummy,
+  verifiedPasswordHash, passwordProblem, setPassword, invalidateSessions,
   requirePasswordChange,
   lockStatus, recordFailedLogin, recordSuccessfulLogin, temporaryPasswordExpired, LOCK_AFTER_FAILURES,
   getUserConfig, DEFAULT_TIMEZONE,
 } = require('../utils/users');
 // Session tokens are signed in one place, auth-middleware.js#signSession,
-// which sets how long they last (24 hours, renewed while in use).
+// which sets how long they last (two hours, renewed while in use, and never
+// past twelve hours from the sign-in).
 const { requireAuth, signSession, SESSION_TOKEN_HEADER } = require('../middleware/auth-middleware');
 const asyncHandler = require('../middleware/async-handler');
 const logger   = require('../utils/logger');
@@ -19,6 +21,21 @@ const notify   = require('../utils/notify');
 // What a locked account is told, whatever the password. The body carries
 // when the lock ends and the whole minutes left, for the form to say so.
 const LOCKED_MESSAGE = 'Too many failed attempts. This account is locked.';
+
+// What a sign-in or registration missing either half, or sending something
+// other than text for one, is told. A number for a password used to reach the
+// hash, which threw: a 500 for an address with an account and a 401 for one
+// without, which told a stranger which addresses exist.
+const CREDENTIALS_REQUIRED = 'Email and password are required';
+
+// Both halves present, and both text.
+function credentialsFrom(body) {
+  const { email, password } = body || {};
+  if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) return null;
+  return { email, password };
+}
+
+const REGISTRATION_CLOSED = 'Public registration is disabled. Contact your administrator.';
 
 // Where a request came from, as the sign-in records keep it: the address
 // (req.ip, the client's own behind the proxy: index.js sets trust proxy, and
@@ -47,10 +64,10 @@ function securityAlert(text) {
 }
 
 // An attempt on a locked account is recorded at most once a minute per
-// account. It is turned away before the password is checked, so a guesser
-// can make as many as the per-IP limit allows each of their addresses, and a
-// row for each would bury the rest of the trail; one a minute still shows
-// that the guessing went on, and from where.
+// account. It is turned away without counting, so a guesser can make as many
+// as the per-IP limit allows each of their addresses, and a row for each
+// would bury the rest of the trail; one a minute still shows that the
+// guessing went on, and from where.
 const LOCKED_ATTEMPT_EVERY_MS = 60 * 1000;
 
 function recordLockedAttempt(row, client) {
@@ -83,6 +100,36 @@ function earlierSignInAddresses(userId) {
   } catch (_) {
     return [];
   }
+}
+
+// ── A lock does not keep the owner out at a known address ───────────────────
+// Five wrong passwords lock an account for everyone, so anyone who knows an
+// address could keep its owner out with five guesses each time the lock ends.
+// The right password is let through from an address this account signed in
+// from in the last 90 days (a login.success in the trail): the owner at their
+// desk gets in, while the lock goes on turning everyone else away, and is left
+// standing for them (recordSuccessfulLogin clears nothing while it is in
+// force). A wrong password from a known address is turned away like any
+// other, and counts nothing while the lock lasts; the per-IP limit is what
+// slows someone guessing from behind the same address as the owner.
+const KNOWN_ADDRESS_DAYS = 90;
+const KNOWN_ADDRESS_MAX  = 1000;
+
+function signedInFromBefore(userId, ip) {
+  if (!ip) return false;
+  try {
+    const since = new Date(Date.now() - KNOWN_ADDRESS_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    return auditLog.signInAddressesSince(userId, since, { limit: KNOWN_ADDRESS_MAX }).includes(String(ip));
+  } catch (_) {
+    return false;
+  }
+}
+
+// The 423 for a locked account, recorded (at most once a minute) and logged.
+function refuseLocked(res, row, client, lock) {
+  recordLockedAttempt(row, client);
+  logger.info('Sign-in refused: account locked', { email: row.email, ip: client.ip, lockedUntil: lock?.lockedUntil });
+  return res.status(423).json({ error: LOCKED_MESSAGE, ...(lock || {}) });
 }
 
 // Resolves whether an alert went. Never rejects; run after the response, so
@@ -131,9 +178,10 @@ async function alertNewCountry(user, ip, earlier) {
 // for the token the caller hands back. The cutoff the caller has just moved
 // (users.js) already refuses the other sessions' tokens; this is so the
 // sessions say they ended, and why, rather than stay in the list until they
-// run out. A token from before sessions were kept has none, and this device
-// gets one now, so its new token is like any other. Never fails the request:
-// at worst the token handed back has no sid, which is still accepted.
+// run out. A token with no session (the test suite's: auth-middleware.js
+// refuses any other) gets one now, so its new token is like any other. Never
+// fails the request: at worst the token handed back has no sid, and this
+// device is asked to sign in again at its next request.
 function keepOnlyThisSession(req, reason) {
   let sid = req.user.sid || null;
   try {
@@ -145,10 +193,15 @@ function keepOnlyThisSession(req, reason) {
   return sid;
 }
 
-// Strict rate limiter for authentication endpoints: max 10 attempts per 15 minutes per IP
+// Strict rate limiter for authentication endpoints: at most 10 failed
+// attempts per 15 minutes per IP. Only failures count (any answer of 400 or
+// more: a wrong password, a lock, a refused registration). Every attempt used
+// to, and an office behind one address was shut out after its tenth sign-in
+// of the morning.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: process.env.NODE_ENV === 'test' ? 1000 : 10,
+  skipSuccessfulRequests: true,
   keyGenerator: req => req.ip,
   message: { error: 'Too many login or registration attempts from this IP. Please try again in 15 minutes.' },
   standardHeaders: true,
@@ -179,47 +232,77 @@ router.get('/status', (_req, res) => {
 // reopens it. It used to be the other way round — open unless the flag said
 // "false" — and the flag was documented nowhere, so the public URL took anyone.
 // Returns a JWT immediately so the user lands on Setup without a second login step.
+//
+// Whether this may be the first account is asked twice: here, cheaply, so a
+// closed form costs no hash; and again inside the transaction that inserts
+// (users.js createUser, firstOnly), which is the answer that counts. Asked
+// only here, before the slow hash, three registrations at once all got in.
+// Each refusal has its own status (403 closed, 409 taken, 400 a bad address);
+// anything else is a 500 that says nothing of why, which goes to the log.
 router.post('/register', authLimiter, asyncHandler(async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
+    const creds = credentialsFrom(req.body);
+    if (!creds) return res.status(400).json({ error: CREDENTIALS_REQUIRED });
+    const { email, password } = creds;
+    const badEmail = emailProblem(email);
+    if (badEmail) return res.status(400).json({ error: badEmail });
     const problem = passwordProblem(password, email);
     if (problem) return res.status(400).json({ error: problem });
 
-    if (hasUsers() && process.env.ALLOW_REGISTRATION !== 'true') {
-      return res.status(403).json({ error: 'Public registration is disabled. Contact your administrator.' });
-    }
+    const open = process.env.ALLOW_REGISTRATION === 'true';
+    if (!open && hasUsers()) return res.status(403).json({ error: REGISTRATION_CLOSED });
 
-    const user  = await createUser(email, password, 'auto');
+    let user;
+    try {
+      user = await createUser(email, password, 'auto', { firstOnly: !open });
+    } catch (err) {
+      if (err.code === 'REGISTRATION_CLOSED') return res.status(403).json({ error: REGISTRATION_CLOSED });
+      if (err.code === 'EMAIL_INVALID')       return res.status(400).json({ error: err.message });
+      if (err.code === 'EMAIL_EXISTS')        return res.status(409).json({ error: 'An account with this email already exists' });
+      throw err;
+    }
+    const client = clientOf(req);
+    // In the trail beside the accounts admins make, with where it came from:
+    // the first account is the one that holds every other.
+    auditLog.recordAdminEvent({ actor: user, target: user, action: 'user.register', details: { role: user.role, ...client } });
     const token = signSession(user, { sid: startSessionFor(user, req) });
-    logger.info('User registered', { email, role: user.role });
+    logger.info('User registered', { email: user.email, role: user.role, ip: client.ip });
     res.status(201).json({ success: true, user, token });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    logger.error('Registration failed', { error: err.message });
+    res.status(500).json({ error: 'Could not create the account' });
   }
 }));
 
 // Login. The per-account lockout (users.js#lockAfterFailure) stands in front
-// of the password check: a locked account answers 423 to every attempt, right
-// password or wrong, and nothing is counted or written until the lock ends.
-// Each outcome goes in the audit trail with the address and browser it came
-// from (clientOf), so a person can see their own sign-ins on the Account page
-// and an admin can see a guesser at work. The address typed is kept for a
-// failure; the password never. A sign-in that goes through starts a session
-// (utils/sessions.js), whose id the token carries.
+// of the sign-in: a locked account answers 423 to every attempt, right
+// password or wrong, and nothing is counted or written until the lock ends,
+// except the right password from an address the account has signed in from
+// before (signedInFromBefore). Each outcome goes in the audit trail with the
+// address and browser it came from (clientOf), so a person can see their own
+// sign-ins on the Account page and an admin can see a guesser at work. The
+// address typed is kept for a failure; the password never. A sign-in that
+// goes through starts a session (utils/sessions.js), whose id the token
+// carries.
+//
+// Every attempt with both halves costs one password check, whether the
+// address has an account or not (verifyDummy) and whether it is locked or
+// not, so how long the answer takes does not say which addresses exist: an
+// unknown one used to answer in 4 ms and a known one in 79.
 router.post('/login', authLimiter, asyncHandler(async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
-    const client = clientOf(req);
-    const { ip } = client;
-    const typed  = String(email).slice(0, 200);
-    const row    = findByEmail(typed);
+    const creds = credentialsFrom(req.body);
+    if (!creds) return res.status(400).json({ error: CREDENTIALS_REQUIRED });
+    const { password } = creds;
+    const client  = clientOf(req);
+    const { ip }  = client;
+    // Looked up whole (an address cut short could name someone else's
+    // account); kept in the trail cut to 200 characters.
+    const address = normalizeEmail(creds.email);
+    const typed   = address.slice(0, 200);
+    const row     = findByEmail(address);
     if (!row) {
+      await verifyDummy(password);
       // The same answer as a wrong password, so the form does not say which
       // addresses exist. Recorded all the same: someone trying addresses is
       // worth seeing, and the account it names does not exist to be shown it.
@@ -227,13 +310,15 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
       logger.info('Sign-in failed', { email: typed, ip, reason: 'no such account' });
       return res.status(401).json({ error: 'Invalid email or password' });
     }
+    // Read before the slow check, so a lock that lands during it (a guess
+    // sent alongside this one) is caught by recordSuccessfulLogin below.
     const lock = lockStatus(row);
+    const user = await validatePassword(address, password);
+    let viaKnownAddress = false;
     if (lock) {
-      recordLockedAttempt(row, client);
-      logger.info('Sign-in refused: account locked', { email: row.email, ip, lockedUntil: lock.lockedUntil });
-      return res.status(423).json({ error: LOCKED_MESSAGE, ...lock });
+      if (!user || !signedInFromBefore(row.id, ip)) return refuseLocked(res, row, client, lock);
+      viaKnownAddress = true;
     }
-    const user = await validatePassword(typed, password);
     if (!user) {
       const next = recordFailedLogin(row.id);
       auditLog.recordAdminEvent({ actor: null, target: row, action: 'login.failed', details: { email: typed, ...client } });
@@ -272,6 +357,20 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
       return res.status(401).json({ error: 'This temporary password has expired. Ask your administrator for a new one.' });
     }
 
+    const earlier = earlierSignInAddresses(user.id);
+    // Clears the lockout record, unless a lock is in force: the lock read
+    // above was taken before the slow check, and a wrong guess sent alongside
+    // this one may have locked the account since. Then this is refused as
+    // locked like any attempt made after it, unless it is the owner at a
+    // known address; a lock in force is never cleared by it either way.
+    if (!recordSuccessfulLogin(user.id) && !viaKnownAddress) {
+      if (!signedInFromBefore(user.id, ip)) return refuseLocked(res, row, client, lockStatus(findById(user.id)));
+      viaKnownAddress = true;
+    }
+    if (viaKnownAddress) {
+      logger.info('Signed in to a locked account from an address it has signed in from before', { email: user.email, ip });
+    }
+
     // The one moment the password itself is in hand: one the rules now refuse
     // (set before they tightened, or a demo account's short one from before
     // that exception went) still signs in, and is then the only thing the
@@ -283,9 +382,9 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
       logger.info('Password no longer meets the rules: a new one is required', { email: user.email });
     }
 
-    const earlier = earlierSignInAddresses(user.id);
-    recordSuccessfulLogin(user.id);
-    auditLog.recordAdminEvent({ actor: user, target: user, action: 'login.success', details: { ...client } });
+    auditLog.recordAdminEvent({
+      actor: user, target: user, action: 'login.success', details: viaKnownAddress ? { ...client, viaKnownAddress: true } : { ...client },
+    });
     const token = signSession(signedIn, { sid: startSessionFor(signedIn, req) });
     logger.info('User logged in', { email: user.email, role: user.role, ip });
     // `user` is sanitized (users.js), so it carries mustChangePassword: the

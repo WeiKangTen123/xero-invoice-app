@@ -46,12 +46,14 @@ describe('routes/auth sessions and sign-in records', () => {
   const row = sid => db.prepare('SELECT * FROM sessions WHERE id = ?').get(sid);
   const adminEvents = () => db.prepare('SELECT * FROM admin_events ORDER BY id').all()
     .map(r => ({ ...r, details: r.details ? JSON.parse(r.details) : null }));
-  // A token from before sessions were kept: no sid.
+  // A token from before sessions were kept: no sid. Refused on a server;
+  // accepted only while the test suite runs (auth-middleware.js).
   const legacyToken = (u, secondsAgo = 0) => jwt.sign(
     { id: u.id, email: u.email, role: u.role, iat: Math.floor(Date.now() / 1000) - secondsAgo }, auth.jwtSecret(), { expiresIn: 24 * HOUR });
   // A token of this session made `secondsAgo` ago, as a sign-in would have.
   const sessionToken = (u, sid, secondsAgo = 0, extra = {}) => jwt.sign(
-    { id: u.id, email: u.email, role: u.role, sid, iat: Math.floor(Date.now() / 1000) - secondsAgo, ...extra }, auth.jwtSecret(), { expiresIn: 24 * HOUR });
+    { id: u.id, email: u.email, role: u.role, sid, iat: Math.floor(Date.now() / 1000) - secondsAgo, ...extra }, auth.jwtSecret(), { expiresIn: 2 * HOUR });
+  const DUE = HOUR / 2;   // old enough to be due a renewal (a quarter hour), young enough to be good
   // The new-country check runs after the response.
   const settle = () => new Promise(resolve => setTimeout(resolve, 30));
 
@@ -79,7 +81,7 @@ describe('routes/auth sessions and sign-in records', () => {
     test('a renewal keeps the sid: it is the same session', async () => {
       const u = await users.createUser('slide@test.com', PW, 'user');
       const sid = sessions.startSession(u.id);
-      const res = await as(sessionToken(u, sid, 2 * HOUR), 'get', '/api/auth/me').expect(200);
+      const res = await as(sessionToken(u, sid, DUE), 'get', '/api/auth/me').expect(200);
       const renewed = jwt.verify(res.headers['x-session-token'], auth.jwtSecret());
       expect(renewed).toMatchObject({ id: u.id, sid, renewed: true });
       expect(res.body.user.sid).toBe(sid);
@@ -122,18 +124,34 @@ describe('routes/auth sessions and sign-in records', () => {
     test('Sign out with a token due a renewal hands none back: it would be of the ended session', async () => {
       const u = await users.createUser('late@test.com', PW, 'user');
       const sid = sessions.startSession(u.id);
-      const res = await as(sessionToken(u, sid, 2 * HOUR), 'post', '/api/auth/logout').expect(200);
+      const res = await as(sessionToken(u, sid, DUE), 'post', '/api/auth/logout').expect(200);
       expect(res.headers['x-session-token']).toBeUndefined();
     });
 
-    test('a token from before sessions were kept still works, and Sign out with it is still recorded', async () => {
-      const u = await users.createUser('legacy@test.com', PW, 'user');
+    test('a token from before sessions were kept is refused on a server: nothing could end it', async () => {
+      // As a server runs: production, with a secret of its own.
+      const saved = { NODE_ENV: process.env.NODE_ENV, JWT_SECRET: process.env.JWT_SECRET };
+      process.env.NODE_ENV   = 'production';
+      process.env.JWT_SECRET = 'a-real-secret-for-this-test-0123456789abcdef';
+      try {
+        const u = await users.createUser('legacy@test.com', PW, 'user');
+        const res = await as(legacyToken(u), 'get', '/api/invoices').expect(401);
+        expect(res.body.error).toBe('Your session has ended. Sign in again.');
+        await as(legacyToken(u), 'post', '/api/auth/logout').expect(401);
+        // Signing in again gives it a session like any other.
+        const { body: { token } } = await login('legacy@test.com', PW).expect(200);
+        expect((await as(token, 'get', '/api/invoices').expect(200)).body).toEqual({ sid: jwt.decode(token).sid });
+      } finally {
+        for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+      }
+    });
+
+    test('while the test suite runs one is let through, and Sign out with it is still recorded', async () => {
+      const u = await users.createUser('suite@test.com', PW, 'user');
       const token = legacyToken(u);
       expect((await as(token, 'get', '/api/invoices').expect(200)).body).toEqual({ sid: null });
       await as(token, 'post', '/api/auth/logout').expect(200);
       expect(adminEvents().pop()).toMatchObject({ action: 'logout', target_user_id: u.id });
-      // Nothing to end, so it runs out on its own.
-      await as(token, 'get', '/api/auth/me').expect(200);
     });
 
     test('change-password keeps this session, ends the others as password_changed, and dates the password', async () => {
@@ -165,7 +183,7 @@ describe('routes/auth sessions and sign-in records', () => {
       expect(sessions.listSessions(u.id).map(s => s.sid)).toEqual([jwt.decode(mine).sid]);
     });
 
-    test('from a token with no session, those two give this device a new one and still end the rest', async () => {
+    test('from a token with no session (the suite\'s), those two give this device a new one and still end the rest', async () => {
       const u = await users.createUser('upgrade@test.com', PW, 'user');
       const theirs = (await login('upgrade@test.com', PW).expect(200)).body.token;
       const res = await as(legacyToken(u, 5), 'post', '/api/auth/sign-out-everywhere').expect(200);
@@ -228,7 +246,9 @@ describe('routes/auth sessions and sign-in records', () => {
       const u = await users.createUser('acct@test.com', PW, 'user');
       const { body: { token } } = await login('acct@test.com', PW).expect(200);
       db.prepare('UPDATE users SET locked_until = ? WHERE id = ?').run(new Date(Date.now() + 60 * 1000).toISOString(), u.id);
-      await login('acct@test.com', PW).expect(423);
+      // A wrong password: the right one from this address, signed in from
+      // before, would be let through (routes/auth.js signedInFromBefore).
+      await login('acct@test.com', 'wrong').expect(423);
       const res = await as(token, 'get', '/api/auth/sign-ins').expect(200);
       expect(res.body.events).toEqual([
         { at: expect.any(String), action: 'login.refused', ip: '203.0.113.5', ua: UA, reason: 'locked' },

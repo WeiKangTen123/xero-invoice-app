@@ -298,7 +298,7 @@ function issueExportToken(userId, spec) {
 }
 
 function verifyExportToken(token) {
-  const payload = jwt.verify(token, jwtSecret());
+  const payload = jwt.verify(token, jwtSecret(), { algorithms: ['HS256'] });
   if (payload.purpose !== 'budget-export') throw new Error('Token scope mismatch');
   return payload;
 }

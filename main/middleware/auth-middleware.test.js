@@ -53,9 +53,10 @@ describe('auth-middleware secrets', () => {
     expect(auth.PASSWORD_CHANGE_REQUIRED).toEqual({ error: 'Set a new password to continue.', code: 'password_change_required' });
   });
 
-  // A sign-in's token names its session; the session must still be live.
-  // A token from before sessions were kept names none and is accepted.
-  test('sessionUser: a token whose session has ended, or does not exist, is signed out; one with no sid is accepted', async () => {
+  // A sign-in's token names its session; the session must still be live, and
+  // less than twelve hours old. A token that names none is refused, except
+  // the test suite's own while it runs.
+  test('sessionUser: a token whose session has ended, or does not exist, is signed out; one with no sid is refused', async () => {
     process.env.NODE_ENV = 'test';
     require('../db/migrate').run();
     const users    = require('../utils/users');
@@ -65,12 +66,38 @@ describe('auth-middleware secrets', () => {
     const token = auth.signSession(u, { sid });
     expect(jwt.decode(token)).toMatchObject({ id: u.id, sid });
     expect(jwt.decode(auth.signSession(u)).sid).toBeUndefined();
-    expect(auth.sessionUser(token)).toMatchObject({ user: { id: u.id }, claims: { sid } });
+    expect(auth.sessionUser(token)).toMatchObject({ user: { id: u.id }, claims: { sid }, session: { userId: u.id, startedAt: expect.any(Number) } });
     sessions.endSession(sid, 'logout');
     expect(auth.sessionUser(token)).toEqual({ error: 'You have been signed out. Sign in again.' });
     expect(auth.SIGNED_OUT_MESSAGE).toBe('You have been signed out. Sign in again.');
     expect(auth.sessionUser(auth.signSession(u, { sid: 'f'.repeat(32) }))).toEqual({ error: auth.SIGNED_OUT_MESSAGE });
-    expect(auth.sessionUser(auth.signSession(u))).toMatchObject({ user: { id: u.id } });
+
+    // No sid: under NODE_ENV=test, accepted (the route tests' tokens), with
+    // a secret of its own or without; on a server, refused.
+    delete process.env.JWT_SECRET;
+    expect(auth.sessionUser(auth.signSession(u))).toMatchObject({ user: { id: u.id }, session: null });
+    process.env.JWT_SECRET = 'x'.repeat(40);
+    expect(auth.sessionUser(auth.signSession(u))).toMatchObject({ user: { id: u.id }, session: null });
+    for (const NODE_ENV of ['production', 'development']) {
+      process.env.NODE_ENV = NODE_ENV;
+      expect(auth.sessionUser(auth.signSession(u))).toEqual({ error: 'Your session has ended. Sign in again.' });
+    }
+    expect(auth.SESSION_ENDED_MESSAGE).toBe('Your session has ended. Sign in again.');
+  });
+
+  test('signSession: two hours, cut short to end at the session\'s twelfth hour', async () => {
+    process.env.NODE_ENV = 'test';
+    require('../db/migrate').run();
+    const users    = require('../utils/users');
+    const sessions = require('../utils/sessions');
+    const u   = await users.createUser('mw2@test.com', 'password123', 'user');
+    const lifetime = t => { const c = jwt.decode(t); return c.exp - c.iat; };
+    expect(lifetime(auth.signSession(u, { sid: sessions.startSession(u.id) }))).toBe(2 * 60 * 60);
+    const startedAt = Date.now() - 11.5 * 60 * 60 * 1000;
+    expect(lifetime(auth.signSession(u, { sid: sessions.startSession(u.id), startedAt }))).toBeGreaterThanOrEqual(30 * 60 - 1);
+    expect(lifetime(auth.signSession(u, { sid: sessions.startSession(u.id), startedAt }))).toBeLessThanOrEqual(30 * 60);
+    // Never minted already dead.
+    expect(lifetime(auth.signSession(u, { sid: sessions.startSession(u.id), startedAt: Date.now() - 13 * 60 * 60 * 1000 }))).toBe(1);
   });
 
   test('jwtSecretProblem: missing is fatal; short or published is only a warning', () => {

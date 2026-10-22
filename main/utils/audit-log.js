@@ -25,7 +25,9 @@ const RETENTION_DAYS = 730;
 // security: long enough to see a guesser at work, or a sign-in the account's
 // owner does not recognise. Which actions count: SIGN_IN_ACTION_SQL.
 const SIGN_IN_RETENTION_DAYS = 90;
-const SIGN_IN_ACTION_SQL = "(action LIKE 'login.%' OR action = 'logout' OR action LIKE 'session.%')";
+// A first-run registration (user.register) holds the same address and
+// browser, so it goes with them.
+const SIGN_IN_ACTION_SQL = "(action LIKE 'login.%' OR action = 'logout' OR action LIKE 'session.%' OR action = 'user.register')";
 
 // One page of history. The review page shows a record's whole life in one
 // page nearly always; the cap is what keeps a pathological record (an import
@@ -169,6 +171,8 @@ function listInvoiceEvents({ invoiceId, userId = null, before = null, limit = PA
 // Every kind of admin event, with the label the Activity tab filters by.
 const ADMIN_ACTIONS = {
   'user.create':           'Created a user',
+  // The first account, made on the sign-in page (routes/auth.js register).
+  'user.register':         'Registered',
   'user.delete':           'Deleted a user',
   'user.role':             'Changed a role',
   'user.password_reset':   'Reset a password',
@@ -234,6 +238,7 @@ function describeAdminEvent(action, details, targetEmail) {
     case 'session.revoke':        return `Ended a session of ${who}`;
     case 'user.create':           return `Created ${who}${d.role === 'admin' ? ' as an admin' : ''}${d.demo ? ' as a demo account' : ''}`
       + (Array.isArray(d.copied) && d.copied.length ? ` with the ${d.copied.join(', ')} settings copied` : '');
+    case 'user.register':         return `Registered ${who}${d.role === 'admin' ? ' as the first admin' : ''}`;
     case 'user.delete':           return `Deleted ${who}${d.role === 'admin' ? ' (an admin)' : ''}`;
     case 'user.role':             return `Changed ${who} from ${d.from || '?'} to ${d.to || '?'}`;
     case 'user.password_reset':   return `Reset the password of ${who}`;

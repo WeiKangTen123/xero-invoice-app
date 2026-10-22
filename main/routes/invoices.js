@@ -27,7 +27,7 @@ function issuePdfToken(userId, invoiceId) {
 }
 
 function verifyPdfToken(token, invoiceId) {
-  const payload = jwt.verify(token, jwtSecret());
+  const payload = jwt.verify(token, jwtSecret(), { algorithms: ['HS256'] });
   if (payload.purpose !== 'pdf' || payload.invoiceId !== invoiceId) {
     throw new Error('Token scope mismatch');
   }

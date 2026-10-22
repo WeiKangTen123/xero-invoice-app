@@ -2,7 +2,7 @@ const fs   = require('fs');
 const path = require('path');
 const jwt  = require('jsonwebtoken');
 
-// The browser's half of 24-hour sliding sessions: ui/src/api/client.js stores
+// The browser's half of two-hour sliding sessions: ui/src/api/client.js stores
 // the fresh token the server hands back in X-Session-Token. There is no React
 // test setup in this project (see invoice-tabs.test.js), but client.js imports
 // nothing and touches only fetch, localStorage, window and atob, so it is run
@@ -19,7 +19,7 @@ function loadClient({ fetch, store = new Map(), pathname = '/invoices' }) {
     removeItem: k => { store.delete(k); },
   };
   const window = { location: { pathname, search: '', hash: '', href: pathname } };
-  const body = `${src.replace(/^export /gm, '')}\nreturn { api, tokenClaims, newerSessionToken, SESSION_TOKEN_HEADER, SET_PASSWORD_PATH };`;
+  const body = `${src.replace(/^export /gm, '')}\nreturn { api, tokenClaims, newerSessionToken, isAuthPath, SESSION_TOKEN_HEADER, SET_PASSWORD_PATH };`;
   const client = new Function('fetch', 'localStorage', 'window', 'atob', body)(fetch, localStorage, window, atob);
   return { ...client, store, window };
 }
@@ -121,9 +121,9 @@ describe('request() stores a renewed token', () => {
     await expect(c.api.get('/x')).rejects.toMatchObject({ status: 500 });
     expect(c.store.get('token')).toBe(old);
 
-    const d = loadClient({ fetch: async () => reply(401, { error: 'Your session ended after 24 hours away. Sign in again.' }) });
+    const d = loadClient({ fetch: async () => reply(401, { error: 'Your session ended after 2 hours without use. Sign in again.' }) });
     d.store.set('token', old);
-    await expect(d.api.get('/x')).rejects.toThrow('Your session ended after 24 hours away. Sign in again.');
+    await expect(d.api.get('/x')).rejects.toThrow('Your session ended after 2 hours without use. Sign in again.');
     expect(d.store.has('token')).toBe(false);
     expect(d.window.location.href).toBe('/login?next=%2Finvoices');
   });
@@ -141,6 +141,36 @@ describe('request() stores a renewed token', () => {
     expect(await c.api.get('/x')).toEqual({ ok: 1 });
     expect(sent).toEqual([`Bearer ${old}`, `Bearer ${fresh}`]);
     expect(c.store.get('token')).toBe(fresh);
+  });
+
+  // A 401 from sign-in is a wrong password, not a stale token: sent again
+  // because another tab had stored a token meanwhile, it counted twice
+  // towards the lock. Nothing under /auth is asked twice.
+  test('never for /auth/*: a wrong password is sent once, even when a token was stored meanwhile', async () => {
+    const fresh = token('u1', nowSec() + 5000);
+    const sent = [];
+    let c;
+    c = loadClient({ pathname: '/login', fetch: async (url, opts) => {
+      sent.push([url, opts.headers.Authorization]);
+      c.store.set('token', fresh);   // another tab signs in while this is out
+      return reply(401, { error: 'Invalid email or password' });
+    } });
+    await expect(c.api.post('/auth/login', { email: 'a@b.co', password: 'wrong' })).rejects.toMatchObject({ status: 401, message: 'Invalid email or password' });
+    expect(sent).toEqual([['/api/auth/login', undefined]]);
+    // The other tab's token is left alone, and nothing navigates.
+    expect(c.store.get('token')).toBe(fresh);
+    expect(c.window.location.href).toBe('/login');
+    // The same for the rest of /auth, a GET included.
+    sent.length = 0;
+    c.store.set('token', token('u1', nowSec() + 100));
+    await expect(c.api.get('/auth/me')).rejects.toMatchObject({ status: 401 });
+    expect(sent).toHaveLength(1);
+  });
+
+  test('isAuthPath: /auth and below, with or without a query; nothing else', () => {
+    const { isAuthPath } = loadClient({ fetch: async () => reply(200, {}) });
+    for (const p of ['/auth/login', '/auth/register', '/auth/me', '/auth/status?x=1', '/auth', '/auth?x']) expect(isAuthPath(p)).toBe(true);
+    for (const p of ['/authors', '/x/auth/login', '/invoices', '', undefined, null]) expect(isAuthPath(p)).toBe(false);
   });
 });
 

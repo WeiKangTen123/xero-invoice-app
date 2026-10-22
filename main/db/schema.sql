@@ -5,8 +5,13 @@
 
 CREATE TABLE IF NOT EXISTS users (
   id           TEXT PRIMARY KEY,
+  -- As users.js#normalizeEmail makes it: trimmed, Unicode NFC, lower case.
+  -- Also unique however cased (idx_users_email_nocase, the end of this file).
   email        TEXT NOT NULL UNIQUE,
+  -- An Argon2id hash, or a bcrypt one ($2a$/$2b$) from before, replaced at
+  -- its owner's next sign-in (users.js, Password hashes).
   password     TEXT NOT NULL,
+  -- 'admin' or 'user'; so is is_demo 0 or 1 (users_role_insert/_update).
   role         TEXT NOT NULL DEFAULT 'user',
   created_at   TEXT NOT NULL,
   -- Updated (throttled — at most once/minute, see users.js#touchLastSeen) on every
@@ -282,6 +287,10 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_status  ON invoices(user_id, status);
+-- duplicate_of's ON DELETE SET NULL looks up every row pointing at a deleted
+-- one. Unindexed, that was a scan of the table per row deleted: deleting an
+-- account with 3,000 invoices took 18 seconds.
+CREATE INDEX IF NOT EXISTS idx_invoices_duplicate_of ON invoices(duplicate_of);
 
 -- One posted Xero invoice can't back two local records for the same user. NULLs
 -- (every non-posted invoice) are exempt — SQLite treats each NULL as distinct, and
@@ -473,3 +482,37 @@ CREATE TABLE IF NOT EXISTS admin_events (
 );
 CREATE INDEX IF NOT EXISTS idx_admin_events_at     ON admin_events(at);
 CREATE INDEX IF NOT EXISTS idx_admin_events_target ON admin_events(target_user_id, at);
+
+-- ── Guards on users ─────────────────────────────────────────────────────────
+-- Applied by migrate.js after its steps, not with the rest of this file: on a
+-- database that already has accounts each one holds only if the rows there
+-- pass it, so migrate.js checks them first, and leaves out a guard they would
+-- break, with an error in the log naming the accounts, until they are put
+-- right (the next boot tries again). On a new database that is all of them,
+-- at once. Keep this section last, each statement after its own
+-- "-- guard: <name>" line; migrate.js reads them by those lines.
+
+-- guard: idx_users_email_nocase
+-- One account per address, however it is cased. Addresses are stored as
+-- users.js#normalizeEmail makes them (trimmed, NFC, lower case), so this is
+-- for a row written some other way. Not used by the sign-in lookup, which is
+-- `email = ?` on the column's own index.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nocase ON users(email COLLATE NOCASE);
+
+-- guard: users_role_insert
+-- A role is 'admin' or 'user', and is_demo is 0 or 1; anything else is a bug
+-- that would otherwise surface far from where it was written (an account no
+-- check recognises as either, a demo flag read as true by one test and false
+-- by another).
+CREATE TRIGGER IF NOT EXISTS users_role_insert BEFORE INSERT ON users
+WHEN NEW.role NOT IN ('admin', 'user') OR NEW.is_demo NOT IN (0, 1)
+BEGIN
+  SELECT RAISE(ABORT, 'users.role must be admin or user, and users.is_demo 0 or 1');
+END;
+
+-- guard: users_role_update
+CREATE TRIGGER IF NOT EXISTS users_role_update BEFORE UPDATE OF role, is_demo ON users
+WHEN NEW.role NOT IN ('admin', 'user') OR NEW.is_demo NOT IN (0, 1)
+BEGIN
+  SELECT RAISE(ABORT, 'users.role must be admin or user, and users.is_demo 0 or 1');
+END;

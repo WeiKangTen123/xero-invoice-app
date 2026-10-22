@@ -25,6 +25,8 @@ describe('utils/sessions', () => {
     expect(cols).toEqual(['id', 'user_id', 'created_at', 'last_seen_at', 'first_ip', 'last_ip', 'user_agent', 'ended_at', 'ended_reason', 'ended_by']);
     expect(db.prepare('PRAGMA index_info(idx_sessions_user)').all().map(c => c.name)).toEqual(['user_id', 'last_seen_at']);
     expect(sessions.SESSION_LIFETIME_MS).toBe(require('../middleware/auth-middleware').SESSION_TTL_SECONDS * 1000);
+    expect(sessions.SESSION_LIFETIME_MS).toBe(2 * HOUR);
+    expect(sessions.SESSION_MAX_AGE_MS).toBe(12 * HOUR);
   });
 
   test('startSession: a random 16-byte id, and the address and browser it began from', () => {
@@ -110,17 +112,33 @@ describe('utils/sessions', () => {
     expect(sessions.isSessionLive(undefined)).toBe(false);
   });
 
+  // What sessionUser reads on every request: whose the session is and when it
+  // began, which the twelve hours are counted from.
+  test('liveSession: the account and the start of a session not ended; null otherwise', () => {
+    const sid = sessions.startSession(jane.id);
+    const began = Date.now() - 3 * HOUR;
+    db.prepare('UPDATE sessions SET created_at = ? WHERE id = ?').run(new Date(began).toISOString(), sid);
+    expect(sessions.liveSession(sid)).toEqual({ userId: jane.id, startedAt: began });
+    sessions.endSession(sid, 'logout');
+    expect(sessions.liveSession(sid)).toBeNull();
+    for (const v of ['0'.repeat(32), null, undefined, '']) expect(sessions.liveSession(v)).toBeNull();
+  });
+
   test('listSessions: in use by default, most recently used first; active:false adds the ended ones, and says when one ran out', () => {
     const now = Date.now();
     const old     = sessions.startSession(jane.id, { ip: '10.0.0.1', userAgent: 'Firefox' });
     const recent  = sessions.startSession(jane.id, { ip: '10.0.0.2', userAgent: 'Safari' });
     const ended   = sessions.startSession(jane.id, { ip: '10.0.0.3' });
     const stale   = sessions.startSession(jane.id, { ip: '10.0.0.4' });
+    const long    = sessions.startSession(jane.id, { ip: '10.0.0.5' });
     sessions.startSession(john.id);
-    lastSeen(old, 3 * HOUR);
+    lastSeen(old, 90 * MIN);
     lastSeen(recent, 5 * MIN);
     sessions.endSession(ended, 'logout');
-    lastSeen(stale, DAY + MIN);
+    lastSeen(stale, 2 * HOUR + MIN);
+    // In use a minute ago, but begun more than twelve hours ago.
+    db.prepare('UPDATE sessions SET created_at = ?, last_seen_at = ? WHERE id = ?')
+      .run(new Date(now - 12 * HOUR - MIN).toISOString(), new Date(now - MIN).toISOString(), long);
 
     const active = sessions.listSessions(jane.id, { now });
     expect(active.map(s => s.sid)).toEqual([recent, old]);
@@ -131,12 +149,16 @@ describe('utils/sessions', () => {
     expect(sessions.listSessions(jane.id)).toHaveLength(2);
 
     const all = sessions.listSessions(jane.id, { active: false, now });
-    expect(all.map(s => s.sid)).toEqual([ended, recent, old, stale]);
+    expect(all.map(s => s.sid)).toEqual([ended, long, recent, old, stale]);
     expect(all[0]).toMatchObject({ endedReason: 'logout', endedAt: expect.any(String) });
-    // Nothing ended it: its last token ran out a day after it was last used.
+    // Nothing ended it: its last token ran out two hours after it was last used.
     const ranOut = all.find(s => s.sid === stale);
     expect(ranOut).toMatchObject({ endedReason: 'expired' });
-    expect(Date.parse(ranOut.endedAt)).toBe(Date.parse(ranOut.lastSeenAt) + DAY);
+    expect(Date.parse(ranOut.endedAt)).toBe(Date.parse(ranOut.lastSeenAt) + 2 * HOUR);
+    // And this one at its twelfth hour, however recently it was used.
+    const capped = all.find(s => s.sid === long);
+    expect(capped).toMatchObject({ endedReason: 'expired' });
+    expect(Date.parse(capped.endedAt)).toBe(Date.parse(capped.createdAt) + 12 * HOUR);
     expect(sessions.listSessions('nobody')).toEqual([]);
   });
 
