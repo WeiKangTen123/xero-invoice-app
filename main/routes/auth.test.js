@@ -448,6 +448,39 @@ describe('routes/auth sign-in lockout, temporary passwords and the Account page'
       expect((await change('1q2w3e4r5t6y').expect(400)).body.error).toBe('That password is too common; choose another');
       await login('cp-rules@test.com', PW).expect(200);
     });
+
+    // The same password again is no change; for a temporary one, the admin
+    // who typed it would go on knowing it.
+    test('change-password refuses the current password as the new one', async () => {
+      const u = await users.createUser('same@test.com', PW, 'user', { temporary: true });
+      const res = await as(tokenFor(u), 'post', '/api/auth/change-password').send({ currentPassword: PW, newPassword: PW }).expect(400);
+      expect(res.body.error).toBe('Choose a password different from your current one');
+      expect(row(u.id).must_change_password).toBe(1);
+    });
+
+    // A password set before the rules tightened (or a demo account's short
+    // one) still signs in: the account is then asked for a new one, held to
+    // that like a temporary password but with no expiry.
+    test('a sign-in with a password the rules now refuse must choose a new one first', async () => {
+      const u = await users.createUser('old@test.com', 'short-pw', 'user');
+      const res = await login('old@test.com', 'short-pw').expect(200);
+      expect(res.body.user).toMatchObject({ mustChangePassword: true, passwordChangeReason: 'rules' });
+      expect(row(u.id)).toMatchObject({ must_change_password: 1, temp_password_expires_at: null });
+      const token = res.body.token;
+      expect((await as(token, 'get', '/api/auth/me').expect(200)).body.user).toMatchObject({ mustChangePassword: true, passwordChangeReason: 'rules' });
+      await as(token, 'post', '/api/auth/sign-out-everywhere').expect(403);
+      const changed = await as(token, 'post', '/api/auth/change-password').send({ currentPassword: 'short-pw', newPassword: 'a-proper-one-2026' }).expect(200);
+      expect((await as(changed.body.token, 'get', '/api/auth/me').expect(200)).body.user).toMatchObject({ mustChangePassword: false, passwordChangeReason: null });
+      // A password that passes is never asked about.
+      expect((await login('old@test.com', 'a-proper-one-2026').expect(200)).body.user.mustChangePassword).toBe(false);
+    });
+
+    test('an admin\'s temporary password keeps its own reason, and its expiry', async () => {
+      const u = await users.createUser('temp@test.com', PW, 'user', { temporary: true });
+      const res = await login('temp@test.com', PW).expect(200);
+      expect(res.body.user).toMatchObject({ mustChangePassword: true, passwordChangeReason: 'temporary' });
+      expect(row(u.id).temp_password_expires_at).not.toBeNull();
+    });
   });
 
   describe('the Account page', () => {

@@ -136,7 +136,9 @@ export function statusLine(user, now = Date.now(), opts = {}) {
   }
   if (u.mustChangePassword === true) {
     const expires = toMs(u.tempPasswordExpiresAt);
-    if (!Number.isFinite(expires)) notes.push({ text: 'On a temporary password', tone: 'yellow' });
+    // No expiry: not an admin's temporary password but their own, which the
+    // rules now refuse (or a demo account made an admin); it still signs in.
+    if (!Number.isFinite(expires)) notes.push({ text: 'Must choose a new password: theirs no longer meets the rules', tone: 'yellow' });
     else if (expires > toMs(now)) notes.push({ text: `Temporary password, expires ${shortDateTime(expires, o)}`, tone: 'yellow' });
     else notes.push({ text: `Temporary password expired ${shortDateTime(expires, o)}: reset it to let them in`, tone: 'red' });
   }
@@ -413,12 +415,9 @@ export function panelActions({ user, isMe = false, lastAdmin = false, now = Date
       title: u.role === 'admin' ? 'Back to an ordinary user' : 'Give them this page',
       blocked: lastAdmin ? 'Cannot demote the last admin' : null,
     });
-    // A demo account that is not an admin keeps the password set for it; an
-    // admin's, on sample data or not, is temporary (account/password-rules.js
-    // shortPasswordAllowed, which this file cannot import).
     account.push({
       key: 'reset', busyKey: 'reset', label: '🔑 Reset password',
-      title: u.demo === true && u.role !== 'admin' ? 'Set the password for this demo account' : 'Set a temporary password for this account',
+      title: 'Set a temporary password for this account',
     });
   }
   if (account.length) groups.push({ key: 'account', label: 'Account', actions: account });

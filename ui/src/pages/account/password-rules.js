@@ -8,20 +8,9 @@
 //
 // Imports nothing, so main/scripts/account-ui.test.js runs it as it is.
 
+// Every account's, demo accounts' included: their short permanent password
+// went (users.js passwordProblem).
 export const PASSWORD_MIN_LENGTH = 12;
-// A demo account's password is shorter by design (users.js
-// DEMO_PASSWORD_MIN_LENGTH): it guards sample data, is typed in front of
-// people at a demonstration, and the lockout still stands.
-export const DEMO_PASSWORD_MIN_LENGTH = 6;
-
-// Who may have that short password, permanent rather than temporary: a demo
-// account that is not an admin (users.js shortPasswordAllowed). An admin can
-// switch their own account from sample data to Xero at any time, and manages
-// every account either way, so theirs is the full length even on sample
-// data. Takes a user, a Users row or the Add User form: { demo, role }.
-export function shortPasswordAllowed(account) {
-  return account?.demo === true && account?.role !== 'admin';
-}
 
 // Twelve characters or more that a person types on purpose and a guesser tries
 // first. Shorter favourites ("password", "123456") already fail the length
@@ -48,10 +37,9 @@ function isPattern(lower) {
 // The rule a password breaks, in the server's words, or null when it passes.
 // `email` is the account's address, which the password may not be — nor the
 // part of it before the @, which is what people type. Compared in lower case
-// and otherwise as typed, as the server compares them. `demo` asks for the
-// short rule: pass shortPasswordAllowed(account), not the demo flag alone.
-export function passwordProblem(password, email, { demo = false } = {}) {
-  const min = demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH;
+// and otherwise as typed, as the server compares them.
+export function passwordProblem(password, email) {
+  const min = PASSWORD_MIN_LENGTH;
   if (typeof password !== 'string' || password.length < min) {
     return `Password must be at least ${min} characters`;
   }
@@ -67,6 +55,16 @@ export function passwordProblem(password, email, { demo = false } = {}) {
 }
 
 // The placeholder under a new-password field.
-export function passwordHint({ demo = false } = {}) {
-  return `Min. ${demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH} characters`;
+export function passwordHint() {
+  return `Min. ${PASSWORD_MIN_LENGTH} characters`;
+}
+
+// What the set-password screen says, by why the account must choose a new
+// password (passwordChangeReason from /api/auth/me and the sign-in): a
+// temporary one from an administrator, or its own one that the rules now
+// refuse. The current-password field is labelled to match.
+export function setPasswordText(reason) {
+  return reason === 'rules'
+    ? { intro: 'Your password no longer meets the password rules. Choose a new one to go on.', current: 'Current password' }
+    : { intro: 'Your administrator gave you a temporary password. Choose your own to go on.', current: 'Temporary password' };
 }

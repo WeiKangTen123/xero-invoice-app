@@ -2,7 +2,8 @@ const express = require('express');
 const router  = express.Router();
 const rateLimit = require('express-rate-limit');
 const {
-  hasUsers, findByEmail, createUser, validatePassword, verifiedPasswordHash, passwordProblem, shortPasswordAllowed, setPassword, invalidateSessions,
+  hasUsers, findByEmail, createUser, validatePassword, verifiedPasswordHash, passwordProblem, setPassword, invalidateSessions,
+  requirePasswordChange,
   lockStatus, recordFailedLogin, recordSuccessfulLogin, temporaryPasswordExpired, LOCK_AFTER_FAILURES,
   getUserConfig, DEFAULT_TIMEZONE,
 } = require('../utils/users');
@@ -271,14 +272,25 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
       return res.status(401).json({ error: 'This temporary password has expired. Ask your administrator for a new one.' });
     }
 
+    // The one moment the password itself is in hand: one the rules now refuse
+    // (set before they tightened, or a demo account's short one from before
+    // that exception went) still signs in, and is then the only thing the
+    // account can change, the same gate as a temporary password.
+    let signedIn = user;
+    if (!user.mustChangePassword && passwordProblem(password, user.email)) {
+      requirePasswordChange(user.id);
+      signedIn = { ...user, mustChangePassword: true, passwordChangeReason: 'rules' };
+      logger.info('Password no longer meets the rules: a new one is required', { email: user.email });
+    }
+
     const earlier = earlierSignInAddresses(user.id);
     recordSuccessfulLogin(user.id);
     auditLog.recordAdminEvent({ actor: user, target: user, action: 'login.success', details: { ...client } });
-    const token = signSession(user, { sid: startSessionFor(user, req) });
+    const token = signSession(signedIn, { sid: startSessionFor(signedIn, req) });
     logger.info('User logged in', { email: user.email, role: user.role, ip });
     // `user` is sanitized (users.js), so it carries mustChangePassword: the
     // client goes straight to the change-password screen when it is set.
-    res.json({ token, user });
+    res.json({ token, user: signedIn });
     alertNewCountry(user, ip, earlier).catch(() => {});
   } catch (err) {
     logger.error('Login error', { error: err.message });
@@ -390,13 +402,16 @@ router.post('/change-password', requireAuth, changePasswordLimiter, asyncHandler
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Current and new password are required' });
     }
-    const problem = passwordProblem(newPassword, req.user.email, {
-      demo: shortPasswordAllowed({ is_demo: req.user.demo, role: req.user.role }),
-    });
+    const problem = passwordProblem(newPassword, req.user.email);
     if (problem) return res.status(400).json({ error: problem });
     const verifiedHash = await verifiedPasswordHash(req.user.id, currentPassword);
     if (!verifiedHash) {
       return res.status(400).json({ error: 'Current password is incorrect' });
+    }
+    // Keeping the same password is no change: and for a temporary one, the
+    // administrator who typed it would go on knowing it.
+    if (newPassword === currentPassword) {
+      return res.status(400).json({ error: 'Choose a password different from your current one' });
     }
     // Written only over the password just checked. A change that landed in
     // between — an admin's reset, or this account in another tab — wins, and

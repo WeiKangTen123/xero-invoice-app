@@ -206,6 +206,7 @@ function requireAuth(req, res, next) {
   // Sign out and for the routes that keep this session while ending others.
   req.user = {
     ...claims, id: live.id, email: live.email, role: live.role, mustChangePassword: !!live.must_change_password,
+    passwordChangeReason: require('../utils/users').passwordChangeReason(live),
     demo: !!live.is_demo, sid: claims.sid || null,
   };
   renewSession(res, live, claims);

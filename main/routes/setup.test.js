@@ -33,11 +33,55 @@ describe('routes/setup — secrets', () => {
 
   test('saving with a blank secret keeps the stored one; a new value replaces it', async () => {
     users.saveUserConfig(user.id, { IMAP_PASS: 'hunter2' });
-    await request(serverFor(app)).post('/api/setup').set('Authorization', auth()).send({ IMAP_PASS: '', IMAP_HOST: 'imap.new' }).expect(200);
+    const kept = await request(serverFor(app)).post('/api/setup').set('Authorization', auth())
+      .send({ IMAP_PASS: '', IMAP_FILTER_FROM: 'bills@supplier.com' }).expect(200);
+    expect(kept.body.cleared).toBeUndefined();
     expect(users.getUserConfig(user.id).IMAP_PASS).toBe('hunter2');
-    expect(users.getUserConfig(user.id).IMAP_HOST).toBe('imap.new');
+    expect(users.getUserConfig(user.id).IMAP_FILTER_FROM).toBe('bills@supplier.com');
     await request(serverFor(app)).post('/api/setup').set('Authorization', auth()).send({ IMAP_PASS: 'new-pass' }).expect(200);
     expect(users.getUserConfig(user.id).IMAP_PASS).toBe('new-pass');
+  });
+
+  // The saved mailbox password went wherever the server box pointed: change
+  // the server, keep the password blank, press Test IMAP, and it was sent to
+  // a server of the caller's choosing. It is for one mailbox, so moving the
+  // mailbox drops it unless a new one comes with the move.
+  describe('the saved mailbox password stays with its mailbox', () => {
+    const save = body => request(serverFor(app)).post('/api/setup').set('Authorization', auth()).send(body).expect(200);
+
+    beforeEach(() => users.saveUserConfig(user.id, { IMAP_HOST: 'imap.gmail.com', IMAP_USER: 'me@gmail.com', IMAP_PASS: 'hunter2' }));
+
+    test('a new server with no new password removes the saved one, and says so', async () => {
+      const { body } = await save({ IMAP_PASS: '', IMAP_HOST: 'imap.attacker.example' });
+      expect(body.cleared).toEqual(['IMAP_PASS']);
+      expect(users.getUserConfig(user.id).IMAP_PASS).toBeUndefined();
+      expect(users.getUserConfig(user.id).IMAP_HOST).toBe('imap.attacker.example');
+      expect(users.getImapSettings(user.id).ready).toBe(false);
+    });
+
+    test('a new mailbox address with no new password removes it too', async () => {
+      const { body } = await save({ IMAP_USER: 'someone.else@gmail.com' });
+      expect(body.cleared).toEqual(['IMAP_PASS']);
+      expect(users.getUserConfig(user.id).IMAP_PASS).toBeUndefined();
+    });
+
+    test('a move that brings its own password keeps the new one', async () => {
+      const { body } = await save({ IMAP_HOST: 'imap.mail.me.com', IMAP_PASS: 'icloud-pass' });
+      expect(body.cleared).toBeUndefined();
+      expect(users.getUserConfig(user.id).IMAP_PASS).toBe('icloud-pass');
+    });
+
+    test('the same server and address, however typed, keep it', async () => {
+      const { body } = await save({ IMAP_HOST: ' IMAP.Gmail.com ', IMAP_USER: 'ME@gmail.com', IMAP_PORT: '993' });
+      expect(body.cleared).toBeUndefined();
+      expect(users.getUserConfig(user.id).IMAP_PASS).toBe('hunter2');
+    });
+
+    test('a blank server box that still works out to the same server keeps it', async () => {
+      const { body } = await save({ IMAP_HOST: '' });
+      expect(body.cleared).toBeUndefined();
+      expect(users.getUserConfig(user.id).IMAP_PASS).toBe('hunter2');
+    });
   });
 
   // A blank box with a grey "Saved" in it read as unset. A stored secret now

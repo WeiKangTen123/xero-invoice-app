@@ -10,7 +10,8 @@ import { setPasswordMode } from './account/account';
 // is the app's settings; this is theirs.
 //
 // Set-password mode (?set-password=1, or the user's own mustChangePassword):
-// an administrator gave them a temporary password, the server refuses every
+// an administrator gave them a temporary password, or their own one no longer
+// meets the rules (user.passwordChangeReason), the server refuses every
 // other request until it is replaced, and the route guard (App.jsx) sends
 // every other page here. The password card is headed for that, and the one
 // control that would be refused (Sign out everywhere) is left out until the

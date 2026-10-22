@@ -35,19 +35,27 @@ describe('routes/auth — the demo flag', () => {
     expect((await me(real)).body.user).toMatchObject({ id: real.id, demo: false });
   });
 
-  // The short demo password is a non-admin demo account's only: an admin on
-  // sample data can switch back to Xero, so theirs keeps the full rule.
-  test('change-password allows the short password to a demo account and not to an admin on sample data', async () => {
+  // Demo accounts were once allowed a six-character password; no account is now.
+  test('change-password holds a demo account to the full rule, admin or not', async () => {
     const change = user => request(serverFor(app)).post('/api/auth/change-password')
       .set('Authorization', `Bearer ${tokenFor(user)}`)
       .send({ currentPassword: 'password1234', newPassword: 'kq7zp4' });
-    expect((await change(demo)).status).toBe(200);
-
     const admin = await users.createUser('boss@test.com', 'password1234', 'admin');
     users.setDemo(admin.id, true);
-    const res = await change(admin);
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/12/);
+    for (const user of [demo, admin]) {
+      const res = await change(user);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Password must be at least 12 characters');
+    }
+  });
+
+  // A demo account from before that, still on its short password, signs in
+  // with it and is then asked for a new one, with nothing else open.
+  test('a demo account signing in with a short password must choose a new one', async () => {
+    const old = await users.createUser('old.demo@test.com', 'kq7zp4', 'user', { demo: true });
+    const res = await request(serverFor(app)).post('/api/auth/login').send({ email: 'old.demo@test.com', password: 'kq7zp4' }).expect(200);
+    expect(res.body.user).toMatchObject({ demo: true, mustChangePassword: true, passwordChangeReason: 'rules' });
+    expect(users.findById(old.id)).toMatchObject({ must_change_password: 1, temp_password_expires_at: null });
   });
 
   test('registration makes a real account', async () => {

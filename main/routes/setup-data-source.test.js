@@ -60,7 +60,7 @@ describe('PUT /api/setup/data-source', () => {
     const refused = 'Only an admin can choose sample data for their own account.';
     expect((await put(member, { source: 'demo' }).expect(403)).body).toEqual({ error: refused });
     expect(isDemo(member)).toBe(0);
-    const demo = await users.createUser('demo@test.com', 'demo123', 'user', { demo: true });
+    const demo = await users.createUser('demo@test.com', 'demo-fixture-2026', 'user', { demo: true });
     expect((await put(demo, { source: 'xero' }).expect(403)).body).toEqual({ error: refused });
     expect(isDemo(demo)).toBe(1);
     expect(events()).toEqual([]);

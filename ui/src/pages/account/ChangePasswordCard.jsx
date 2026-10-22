@@ -1,16 +1,18 @@
 import { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import ResultNote from '../../components/ResultNote';
-import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './password-rules';
+import { passwordProblem, passwordHint, setPasswordText, PASSWORD_MIN_LENGTH } from './password-rules';
 
 // The signed-in account's own password, on the Account page: not a setting of
 // the app, so not on Setup with them. Its own form and its own server call.
 // The server signs out every other session this account has open; this one
 // is kept because changePassword stores the fresh token it returns.
 //
-// `setPassword` is the mode for a temporary password from an administrator:
-// the card says so, the current-password field is the temporary one, and on
-// success `onPasswordSet` takes over (the page reloads the user and leaves).
+// `setPassword` is the mode for an account that must choose a new password,
+// a temporary one from an administrator or its own one the rules now refuse
+// (user.passwordChangeReason): the card says which, the current-password
+// field is labelled to match, and on success `onPasswordSet` takes over (the
+// page reloads the user and leaves).
 export default function ChangePasswordCard({ idx = 0, setPassword = false, onPasswordSet }) {
   const { user, changePassword } = useAuth();
   const [current, setCurrent] = useState('');
@@ -25,9 +27,10 @@ export default function ChangePasswordCard({ idx = 0, setPassword = false, onPas
   const problem  = next ? passwordProblem(next, user?.email) : null;
   const mismatch = again && next !== again ? 'The new passwords do not match' : '';
   const valid    = !!current && !!next && !problem && again === next;
+  const text     = setPasswordText(user?.passwordChangeReason);
 
   const fields = [
-    { id: 'cp-current', label: setPassword ? 'Temporary password' : 'Current password', value: current, set: setCurrent, autoComplete: 'current-password' },
+    { id: 'cp-current', label: setPassword ? text.current : 'Current password', value: current, set: setCurrent, autoComplete: 'current-password' },
     { id: 'cp-next',    label: 'New password',       value: next,  set: setNext,  autoComplete: 'new-password', minLength: PASSWORD_MIN_LENGTH, placeholder: passwordHint(), note: problem },
     { id: 'cp-again',   label: 'New password again', value: again, set: setAgain, autoComplete: 'new-password', minLength: PASSWORD_MIN_LENGTH, note: mismatch },
   ];
@@ -59,7 +62,7 @@ export default function ChangePasswordCard({ idx = 0, setPassword = false, onPas
           <div className="card-title">{setPassword ? 'Set a new password' : 'Change password'}</div>
           <div className="card-subtitle" style={{ marginBottom: 0 }}>
             {setPassword
-              ? 'Your administrator gave you a temporary password. Choose your own to go on.'
+              ? text.intro
               : 'The password you sign in with. Other devices are signed out.'}
           </div>
         </div>

@@ -9,7 +9,7 @@ const {
   getGeminiKeys, addGeminiKey, removeGeminiKey, checkAllowanceSettings, defaultsFrom, timezoneProblem,
 } = require('../utils/users');
 const logger  = require('../utils/logger');
-const { automaticImapValues } = require('../email/imap-settings');
+const { automaticImapValues, resolveImapSettings } = require('../email/imap-settings');
 
 // ── Field definitions ─────────────────────────────────────────────────────────
 
@@ -171,6 +171,24 @@ router.get('/', requireAuth, (req, res) => {
   res.json(result);
 });
 
+// The saved mailbox password belongs to one mailbox: one server, one address.
+// A save that points the mailbox somewhere else and brings no new password
+// would have the next Test IMAP, or the watcher, hand the old one to whatever
+// server was typed. Anyone signed in as the account (a demo account holding a
+// copied mailbox, a borrowed session) could collect it with a server of their
+// own. Such a save drops the stored password instead: the new mailbox needs
+// its own. Compared as the watcher would connect (resolveImapSettings), so a
+// blank box that still works out to the same server changes nothing.
+function mailboxMovedWithoutPassword(userId, loginEmail, patch) {
+  if (patch.IMAP_PASS !== undefined) return false;   // a new password comes with the change
+  const config = getUserConfig(userId);
+  const before = resolveImapSettings(config, loginEmail);
+  if (!before.password) return false;                // nothing stored to protect
+  const after = resolveImapSettings({ ...config, ...patch }, loginEmail);
+  const same  = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+  return !same(before.host, after.host) || !same(before.user, after.user);
+}
+
 // ── POST /api/setup — save updated values ─────────────────────────────────────
 router.post('/', requireAuth, (req, res) => {
   try {
@@ -199,6 +217,13 @@ router.post('/', requireAuth, (req, res) => {
     if (errors.length) return res.status(400).json({ error: errors[0].error, errors });
     Object.assign(userPatch, checkedPatch);
 
+    const cleared = [];
+    if (mailboxMovedWithoutPassword(req.user.id, req.user.email, userPatch)) {
+      userPatch.IMAP_PASS = '';   // '' clears the stored value (users.js saveUserConfig)
+      cleared.push('IMAP_PASS');
+      logger.info('Mailbox server or address changed: saved mailbox password removed', { by: req.user.email });
+    }
+
     if (Object.keys(userPatch).length)   saveUserConfig(req.user.id, userPatch);
     if (Object.keys(globalPatch).length) writeEnvFile(globalPatch);
 
@@ -207,7 +232,7 @@ router.post('/', requireAuth, (req, res) => {
       globalKeys: Object.keys(globalPatch),
       by:         req.user.email,
     });
-    res.json({ success: true });
+    res.json({ success: true, ...(cleared.length ? { cleared } : {}) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

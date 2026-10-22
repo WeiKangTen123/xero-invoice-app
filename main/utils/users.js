@@ -326,24 +326,14 @@ async function validatePassword(email, password) {
 // is the account's, for the second rule; without it that rule is skipped.
 const PASSWORD_MIN_LENGTH = 12;
 
-// A demo account's password is shorter by design: it guards sample data,
-// is typed in front of people at a demonstration, and the sign-in lockout
-// still stands between it and a guesser. The owner picks it, and it is not
-// temporary (routes/admin.js). The email and common-password rules still hold.
-// Never an admin's, demo or not: see shortPasswordAllowed.
-const DEMO_PASSWORD_MIN_LENGTH = 6;
-
-// Whether this account may have the short, permanent demo password: a demo
-// account that is not an admin. An admin can switch their own account back to
-// real Xero at any time (setDemo) and manages every other account, so their
-// password keeps the full rule even while they are on sample data. Takes the
-// raw row (is_demo, role).
-function shortPasswordAllowed(user) {
-  return !!(user && user.is_demo) && user.role !== 'admin';
-}
-
-function passwordProblem(password, email = null, { demo = false } = {}) {
-  const min = demo ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH;
+// Every account, demo or not, admin or not. Demo accounts used to be allowed a
+// six-character permanent password for typing in front of people; the one
+// actually used turned up in this public repository's tests, and a demo
+// account holds copied settings (Gemini keys, a mailbox), so the exception
+// went. An account still on a password these rules refuse is sent to choose a
+// new one at its next sign-in (routes/auth.js, requirePasswordChange).
+function passwordProblem(password, email = null) {
+  const min = PASSWORD_MIN_LENGTH;
   if (typeof password !== 'string' || password.length < min) {
     return `Password must be at least ${min} characters`;
   }
@@ -479,7 +469,7 @@ async function verifiedPasswordHash(id, password) {
 async function setPassword(id, newPassword, { ifCurrentHash = null, temporary = false } = {}) {
   const user = findById(id);
   if (!user) throw new Error('User not found');
-  const problem = passwordProblem(newPassword, user.email, { demo: shortPasswordAllowed(user) });
+  const problem = passwordProblem(newPassword, user.email);
   if (problem) throw new Error(problem);
   const hash = await bcrypt.hash(newPassword, 10);
   const now  = Date.now();
@@ -500,6 +490,24 @@ async function setPassword(id, newPassword, { ifCurrentHash = null, temporary = 
   `).run(hash, at, marks.must, marks.expires, at, id);
   if (temporary) unlockAccount(id);
   return true;
+}
+
+// The account must choose a new password before anything else (the same gate
+// as a temporary password, auth-middleware.js), but its current one keeps
+// working: no expiry, unlike an admin's temporary password. For a password the
+// rules now refuse, found at sign-in (routes/auth.js), and for a demo account
+// made an admin (routes/admin.js), which may still have the short password
+// demo accounts were once allowed. A no-op on an account already marked.
+function requirePasswordChange(id) {
+  db.prepare('UPDATE users SET must_change_password = 1 WHERE id = ? AND must_change_password = 0').run(id);
+}
+
+// Why the account must choose a new password, for the screen that asks:
+// 'temporary' (an admin set it, and it expires), 'rules' (its own password no
+// longer meets them), or null when nothing is asked. Takes the raw row.
+function passwordChangeReason(row) {
+  if (!row || !row.must_change_password) return null;
+  return row.temp_password_expires_at ? 'temporary' : 'rules';
 }
 
 // Every token issued before now is refused from here on (auth-middleware.js).
@@ -603,7 +611,8 @@ function sanitize(u) {
     failedLogins:       u.failed_logins ?? u.failedLogins ?? 0,
     lockedUntil:        lockedUntil ? lockedUntil.lockedUntil : null,
     mustChangePassword: !!(u.must_change_password ?? u.mustChangePassword),
-    lastLoginAt:        u.last_login_at ?? u.lastLoginAt ?? null,
+    passwordChangeReason: u.passwordChangeReason ?? passwordChangeReason(u),
+    lastLoginAt:      u.last_login_at ?? u.lastLoginAt ?? null,
     demo:               !!(u.is_demo ?? u.isDemo ?? u.demo),
     lockCount:             u.lock_count ?? u.lockCount ?? 0,
     lastLockedAt:          u.last_locked_at ?? u.lastLockedAt ?? null,
@@ -689,8 +698,9 @@ function ensureUserDirectories() {
 
 module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
-  passwordProblem, shortPasswordAllowed, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, isDemoUser, setDemo,
-  PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH,
+  passwordProblem, verifiedPasswordHash, setPassword, invalidateSessions, setDisabled, isActive, isDemoUser, setDemo,
+  requirePasswordChange, passwordChangeReason,
+  PASSWORD_MIN_LENGTH,
   lockStatus, lockAfterFailure, recordFailedLogin, recordSuccessfulLogin, unlockAccount, temporaryPasswordExpired,
   LOCK_AFTER_FAILURES, LOCK_BASE_MS, LOCK_MAX_MS, TEMP_PASSWORD_TTL_MS,
   getAllUsers, updateUserRole, deleteUser, readUsers,

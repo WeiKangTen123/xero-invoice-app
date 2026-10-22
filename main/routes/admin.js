@@ -6,7 +6,7 @@ const { requireAdmin } = require('../middleware/auth-middleware');
 const asyncHandler     = require('../middleware/async-handler');
 const {
   getAllUsers, createUser, updateUserRole, deleteUser, readUsers, findById, getSetupStatus, isOnline,
-  passwordProblem, shortPasswordAllowed, setPassword, invalidateSessions, setDisabled, unlockAccount, getUserDefaults, isKnownTimezone,
+  passwordProblem, requirePasswordChange, setPassword, invalidateSessions, setDisabled, unlockAccount, getUserDefaults, isKnownTimezone,
   getUserConfig, saveUserConfig, getImapSettings, getGeminiKeys, addGeminiKey,
 } = require('../utils/users');
 const invoiceStore     = require('../utils/invoice-store');
@@ -138,22 +138,18 @@ router.post('/users', requireAdmin, asyncHandler(async (req, res) => {
     if (demo !== undefined && typeof demo !== 'boolean') {
       return res.status(400).json({ error: 'demo must be true or false' });
     }
-    // A demo account's password is the admin's to choose and keep: shorter
-    // (users.js DEMO_PASSWORD_MIN_LENGTH) and permanent, since it is typed in
-    // front of people and guards sample data. Any other account's is
-    // temporary, replaced at the first sign-in — an admin's too, even one
-    // made on sample data: it can switch to real Xero and manage every
-    // account (users.js shortPasswordAllowed).
+    // Every account's first password is temporary, replaced at the first
+    // sign-in, a demo account's too: the short permanent one demo accounts
+    // were once allowed went (users.js passwordProblem).
     const isDemo  = demo === true;
     const newRole = role === 'admin' ? 'admin' : 'user';
-    const short   = shortPasswordAllowed({ is_demo: isDemo, role: newRole });
-    const problem = passwordProblem(password, email, { demo: short });
+    const problem = passwordProblem(password, email);
     if (problem) return res.status(400).json({ error: problem });
     const groups = _copyGroups(copyFrom);
     if (groups.mailbox && !String(mailboxFilterFrom ?? '').trim()) {
       return res.status(400).json({ error: MAILBOX_FILTER_REQUIRED });
     }
-    const user   = await createUser(email, password, newRole, { temporary: !short, demo: isDemo });
+    const user   = await createUser(email, password, newRole, { temporary: true, demo: isDemo });
     const copied = _copySettings(req.user.id, user.id, groups, mailboxFilterFrom);
     recordAdmin(req, user, 'user.create', { role: user.role, demo: user.demo, copied });
     logger.info('Admin created user', { email, role: user.role, demo: user.demo, copied, by: req.user.email });
@@ -277,8 +273,15 @@ router.patch('/users/:id/role', requireAdmin, (req, res) => {
   if (role === 'user' && lastActiveAdmin(target)) {
     return res.status(400).json({ error: 'Cannot demote the last admin account' });
   }
+  // A demo account made an admin may still have the short password demo
+  // accounts were once allowed, and as an admin it can switch to real Xero
+  // and manage every account. It must choose a full one first: at once, since
+  // the gate reads the row on every request, so a session already open as
+  // the demo account gets nothing until it has.
+  const newPassword = role === 'admin' && target.role !== 'admin' && !!target.is_demo;
+  if (newPassword) requirePasswordChange(target.id);
   const user = updateUserRole(target.id, role);
-  recordAdmin(req, target, 'user.role', { from: target.role, to: role });
+  recordAdmin(req, target, 'user.role', { from: target.role, to: role, ...(newPassword ? { passwordChangeRequired: true } : {}) });
   logger.info('Admin changed user role', { email: target.email, role, by: req.user.email });
   res.json({ success: true, user });
 });
@@ -287,15 +290,14 @@ router.patch('/users/:id/role', requireAdmin, (req, res) => {
 // Passwords are bcrypt hashes: there is nothing to view, only replace. The
 // account's other sessions are signed out by the same cutoff a self-service
 // change uses (users.js#setPassword). The password set here is temporary, as
-// on Add user: replaced at the next sign-in, dead after a day — except for a
-// demo account that is not an admin, whose password is the admin's to choose
-// and keep (see Add user). A reset also unlocks the account: the person
-// asking for one is often the one locked out.
+// on Add user: replaced at the next sign-in, dead after a day, for every
+// account, demo or not. A reset also unlocks the account: the person asking
+// for one is often the one locked out.
 router.patch('/users/:id/password', requireAdmin, asyncHandler(async (req, res) => {
   try {
     const target = findTarget(req, res, 'Change your own password from the Account page');
     if (!target) return;
-    await setPassword(target.id, req.body.password, { temporary: !shortPasswordAllowed(target) });
+    await setPassword(target.id, req.body.password, { temporary: true });
     endSessionsOf(req, target, 'password_changed');
     // That it was reset, and by whom. Never the password.
     recordAdmin(req, target, 'user.password_reset');

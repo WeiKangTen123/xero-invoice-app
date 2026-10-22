@@ -12,7 +12,7 @@ import { staggerIn } from '../utils/stagger';
 import ActivityPanel from './admin/ActivityPanel';
 import UserDetailPanel from './admin/UserDetailPanel';
 import { lockBadge, failedNote, mustSetNote, demoBadge, copyBoxes, copyDefaults, addUserPayload, addUserProblem } from './admin/users';
-import { passwordProblem, passwordHint, shortPasswordAllowed, PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH } from './account/password-rules';
+import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
 
 const ADMIN_TABS = [
   { key: 'users',      label: '👥 Users' },
@@ -63,20 +63,16 @@ function autoSubmitOffSend(u) {
 }
 
 // An admin cannot see a password (it is a bcrypt hash), only set a temporary
-// one and pass it on. It works once, for 24 hours; the account must then
-// choose its own. The server signs out every session that account has open.
+// one and pass it on. It works for 24 hours, until the account chooses its
+// own. The server signs out every session that account has open.
 function ResetPasswordDialog({ user, onClose, onDone }) {
   const [password, setPassword] = useState('');
   const [show,     setShow]     = useState(false);
   const [error,    setError]    = useState('');
   const [saving,   setSaving]   = useState(false);
-  // The server's rules (pages/account/password-rules.js), said as typed. A
-  // demo account's password is shorter and permanent: the admin's to choose
-  // and keep, since it guards sample data and is typed in front of people.
-  // Not an admin's on sample data: they can switch to Xero at any time, so
-  // theirs is temporary and full length like anyone's (shortPasswordAllowed).
-  const demoRule = shortPasswordAllowed(user);
-  const problem  = passwordProblem(password, user.email, { demo: demoRule });
+  // The server's rules (pages/account/password-rules.js), said as typed: the
+  // same for every account, demo accounts' included.
+  const problem  = passwordProblem(password, user.email);
 
   async function submit(e) {
     e.preventDefault();
@@ -94,24 +90,21 @@ function ResetPasswordDialog({ user, onClose, onDone }) {
     <Modal onClose={onClose} busy={saving} label={`Reset password for ${user.email}`}>
       <div className="card-title">Reset password</div>
       <div className="card-subtitle">
-        {demoRule
-          ? <>Set the password for the demo account <strong>{user.email}</strong>. It is permanent: this account keeps the password you choose.
-              The current one cannot be shown. Every session it has open is signed out.</>
-          : <>Set a temporary password for <strong>{user.email}</strong> and pass it on to them.
-              They sign in with this once, within 24 hours, then must choose their own.
-              The current one cannot be shown. Every session they have open is signed out.</>}
+        Set a temporary password for <strong>{user.email}</strong> and pass it on to them.
+        They sign in with it within 24 hours, then must choose their own.
+        The current one cannot be shown. Every session they have open is signed out.
       </div>
       <form onSubmit={submit}>
         <div className="form-group">
-          <label htmlFor="reset-password" className="form-label">{demoRule ? 'Password' : 'Temporary password'}</label>
+          <label htmlFor="reset-password" className="form-label">Temporary password</label>
           <div style={{ position: 'relative' }}>
             <input id="reset-password"
               type={show ? 'text' : 'password'}
               className="form-input"
-              placeholder={passwordHint({ demo: demoRule })}
+              placeholder={passwordHint()}
               value={password}
               onChange={e => setPassword(e.target.value)}
-              required minLength={demoRule ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH} autoFocus autoComplete="new-password"
+              required minLength={PASSWORD_MIN_LENGTH} autoFocus autoComplete="new-password"
               style={{ paddingRight: 38 }}
             />
             <button type="button" onClick={() => setShow(v => !v)} style={EYE_BUTTON}
@@ -212,11 +205,7 @@ export default function Admin() {
   // why it cannot be sent yet (the mailbox copy needs a sender address).
   const form = { email, password: pass, role, demo, copyFrom, mailboxFilterFrom: filterFrom };
   const createProblem = addUserProblem(form);
-  // The short, permanent password is for a demo account that is not an
-  // admin (shortPasswordAllowed); a demo admin's is temporary and full
-  // length, as the server requires.
-  const demoRule    = shortPasswordAllowed({ demo, role });
-  const passProblem = passwordProblem(pass, email, { demo: demoRule });
+  const passProblem = passwordProblem(pass, email);
 
   async function handleCreate(e) {
     e.preventDefault();
@@ -274,11 +263,15 @@ export default function Admin() {
 
   async function handleRole(u) {
     const role = u.role === 'admin' ? 'user' : 'admin';
+    // A demo account may still have the short password demo accounts were
+    // once allowed, so the server makes it choose a new one first.
+    const newPassword = role === 'admin' && u.demo === true;
     const ok = await confirm(role === 'admin'
-      ? { title: `Make ${u.email} an admin?`, message: 'They will see every account, every flagged invoice and the server logs, and can do everything on this page.', confirmLabel: 'Make admin' }
+      ? { title: `Make ${u.email} an admin?`, message: `They will see every account, every flagged invoice and the server logs, and can do everything on this page.${newPassword ? ' As a demo account, it must choose a new password before anything else.' : ''}`, confirmLabel: 'Make admin' }
       : { title: `Remove admin from ${u.email}?`, message: 'They keep their account and data, and lose access to this page.', confirmLabel: 'Make user' });
     if (!ok) return;
-    await control('role', u, () => api.patch(`/admin/users/${u.id}/role`, { role }), `${u.email} is now ${role === 'admin' ? 'an admin' : 'a user'}.`);
+    await control('role', u, () => api.patch(`/admin/users/${u.id}/role`, { role }),
+      `${u.email} is now ${role === 'admin' ? 'an admin' : 'a user'}.${newPassword ? ' They must choose a new password before anything else.' : ''}`);
   }
 
   async function handleSignOut(u) {
@@ -511,10 +504,7 @@ export default function Admin() {
             </div>
           </div>
           <div className="card-subtitle">
-            {demoRule
-              ? 'A demo account keeps the password you set: it is permanent, and may be short, since it guards sample data.'
-              : 'The password you set is temporary. They sign in with this once, within 24 hours, then must choose their own.'}
-            {demo && !demoRule && " An admin's is temporary on sample data too, since they can switch to Xero."}
+            The password you set is temporary. They sign in with it within 24 hours, then must choose their own.
           </div>
 
           <form onSubmit={handleCreate}>
@@ -526,20 +516,20 @@ export default function Admin() {
                 placeholder="user@company.com"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                required
+                required autoComplete="off" spellCheck={false} autoCapitalize="none"
               />
             </div>
 
             <div className="form-group">
-              <label htmlFor="admin-password" className="form-label">{demoRule ? 'Password' : 'Temporary password'}</label>
+              <label htmlFor="admin-password" className="form-label">Temporary password</label>
               <div style={{ position: 'relative' }}>
                 <input id="admin-password"
                   type={showPass ? 'text' : 'password'}
                   className="form-input"
-                  placeholder={passwordHint({ demo: demoRule })}
+                  placeholder={passwordHint()}
                   value={pass}
                   onChange={e => setPass(e.target.value)}
-                  required minLength={demoRule ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH}
+                  required minLength={PASSWORD_MIN_LENGTH} autoComplete="new-password"
                   style={{ paddingRight: 38 }}
                 />
                 <button
@@ -668,9 +658,7 @@ export default function Admin() {
           user={resetting}
           onClose={() => setResetting(null)}
           onDone={() => {
-            toast.success(shortPasswordAllowed(resetting)
-              ? `Password for the demo account ${resetting.email} set; its other sessions were signed out.`
-              : `Temporary password for ${resetting.email} set. It works once, within 24 hours; their other sessions were signed out.`);
+            toast.success(`Temporary password for ${resetting.email} set. It works for 24 hours, until they choose their own; their other sessions were signed out.`);
             setResetting(null);
             setDetailRefresh(n => n + 1);
             fetchUsers();

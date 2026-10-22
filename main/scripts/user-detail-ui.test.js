@@ -148,7 +148,10 @@ describe('the head of the panel (statusLine)', () => {
       .toContainEqual({ text: 'Temporary password, expires 21 Oct 09:12', tone: 'yellow' });
     expect(line({ mustChangePassword: true, tempPasswordExpiresAt: '2026-10-19T01:12:00.000Z' }).notes)
       .toContainEqual({ text: 'Temporary password expired 19 Oct 09:12: reset it to let them in', tone: 'red' });
-    expect(line({ mustChangePassword: true }).notes).toContainEqual({ text: 'On a temporary password', tone: 'yellow' });
+    // No expiry: their own password, which the rules now refuse (users.js
+    // requirePasswordChange). It still signs in, to the change-password screen.
+    expect(line({ mustChangePassword: true }).notes)
+      .toContainEqual({ text: 'Must choose a new password: theirs no longer meets the rules', tone: 'yellow' });
     expect(line({ tempPasswordExpiresAt: '2026-10-21T01:12:00.000Z' }).notes.map(n => n.text).join()).not.toMatch(/Temporary/);
   });
 
@@ -383,12 +386,11 @@ describe('the controls the panel offers (panelActions)', () => {
     expect(find(d.panelActions({ user: { ...jane, disabledAt: '2026-10-18T04:00:00.000Z' }, now: NOW }), 'disabled').label).toBe('✓ Enable');
   });
 
-  // A demo account that is not an admin keeps the password set for it; an
-  // admin's is temporary, on sample data or not (password-rules.js
-  // shortPasswordAllowed).
+  // Every account's reset is temporary, a demo account's included: the
+  // short permanent demo password went (password-rules.js).
   test('Reset password says which kind of password it sets', () => {
     const title = user => find(d.panelActions({ user: { ...jane, ...user }, now: NOW }), 'reset').title;
-    expect(title({ demo: true })).toBe('Set the password for this demo account');
+    expect(title({ demo: true })).toBe('Set a temporary password for this account');
     expect(title({ demo: true, role: 'admin' })).toBe('Set a temporary password for this account');
     expect(title({ demo: false })).toBe('Set a temporary password for this account');
     expect(title({ role: 'admin' })).toBe('Set a temporary password for this account');

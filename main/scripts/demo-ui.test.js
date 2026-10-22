@@ -218,32 +218,35 @@ describe('Admin › Users is wired to them', () => {
     expect(admin).toMatch(/\{isDemo && \(\s+<span className="badge badge-gray" title=\{isDemo\.title\}>\{isDemo\.text\}<\/span>/);
   });
 
-  // The short, permanent password is for a demo account that is not an
-  // admin (password-rules.js shortPasswordAllowed, run in account-ui.test.js);
-  // the server refuses a short one for a demo admin, and makes theirs temporary.
-  test('both password forms take the short rule from shortPasswordAllowed, not from the demo flag alone', () => {
-    expect(admin).toMatch(/import \{ passwordProblem, passwordHint, shortPasswordAllowed, PASSWORD_MIN_LENGTH, DEMO_PASSWORD_MIN_LENGTH \} from '\.\/account\/password-rules';/);
+  // Demo accounts were once allowed a short, permanent password; the one used
+  // turned up in this public repository. Both forms now ask every account the
+  // same rule, and every password they set is temporary.
+  test('both password forms ask the one rule, for a temporary password, demo account or not', () => {
+    expect(admin).toMatch(/import \{ passwordProblem, passwordHint, PASSWORD_MIN_LENGTH \} from '\.\/account\/password-rules';/);
     const reset = admin.slice(admin.indexOf('function ResetPasswordDialog('), admin.indexOf('export default function Admin('));
-    expect(reset).toContain('const demoRule = shortPasswordAllowed(user);');
-    expect(reset).toContain('passwordProblem(password, user.email, { demo: demoRule })');
-    expect(reset).toContain('placeholder={passwordHint({ demo: demoRule })}');
-    expect(reset).toContain('required minLength={demoRule ? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH} autoFocus');
-    expect(reset).toMatch(/\{demoRule\s+\? <>Set the password for the demo account/);
-    expect(reset).toContain("{demoRule ? 'Password' : 'Temporary password'}");
-    expect(reset).not.toMatch(/\{ demo \}|!!user\.demo/);
+    expect(reset).toContain('passwordProblem(password, user.email)');
+    expect(reset).toContain('placeholder={passwordHint()}');
+    expect(reset).toContain('required minLength={PASSWORD_MIN_LENGTH} autoFocus');
+    expect(reset).toContain('>Temporary password</label>');
 
-    expect(admin).toContain('const demoRule    = shortPasswordAllowed({ demo, role });');
-    expect(admin).toContain('const passProblem = passwordProblem(pass, email, { demo: demoRule });');
+    expect(admin).toContain('const passProblem = passwordProblem(pass, email);');
     const create = admin.slice(admin.indexOf('{/* Create form */}'), admin.indexOf('Create account'));
-    expect(create).toContain('placeholder={passwordHint({ demo: demoRule })}');
-    expect(create).toMatch(/required minLength=\{demoRule \? DEMO_PASSWORD_MIN_LENGTH : PASSWORD_MIN_LENGTH\}\s+style=/);
-    expect(create).toContain("{demoRule ? 'Password' : 'Temporary password'}");
-    expect(create).toMatch(/\{demoRule\s+\? 'A demo account keeps the password you set: it is permanent/);
-    expect(create).toContain(`{demo && !demoRule && " An admin's is temporary on sample data too, since they can switch to Xero."}`);
-    expect(create).not.toMatch(/passwordProblem\(|\{ demo \}/);
+    expect(create).toContain('placeholder={passwordHint()}');
+    expect(create).toMatch(/required minLength=\{PASSWORD_MIN_LENGTH\} autoComplete="new-password"\s+style=/);
+    expect(create).toContain('>Temporary password</label>');
+    expect(create).toContain('The password you set is temporary.');
 
-    // The toast after a reset says what kind of password was set, by the same rule.
-    expect(admin).toMatch(/toast\.success\(shortPasswordAllowed\(resetting\)\s+\? `Password for the demo account/);
+    expect(admin).not.toMatch(/demoRule|shortPasswordAllowed|DEMO_PASSWORD_MIN_LENGTH/);
+    expect(admin).toMatch(/toast\.success\(`Temporary password for \$\{resetting\.email\} set\./);
+  });
+
+  // A demo account may still have the short password from before; made an
+  // admin, the server makes it choose a new one, and the page says so.
+  test('making a demo account an admin says it must choose a new password', () => {
+    const role = admin.slice(admin.indexOf('async function handleRole('), admin.indexOf('async function handleSignOut('));
+    expect(role).toContain("const newPassword = role === 'admin' && u.demo === true;");
+    expect(role).toContain('As a demo account, it must choose a new password before anything else.');
+    expect(role).toContain('They must choose a new password before anything else.');
   });
 });
 

@@ -85,27 +85,25 @@ describe('the password rules the card mirrors', () => {
     expect(rules.passwordProblem('plainletters', 'me@test.com')).toBeNull();
   });
 
-  // As users.js shortPasswordAllowed: an admin can switch to Xero at any
-  // time, so an admin on sample data has the full-length rule.
-  test('the short demo password is for a demo account that is not an admin', () => {
-    expect(rules.shortPasswordAllowed({ demo: true, role: 'user' })).toBe(true);
-    expect(rules.shortPasswordAllowed({ demo: true })).toBe(true);
-    expect(rules.shortPasswordAllowed({ demo: true, role: 'admin' })).toBe(false);
-    expect(rules.shortPasswordAllowed({ demo: false, role: 'user' })).toBe(false);
-    expect(rules.shortPasswordAllowed({ demo: false, role: 'admin' })).toBe(false);
-    // Read strictly, and nothing at all is no demo account.
-    expect(rules.shortPasswordAllowed({ demo: 'true', role: 'user' })).toBe(false);
-    expect(rules.shortPasswordAllowed(null)).toBe(false);
-    expect(rules.shortPasswordAllowed(undefined)).toBe(false);
+  // Demo accounts were once allowed six characters; no account is now.
+  test('one rule for every account: there is no short demo password any more', () => {
+    expect(rules.shortPasswordAllowed).toBeUndefined();
+    expect(rules.DEMO_PASSWORD_MIN_LENGTH).toBeUndefined();
+    expect(rules.passwordProblem('demo456', 'demo.fixture@gmail.com', { demo: true })).toBe('Password must be at least 12 characters');
+    expect(rules.passwordHint({ demo: true })).toBe('Min. 12 characters');
   });
 
-  test('asked through it, a demo admin needs the full length and a demo user six', () => {
-    const ask = account => rules.passwordProblem('demo123', 'demo@gmail.com', { demo: rules.shortPasswordAllowed(account) });
-    expect(ask({ demo: true, role: 'user' })).toBeNull();
-    expect(ask({ demo: true, role: 'admin' })).toBe('Password must be at least 12 characters');
-    expect(ask({ demo: false, role: 'user' })).toBe('Password must be at least 12 characters');
-    expect(rules.passwordHint({ demo: rules.shortPasswordAllowed({ demo: true, role: 'admin' }) })).toBe('Min. 12 characters');
-    expect(rules.passwordHint({ demo: rules.shortPasswordAllowed({ demo: true, role: 'user' }) })).toBe('Min. 6 characters');
+  // Why the account must choose a new password: a temporary one from an
+  // administrator, or its own one that the rules now refuse.
+  test('setPasswordText: what the set-password screen says, by the reason', () => {
+    expect(rules.setPasswordText('temporary')).toEqual({
+      intro: 'Your administrator gave you a temporary password. Choose your own to go on.', current: 'Temporary password',
+    });
+    expect(rules.setPasswordText('rules')).toEqual({
+      intro: 'Your password no longer meets the password rules. Choose a new one to go on.', current: 'Current password',
+    });
+    // Anything else (an older server that sends no reason) reads as before.
+    expect(rules.setPasswordText(undefined)).toEqual(rules.setPasswordText('temporary'));
   });
 });
 
@@ -125,7 +123,7 @@ describe('the Account page is wired to them', () => {
   });
 
   test('the card: twelve characters, the server\'s messages before sending, the button off until it would pass', () => {
-    expect(card).toMatch(/import \{ passwordProblem, passwordHint, PASSWORD_MIN_LENGTH \} from '\.\/password-rules';/);
+    expect(card).toMatch(/import \{ passwordProblem, passwordHint, setPasswordText, PASSWORD_MIN_LENGTH \} from '\.\/password-rules';/);
     expect(card).toMatch(/const problem\s+= next \? passwordProblem\(next, user\?\.email\) : null;/);
     expect(card).toMatch(/const mismatch = again && next !== again \? 'The new passwords do not match' : '';/);
     expect(card).toMatch(/const valid\s+= !!current && !!next && !problem && again === next;/);
@@ -136,8 +134,10 @@ describe('the Account page is wired to them', () => {
 
   test('set-password mode: the heading, the temporary-password field, and on success the user is re-read and the dashboard opened', () => {
     expect(card).toMatch(/\{setPassword \? 'Set a new password' : 'Change password'\}/);
-    expect(card).toContain('Your administrator gave you a temporary password. Choose your own to go on.');
-    expect(card).toMatch(/label: setPassword \? 'Temporary password' : 'Current password'/);
+    // The words come from setPasswordText, by the reason the user carries.
+    expect(card).toMatch(/const text\s+= setPasswordText\(user\?\.passwordChangeReason\);/);
+    expect(card).toMatch(/\{setPassword\s+\? text\.intro\s+:/);
+    expect(card).toMatch(/label: setPassword \? text\.current : 'Current password'/);
     expect(card).toMatch(/if \(onPasswordSet\) \{ await onPasswordSet\(\); return; \}/);
     expect(page).toMatch(/onPasswordSet=\{settingPassword \? onPasswordSet : undefined\}/);
     expect(page).toMatch(/await refreshUser\(\);\s+navigate\('\/dashboard', \{ replace: true \}\);/);

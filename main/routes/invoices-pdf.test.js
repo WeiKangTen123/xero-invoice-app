@@ -77,4 +77,13 @@ describe('GET /api/invoices/:id/pdf — who may read it', () => {
     users.setDisabled(user.id, true);
     await withLink(link).expect(401);
   });
+
+  // requireAuth's other check: an account that must choose a new password
+  // (a temporary one from an admin) gets nothing else, and that includes PDFs.
+  test('an account that must choose a new password first is refused, with the code that opens the form', async () => {
+    const token = sessionToken(user);
+    users.requirePasswordChange(user.id);
+    const res = await withBearer(token).expect(403);
+    expect(res.body.code).toBe('password_change_required');
+  });
 });

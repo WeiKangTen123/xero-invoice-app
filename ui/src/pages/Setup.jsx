@@ -1075,7 +1075,13 @@ export default function Setup() {
     setMsgs(prev => ({ ...prev, _save: null }));
     const sent = values;
     try {
-      await api.post('/setup', sent);
+      const answer = await api.post('/setup', sent);
+      // The mailbox's server or address changed with no new app password, so
+      // the server dropped the saved one rather than send it to the new place
+      // (routes/setup.js mailboxMovedWithoutPassword). Said on the mailbox card.
+      if (answer?.cleared?.includes('IMAP_PASS')) {
+        setMsgs(prev => ({ ...prev, imap: { ok: false, text: 'The mailbox server or address changed, so the saved app password was removed. Enter the app password for this mailbox and save again.' } }));
+      }
     } catch (err) {
       setMsgs(prev => ({ ...prev, _save: { ok: false, text: err.message } }));
       setSaving(false);

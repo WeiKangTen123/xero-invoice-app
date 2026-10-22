@@ -276,13 +276,38 @@ describe('users store (SQLite)', () => {
       expect(users.passwordProblem('twelve chars', 'jane@example.com')).toBeNull();
     });
 
-    test('a demo account\'s password may be short; the email and common rules still hold', () => {
-      expect(users.DEMO_PASSWORD_MIN_LENGTH).toBe(6);
-      expect(users.passwordProblem('demo123', 'demo@gmail.com', { demo: true })).toBeNull();
-      expect(users.passwordProblem('demo1', 'demo@gmail.com', { demo: true })).toBe('Password must be at least 6 characters');
-      expect(users.passwordProblem('demo123', 'demo@gmail.com')).toBe('Password must be at least 12 characters');
-      expect(users.passwordProblem('demo@gmail.com', 'demo@gmail.com', { demo: true })).toBe('Password must not be your email address');
-      expect(users.passwordProblem('123456', 'demo@gmail.com', { demo: true })).toBe('That password is too common; choose another');
+    // Demo accounts were once allowed six characters; the one used turned up
+    // in this public repository. The rules are the same for every account,
+    // and the old option is gone rather than ignored.
+    test('a demo account is held to the same rules: there is no short demo password any more', () => {
+      expect(users.DEMO_PASSWORD_MIN_LENGTH).toBeUndefined();
+      expect(users.shortPasswordAllowed).toBeUndefined();
+      expect(users.passwordProblem('demo456', 'demo.fixture@gmail.com', { demo: true })).toBe('Password must be at least 12 characters');
+      expect(users.passwordProblem('demo-fixture-2026', 'demo.fixture@gmail.com')).toBeNull();
+    });
+  });
+
+  // An account that must choose a new password without an admin's temporary
+  // one: its own password still signs in, and nothing expires.
+  describe('requirePasswordChange / passwordChangeReason', () => {
+    test('marks the account with no expiry; the reason says which kind of change is asked', async () => {
+      const u = await users.createUser('rules@test.com', 'password1234', 'user');
+      expect(users.passwordChangeReason(users.findById(u.id))).toBeNull();
+      users.requirePasswordChange(u.id);
+      const row = users.findById(u.id);
+      expect(row).toMatchObject({ must_change_password: 1, temp_password_expires_at: null });
+      expect(users.passwordChangeReason(row)).toBe('rules');
+      expect(users.temporaryPasswordExpired(row)).toBe(false);
+      expect(users.getAllUsers().find(x => x.id === u.id)).toMatchObject({ mustChangePassword: true, passwordChangeReason: 'rules' });
+      const temp = await users.createUser('temp@test.com', 'password1234', 'user', { temporary: true });
+      expect(users.passwordChangeReason(users.findById(temp.id))).toBe('temporary');
+    });
+
+    test('leaves a temporary password as it is: its expiry still stands', async () => {
+      const temp = await users.createUser('temp@test.com', 'password1234', 'user', { temporary: true });
+      const before = users.findById(temp.id).temp_password_expires_at;
+      users.requirePasswordChange(temp.id);
+      expect(users.findById(temp.id).temp_password_expires_at).toBe(before);
     });
   });
 

@@ -67,36 +67,51 @@ describe('POST /api/admin/users — demo accounts and copied settings', () => {
     expect(users.findByEmail('new@outlook.com')).toBeNull();
   });
 
-  // A demo account's password is the admin's to choose and keep: it guards
-  // sample data and is typed in front of people, so it may be short and it
-  // is not temporary. Any other account's, an admin's on sample data
-  // included, stays twelve characters and temporary.
-  test('a demo account takes a short, permanent password; a real account does not', async () => {
-    const res = await create({ email: 'demo@gmail.com', password: 'demo123', demo: true }).expect(201);
-    expect(res.body.user).toMatchObject({ email: 'demo@gmail.com', demo: true, mustChangePassword: false });
-    expect(users.findByEmail('demo@gmail.com')).toMatchObject({ must_change_password: 0, temp_password_expires_at: null });
-    expect(await users.validatePassword('demo@gmail.com', 'demo123')).toMatchObject({ email: 'demo@gmail.com' });
-    expect((await create({ password: 'demo123' }).expect(400)).body.error).toBe('Password must be at least 12 characters');
-    expect((await create({ email: 'demo2@gmail.com', password: 'demo1', demo: true }).expect(400)).body.error).toBe('Password must be at least 6 characters');
+  // Demo accounts were once allowed a short, permanent password; the one used
+  // turned up in this public repository. A demo account's first password is
+  // now twelve characters and temporary, like any other's.
+  test('a demo account takes a full-length, temporary password, like any account', async () => {
+    expect((await create({ email: 'demo.fixture@gmail.com', password: 'demo456', demo: true }).expect(400)).body.error)
+      .toBe('Password must be at least 12 characters');
+    expect(users.findByEmail('demo.fixture@gmail.com')).toBeNull();
+    const res = await create({ email: 'demo.fixture@gmail.com', password: 'demo-fixture-2026', demo: true }).expect(201);
+    expect(res.body.user).toMatchObject({ email: 'demo.fixture@gmail.com', demo: true, mustChangePassword: true });
+    expect(users.findByEmail('demo.fixture@gmail.com').temp_password_expires_at).not.toBeNull();
   });
 
-  test('a reset on a demo account is permanent and may be short; on a real account temporary', async () => {
-    const demo = (await create({ email: 'demo@gmail.com', password: 'demo123', demo: true }).expect(201)).body.user;
-    const real = (await create({}).expect(201)).body.user;
+  test('a reset on a demo account is full-length and temporary, as on any account', async () => {
+    const demo = (await create({ email: 'demo.fixture@gmail.com', password: 'demo-fixture-2026', demo: true }).expect(201)).body.user;
     const reset = (id, password) => request(serverFor(app)).patch(`/api/admin/users/${id}/password`).set('Authorization', auth()).send({ password });
-    await reset(demo.id, 'demo456').expect(200);
-    expect(users.findByEmail('demo@gmail.com')).toMatchObject({ must_change_password: 0, temp_password_expires_at: null });
-    expect(await users.validatePassword('demo@gmail.com', 'demo456')).toMatchObject({ email: 'demo@gmail.com' });
-    expect((await reset(real.id, 'demo456').expect(400)).body.error).toBe('Password must be at least 12 characters');
-    await reset(real.id, 'Another-temp-2026').expect(200);
-    expect(users.findByEmail('new@outlook.com').must_change_password).toBe(1);
+    expect((await reset(demo.id, 'demo456').expect(400)).body.error).toBe('Password must be at least 12 characters');
+    await reset(demo.id, 'Another-temp-2026').expect(200);
+    expect(users.findByEmail('demo.fixture@gmail.com')).toMatchObject({ must_change_password: 1 });
+    expect(users.findByEmail('demo.fixture@gmail.com').temp_password_expires_at).not.toBeNull();
+  });
+
+  // A demo account from before the rule changed may still have a short
+  // password, and an admin can switch to real Xero and manages every
+  // account: made an admin, it must choose a full one before anything else,
+  // its open sessions included.
+  test('making a demo account an admin requires a new password, at once and with no expiry', async () => {
+    const demo = await users.createUser('old.demo@gmail.com', 'demo456', 'user', { demo: true });
+    const real = await users.createUser('real@gmail.com', 'password1234', 'user');
+    const role = (id, to) => request(serverFor(app)).patch(`/api/admin/users/${id}/role`).set('Authorization', auth()).send({ role: to });
+    const res = await role(demo.id, 'admin').expect(200);
+    expect(res.body.user).toMatchObject({ role: 'admin', mustChangePassword: true, passwordChangeReason: 'rules' });
+    expect(users.findById(demo.id)).toMatchObject({ must_change_password: 1, temp_password_expires_at: null });
+    expect(auditLog.listAdminEvents({ action: 'user.role', limit: 1 }).events[0].details).toMatchObject({ to: 'admin', passwordChangeRequired: true });
+    // The old password still signs in, to the change-password screen.
+    expect(await users.validatePassword('old.demo@gmail.com', 'demo456')).toMatchObject({ id: demo.id });
+    // An ordinary account made an admin is asked nothing.
+    await role(real.id, 'admin').expect(200);
+    expect(users.findById(real.id).must_change_password).toBe(0);
   });
 
   // An admin can switch to real Xero (PUT /api/setup/data-source) and
   // manages every account, so one made on sample data keeps the full rule
   // and a temporary password, as any other account does.
   test('an admin made on sample data needs the full-length password, and it is temporary', async () => {
-    expect((await create({ email: 'boss@gmail.com', password: 'demo123', role: 'admin', demo: true }).expect(400)).body.error)
+    expect((await create({ email: 'boss@gmail.com', password: 'demo456', role: 'admin', demo: true }).expect(400)).body.error)
       .toBe('Password must be at least 12 characters');
     expect(users.findByEmail('boss@gmail.com')).toBeNull();
     const res = await create({ email: 'boss@gmail.com', password: 'Temp-pass-2026-x', role: 'admin', demo: true }).expect(201);

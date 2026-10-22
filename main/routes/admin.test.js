@@ -459,8 +459,12 @@ describe('admin account controls', () => {
       expect((await reset('User@Test.com').expect(400)).body.error).toBe('Password must not be your email address');
       await asAdmin(request(serverFor(app)).patch(`/api/admin/users/${admin.id}/password`)).send({ password: 'newpassword1' }).expect(400);
       await asAdmin(request(serverFor(app)).patch('/api/admin/users/nope/password')).send({ password: 'newpassword1' }).expect(404);
-      await login('user@test.com', 'password123').expect(200);
+      // Nothing temporary was set. (Read before signing in: this fixture's own
+      // password is under twelve characters, so the sign-in asks for a new one,
+      // with no expiry, as for any password the rules now refuse.)
       expect(users.findById(target.id).must_change_password).toBe(0);
+      await login('user@test.com', 'password123').expect(200);
+      expect(users.findById(target.id).temp_password_expires_at).toBeNull();
     });
 
     test('the password set is temporary: the account signs in with mustChangePassword and is held to the change', async () => {
