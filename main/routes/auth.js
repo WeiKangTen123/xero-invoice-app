@@ -4,7 +4,7 @@ const rateLimit = require('express-rate-limit');
 const {
   hasUsers, findById, findByEmail, normalizeEmail, emailProblem, createUser, validatePassword, verifyDummy,
   verifiedPasswordHash, passwordProblem, setPassword, invalidateSessions,
-  requirePasswordChange, hashPassword, setPasswordHash, unlockAccount, isInvited,
+  requirePasswordChange, rulesChangeRequired, hashPassword, setPasswordHash, unlockAccount, isInvited,
   lockStatus, recordFailedLogin, recordSuccessfulLogin, temporaryPasswordExpired, LOCK_AFTER_FAILURES,
   getUserConfig, getUser, DEFAULT_TIMEZONE,
 } = require('../utils/users');
@@ -476,7 +476,7 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
           viaKnownAddress = true;
         }
       }
-      const passwordChange = !user.mustChangePassword && !!passwordProblem(password, user.email);
+      const passwordChange = rulesChangeRequired() && !user.mustChangePassword && !!passwordProblem(password, user.email);
       const mfaToken = mfa.issueChallenge(user.id, { passwordChange, viaKnownAddress });
       auditLog.recordAdminEvent({
         actor: null, target: row, action: 'login.password_ok', details: viaKnownAddress ? { ...client, viaKnownAddress: true } : { ...client },
@@ -503,9 +503,10 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
     // The one moment the password itself is in hand: one the rules now refuse
     // (set before they tightened, or a demo account's short one from before
     // that exception went) still signs in, and is then the only thing the
-    // account can change, the same gate as a temporary password.
+    // account can change, the same gate as a temporary password. Only while
+    // that is switched on (users.js rulesChangeRequired); off for now.
     let signedIn = user;
-    if (!user.mustChangePassword && passwordProblem(password, user.email)) {
+    if (rulesChangeRequired() && !user.mustChangePassword && passwordProblem(password, user.email)) {
       requirePasswordChange(user.id);
       signedIn = { ...user, mustChangePassword: true, passwordChangeReason: 'rules' };
       logger.info('Password no longer meets the rules: a new one is required', { email: user.email });

@@ -798,12 +798,35 @@ function requirePasswordChange(id) {
   db.prepare('UPDATE users SET must_change_password = 1 WHERE id = ? AND must_change_password = 0').run(id);
 }
 
+// Whether a password the rules now refuse must be replaced before anything
+// else (requirePasswordChange above). Switched off on every server at the
+// owner's word on 2026-10-23, until PASSWORD_RULES_AT_SIGNIN=true; on under
+// the test suite (NODE_ENV=test), whose tests of that gate keep running. Off,
+// sign-in marks nothing, and a mark already on an account stays on its row
+// but asks nothing, so switching this back on brings it back. A temporary
+// password is asked for either way, and a new password must still meet the
+// rules: only the forced change of an existing one is off.
+function rulesChangeRequired(env = process.env) {
+  const v = String(env.PASSWORD_RULES_AT_SIGNIN ?? '').trim().toLowerCase();
+  if (v === 'true' || v === '1') return true;
+  if (v === 'false' || v === '0') return false;
+  return env.NODE_ENV === 'test';
+}
+
 // Why the account must choose a new password, for the screen that asks:
 // 'temporary' (an admin set it, and it expires), 'rules' (its own password no
-// longer meets them), or null when nothing is asked. Takes the raw row.
+// longer meets them, while rulesChangeRequired), or null when nothing is
+// asked. Takes the raw row.
 function passwordChangeReason(row) {
   if (!row || !row.must_change_password) return null;
-  return row.temp_password_expires_at ? 'temporary' : 'rules';
+  if (row.temp_password_expires_at) return 'temporary';
+  return rulesChangeRequired() ? 'rules' : null;
+}
+
+// Whether the account must choose a new password before anything else: the
+// gate (auth-middleware.js) and what the client is told. Takes the raw row.
+function mustChangePassword(row) {
+  return passwordChangeReason(row) !== null;
 }
 
 // Every token issued before now is refused from here on (auth-middleware.js).
@@ -935,7 +958,9 @@ function sanitize(u) {
     disabledAt: u.disabled_at ?? u.disabledAt ?? null,
     failedLogins:       u.failed_logins ?? u.failedLogins ?? 0,
     lockedUntil:        lockedUntil ? lockedUntil.lockedUntil : null,
-    mustChangePassword: !!(u.must_change_password ?? u.mustChangePassword),
+    // From a raw row, as the gate reads it (a mark the rules switch has
+    // turned off asks nothing); an object already in this shape keeps its own.
+    mustChangePassword: u.must_change_password !== undefined ? mustChangePassword(u) : !!u.mustChangePassword,
     passwordChangeReason: u.passwordChangeReason ?? passwordChangeReason(u),
     lastLoginAt:      u.last_login_at ?? u.lastLoginAt ?? null,
     demo:               !!(u.is_demo ?? u.isDemo ?? u.demo),
@@ -1027,7 +1052,7 @@ module.exports = {
   hasUsers, findById, findByEmail, createUser, validatePassword,
   normalizeEmail, emailProblem, EMAIL_MAX_LENGTH,
   passwordProblem, verifiedPasswordHash, setPassword, setPasswordHash, voidPendingLinks, invalidateSessions, setDisabled, isActive, isDemoUser, setDemo,
-  requirePasswordChange, passwordChangeReason, isInvited, INVITED_PASSWORD,
+  requirePasswordChange, passwordChangeReason, mustChangePassword, rulesChangeRequired, isInvited, INVITED_PASSWORD,
   hashPassword, verifyPassword, needsRehash, verifyDummy, ARGON2_OPTIONS,
   PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH,
   lockStatus, lockAfterFailure, recordFailedLogin, recordSuccessfulLogin, unlockAccount, temporaryPasswordExpired,

@@ -292,9 +292,11 @@ function allowedBeforeMfaSetup(method, url) {
 // The 403 this account gets for this request before anything else, or null:
 // a temporary password to replace, then 2-step sign-in to set up. `live` is
 // the account's row (sessionUser). requireAuth applies it; so must any route
-// that reads a session token itself (the invoice PDF route).
+// that reads a session token itself (the invoice PDF route). A password the
+// rules refuse is only asked for while that switch is on (users.js
+// rulesChangeRequired); a temporary one always is.
 function accessGate(live, method, url) {
-  if (live.must_change_password && !allowedBeforePasswordChange(method, url)) return PASSWORD_CHANGE_REQUIRED;
+  if (require('../utils/users').mustChangePassword(live) && !allowedBeforePasswordChange(method, url)) return PASSWORD_CHANGE_REQUIRED;
   if (require('../utils/mfa').setupRequired(live) && !allowedBeforeMfaSetup(method, url)) return MFA_SETUP_REQUIRED;
   return null;
 }
@@ -319,7 +321,7 @@ function requireAuth(req, res, next) {
   const mfa = require('../utils/mfa');
   const mfaEnabled = mfa.isEnabled(live);
   req.user = {
-    ...claims, id: live.id, email: live.email, role: live.role, mustChangePassword: !!live.must_change_password,
+    ...claims, id: live.id, email: live.email, role: live.role, mustChangePassword: require('../utils/users').mustChangePassword(live),
     passwordChangeReason: require('../utils/users').passwordChangeReason(live),
     demo: !!live.is_demo, sid: claims.sid || null,
     mfaEnabled, mfaSetupRequired: mfa.requiredFor(live) && !mfaEnabled,
