@@ -51,6 +51,7 @@ const FIELD_LABELS = {
   SMTP_FROM_NAME:        'Sender name',
   APP_BASE_URL:          'App web address',
   PRIVACY_CONTACT_EMAIL: 'Privacy contact email',
+  ALLOW_REGISTRATION:    'Let people create their own accounts',
 };
 
 // A line of help under a server-wide field, for the ones whose value is not
@@ -63,6 +64,7 @@ const FIELD_HINTS = {
   SMTP_FROM_NAME: 'The name emails come from. Blank uses "Financial Automation".',
   APP_BASE_URL:   "This app's public address, such as https://app.example.com. Every link in an email starts with it.",
   PRIVACY_CONTACT_EMAIL: 'Who people write to about their data; the privacy notice every account reads names this address. Blank uses the admin who signed in most recently.',
+  ALLOW_REGISTRATION:    'When on, the sign-in page offers "Create an account": anyone with the address can make an ordinary (not admin) account with an email and a password, and is signed straight in. Off, accounts come only from your invites.',
 };
 
 // What a blank account box codes the claim to, said beside the box: the claim
@@ -102,6 +104,11 @@ const GLOBAL_SECTIONS = {
   // (utils/onboarding.js privacyContact, which falls back to an admin's
   // address while this is blank).
   privacy:   ['PRIVACY_CONTACT_EMAIL'],
+  // Whether anyone may create their own account from the sign-in page
+  // (routes/auth.js register; 'true' opens it, anything else keeps it to the
+  // first account and admins' invites). Read from process.env on every
+  // request, so a save here opens or closes it at once.
+  signup:    ['ALLOW_REGISTRATION'],
 };
 
 // ENV_FILE lets the tests point at a throwaway file instead of the real
@@ -265,6 +272,13 @@ function checkGlobalSettings(patch) {
   }
   if (!blank('PRIVACY_CONTACT_EMAIL') && emailProblem(values.PRIVACY_CONTACT_EMAIL)) {
     errors.push({ field: 'PRIVACY_CONTACT_EMAIL', error: 'Privacy contact must be an email address, such as privacy@example.com' });
+  }
+  // An on/off switch: 'true' or 'false', nothing else, so a typo cannot read
+  // as "open" (the server opens sign-up only for the exact word 'true').
+  if (!blank('ALLOW_REGISTRATION')) {
+    const v = values.ALLOW_REGISTRATION.toLowerCase();
+    if (v !== 'true' && v !== 'false') errors.push({ field: 'ALLOW_REGISTRATION', error: 'Sign-up must be on (true) or off (false)' });
+    else values.ALLOW_REGISTRATION = v;
   }
   if (!blank('SMTP_FROM_NAME') && values.SMTP_FROM_NAME.length > 100) {
     errors.push({ field: 'SMTP_FROM_NAME', error: 'Sender name must be at most 100 characters' });

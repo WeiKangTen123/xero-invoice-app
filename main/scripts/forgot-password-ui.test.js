@@ -100,7 +100,7 @@ describe('the sign-in page is wired to them', () => {
   const page = read('pages/Login.jsx');
 
   test('the status answer says whether reset by email is on, and the form is decided as before', () => {
-    expect(page).toMatch(/\.then\(d => \{ setMail\(resetByEmail\(d\)\); return d; \}\)\s+\.then\(d => setForm\(formFromStatus\(d\)\)\)/);
+    expect(page).toMatch(/\.then\(d => \{ setMail\(resetByEmail\(d\)\); setSignup\(signupOpen\(d\)\); return d; \}\)\s+\.then\(d => setForm\(formFromStatus\(d\)\)\)/);
     expect(page).toMatch(/const \[mail, setMail\]\s+= useState\(false\);/);
   });
 

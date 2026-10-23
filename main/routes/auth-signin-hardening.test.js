@@ -73,7 +73,7 @@ describe('routes/auth sign-up and sign-in hardening', () => {
       process.env.ALLOW_REGISTRATION = 'true';
       await register({ email: 'jane@test.com', password: 'first-admin-pass-1' }).expect(201);
       const res = await register({ email: ' JANE@Test.com ', password: 'another-pass-2026' }).expect(409);
-      expect(res.body).toEqual({ error: 'An account with this email already exists' });
+      expect(res.body).toEqual({ error: 'An account with this email already exists. Sign in instead.' });
     });
 
     test('anything unexpected is a 500 that says nothing of why', async () => {

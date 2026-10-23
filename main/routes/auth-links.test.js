@@ -55,13 +55,13 @@ describe('routes/auth — invite and reset links', () => {
   describe('GET /status', () => {
     test('says whether the server can send email with links in it', async () => {
       const status = () => request(serverFor(app)).get('/api/auth/status').expect(200).then(r => r.body);
-      expect(await status()).toEqual({ hasUsers: true, mail: true });
+      expect(await status()).toEqual({ hasUsers: true, mail: true, signup: false });
       delete process.env.APP_BASE_URL;
       expect((await status()).mail).toBe(false);   // nothing to start a link with
       process.env.XERO_OAUTH_REDIRECT_URI = 'https://app.firm.test/api/xero/oauth/callback';
       expect((await status()).mail).toBe(true);
       delete process.env.SMTP_PASS;
-      expect(await status()).toEqual({ hasUsers: true, mail: false });
+      expect(await status()).toEqual({ hasUsers: true, mail: false, signup: false });
     });
   });
 

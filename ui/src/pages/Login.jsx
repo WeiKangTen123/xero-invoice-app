@@ -6,16 +6,19 @@ import { api, requiredPath } from '../api/client';
 import { returnPathFrom } from '../utils/returnTo';
 import {
   lockMessage, lockCountdown, formFromStatus, registerRefusal, resetByEmail, emailFromSearch, forgotPath, mfaChallenge,
-  FORM_CHECKING, FORM_FIRST_RUN, FORM_UNREACHABLE, STATUS_FAILED_MESSAGE, ASK_ADMIN_TEXT,
+  signupOpen, isSignupPath, signupRefusal,
+  FORM_CHECKING, FORM_FIRST_RUN, FORM_UNREACHABLE, STATUS_FAILED_MESSAGE, ASK_ADMIN_TEXT, SIGNUP_PATH, SIGNUP_CLOSED_TEXT,
 } from './login/login';
 import MfaStep from './login/MfaStep';
 import { passwordProblem, passwordHint, PASSWORD_MIN_LENGTH } from './account/password-rules';
 
-// Two modes. On first run the form creates the admin account (the server's
-// /auth/register, which takes only the first account; after that it is
-// refused and admins add users from Admin › Users). Ever after it signs in,
-// and nothing on it offers to register: the tab that did led to a 403.
-// Which one is asked of the server before either is shown (login/login.js).
+// On first run the form creates the admin account (the server's
+// /auth/register, which takes only the first account). Ever after it signs
+// in, except at /signup while an admin has sign-up open (Setup › Sign-up;
+// the server's `signup`), where it creates an ordinary account and signs it
+// straight in. "Create an account" is offered only then: a link to a form the
+// server would refuse led to a 403. Which form is asked of the server before
+// any is shown (login/login.js).
 export default function Login() {
   const { login, register } = useAuth();
   const { theme, toggle }   = useTheme();
@@ -44,6 +47,8 @@ export default function Login() {
   const [forgot, setForgot]   = useState(false);
   // Whether this server can email a reset link (GET /auth/status → mail).
   const [mail, setMail]       = useState(false);
+  // Whether anyone may create an account here (GET /auth/status → signup).
+  const [signup, setSignup]   = useState(false);
   // The second step (login/MfaStep.jsx), once the password was right for an
   // account with 2-step sign-in on: the server's { mfaToken, methods }, and
   // no session until the code is checked.
@@ -51,12 +56,17 @@ export default function Login() {
 
   const shakeTimer = useRef(null);
   const firstRun = form === FORM_FIRST_RUN;
-  const mode = firstRun ? 'register' : 'login';
+  // At /signup, creating an account: only once the server has said it takes
+  // one. Until then (or when it is closed) the card signs in, and says why.
+  const signingUp = !firstRun && isSignupPath(location.pathname);
+  const creating  = signingUp && signup;
+  const mode = firstRun || creating ? 'register' : 'login';
 
   // Resolves once the form is known, or known to be unreachable. The same
-  // answer says whether a forgotten password can be reset by email.
+  // answer says whether a forgotten password can be reset by email, and
+  // whether anyone may create an account.
   const loadForm = useCallback(() => api.get('/auth/status')
-    .then(d => { setMail(resetByEmail(d)); return d; })
+    .then(d => { setMail(resetByEmail(d)); setSignup(signupOpen(d)); return d; })
     .then(d => setForm(formFromStatus(d)))
     .catch(() => setForm(FORM_UNREACHABLE)), []);
 
@@ -124,11 +134,21 @@ export default function Login() {
       // Too late to set the site up: an account exists after all (someone
       // got there first, or this address has one). The form is asked for
       // again rather than assumed, and says why it changed.
-      const refusal = mode === 'register' ? registerRefusal(err) : null;
+      const refusal = mode === 'register' && firstRun ? registerRefusal(err) : null;
       if (refusal) {
         setPassword('');
         setNotice(refusal);
         await loadForm();
+        return;
+      }
+      // Creating an account and refused: sign-up was closed meanwhile (the
+      // form is asked for again, and becomes a sign-in form), or the address
+      // already has an account (said, with Sign in below).
+      const closed = creating ? signupRefusal(err) : null;
+      if (closed) {
+        setPassword('');
+        setNotice(closed);
+        if (err.status === 403) await loadForm();
         return;
       }
       // A sign-in that failed keeps the address and starts the password
@@ -273,7 +293,9 @@ export default function Login() {
                 ? 'Set up your admin account to get started'
                 : form === FORM_CHECKING || form === FORM_UNREACHABLE
                   ? ' '
-                  : 'Welcome back — sign in to continue'}
+                  : creating
+                    ? 'Create an account to get started'
+                    : 'Welcome back — sign in to continue'}
             </p>
           </div>
 
@@ -292,7 +314,7 @@ export default function Login() {
           }}>
 
             <div style={{ fontSize: 15, fontWeight: 700, color: isDark ? '#eeeef5' : '#0d0e14', marginBottom: 18 }}>
-              {challenge ? '2-step sign-in' : firstRun ? 'Set up your admin account' : 'Sign in'}
+              {challenge ? '2-step sign-in' : firstRun ? 'Set up your admin account' : creating ? 'Create your account' : 'Sign in'}
             </div>
 
             {/* The second step takes the card's place once the password was
@@ -348,6 +370,14 @@ export default function Login() {
                   <div className="alert alert-info" style={{ marginBottom: 20 }}>
                     <span className="alert-icon">ℹ</span>
                     First account becomes admin automatically.
+                  </div>
+                )}
+                {/* /signup on a site that takes no new accounts: said, and the
+                    card signs in, rather than a form the server would refuse. */}
+                {signingUp && !signup && !notice && !error && (
+                  <div className="alert alert-info" role="status" style={{ marginBottom: 20 }}>
+                    <span className="alert-icon">ℹ</span>
+                    {SIGNUP_CLOSED_TEXT}
                   </div>
                 )}
 
@@ -445,13 +475,22 @@ export default function Login() {
                   </div>
                 </form>
 
-                {/* After first run there is nowhere to register: accounts come
-                    from an administrator's invite, and the form says so rather
-                    than leaving someone to look for a button. A forgotten
-                    password is reset by email where this server can send it
-                    (the address typed so far goes along); elsewhere an
-                    administrator sends a reset link. */}
-                {!firstRun && (
+                {/* Creating an account: the way back to signing in. */}
+                {creating && (
+                  <p style={{ marginTop: 18, textAlign: 'center', fontSize: 12.5, color: muted }}>
+                    Already have an account?{' '}
+                    <Link to="/login" style={{ fontWeight: 600, color: 'var(--accent)' }}>Sign in</Link>
+                  </p>
+                )}
+
+                {/* Signing in, after first run. Where sign-up is open, the way
+                    to create an account; where it is not, accounts come from an
+                    administrator's invite, and the form says so rather than
+                    leaving someone to look for a button. A forgotten password
+                    is reset by email where this server can send it (the address
+                    typed so far goes along); elsewhere an administrator sends a
+                    reset link. */}
+                {!firstRun && !creating && (
                   <div style={{ marginTop: 18, textAlign: 'center', fontSize: 12.5, lineHeight: 1.55 }}>
                     {mail ? (
                       <Link
@@ -475,7 +514,14 @@ export default function Login() {
                         {ASK_ADMIN_TEXT}
                       </p>
                     )}
-                    <p style={{ marginTop: 8, color: muted }}>Need an account? Ask your administrator.</p>
+                    {signup ? (
+                      <p style={{ marginTop: 8, color: muted }}>
+                        New here?{' '}
+                        <Link to={SIGNUP_PATH} style={{ fontWeight: 600, color: 'var(--accent)' }}>Create an account</Link>
+                      </p>
+                    ) : (
+                      <p style={{ marginTop: 8, color: muted }}>Need an account? Ask your administrator.</p>
+                    )}
                   </div>
                 )}
               </>
@@ -490,7 +536,9 @@ export default function Login() {
             color:      muted,
             animation:  'fadeIn 0.5s ease 0.4s both',
           }}>
-            Invite-only · Documents are read by Google Gemini and posted to your Xero
+            {signup
+              ? 'Documents are read by Google Gemini and posted to your Xero'
+              : 'Invite-only · Documents are read by Google Gemini and posted to your Xero'}
           </p>
         </div>
       </div>

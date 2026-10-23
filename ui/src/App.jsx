@@ -103,6 +103,8 @@ function AppRoutes() {
               be set, or 2-step sign-in set up, first, which come before any
               page (api/client.js requiredPath). */}
           <Route path="/login" element={user ? <Navigate to={requiredPath(user) || returnPathFrom(location)} replace /> : <Login />} />
+          {/* The same card, creating an account (Login reads the path). */}
+          <Route path="/signup" element={user ? <Navigate to={requiredPath(user) || returnPathFrom(location)} replace /> : <Login />} />
           {/* Outside the auth guard on purpose: the pairing token in the URL is the
               phone's only credential, and it grants upload and nothing else. */}
           <Route path="/capture/:token" element={<Capture />} />

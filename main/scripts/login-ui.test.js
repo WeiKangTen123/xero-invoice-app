@@ -163,11 +163,16 @@ describe('the sign-in page is wired to them', () => {
 
   // A forgotten password: reset by email where the server can send it
   // (forgot-password-ui.test.js), otherwise a reset link from an administrator.
+  // No Register tab: creating an account is its own address (/signup), and
+  // offered only while the server takes one (signup); otherwise accounts come
+  // from an administrator.
   test('after first run there is no Register tab; accounts come from an administrator, and a reset link from them without email', () => {
     expect(page).not.toMatch(/\['login', 'register'\]/);
     expect(page).not.toMatch(/switchMode|'Register'/);
-    expect(page).toMatch(/const mode = firstRun \? 'register' : 'login';/);
-    expect(page).toMatch(/\{!firstRun && \(/);
+    expect(page).toMatch(/const signingUp = !firstRun && isSignupPath\(location\.pathname\);/);
+    expect(page).toMatch(/const creating  = signingUp && signup;/);
+    expect(page).toMatch(/const mode = firstRun \|\| creating \? 'register' : 'login';/);
+    expect(page).toMatch(/\{!firstRun && !creating && \(/);
     expect(page).toContain('Need an account? Ask your administrator.');
     expect(page).toContain('Forgot your password?');
     expect(login.ASK_ADMIN_TEXT).toBe('Ask your administrator for a reset link.');

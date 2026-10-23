@@ -301,13 +301,26 @@ const linkLimiter = rateLimit({
 // first-run registration when none does), and whether the server can send
 // email with links in it (`mail`), which is when the page offers "Forgot your
 // password?".
+// `signup`: whether anyone may create their own account (ALLOW_REGISTRATION,
+// Setup › Sign-up), so the sign-in page offers "Create an account" only when
+// the server would take one.
 router.get('/status', (_req, res) => {
-  res.json({ hasUsers: hasUsers(), mail: mailer.isConfigured() && !!mailer.appBaseUrl() });
+  res.json({
+    hasUsers: hasUsers(),
+    mail:     mailer.isConfigured() && !!mailer.appBaseUrl(),
+    signup:   registrationOpen(),
+  });
 });
+
+// Read on every request, so Setup opens and closes it without a restart.
+function registrationOpen() {
+  return process.env.ALLOW_REGISTRATION === 'true';
+}
 
 // Self-registration creates the FIRST account, which becomes admin. After
 // that it is closed: admins add users on the Admin page. ALLOW_REGISTRATION=true
-// reopens it. It used to be the other way round — open unless the flag said
+// (Setup › Sign-up) reopens it for anyone, each new account an ordinary user.
+// It used to be the other way round — open unless the flag said
 // "false" — and the flag was documented nowhere, so the public URL took anyone.
 // Returns a JWT immediately so the user lands on Setup without a second login step.
 //
@@ -327,7 +340,7 @@ router.post('/register', authLimiter, asyncHandler(async (req, res) => {
     const problem = passwordProblem(password, email);
     if (problem) return res.status(400).json({ error: problem });
 
-    const open = process.env.ALLOW_REGISTRATION === 'true';
+    const open = registrationOpen();
     if (!open && hasUsers()) return res.status(403).json({ error: REGISTRATION_CLOSED });
 
     let user;
@@ -336,7 +349,7 @@ router.post('/register', authLimiter, asyncHandler(async (req, res) => {
     } catch (err) {
       if (err.code === 'REGISTRATION_CLOSED') return res.status(403).json({ error: REGISTRATION_CLOSED });
       if (err.code === 'EMAIL_INVALID')       return res.status(400).json({ error: err.message });
-      if (err.code === 'EMAIL_EXISTS')        return res.status(409).json({ error: 'An account with this email already exists' });
+      if (err.code === 'EMAIL_EXISTS')        return res.status(409).json({ error: 'An account with this email already exists. Sign in instead.' });
       throw err;
     }
     const client = clientOf(req);

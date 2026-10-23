@@ -74,7 +74,7 @@ function storeRenewal(res) {
 // in particular: its address can still carry an invite or reset token in the
 // fragment while the session is checked, and sending it on as ?next= would
 // put the token in a URL the server logs.
-const PUBLIC_PATHS = ['/login', '/capture', '/set-password', '/forgot-password'];
+const PUBLIC_PATHS = ['/login', '/signup', '/capture', '/set-password', '/forgot-password'];
 
 export function isPublicPath(path) {
   const p = String(path || '');

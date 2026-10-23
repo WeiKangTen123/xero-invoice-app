@@ -87,6 +87,13 @@ const SECTION_META = {
     desc: 'Named in the privacy notice as who to ask about personal data. Blank: the admin who signed in most recently.',
     testKey: null,
   },
+  // For the whole server: whether people may create their own accounts from
+  // the sign-in page (ALLOW_REGISTRATION), drawn as an on/off box (Field).
+  signup: {
+    label: 'Sign-up (admin)', icon: '✍',
+    desc: 'Whether people can create their own account from the sign-in page.',
+    testKey: null,
+  },
 };
 
 // A key that reads like a secret but is not one: this site's own address,
@@ -152,6 +159,28 @@ function Field({ name, meta, value, onChange }) {
           )}
         </div>
         {note && <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>{note}</div>}
+        {meta.hint && <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>{meta.hint}</div>}
+      </div>
+    );
+  }
+
+  // An on/off switch, kept as the words 'true' / 'false' the server reads
+  // (routes/auth.js registrationOpen): a box to tick, not a word to type.
+  if (name === 'ALLOW_REGISTRATION') {
+    const on = String(value || '').trim().toLowerCase() === 'true';
+    return (
+      <div className="form-group">
+        <label htmlFor={`setting-${name}`} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: isReadOnly ? 'default' : 'pointer', fontSize: 13.5, fontWeight: 600 }}>
+          <input
+            id={`setting-${name}`} type="checkbox" checked={on} disabled={isReadOnly}
+            onChange={e => onChange(name, e.target.checked ? 'true' : 'false')}
+            style={{ width: 17, height: 17, accentColor: 'var(--accent)', cursor: isReadOnly ? 'default' : 'pointer' }}
+          />
+          {label}
+        </label>
+        <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 6 }}>
+          {on ? 'On: the sign-in page offers "Create an account". Save to apply.' : 'Off: accounts come only from your invites.'}
+        </div>
         {meta.hint && <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>{meta.hint}</div>}
       </div>
     );
@@ -1263,6 +1292,12 @@ export default function Setup() {
           <SectionCard
             sectionKey="privacy" meta={SECTION_META.privacy} sectionData={config.privacy}
             values={values} onChange={handleChange} idx={9} testing={testing} msgs={msgs} onTest={runTest}
+          />
+        )}
+        {config.signup && (
+          <SectionCard
+            sectionKey="signup" meta={SECTION_META.signup} sectionData={config.signup}
+            values={values} onChange={handleChange} idx={10} testing={testing} msgs={msgs} onTest={runTest}
           />
         )}
 

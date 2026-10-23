@@ -40,6 +40,32 @@ export function resetByEmail(body) {
 
 export const ASK_ADMIN_TEXT = 'Ask your administrator for a reset link.';
 
+// ── Creating an account (/signup) ────────────────────────────────────────────
+// The sign-in card at /signup creates an account instead: email and password,
+// signed straight in. Only where the server takes one (`signup`, true while
+// an admin has Setup › Sign-up on); otherwise the page says it is closed and
+// signs in.
+export const SIGNUP_PATH = '/signup';
+
+export function signupOpen(body) {
+  return !!body && body.signup === true;
+}
+
+export function isSignupPath(pathname) {
+  return String(pathname || '').replace(/\/+$/, '') === SIGNUP_PATH;
+}
+
+export const SIGNUP_CLOSED_TEXT = 'Creating an account is closed on this site. Ask your administrator for an invite, or sign in below.';
+
+// What a refused sign-up says: closed meanwhile (403), or the address already
+// has an account (409, whose own message says to sign in). Anything else is
+// the server's message as it came.
+export function signupRefusal(err) {
+  if (err?.status === 403) return SIGNUP_CLOSED_TEXT;
+  if (err?.status === 409) return 'An account with this email already exists. Sign in with its password.';
+  return null;
+}
+
 // The address passed along in the query (?email=), to start a form with: the
 // sign-in page's from a password just set, the forgot-password page's from
 // the sign-in form. Only something that looks like one address, never a long

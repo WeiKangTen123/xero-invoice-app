@@ -70,7 +70,11 @@ describe('the sign-in page is wired to them', () => {
   });
 
   test('a 403 or 409 from registration asks again which form, and says why it changed', () => {
-    expect(page).toMatch(/const refusal = mode === 'register' \? registerRefusal\(err\) : null;/);
+    expect(page).toMatch(/const refusal = mode === 'register' && firstRun \? registerRefusal\(err\) : null;/);
+    // A sign-up refused (closed meanwhile, or the address has an account)
+    // says so; only "closed" asks for the form again.
+    expect(page).toMatch(/const closed = creating \? signupRefusal\(err\) : null;/);
+    expect(page).toMatch(/if \(closed\) \{\s+setPassword\(''\);\s+setNotice\(closed\);\s+if \(err\.status === 403\) await loadForm\(\);\s+return;\s+\}/);
     expect(page).toMatch(/if \(refusal\) \{\s+setPassword\(''\);\s+setNotice\(refusal\);\s+await loadForm\(\);\s+return;\s+\}/);
     expect(page).toMatch(/<div className="alert alert-info" role="status"[^>]*>\s+<span className="alert-icon">ℹ<\/span>\s+\{notice\}/);
   });
