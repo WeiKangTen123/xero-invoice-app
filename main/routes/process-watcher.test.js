@@ -274,9 +274,10 @@ describe('routes/process — the watcher survives a restart, and says why it sto
       expect((await status(u)).body).toMatchObject({ running: true, watcher: { state: 'watching', reason: null } });
 
       fake.emit('error', Object.assign(new Error('Invalid credentials (Failure)'), { source: 'authentication' }));
+      // Gmail's words, and what to do about them (email/imap-settings.js).
       expect((await status(u)).body).toMatchObject({
         running: false,
-        watcher: { state: 'stopped', reason: 'auth-failed', error: 'Invalid credentials (Failure)' },
+        watcher: { state: 'stopped', reason: 'auth-failed', error: expect.stringMatching(/^Gmail refused the App Password \(Invalid credentials \(Failure\)\)\. /) },
       });
 
       await post(u, 'start').expect(200);

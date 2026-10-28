@@ -433,7 +433,11 @@ describe('watcher-registry — stop reasons', () => {
   test('a refused password: auth-failed, with the server\'s message, setting kept', () => {
     watcherRegistry.start('why-2', CREDS, jest.fn());
     lastImapInstance().emit('error', Object.assign(new Error('Invalid credentials (Failure)'), { source: 'authentication' }));
-    expect(watcherRegistry.getStatus('why-2')).toMatchObject({ state: 'stopped', reason: 'auth-failed', error: 'Invalid credentials (Failure)' });
+    // The server's words, with what to do about them (imap-settings.js).
+    expect(watcherRegistry.getStatus('why-2')).toMatchObject({
+      state: 'stopped', reason: 'auth-failed',
+      error: expect.stringMatching(/^The mail server refused the password \(Invalid credentials \(Failure\)\)\. /),
+    });
     expect(mockSetWatcherEnabled).not.toHaveBeenCalled();
   });
 

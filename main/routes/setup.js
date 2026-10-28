@@ -10,7 +10,7 @@ const {
 } = require('../utils/users');
 const logger  = require('../utils/logger');
 const onboarding = require('../utils/onboarding');
-const { automaticImapValues, resolveImapSettings } = require('../email/imap-settings');
+const { automaticImapValues, resolveImapSettings, cleanMailboxPassword, mailboxRefusalMessage } = require('../email/imap-settings');
 
 // ── Field definitions ─────────────────────────────────────────────────────────
 
@@ -342,6 +342,14 @@ router.post('/', requireAuth, (req, res) => {
     Object.assign(userPatch, checkedPatch);
     Object.assign(globalPatch, checkedGlobal.values);
 
+    // A Gmail App Password is kept without the spaces Google shows it with
+    // (imap-settings.js cleanMailboxPassword), so the saved one is what Gmail
+    // takes and its last four characters read as the code's.
+    if (typeof userPatch.IMAP_PASS === 'string' && userPatch.IMAP_PASS !== '') {
+      const host = resolveImapSettings({ ...getUserConfig(req.user.id), ...userPatch }, req.user.email).host;
+      userPatch.IMAP_PASS = cleanMailboxPassword(userPatch.IMAP_PASS, host);
+    }
+
     const cleared = [];
     if (mailboxMovedWithoutPassword(req.user.id, req.user.email, userPatch)) {
       userPatch.IMAP_PASS = '';   // '' clears the stored value (users.js saveUserConfig)
@@ -547,10 +555,11 @@ router.post('/test/email', requireAdmin, asyncHandler(async (req, res) => {
 
 // ── POST /api/setup/test/imap — test this user's IMAP connection ──────────────
 router.post('/test/imap', requireAuth, asyncHandler(async (req, res) => {
+  let settings = null;
   try {
     // The same settings the watcher will use, so a passing test means a working
     // watcher — including everything filled in from the account.
-    const settings = getImapSettings(req.user.id);
+    settings = getImapSettings(req.user.id);
 
     if (!settings.ready) {
       const missing = !settings.password ? 'an app password'
@@ -582,8 +591,10 @@ router.post('/test/imap', requireAuth, asyncHandler(async (req, res) => {
     rememberTest(req, 'imap', true, 'IMAP connected successfully');
     res.json({ success: true, message: 'IMAP connected successfully' });
   } catch (err) {
-    rememberTest(req, 'imap', false, err.message);
-    res.status(400).json({ success: false, message: err.message });
+    // A refused password says what to do about it (imap-settings.js).
+    const message = mailboxRefusalMessage(err, settings && settings.host);
+    rememberTest(req, 'imap', false, message);
+    res.status(400).json({ success: false, message });
   }
 }));
 

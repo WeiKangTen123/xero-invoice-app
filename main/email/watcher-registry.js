@@ -6,7 +6,7 @@ const emailWorker       = require('../queue/email-worker');
 const processState      = require('../utils/process-state');
 const settingsStore     = require('../utils/settings-store');
 const logger            = require('../utils/logger');
-const { resolveImapSettings } = require('./imap-settings');
+const { resolveImapSettings, mailboxRefusalMessage } = require('./imap-settings');
 const { runAsSystem }   = require('../utils/audit-context');
 
 const RECONNECT_BASE_MS   = 10000;
@@ -392,7 +392,8 @@ function _connect(s) {
     if (err && err.source === 'authentication') {
       if (imap !== s.imap) return;
       logger.error(`[user:${s.userId}] IMAP authentication failed — watcher stopped; check IMAP_USER / IMAP_PASS`, { error: err.message });
-      stop(s.userId, { reason: STOP_REASONS.AUTH, error: err.message });
+      // The status says what to do about it, as Test IMAP does (imap-settings.js).
+      stop(s.userId, { reason: STOP_REASONS.AUTH, error: mailboxRefusalMessage(err, s.settings && s.settings.host) });
       return;
     }
     _scheduleReconnect(s, imap, 'error', err);

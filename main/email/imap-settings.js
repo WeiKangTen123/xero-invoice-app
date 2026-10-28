@@ -56,6 +56,40 @@ function _text(raw) {
   return v.length ? v : null;
 }
 
+// Gmail shows an App Password as four groups of four letters with spaces
+// between them ("abcd efgh ijkl mnop"), and the spaces are not part of it. For
+// a Gmail mailbox they are taken out, so a copy pasted with them works. Any
+// other server's password is kept exactly as typed: a space may be part of it.
+const GMAIL_HOSTS = new Set(['imap.gmail.com', 'imap.googlemail.com']);
+
+function isGmailHost(host) {
+  return GMAIL_HOSTS.has(String(host || '').trim().toLowerCase());
+}
+
+function cleanMailboxPassword(password, host) {
+  if (password == null) return password;
+  return isGmailHost(host) ? String(password).replace(/\s+/g, '') : password;
+}
+
+// What to say when the mail server refuses the password. Gmail's own words,
+// "Invalid credentials (Failure)", say neither why nor what to do, and the
+// usual cause is an App Password Google has revoked: changing the Google
+// password removes every App Password, and so does turning 2-Step Verification
+// off. The server's words stay in brackets. Anything other than a refused
+// password is returned as it came.
+function mailboxRefusalMessage(err, host) {
+  const raw = String((err && err.message) || err || '');
+  const refused = (err && err.source === 'authentication')
+    || /invalid credentials|authenticationfailed|authentication failed|login failed|auth(entication)? (rejected|failure)/i.test(raw);
+  if (!refused) return raw;
+  if (isGmailHost(host)) {
+    return `Gmail refused the App Password (${raw}). It was probably revoked: changing your Google password removes every App Password. `
+      + 'Make a new one at myaccount.google.com/apppasswords, paste it into IMAP_PASS, Save, then Test IMAP again.';
+  }
+  return `The mail server refused the password (${raw}). Check the mailbox address and the password, or make a new app password, `
+    + 'then Save and Test IMAP again.';
+}
+
 // config: this user's stored settings (blank/missing means "decide for me").
 // loginEmail: the address they sign in with, used when no mailbox is named.
 function resolveImapSettings(config = {}, loginEmail = '') {
@@ -80,7 +114,7 @@ function resolveImapSettings(config = {}, loginEmail = '') {
   const lookbackDays = Math.min(_int(stored('IMAP_LOOKBACK_DAYS'), DEFAULT_LOOKBACK_DAYS), MAX_LOOKBACK_DAYS);
   if (stored('IMAP_LOOKBACK_DAYS') === null) automatic.push('IMAP_LOOKBACK_DAYS');
 
-  const password = _text(config.IMAP_PASS);
+  const password = cleanMailboxPassword(_text(config.IMAP_PASS), host);
 
   return {
     host, port, user, password,
@@ -106,6 +140,6 @@ function automaticImapValues(loginEmail = '') {
 }
 
 module.exports = {
-  hostForEmail, resolveImapSettings, automaticImapValues,
+  hostForEmail, resolveImapSettings, automaticImapValues, isGmailHost, cleanMailboxPassword, mailboxRefusalMessage,
   HOST_BY_DOMAIN, DEFAULT_PORT, DEFAULT_POLL_MS, MIN_POLL_MS, DEFAULT_LOOKBACK_DAYS, MAX_LOOKBACK_DAYS,
 };

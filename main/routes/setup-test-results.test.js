@@ -85,8 +85,33 @@ describe('routes/setup — Test results and the privacy contact', () => {
       await test_('imap').expect(200);
       expect(last('imap')).toMatchObject({ ok: true, message: 'IMAP connected successfully' });
       mockImapOutcome = 'Invalid credentials (Failure)';
-      await test_('imap').expect(400);
-      expect(last('imap')).toMatchObject({ ok: false, message: 'Invalid credentials (Failure)' });
+      const refused = await test_('imap').expect(400);
+      // Gmail's own words say neither why nor what to do: the answer does,
+      // with Gmail's words kept in brackets.
+      const why = /^Gmail refused the App Password \(Invalid credentials \(Failure\)\)\. It was probably revoked: .*myaccount\.google\.com\/apppasswords/;
+      expect(refused.body.message).toMatch(why);
+      expect(last('imap')).toMatchObject({ ok: false, message: expect.stringMatching(why) });
+    });
+
+    test('a failure that is not a refused password is said as it came', async () => {
+      users.saveUserConfig(user.id, { IMAP_PASS: 'app-pw' });
+      mockImapOutcome = 'getaddrinfo ENOTFOUND imap.gmail.com';
+      expect((await test_('imap').expect(400)).body.message).toBe('getaddrinfo ENOTFOUND imap.gmail.com');
+    });
+  });
+
+  // Google shows an App Password as "abcd efgh ijkl mnop"; the spaces are not
+  // part of it, and a copy pasted with them is kept without.
+  describe('a Gmail App Password pasted with its spaces', () => {
+    test('is saved without them', async () => {
+      await save({ IMAP_PASS: 'abcd efgh ijkl mnop' }).expect(200);
+      expect(users.getUserConfig(user.id).IMAP_PASS).toBe('abcdefghijklmnop');
+      expect(users.getImapSettings(user.id).password).toBe('abcdefghijklmnop');
+    });
+
+    test('a password for another server keeps its spaces', async () => {
+      await save({ IMAP_HOST: 'mail.example.com', IMAP_PASS: 'two words' }).expect(200);
+      expect(users.getUserConfig(user.id).IMAP_PASS).toBe('two words');
     });
   });
 

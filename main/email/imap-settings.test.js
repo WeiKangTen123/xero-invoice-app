@@ -1,7 +1,32 @@
 const {
-  hostForEmail, resolveImapSettings, automaticImapValues,
+  hostForEmail, resolveImapSettings, automaticImapValues, isGmailHost, cleanMailboxPassword, mailboxRefusalMessage,
   DEFAULT_PORT, DEFAULT_POLL_MS, MIN_POLL_MS, DEFAULT_LOOKBACK_DAYS, MAX_LOOKBACK_DAYS,
 } = require('./imap-settings');
+
+describe('email/imap-settings — Gmail App Passwords and a refused password', () => {
+  test('a Gmail App Password loses the spaces Google shows it with; any other password keeps them', () => {
+    expect(isGmailHost('imap.gmail.com')).toBe(true);
+    expect(isGmailHost(' IMAP.GoogleMail.com ')).toBe(true);
+    expect(isGmailHost('imap.mail.yahoo.com')).toBe(false);
+    expect(cleanMailboxPassword('abcd efgh ijkl mnop', 'imap.gmail.com')).toBe('abcdefghijklmnop');
+    expect(cleanMailboxPassword('abcd\tefgh ijkl mnop', 'imap.gmail.com')).toBe('abcdefghijklmnop');
+    expect(cleanMailboxPassword('two words', 'mail.example.com')).toBe('two words');
+    expect(cleanMailboxPassword(null, 'imap.gmail.com')).toBeNull();
+    // As the watcher and Test IMAP read it.
+    expect(resolveImapSettings({ IMAP_PASS: 'abcd efgh ijkl mnop' }, 'me@gmail.com').password).toBe('abcdefghijklmnop');
+  });
+
+  test('a refused password says why and what to do, with the server\'s words kept', () => {
+    const gmail = mailboxRefusalMessage(Object.assign(new Error('Invalid credentials (Failure)'), { source: 'authentication' }), 'imap.gmail.com');
+    expect(gmail).toMatch(/^Gmail refused the App Password \(Invalid credentials \(Failure\)\)\. It was probably revoked/);
+    expect(gmail).toContain('myaccount.google.com/apppasswords');
+    // Known by its words too, when the error carries no source.
+    expect(mailboxRefusalMessage(new Error('[AUTHENTICATIONFAILED] Invalid credentials'), 'imap.gmail.com')).toMatch(/^Gmail refused/);
+    expect(mailboxRefusalMessage(new Error('LOGIN failed'), 'imap.mail.me.com')).toMatch(/^The mail server refused the password \(LOGIN failed\)/);
+    // Anything else is said as it came.
+    expect(mailboxRefusalMessage(new Error('Timed out while connecting to server'), 'imap.gmail.com')).toBe('Timed out while connecting to server');
+  });
+});
 
 describe('email/imap-settings — which mailbox settings a person must actually type', () => {
   describe('the server host is read from the address', () => {
