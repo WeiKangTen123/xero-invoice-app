@@ -342,8 +342,8 @@ function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, tes
 
   return (
     <div id={`setup-${sectionKey}`} className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flex: '1 1 300px', minWidth: 0 }}>
           <div style={{
             width: 38, height: 38, borderRadius: 10, flexShrink: 0,
             background: 'var(--accent-subtle)',
@@ -358,13 +358,13 @@ function SectionCard({ sectionKey, meta, sectionData, values, onChange, idx, tes
         </div>
 
         {meta.testKey && !readOnly && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
             <TestResult msg={msgs[meta.testKey]} />
             <button
               type="button" className="btn btn-outline btn-sm"
               disabled={testing[meta.testKey]}
               onClick={() => onTest(meta.testKey)}
-              style={{ whiteSpace: 'nowrap' }}
+              style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
             >
               {testing[meta.testKey]
                 ? <><span className="btn-spinner" style={{ borderColor: 'rgba(0,0,0,0.15)', borderTopColor: 'var(--accent)' }} /> Testing...</>
@@ -953,8 +953,8 @@ function LlmKeysCard({ idx, testing, msgs, onTest, onKeysChange }) {
 
   return (
     <div id="setup-llm" className="card" style={{ marginBottom: 16, animation: `fadeUp 0.3s ease ${idx * 60}ms both` }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16 }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flex: '1 1 300px', minWidth: 0 }}>
           <div style={{ width: 38, height: 38, borderRadius: 10, flexShrink: 0, background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>
             🤖
           </div>
@@ -965,9 +965,9 @@ function LlmKeysCard({ idx, testing, msgs, onTest, onKeysChange }) {
             </div>
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           <TestResult msg={msgs.llm} />
-          <button type="button" className="btn btn-outline btn-sm" disabled={testing.llm} onClick={() => onTest('llm')} style={{ whiteSpace: 'nowrap' }}>
+          <button type="button" className="btn btn-outline btn-sm" disabled={testing.llm} onClick={() => onTest('llm')} style={{ whiteSpace: 'nowrap', flexShrink: 0 }}>
             {testing.llm ? <><span className="btn-spinner" style={{ borderColor: 'rgba(0,0,0,0.15)', borderTopColor: 'var(--accent)' }} /> Testing...</> : '⚡ Test LLM'}
           </button>
         </div>
